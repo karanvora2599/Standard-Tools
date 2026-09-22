@@ -25,8 +25,9 @@ not the same as `--runtime microstructure`, and the difference matters when
 scoping an MCP session -- see [18_mcp.md](18_mcp.md).
 
 Two tools (`run_backtest_optimization`, `scan_pairs`) are long-running and
-are served only with `--enable-long-running`, so a default MCP session
-advertises 155 of the 237 below.
+are served only with `--enable-long-running`. A default MCP session is also
+scoped to four categories rather than all of them, so it advertises 58 of the
+237 below; `--runtime all --enable-long-running` serves every one.
 
 
 ## The runtimes

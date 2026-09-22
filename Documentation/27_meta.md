@@ -30,16 +30,32 @@ That matters when a narrowly-scoped agent has heard of a tool it cannot
 run: it can still learn what the tool is before deciding to ask for a
 handoff.
 
-**`validate_tool_call`** checks arguments against a schema **without
-calling**. Two layers, because the library has two: the JSON schema, and
-the strategy parameter contract underneath it. A grid search with an
-invalid parameter range fails after the fetch without this, and before it
-with.
+**`validate_tool_call`** checks arguments against a tool's contract
+**without calling**. Three layers, because the library has three: the JSON
+schema, the strategy parameter contract underneath it, and the numerical
+contract run against numbers already written into the call — an all-NaN
+series passes a schema check cleanly and fails at execution with "contains
+no observations", after the rest of the call has been paid for. A grid
+search with an invalid parameter range fails after the fetch without this,
+and before it with.
 
 **`estimate_tool_cost`** reports what each runtime costs a client's
 context, in bytes and approximate tokens. There is no fixed ceiling — what
 a client can afford depends on its model and its session — so this
 measures rather than judges.
+
+**`describe_numeric_contract`** is the layer underneath that: the
+numerical rules every public boundary enforces on every call, each with the
+threshold where it bites, an excerpt of the message it raises — so a
+refusal you already hold can be matched to a rule — and why the line is
+drawn there. Per-tool bounds sit on top of it and belong to
+`describe_tool`.
+
+**`describe_effective_config`** reports every `SQT_*` setting this process
+reads and what it resolves to, taken through the same readers the library
+uses, so an unset variable still has an answer. A secret reports only
+whether it is set; the redaction salt is never a value, because disclosing
+it would undo the redaction it configures.
 
 **`describe_runtime`** and **`list_reference_kinds`** answer the two
 structural questions: what runtimes exist and what each owns, and what
@@ -64,15 +80,22 @@ windows `run_stress_test` accepts.
 
 ## What a data source can promise
 
-**`describe_data_capabilities`** answers whether the active provider serves
-tick trades, top-of-book quotes or async OHLCV, and which bar intervals it
-accepts. Most environments have no tick feed, so asking first is the
-difference between a routed request and a refused one. `available` means
-configured, not merely constructible: Databento builds without a key and
-fails on its first fetch, and the report took construction for
-availability; with `DATABENTO_API_KEY` unset it now says `available=False`
-and names the variable in `unavailable_reason`, while the capability flags
-still describe the class — what you could reach once it is configured.
+**`describe_data_capabilities`** answers what one provider serves: tick
+trades, top-of-book quotes, async OHLCV and the bar intervals it accepts,
+and — the four that actually separate the providers — L2 depth, order-by-
+order events, point-in-time records and a temporal contract. Depth and
+events come from exactly one provider here, point-in-time records from
+exactly one other, so an agent consulting this before choosing a `source`
+could otherwise not learn the only facts that decide the choice. It also
+reports the OHLCV cache's size and its dead-generation count, which is what
+`sqt cache gc` collects. Nothing is fetched: capability is read from
+whether the class overrides the base method.
+
+`available` means configured, not merely constructible. Databento builds
+without a key and fails on its first fetch, so with `DATABENTO_API_KEY`
+unset the report says `available=False` and names the variable in
+`unavailable_reason`, while the capability flags still describe the class —
+what you could reach once it is configured.
 
 **`describe_temporal_contract`** asks what a source can say about *when*
 its facts became knowable — **before anything is fetched**. A quarterly
@@ -87,9 +110,17 @@ say which you are looking at.
 
 ## Reading what other runtimes produced
 
+**`list_artifacts`** is the entry point, because a tool that writes a file
+hands back its URI once and that response scrolls away. It lists what the
+store holds, or one run's, with the store's own 16-character content digest
+on request — the only part that reads the files rather than their directory
+entries.
+
 **`describe_artifact`** reports the shape, date span, per-column statistics
 and both ends of a persisted Parquet artifact — so a result can be
-inspected instead of the run being repeated.
+inspected instead of the run being repeated. It takes a URI or the store key
+`list_artifacts` prints, and hashes with the same 16-hex digest, so a
+listing and a description of one file agree.
 
 **`describe_reference`** does the same for a handoff reference: what kind
 it carries, its shape, and which runtime produced it.
@@ -116,7 +147,10 @@ ordered by the size of the change.
 Six of these seven READ the decision log; `export_audit_bundle` copies a
 range of it out. **None of them mutates it** — holds, sealing, garbage
 collection and checkpoint signing stay on the `sqt` CLI, because a surface
-an agent can reach should not be able to edit its own record.
+an agent can reach should not be able to edit its own record. What a record
+contains, how the hash chain and its cross-day index work, and what the CLI
+does are [10_auditability.md](10_auditability.md)'s subject; this is the
+agent-facing half.
 
 | Tool | Answers |
 |---|---|

@@ -8,6 +8,7 @@ the ones above it.
 |---|---|---|---|
 | Per-module correctness | `tests/<package>/` | Wrong answers | ~3 min |
 | Parity vs contract | `tests/modeling/test_native_metrics.py` | Two backends agreeing on the WRONG answer | 6 s |
+| The extension switched off | `tests/test_fallback_configuration.py`, then the whole suite under `SQT_DISABLE_NATIVE=1` | A fallback nothing executes, and a survey that calls it dead | the suite again |
 | Whole-surface invariants | `tests/surface/test_invariants.py` | A tool registered halfway | 6 s |
 | Adversarial fuzzing | `tests/surface/test_adversarial_inputs.py` | Unhandled exceptions, NaN in output | ~4.5 min |
 | Metamorphic relations | `tests/surface/test_metamorphic.py` | Consistently-wrong answers | 4 s |
@@ -90,8 +91,8 @@ shuffle is not numpy's PCG64 — asserts the analytic standard deviation of
 the null instead, which is the property both are supposed to have.
 
 **And each kernel ships a benchmark that can toggle the backend.** The
-first native plan instructed readers to reproduce its speedups with
-`tests/bench/bench_modeling.py`; `HAS_CPP` appears nowhere in
+first round of native modelling work told readers to reproduce its speedups
+with `tests/bench/bench_modeling.py`; `HAS_CPP` appeared nowhere in
 `tests/bench/`, so none of its figures could be re-derived from committed
 code. `rank_by_date` and `permutation_null_ic` each carry a
 `@pytest.mark.benchmark` test that times both paths back to back and
@@ -114,11 +115,13 @@ One name made unimportable flips all seventeen, because they all import the
 same one, and each takes the `except ImportError` branch it already had. No
 module needed changing.
 
-**It found nothing wrong, which is the useful result.** 6,514 passed, 519
-skipped, zero failures — the extra skips are the parity and benchmark tests
-that `importorskip` the extension, correctly. The run takes 11:22 against
-6:54, which is the compiled path's contribution measured at suite scale
-rather than per kernel.
+**It found nothing wrong, which is the useful result.** Zero failures. On
+the run that introduced it, 6,514 passed and 519 skipped — the extra skips
+are the parity and benchmark tests that `importorskip` the extension,
+correctly — and it took 11:22 against 6:54, which is the compiled path's
+contribution measured at suite scale rather than per kernel. The suite is
+8,888 tests now (8,737 passed, 81 skipped in 13:50 with the extension), so
+that pair of clocks is a ratio to re-measure, not a figure to quote.
 
 ### Why this is a testing concern and not a packaging one
 
@@ -407,17 +410,17 @@ vendor's own numbers, and that pass is the owner's. The suites are
 `tests/data/test_databento_pipeline_live.py`, run with
 `DATABENTO_API_KEY` set, `-m integration`, and an interpreter that has
 `databento` installed; every OPRA and MBO fetch is preflighted with
-`get_billable_size`. The checks, one per phase of the fix:
+`get_billable_size`. The checks, one per area the fix touched:
 
-| phase | check |
+| area | check |
 |---|---|
-| 1 | a daily close on `d` equals the tape's; `frame.attrs["dataset"]` is `EQUS.SUMMARY`; `build_dataset(provider="databento")` builds; `ES.c.0` prices and bare `ES` is refused |
-| 2 | a searched model's `estimator_params` are in the grid; scoring a subset universe on a cross-sectional model is refused |
-| 3 | `permutation_test_ic` on `market.momentum` gives a p-value near the block-bootstrap value |
-| 4 | LRCX buy-and-hold across its split carries the split warning |
-| 5 | the four IV cases return the true volatility |
-| 6 | `microstructure_summary` on a live AAPL minute returns |
-| 7 | `sqt cache gc` lists the dead files; `describe_data_capabilities(source="databento")` without a key says `available=False`; `fetch_tick_tape(source="databento")` returns a tape |
+| daily bars and symbology | a daily close on `d` equals the tape's; `frame.attrs["dataset"]` is `EQUS.SUMMARY`; `build_dataset(provider="databento")` builds; `ES.c.0` prices and bare `ES` is refused |
+| modeling over a vendor tape | a searched model's `estimator_params` are in the grid; scoring a subset universe on a cross-sectional model is refused |
+| inference | `permutation_test_ic` on `market.momentum` gives a p-value near the block-bootstrap value |
+| corporate actions | LRCX buy-and-hold across its split carries the split warning |
+| implied volatility | the four IV cases return the true volatility |
+| microstructure | `microstructure_summary` on a live AAPL minute returns |
+| cache and provider plumbing | `sqt cache gc` lists the dead files; `describe_data_capabilities(source="databento")` without a key says `available=False`; `fetch_tick_tape(source="databento")` returns a tape |
 
 What the live pass did not reach, so nothing here has measured it: an
 interior gap from a trading halt (the feed's only real holes were

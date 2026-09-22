@@ -2,11 +2,18 @@
 
 Thirty-two high-level agentic tools that compose the library's existing primitives into single, LLM-callable operations. Each collapses a multi-step reasoning workflow into one structured function call with a Pydantic output model.
 
-> **See also:** [07_agent_tools.md](07_agent_tools.md) covers the 14 core tools (including `run_buy_and_hold` and `compare_strategies`), the full `get_agent_tools()` registry (all 174), `dispatch()` wiring, and the complete Model Summary.
+> **See also:** [07_agent_tools.md](07_agent_tools.md) covers the 14 core tools (including `run_buy_and_hold` and `compare_strategies`), `dispatch()` wiring, and the cross-field validation rules. The full catalogue — all 189 tools `get_agent_tools()` returns, plus the modeling and feature-lab runtimes, 237 in all — is [20_tool_index.md](20_tool_index.md), generated from the live registry; [19_runtimes.md](19_runtimes.md) explains the ten execution boundaries they are split across. The tools below are the backtest, portfolio and analytics slice, in depth.
 
 ---
 
 ## Tool Summary
+
+The "what it does" column below is this guide's framing, written to place
+each tool against its neighbours. The description the *model* reads when
+choosing is a different string, and it lives in
+[20_tool_index.md](20_tool_index.md) with the tool's required and optional
+parameters. What this table adds is the last column: the fields you will
+actually read off the result.
 
 **Advanced tools (8)**
 
@@ -17,7 +24,7 @@ Thirty-two high-level agentic tools that compose the library's existing primitiv
 | `scan_pairs` | Find cointegrated pairs in a universe, ranked by half-life | `pairs[].half_life_days`, `pairs[].signal`, `failed_pairs`, `failed_tickers` |
 | `run_walk_forward_backtest` | Optimise in-sample, validate out-of-sample across rolling windows | `stitched_oos_sharpe`, `pct_windows_profitable`, `param_stability` |
 | `get_portfolio_risk_attribution` | Deep risk decomposition: MCR, PCA, optional factor model | `asset_risk_contributions`, `pca_variance_explained` |
-| `run_portfolio_optimization` | Produce weights — Markowitz mean-variance (max_sharpe/min_volatility/target_return/target_volatility), risk parity, or Black-Litterman — unlike `get_portfolio_risk_attribution`, which only decomposes weights already chosen | `weights`, `expected_return`, `expected_volatility`, `sharpe_ratio`, `converged`, `risk_contributions` (risk_parity only) |
+| `run_portfolio_optimization` | Produce weights — Markowitz mean-variance (max_sharpe/min_volatility/target_return/target_volatility), risk parity, or Black-Litterman — unlike `get_portfolio_risk_attribution`, which only decomposes weights already chosen | `weights`, `expected_return`, `expected_volatility`, `sharpe_ratio`, `converged`, `solver` (iterations/status/objective/multipliers), `condition_number`, `risk_contributions` (risk_parity only), and for Black-Litterman `implied_equilibrium_returns`, `posterior_returns`, `posterior_volatilities`, `view_absorption` |
 | `get_position_size` | ATR stop-loss sizing with optional Kelly criterion | `shares_fixed_risk`, `kelly_fraction`, `recommended_shares` |
 | `run_portfolio_simulation` | True shared-cash portfolio: rebalancing, position sizing vs. current equity, weight drift between rebalances | `rebalance_log`, `avg_gross_leverage`, `final_equity`, `final_cash` |
 
@@ -46,8 +53,8 @@ Thirty-two high-level agentic tools that compose the library's existing primitiv
 | `run_pair_trade_backtest` | Backtest a cointegrated pair as one synchronized two-leg trade (reuses `run_portfolio_simulation`) | `n_round_trips`, `entry_spread`, `current_spread`, `sharpe_ratio` |
 | `get_robustness_diagnostics` | Same-sample confidence checks on a grid search's winning combination: parameter sensitivity, Deflated Sharpe Ratio, block-bootstrap CI | `expected_max_sharpe`, `deflated_sharpe_ratio`, `bootstrap_ci_lower`, `bootstrap_ci_upper` |
 | `get_capacity_report` | Max account size a target-weight portfolio can support before positions move their own market | `max_account_size`, `binding_ticker`, `days_to_liquidate_at_capacity` |
-| `get_data_quality_report` | Dataset provenance plus missing-bar/stale-price/price-jump detection on fetched OHLCV | `metadata`, `missing_bars`, `stale_price_runs`, `price_jumps` |
-| `run_backtest_compact` | Same four built-in strategies as `run_sma_backtest` etc., but returns a compact summary/risk/exposure/cost result with artifact URIs instead of the inline equity curve/trade log | `summary`, `risk`, `exposure`, `costs`, `equity_curve_uri` |
+| `get_data_quality_report` | Dataset provenance plus missing-bar/stale-price/price-jump/volume-anomaly detection on fetched OHLCV, against a named exchange calendar | `metadata`, `missing_bars`, `stale_price_runs`, `price_jumps`, `volume_anomalies` |
+| `run_backtest_compact` | Any of the eight built-in strategies, as `run_sma_backtest` runs them, but returning a compact summary/risk/exposure/cost result with artifact URIs and references instead of the inline equity curve/trade log | `summary`, `risk`, `exposure`, `costs`, `equity_curve_uri`, `equity_curve_ref` |
 
 **Analytics tools (5)**
 
@@ -63,8 +70,8 @@ Thirty-two high-level agentic tools that compose the library's existing primitiv
 
 | Tool | What it does | Key output fields |
 |---|---|---|
-| `run_garch_volatility_forecast` | Fit GARCH(1,1) conditional volatility and forecast it forward, unlike `get_volatility_estimators`' backward-looking realized estimates | `persistence`, `current_annualized_vol`, `long_run_annualized_vol`, `forecast_annualized_vol` |
-| `run_kalman_hedge_ratio` | Time-varying hedge ratio via a Kalman filter — a staleness diagnostic companion to `run_cointegration_test`'s static OLS hedge ratio | `current_hedge_ratio`, `hedge_ratio_std`, `current_zscore`, `signal` |
+| `run_garch_volatility_forecast` | Fit GARCH(1,1) conditional volatility and forecast it forward, unlike `get_volatility_estimators`' backward-looking realized estimates | `persistence`, `current_annualized_vol`, `long_run_annualized_vol`, `forecast_annualized_vol`, `misspecified` |
+| `run_kalman_hedge_ratio` | Time-varying hedge ratio via a Kalman filter — a staleness diagnostic companion to `run_cointegration_test`'s static OLS hedge ratio | `current_hedge_ratio`, `hedge_ratio_std`, `current_zscore`, `signal`, `path_ref` |
 | `get_tail_risk_metrics` | Extreme Value Theory tail risk (Peaks-Over-Threshold GPD fit): VaR/CVaR extrapolated from the fitted tail, vs. the naive historical quantile | `var_evt`, `cvar_evt`, `var_historical_comparison`, `tail_classification` |
 
 **Regime/momentum diagnostic tools (1)**
@@ -86,7 +93,7 @@ Thirty-two high-level agentic tools that compose the library's existing primitiv
 
 `run_regime_adaptive_backtest` computes the Hurst exponent on the symbol's return series, maps the result to the most appropriate strategy class, optimises parameters via grid search, and returns the best backtest alongside the regime classification — all in one call.
 
-> **In-sample only — not out-of-sample validated:** this tool computes Hurst, optimises parameters, *and* backtests all on the same requested date range. That's fast and useful for a quick exploratory look, but it's in-sample selection bias, not a trustworthy performance estimate — the parameters were chosen using the same data they're then "tested" on. When you need a genuinely out-of-sample answer (or want to avoid the hardcoded regime → strategy map below), use [`run_regime_adaptive_walkforward_backtest`](#14-regime-adaptive-walk-forward-backtest-leakage-free) instead — same idea, walked forward window by window like `run_walk_forward_backtest`, with every window's strategy choice tested against *all four* registered strategies rather than assumed from Hurst alone.
+> **In-sample only — not out-of-sample validated:** this tool computes Hurst, optimises parameters, *and* backtests all on the same requested date range. That's fast and useful for a quick exploratory look, but it's in-sample selection bias, not a trustworthy performance estimate — the parameters were chosen using the same data they're then "tested" on. When you need a genuinely out-of-sample answer (or want to avoid the hardcoded regime → strategy map below), use [`run_regime_adaptive_walkforward_backtest`](#14-regime-adaptive-walk-forward-backtest-leakage-free) instead — same idea, walked forward window by window like `run_walk_forward_backtest`, with every window's strategy choice tested against *every* registered strategy rather than assumed from Hurst alone.
 
 > **Performance:** The dominant cost in this tool is the `hurst_exponent` call on the full return series. With the optional C++ extension (`_sqt_core`) built, this step runs measured 83–131× faster (n=500/n=2 000), reducing total wall-clock time for the tool from ~10–20 s to well under a second on a 2 000-bar series. See [30_build_guide.md](30_build_guide.md).
 
@@ -141,6 +148,12 @@ result = run_regime_adaptive_backtest(RegimeAdaptiveInput(
 | `rsi_mean_reversion` | period=[7,14,21], oversold=[25,30], overbought=[65,70] → 12 combos |
 | `macd_crossover` | fast=[8,12], slow=[21,26], signal=[7,9] → 8 combos |
 | `bollinger_reversion` | period=[15,20,25], num_std=[1.5,2.0] → 6 combos |
+
+These are the four the regime map can select. The strategy registry holds
+eight — `donchian_breakout`, `momentum_timeseries`, `vwap_reversion` and
+`adx_trend` also carry default grids, and `run_regime_adaptive_walkforward_backtest`
+(§14) searches all of them; this tool cannot reach them, because the Hurst
+regime maps only to the four above.
 
 **Output reference:**
 
@@ -207,10 +220,10 @@ result = run_regime_adaptive_backtest(RegimeAdaptiveInput(
         "oversold":   [20, 25, 30],
         "overbought": [70, 75, 80],
     },
-    macd_param_grid={
-        "fast_period":   [8, 12],
-        "slow_period":   [21, 26],
-        "signal_period": [7, 9],
+    macd_param_grid={       # MACD's parameter names are fast/slow/signal,
+        "fast":   [8, 12],  # not fast_period/slow_period — see the grid table above
+        "slow":   [21, 26],
+        "signal": [7, 9],
     },
 ))
 
@@ -532,6 +545,9 @@ for win in result.windows:
 | `worst_oos_window` | `int` | `window_index` of the window with the lowest `out_of_sample_return` |
 | `longest_losing_window_streak` | `int` | Longest run of consecutive windows with negative OOS return |
 | `parameter_turnover` | `float` | Fraction of consecutive windows whose `best_params` changed (0.0 = perfectly stable, 1.0 = changes every window) |
+| `stitched_equity_curve_ref` | `str?` | An `equity_curve` reference to the continuous out-of-sample curve the five `stitched_oos_*` fields reduce — one capital base across every window, boundaries included as ordinary bars. Five scalars cannot say *when* the decay happened; this can. Published only when `run_id` was given |
+
+`sort_by` accepts `sharpe_ratio` (default), `sortino_ratio`, `calmar_ratio`, `total_return`, `profit_factor`, `win_rate`, `max_drawdown`, `annualized_volatility`, `avg_trade_return_pct` and `num_trades`. `annualized_volatility` is ranked ascending — the lowest wins — and every other metric descending.
 
 > **Why both `avg_oos_*` and `stitched_oos_*` exist:** `avg_oos_sharpe`/`avg_oos_return`/`avg_oos_max_drawdown` average each window's independently-computed stats — simple, but it misrepresents compounding. Two windows of +20% and -20% average to a 0% return, but an account that actually lived through both windows sequentially would be down ~4% (1.2 × 0.8 − 1). `stitched_oos_*` is computed from **one continuous backtest spanning the entire OOS region** — a single capital base carried across every window boundary, real transaction costs applied at every actual transition (including at a window boundary, which is now just an ordinary bar, not a capital reset) — the economically correct aggregate. Prefer `stitched_oos_*` for reporting; the `avg_oos_*`/`windows[].out_of_sample_*` fields are window-scoped diagnostics (each computed from an independent, separately-capitalized run over just that window) — useful to see per-window variation, but not a substitute for the continuous result.
 >
@@ -1264,10 +1280,13 @@ for run in result.top_results:
 | `strategy` | str | — | `"sma_crossover"`, `"rsi_mean_reversion"`, `"macd_crossover"`, `"bollinger_reversion"`, `"donchian_breakout"`, `"momentum_timeseries"`, `"vwap_reversion"`, `"adx_trend"` |
 | `param_grid` | dict | — | Mapping of parameter name → list of values to test |
 | `initial_capital` | float | 10000 | Starting capital |
-| `sort_by` | str | `"sharpe_ratio"` | Ranking metric: `"sharpe_ratio"`, `"total_return"`, `"calmar_ratio"`, `"sortino_ratio"`, `"max_drawdown"` |
+| `commission_pct` | float | `0.001` | Commission per trade side (fraction) |
+| `slippage_pct` | float | `0.0005` | Slippage per trade side (fraction) |
+| `sort_by` | str | `"sharpe_ratio"` | Ranking metric: `"sharpe_ratio"`, `"sortino_ratio"`, `"calmar_ratio"`, `"total_return"`, `"profit_factor"`, `"win_rate"`, `"max_drawdown"`, `"annualized_volatility"`, `"avg_trade_return_pct"`, `"num_trades"`. `annualized_volatility` ranks **ascending** — the least volatile combination wins, which for that one metric is the best one; every other metric ranks descending |
 | `top_n` | int | 5 | Number of top combinations to return (capped at 20) |
 | `n_workers` | int | 1 | CPU workers for parallel grid search |
-| `fill_price` | str | `"close"` | `"close"` (default) or `"next_open"` — see `BacktestInput.fill_price` |
+| `fill_price` | str | `"close"` | `"close"` (default), `"next_open"`, `"hl2_exploratory"` — see `BacktestInput.fill_price` |
+| `risk_free_rate` | float | `0.0` | Annual rate the Sharpe/Sortino excess is measured against — it sets the ranking, not just the reported number |
 
 **Output reference:**
 
@@ -1294,6 +1313,7 @@ Each `OptimizationRun` has:
 | `calmar_ratio` | `float` | Calmar ratio for this run |
 | `max_drawdown` | `float` | Max drawdown (negative decimal) |
 | `num_trades` | `int` | Number of round-trip trades |
+| `annualized_volatility`, `profit_factor`, `win_rate`, `avg_trade_return_pct` | `float?` | The remaining sortable metrics. `None` rather than `0.0` when the grid did not compute the column, so a metric you sorted by never comes back as a plausible zero |
 
 **Finding the best SMA parameters then running the full backtest:**
 
@@ -1364,6 +1384,7 @@ print(f"MFI signal  : {result.mfi_signal}")      # "overbought", "oversold", or 
 | `start_date` | str | — | ISO date |
 | `end_date` | str | — | ISO date |
 | `sar_af_start` | float | 0.02 | SAR: initial acceleration factor |
+| `sar_af_step` | float | 0.02 | SAR: increment added to the acceleration factor at each new extreme |
 | `sar_af_max` | float | 0.2 | SAR: maximum acceleration factor |
 | `atr_period` | int | 14 | Wilder ATR period in bars |
 | `mfi_period` | int | 14 | MFI lookback period in bars |
@@ -1644,7 +1665,8 @@ print(f"Num Trades    : {result.num_trades}")
 | `initial_capital` | float | `10000` | Starting capital |
 | `commission_pct` | float | `0.001` | Commission per trade (fraction) |
 | `slippage_pct` | float | `0.0005` | Slippage per trade (fraction) |
-| `fill_price` | str | `"close"` | `"close"` (default) or `"next_open"` — see `BacktestInput.fill_price` |
+| `fill_price` | str | `"close"` | `"close"` (default), `"next_open"`, `"hl2_exploratory"` — see `BacktestInput.fill_price` |
+| `risk_free_rate` | float | `0.0` | Annual rate the Sharpe/Sortino excess is measured against |
 
 **Output:** `BacktestResult` — identical shape to `run_sma_backtest` / `run_rsi_backtest` / etc. See the full reference in [07_agent_tools.md](07_agent_tools.md#backtestinput--backtestresult--full-reference).
 
@@ -1727,8 +1749,9 @@ print(f"Portfolio VaR 95%: {pm['var_95']:.4f}")
 | `tickers` | `List[str]` | — | Universe; must match `signal_panel`'s outer keys |
 | `start_date` | str | — | ISO date |
 | `end_date` | str | — | ISO date |
-| `signal_panel` | `Dict[str, Dict[str, float]]` | — | `{ticker: {date: value}}`, computed entirely outside this library. Each ticker's map is reindexed onto that ticker's **full daily price calendar** per `signal_fill_policy` before backtesting. Whether/how values are validated is controlled by `signal_type`, applied uniformly across every ticker's signal map. |
-| `signal_type` | `SignalType` | `"score"` | `"score"` (default — unrestricted float, today's original behavior) \| `"direction"` (every value must be exactly -1, 0, or 1) \| `"target_weight"` (every `\|value\|` must be `<= max_abs_weight`) |
+| `signal_panel` | `Dict[str, Dict[str, float]]?` | `None` | `{ticker: {date: value}}`, computed entirely outside this library. Each ticker's map is reindexed onto that ticker's **full daily price calendar** per `signal_fill_policy` before backtesting. Whether/how values are validated is controlled by `signal_type`, applied uniformly across every ticker's signal map. Supply this **or** `signal_panel_ref`, never both and never neither |
+| `signal_panel_ref` | str? | `None` | An `sqt://signal_panel/...` handoff reference instead of the inline map. Any runtime can publish one, so a model's predictions reach this tool without being transcribed through the conversation |
+| `signal_type` | `SignalType` | `"score"` | `"score"` (default — unrestricted float) \| `"direction"` (every value must be exactly -1, 0, or 1) \| `"target_weight"` (every `\|value\|` must be `<= max_abs_weight`) |
 | `max_abs_weight` | float | `1.0` | Bound used only when `signal_type="target_weight"` (ignored otherwise) |
 | `weights` | `Dict[str, float]?` | `None` | Per-ticker weight, must sum to 1.0. Defaults to equal weight. |
 | `signal_fill_policy` | str | `"hold"` | Same semantics as `CustomSignalBacktestInput.signal_fill_policy` (§11), applied independently to each ticker's own price calendar. |
@@ -1737,7 +1760,9 @@ print(f"Portfolio VaR 95%: {pm['var_95']:.4f}")
 | `slippage_pct` | float | `0.0005` | Slippage per trade (fraction) |
 | `benchmark` | str? | `None` | Optional benchmark ticker — adds `information_ratio` to `portfolio_metrics` |
 | `include_trade_log` | bool | `False` | If `True`, include a per-trade log for each ticker |
-| `fill_price` | str | `"close"` | `"close"` (default) or `"next_open"` — see `BacktestInput.fill_price` |
+| `fill_price` | str | `"close"` | `"close"` (default), `"next_open"`, `"hl2_exploratory"` — see `BacktestInput.fill_price` |
+| `risk_free_rate` | float | `0.0` | Annual rate the Sharpe/Sortino excess is measured against |
+| `run_id` | str? | `None` | Publishes the blended portfolio return series under it, returned as `portfolio_returns_ref`. Omit it and the series is computed and discarded |
 
 **Output reference:**
 
@@ -1746,8 +1771,10 @@ print(f"Portfolio VaR 95%: {pm['var_95']:.4f}")
 | `tickers` | `List[str]` | Universe, in `signal_panel`'s order |
 | `per_ticker` | `Dict[str, BacktestResult]` | One full backtest result per ticker |
 | `portfolio_metrics` | `dict` | Same shape as `portfolio.portfolio_metrics()`: `annualized_return`, `annualized_volatility`, `sharpe_ratio`, `sortino_ratio`, `max_drawdown`, `calmar_ratio`, `var_95`, `cvar_95`, `total_return`, `tickers`, `weights`, plus `information_ratio` when `benchmark` was set |
+| `portfolio_returns_ref` | `str?` | A `returns_panel` reference to the blended per-bar portfolio return series, one column named `portfolio`, published only when `run_id` was given. `portfolio_metrics` is a reduction of exactly this series — without the reference it is the one backtest output on this surface that can feed no return-consuming tool |
+| `warnings` | `List[str]` | What the result knows that the numbers do not say |
 
-**Validation:** `signal_panel` must have an entry for every ticker in `tickers`; if `weights` is given, its keys must exactly match `tickers` and sum to 1.0 — both raise a Pydantic `ValidationError` with the offending ticker(s) named directly, so the calling agent can retry with a corrected payload.
+**Validation:** exactly one of `signal_panel` or `signal_panel_ref` — both would leave it ambiguous which one ran. The panel must have an entry for every ticker in `tickers`; if `weights` is given, its keys must exactly match `tickers` and sum to 1.0. Each raises a Pydantic `ValidationError` with the offending ticker(s) named directly, so the calling agent can retry with a corrected payload.
 
 **Note on scale:** per-ticker equity curves are aligned to their common date range (inner join) before being combined into the portfolio — a ticker whose signal/price data doesn't fully cover the requested range will shrink the portfolio's effective date range. For very large universes, prefer calling this tool once per rebalance period rather than once per ticker.
 
@@ -1809,11 +1836,11 @@ print(f"\nTime in market: {exp.time_in_market:.0%}  "
 `run_regime_adaptive_walkforward_backtest` is the out-of-sample-validated counterpart to `run_regime_adaptive_backtest` (§1). It walks forward exactly like `run_walk_forward_backtest` (§3) — non-overlapping `train_df`/`test_df` windows, cursor only advances — but at each window it also classifies the regime and picks the winning strategy, all strictly within `train_df`:
 
 1. Compute the Hurst exponent on `train_df`'s returns → regime + H, reported per window as **diagnostic context only**.
-2. Grid-search **all four** registered strategies (`sma_crossover`, `rsi_mean_reversion`, `macd_crossover`, `bollinger_reversion`) on `train_df`, using the same default parameter grids as `run_regime_adaptive_backtest` (or your own overrides) — keep whichever `(strategy, params)` wins by `sort_by`.
+2. Grid-search **every** registered strategy on `train_df` — `sma_crossover`, `rsi_mean_reversion`, `macd_crossover`, `bollinger_reversion`, `donchian_breakout`, `momentum_timeseries`, `vwap_reversion`, `adx_trend` — using each one's default parameter grid. Only the first four have override fields (`sma_param_grid` and friends); the rest always use their defaults, as any future registry addition would. Keep whichever `(strategy, params)` wins by `sort_by`. That comparison faces the same direction as the grid's own sort, so `sort_by="annualized_volatility"` picks the least volatile strategy rather than the most.
 3. Freeze that choice; generate its signal from `train_df + test_df` together (warm-up), keep only the `test_bars` tail — the window-scoped diagnostic in `windows[]` runs that tail through its own independent `run_strategy` call.
 4. Slide forward by `test_bars`; concatenate every window's `test_bars`-tail signal chronologically and run **one continuous** `run_strategy` call across the whole OOS region — one capital base, real costs at every actual transition, same continuity guarantee as `run_walk_forward_backtest` (§3).
 
-This directly answers two criticisms of `run_regime_adaptive_backtest`: the in-sample selection bias (every number here is genuinely out-of-sample), and the hardcoded regime → strategy map (a "trending" window is free to pick `rsi_mean_reversion` if it actually wins in-sample — the regime is context, not a hard rule).
+This directly answers two weaknesses of `run_regime_adaptive_backtest`: the in-sample selection bias (every number here is genuinely out-of-sample), and the hardcoded regime → strategy map (a "trending" window is free to pick `rsi_mean_reversion`, or `adx_trend`, if it actually wins in-sample — the regime is context, not a hard rule).
 
 ```python
 from standard_quant_tools.agent.tools import run_regime_adaptive_walkforward_backtest
@@ -1851,7 +1878,7 @@ for win in result.windows:
 
 Each `RegimeAdaptiveWalkForwardWindow` additionally reports `regime`, `hurst`, `fit_r_squared`, `selected_strategy`, `best_params`, `in_sample_sharpe`, `in_sample_return` alongside the usual `out_of_sample_*` fields.
 
-**Cost:** each window grid-searches four strategies instead of one, so this tool costs roughly 4× a single `run_walk_forward_backtest` call per window. Still fast enough for interactive use at default grid sizes (~35 combinations total per window).
+**Cost:** each window grid-searches eight strategies instead of one, so this tool costs roughly 8× a single `run_walk_forward_backtest` call per window. Still fast enough for interactive use at default grid sizes (65 combinations total per window).
 
 ---
 
@@ -1906,7 +1933,10 @@ if result.warnings:
 
 **`target_weights` shape:** `{ticker: {date: value}}`, same convention as
 `run_signal_panel_backtest`'s `signal_panel` — every ticker must share the
-**identical set of dates**. With the default `signal_type="target_weight"`,
+**identical set of dates**. Instead of the inline map you may pass
+`target_weights_ref`, a published `weight_panel` or `score_panel` reference
+whose kind must match `signal_type`; supply one or the other, never both.
+With the default `signal_type="target_weight"`,
 a value is a target *fraction of account equity* (negative for short), not a
 `{-1, 0, 1}` direction, and that shared date set is the rebalance calendar.
 With `signal_type="score"`, values are instead arbitrary per-ticker alpha
@@ -1927,23 +1957,32 @@ result = run_portfolio_simulation(PortfolioSimulationInput(
 ))
 ```
 
-Beta-neutral, sector-neutral, risk-parity, and optimizer-generated weights
-are not implemented — each needs infrastructure this repo doesn't have yet.
+`construction_method` offers those four and no more: beta-neutral and
+sector-neutral construction are not implemented here. Risk-parity and
+optimizer-chosen weights are — but in the `portfolio` runtime, not this one.
+Run `optimize_risk_parity`, `optimize_hierarchical_risk_parity`,
+`optimize_max_diversification` or `run_portfolio_optimization`, then hand
+the weights to this tool as a `target_weights` panel or a published
+`weight_panel` reference.
 
 **Output reference:**
 
 | Field | Type | Description |
 |---|---|---|
-| `n_rebalances`, `rebalance_log` | — | One `RebalanceEvent` per rebalance date: `date`, `turnover_pct`, `gross_leverage_after`, `n_positions`, plus `n_capped` and `capped_notional` — the trades `max_adv_participation` sized down on that date and the notional they gave up |
+| `n_rebalances`, `rebalance_log` | — | One `RebalanceEvent` per rebalance date: `date`, `turnover_pct`, `gross_leverage_after`, `n_positions`, plus `n_capped`, `capped_notional` and `capped` — how many trades `max_adv_participation` sized down on that date, the notional they gave up, and **which tickers**, so a run that traded three names short of its target can say which three |
 | `total_return`, `annualized_return`, `annualized_volatility`, `sharpe_ratio`, `sortino_ratio`, `max_drawdown`, `calmar_ratio`, `var_95`, `cvar_95` | `float` | Computed from the engine's `equity_curve` via the **existing** metrics functions — no new metric math |
 | `information_ratio` | `float?` | Present only when `benchmark` is set |
 | `final_equity`, `final_cash` | `float` | Account state at the last bar |
 | `avg_gross_leverage`, `max_gross_leverage_used` | `float` | `gross_exposure / equity` averaged and maxed across every bar (not just rebalance dates) — shows how far weight drift pushed leverage between rebalances |
+| `net_exposure_min`, `net_exposure_max`, `net_exposure_mean` | `float?` | Net exposure as a fraction of that bar's equity, at its most short, most long, and on average. A mean near zero beside a large gross is what a dollar-neutral book looks like when neutrality actually held — and a book that drifted from −13% to +8% finally says so |
 | `equity_curve` | `List[float]` | Full daily curve — drifts between rebalances rather than jumping |
+| `cash_curve_ref`, `gross_exposure_curve_ref`, `net_exposure_curve_ref`, `leverage_curve_ref` | `str?` | `analytic_series` references to the per-bar state curves the simulation already builds: cash, `sum(|position value|)`, `sum(position value)`, and gross-over-equity. Published only when `run_id` is given; the leverage and net-exposure scalars above are points on two of them |
+| `portfolio_returns_ref` | `str?` | A `returns_panel` reference to the account's own per-bar return series, measured from pre-trade opening equity so a day-0 rebalance cost is in it. Published only when `run_id` is given |
 | `warnings` | `List[str]` | E.g. `"cash went negative..."` if implied margin borrowing occurred |
 
 **Validation (Pydantic, fails fast with the offending date/ticker named):**
-`target_weights` must have an entry for every ticker; every ticker must
+exactly one of `target_weights` or `target_weights_ref`; the panel must have
+an entry for every ticker; every ticker must
 share the identical rebalance-date set; per rebalance date, `sum(|weight|)`
 must not exceed `max_gross_leverage` (default `1.0`); no single `|weight|`
 may exceed `max_position_pct` (default `1.0` — reuses the same
@@ -1990,10 +2029,13 @@ filled run's numbers.
 **Cost models and liquidity (`04_backtesting.md`'s
 [Pluggable cost models](04_backtesting.md#cost-model-building-blocks-backtestcostspy)
 section has the full reference):** `commission_model` (`"pct"` default or
-`"per_share"` with `per_share_rate`/`min_commission`), `use_impact_model`
+`"per_share"` with `per_share_rate`/`min_commission`), `sell_commission_pct`
+(a separate rate for sales — `None`, the default, charges `commission_pct`
+on both sides, but real venues are frequently asymmetric because regulatory
+fees in several markets are sell-side only), `use_impact_model`
 (+ `impact_coefficient`/`impact_lookback`), `borrow_fee_bps`,
 `margin_interest_rate`, and `max_adv_participation` — all optional,
-defaulting to today's exact flat-cost, no-constraint behavior.
+each defaulting off, to a flat cost model with no constraint.
 `max_adv_participation` is a **cap**: a trade over it is sized down to the
 cap and the shortfall recorded per rebalance (`n_capped`, `capped_notional`
 on the `RebalanceEvent`, and a warning with the run's total). It used to
@@ -2079,6 +2121,8 @@ to evaluate strategy performance — the same convention and warning as
 | `current_spread` | `float` | Last spread value |
 | `total_return`, `annualized_return`, `annualized_volatility`, `sharpe_ratio`, `sortino_ratio`, `max_drawdown`, `calmar_ratio` | `float` | Computed from the engine's `equity_curve` via existing metrics functions |
 | `final_equity`, `final_cash`, `equity_curve`, `warnings` | — | Same meaning as §15 |
+| `state_ref` | `str?` | An `analytic_series` reference to the spread state per bar: `+1` long the spread (long `symbol_a`, short `symbol_b`), `−1` short it, `0` flat — the series the entry/exit thresholds actually produced, which `n_round_trips` reduces to one integer. Published when `run_id` is given |
+| `cash_curve_ref`, `gross_exposure_curve_ref`, `net_exposure_curve_ref`, `leverage_curve_ref` | `str?` | Inherited from §15, published on the same condition |
 
 **`fill_price`:** `"next_open"` (default), `"close"`, or `"hl2_exploratory"`.
 Defaults to `"next_open"` because the z-score signal deciding a transition
@@ -2145,6 +2189,14 @@ if result.warnings:
 recorded in the audit trail (`audit/`) alongside every other input, so a
 `replay` of the recorded call reproduces the identical confidence interval.
 
+**The other knobs:** `sort_by` picks the winning combination (same metric set
+and same ascending-for-volatility rule as `run_backtest_optimization`, §7);
+`skew` (default `0.0`) and `kurtosis` (default `3.0`) feed the Deflated Sharpe
+Ratio's standard-error formula and describe the return distribution, so the
+normal defaults understate the correction for a fat-tailed series; and
+`n_bootstrap_iterations` (1000), `bootstrap_block_size` (20) and
+`bootstrap_confidence` (0.95) size the block bootstrap.
+
 **Scope, stated explicitly:** the Deflated Sharpe Ratio's `sharpe_trials_std`
 is the standard deviation actually observed across the searched grid, not
 an independently-estimated theoretical variance — a practical proxy common
@@ -2192,6 +2244,10 @@ for t, size in result.per_ticker_max_account_size.items():
 print(f"Sector exposure   : {result.sector_exposure}")
 ```
 
+`max_participation` defaults to `0.1`, `adv_lookback` to `20` bars (trailing
+from the end of the requested range, the window the average dollar and share
+volume are measured over), and `include_sector_exposure` to `True`.
+
 **How it works:** for each ticker, `max account size = (max_participation *
 avg_dollar_volume) / target_weight` — a name with a large target weight and
 thin volume caps the *whole portfolio's* capacity, not just its own
@@ -2216,17 +2272,19 @@ rebalance panel like `run_portfolio_simulation`'s) — capacity is inherently
 a point-in-time estimate, not a backtest. Sector data is best-effort
 (yfinance's `sector` field defaults to `"Unknown"` for many tickers — see
 `data/base.py`'s `TickerInfo`); sector *limits* (as opposed to reporting)
-aren't enforced anywhere in this library yet.
+are not enforced anywhere in this library. What exists instead measures
+concentration rather than constraining it: `analyze_concentration` for
+effective N and the weight distribution, and `get_factor_exposure_budget`
+for what the names collapse into once they are read as factor bets.
 
 ---
 
 ## 19. Data Quality Report
 
 `get_data_quality_report` reports what a data provider actually guarantees
-about a symbol's OHLCV, plus missing-bar/stale-price/price-jump detection
-on the fetched data. See [11_data_quality.md](11_data_quality.md) for the
-full conceptual reference (including the calendar-free heuristic
-limitation of missing-bar detection) — this section covers the tool's
+about a symbol's OHLCV, plus missing-bar/stale-price/price-jump/thin-volume
+detection on the fetched data. See [11_data_quality.md](11_data_quality.md)
+for the full conceptual reference — this section covers the tool's
 input/output shape.
 
 ```python
@@ -2235,42 +2293,59 @@ from standard_quant_tools.agent.models import DataQualityReportInput
 
 result = get_data_quality_report(DataQualityReportInput(
     symbol="AAPL", start_date="2023-01-01", end_date="2024-01-01",
+    calendar="XNYS",   # default; the sessions that SHOULD have a bar
 ))
 
 print(result.metadata)  # {'provider': 'yfinance', 'adjusted': True,
                          #  'survivorship_free': False, 'point_in_time': False, ...}
 for gap in result.missing_bars:
-    print(f"Missing bar: {gap['date']} ({gap['weekday']})")
+    print(f"Missing bar: {gap.date} ({gap.weekday}, judged by {gap.basis})")
 for run in result.stale_price_runs:
-    print(f"Stale: {run['start']} -> {run['end']} @ {run['price']} ({run['run_length']} bars)")
+    print(f"Stale: {run.start} -> {run.end} @ {run.price} ({run.run_length} bars)")
 for jump in result.price_jumps:
-    print(f"Jump: {jump['date']}  {jump['pct_change']:+.1%}")
+    print(f"Jump: {jump.date}  {jump.pct_change:+.1%}")
+for thin in result.volume_anomalies:
+    print(f"Thin volume: {thin.date}  {thin.volume:,.0f} vs median {thin.trailing_median:,.0f} ({thin.kind})")
 ```
 
 **Output reference:**
 
 | Field | Type | Description |
 |---|---|---|
-| `metadata` | `Dict[str, Any]` | `DataSetMetadata` as a dict — `provider`, `adjusted`, `survivorship_free`, `point_in_time`, `frequency`, `timezone`, `retrieved_at` |
-| `missing_bars` | `List[{date, weekday}]` | Weekday gaps in the index — includes false positives for U.S. market holidays (no calendar dependency) |
-| `stale_price_runs` | `List[{start, end, price, run_length}]` | Runs of `stale_run_length`+ consecutive identical `Close` values |
-| `price_jumps` | `List[{date, pct_change}]` | Single-bar moves exceeding `jump_threshold` |
+| `metadata` | `Dict[str, Any]` | `DataSetMetadata` as a dict — `provider`, `adjusted`, `survivorship_free`, `point_in_time`, `frequency`, `timezone`, `retrieved_at`, and the vendor dataset the bars actually came from |
+| `missing_bars` | `List[MissingBar]` | `date`, `weekday`, `basis`. Sessions with no bar, judged against the exchange calendar when `exchange_calendars` is installed; `basis` says which rule judged it, and under the `weekday` fallback every market holiday in the range appears as a false positive |
+| `stale_price_runs` | `List[StalePriceRun]` | `start`, `end`, `price`, `run_length` — runs of `stale_run_length`+ consecutive identical `Close` values |
+| `price_jumps` | `List[PriceJump]` | `date`, `pct_change` — single-bar moves exceeding `jump_threshold` |
+| `volume_anomalies` | `List[VolumeAnomaly]` | `date`, `volume`, `trailing_median`, `kind`. Bars with zero volume, or below `thin_fraction` of the trailing `volume_window`-bar median. A *run* of thin bars is the signature of a sample feed rather than the tape |
 
-**`stale_run_length`** (default `3`) and **`jump_threshold`** (default
-`0.15`) tune the two detectors' sensitivity.
+**Inputs beyond `symbol`/`start_date`/`end_date`:** `source` picks the
+provider to fetch from (this tool could once check only one provider's data,
+which meant the feeds most worth checking — a single-venue tape, a vendor
+extract — could never be checked at all); `calendar` (default `"XNYS"`) is
+the exchange calendar deciding which sessions *should* have a bar, as
+`exchange_calendars` spells it — `XLON`, `XTKS` and `CMES` for London, Tokyo
+and CME. It is not cosmetic: a 2024 US equity frame reports no gaps against
+`XNYS` and nine against a bare weekday rule. `stale_run_length` (default
+`3`), `jump_threshold` (default `0.15`), `volume_window` (default `20`) and
+`thin_fraction` (default `0.05`) tune the detectors' sensitivity; the
+`thin_fraction` default is deliberately severe, because a feed carrying a
+few percent of consolidated volume *all the way through* is thin
+consistently rather than occasionally, and only a higher setting catches it.
 
 **Scope, stated explicitly:** every finding is a lead to investigate, not a
-proven defect — a genuinely volatile session produces the same signature
-as a data error, and a real market holiday produces the same signature as
-a missing bar.
+proven defect — a genuinely volatile session produces the same signature as
+a data error, and a thin session produces the same signature as a sample
+feed.
 
 ---
 
 ## 20. Compact Backtest Result (`BacktestResultV2`)
 
-`run_backtest_compact` is the same four built-in strategies as
-`run_sma_backtest`/`run_rsi_backtest`/`run_macd_backtest`/
-`run_bollinger_backtest`, but returns a **compact result** instead of
+`run_backtest_compact` runs any of the eight built-in strategies —
+`sma_crossover`, `rsi_mean_reversion`, `macd_crossover`,
+`bollinger_reversion`, `donchian_breakout`, `momentum_timeseries`,
+`vwap_reversion`, `adx_trend` — exactly as `run_sma_backtest` and its
+siblings run them, but returns a **compact result** instead of
 embedding the full `equity_curve`/`trade_log` inline — closes the "agent
 tool result can contain the complete equity curve" concern for callers who
 don't need the raw arrays. Reuses `run_strategy` and
@@ -2307,6 +2382,7 @@ equity_curve = load_artifact(result.equity_curve_uri).squeeze("columns")
 | `exposure` | `ExposureSummary` | Same shape as `get_backtest_diagnostics`' `exposure` field |
 | `costs` | `CostSummary` | `turnover` (position changed, summed over bars, in units of the signal), `realized_cost_pct` (the commission and slippage the engine actually charged, `turnover × (commission_pct + slippage_pct)`), `total_commission_pct`, `total_slippage_pct`, `total_cost_pct` (sums of per-bar cost drag as a fraction of capital, not dollarized), `num_trades` |
 | `equity_curve_uri`, `trades_uri` | `str`, `str?` | Parquet file paths from `backtest/artifacts.py`'s `save_artifact` — load with `load_artifact(uri)`. `trades_uri` is `None` when the strategy never traded |
+| `equity_curve_ref`, `trades_ref` | `str?` | Typed handoff references (`sqt://equity_curve/...`) for the same two artifacts. Prefer these over the `*_uri` fields when passing the curve to another tool: a reference carries a content kind, so a tool expecting something else refuses it by name instead of failing on the contents |
 | `warnings` | `List[str]` | The engine's own warnings first — the split screen (a bar-to-bar move beyond 35%, phrased by the provider's `adjusted` flag) and the `fill_price` caveat — then the tool's, e.g. too few trades to draw reliable conclusions |
 | `validation_status` | `str` | `"ok"` or `"warning"` (currently: `< 5` trades) |
 
@@ -2320,9 +2396,9 @@ absolute/drive-letter prefixes before they ever reach a filesystem path, with
 a resolved-path containment check against `SQT_RUNS_DIR` as defense in depth.
 Writes are atomic (temp file + `os.replace`).
 
-**Scope, stated explicitly:** no `positions_uri`/`orders_uri` from the
-original design doc — this signal-array engine has no per-order or
-per-position time series to expose (only equity and completed trades);
+**Scope, stated explicitly:** there is no `positions_uri` or `orders_uri` —
+this signal-array engine has no per-order or per-position time series to
+expose (only equity and completed trades);
 exposing those would need an event-driven execution engine, which
 `backtest/strategy.py`'s module docstring explicitly defers (no execution
 loop exists to consume it). `costs` reports cost **drag as a fraction of
@@ -2367,6 +2443,7 @@ print(f"Yang-Zhang / close ratio : {result.yang_zhang_vs_close_to_close_ratio:.2
 | `start_date` | str | — | ISO date |
 | `end_date` | str | — | ISO date |
 | `period` | int | `20` | Rolling window (bars) for every estimator; must be > 1 |
+| `periods_per_year` | int | `252` | Bars per year, the factor every estimator annualizes by. 252 is daily trading bars; 52 weekly, 12 monthly, 98,280 for 5-minute US equity bars. It was once pinned at 252 with no way to say otherwise, so a weekly series came back annualized as if it were daily |
 
 **Output reference:**
 
@@ -2648,6 +2725,7 @@ print(f"10-day forecast          : {[f'{v:.1%}' for v in result.forecast_annuali
 | `symbol` | str | — | Ticker symbol |
 | `start_date` / `end_date` | str | — | ISO dates |
 | `forecast_horizon` | int | `10` | Periods ahead to forecast (1–252) |
+| `run_id` / `name` | str? | `None` | Both or neither — one alone is refused. Publishes the fitted conditional-volatility path, one value per in-sample observation, as `conditional_vol_ref` |
 
 **Output reference:**
 
@@ -2655,7 +2733,12 @@ print(f"10-day forecast          : {[f'{v:.1%}' for v in result.forecast_annuali
 |---|---|---|
 | `omega`, `alpha`, `beta` | `float` | Fitted GARCH(1,1) parameters |
 | `persistence` | `float` | `alpha + beta` — how slowly a volatility shock decays; close to 1.0 means shocks persist for a long time |
-| `converged` | `bool` | Whether the MLE optimizer converged to a stationary fit (`persistence < 1.0`) |
+| `converged` | `bool` | The **optimizer** reached a stationary point inside the bounds with `persistence < 1`. It is not a verdict on the specification — for that read `misspecified`, which is computed from the fit's own residuals and is independent of this flag |
+| `ljung_box_p` | `float?` | Joint Ljung-Box p-value on the standardized residuals, testing the *mean* equation. This model assumes a constant mean, so a low value points at an omitted AR term rather than at the variance model |
+| `ljung_box_squared_p` | `float?` | Joint Ljung-Box on the **squared** standardized residuals — the check on the variance model. If the fit captured the clustering, dividing it out leaves no autocorrelation; below 0.05 it did not |
+| `standardized_skew`, `standardized_kurtosis` | `float?` | Skew (~0 under normality) and **excess** kurtosis (0 under normality, not 3) of the standardized residuals. Large positive excess kurtosis is the standard sign that Student-t innovations are wanted |
+| `misspecified` | `bool` | `ljung_box_squared_p < 0.05`: the fitted model did not remove the volatility clustering it was fitted to remove. Independent of `converged`, and the accompanying warning names the usual next step |
+| `conditional_vol_ref` | `str?` | `sqt://analytic_series/...` for the fit's own conditional volatility, one value per in-sample observation, in the returns' units and **not** annualized. `current_annualized_vol` is its last value, scaled. Published only when `run_id`/`name` were given |
 | `current_annualized_vol` | `float` | Latest in-sample conditional volatility, annualized |
 | `long_run_annualized_vol` | `float` | The model's unconditional (long-run) volatility level |
 | `forecast_annualized_vol` | `List[float]` | Forecast conditional volatility for each of the next `forecast_horizon` periods, decaying geometrically toward `long_run_annualized_vol` |
@@ -2665,6 +2748,8 @@ print(f"10-day forecast          : {[f'{v:.1%}' for v in result.forecast_annuali
 **Interpreting the results:**
 
 A `persistence` near 1.0 (e.g. > 0.97) means today's volatility shock will take a long time to fade — current elevated (or depressed) volatility is a reliable near-term forecast. Compare `current_annualized_vol` against `get_volatility_estimators`' realized measures on the same symbol: GARCH's conditional vol reacts faster to recent shocks than a trailing realized-vol window does, since it's model-based rather than a rolling average.
+
+Read `misspecified` before any of that. `converged=True` says the optimizer finished; it says nothing about whether the fit did its job. A converged, misspecified fit is a forecast built on residuals that still cluster, and its persistence and horizon are both suspect.
 
 ---
 
@@ -2696,8 +2781,11 @@ print(f"Current z-score     : {result.current_zscore}  →  {result.signal}")
 |---|---|---|---|
 | `symbol_a` / `symbol_b` | str | — | Pair legs, same convention as `run_cointegration_test` |
 | `start_date` / `end_date` | str | — | ISO dates |
-| `delta` | float | `1e-4` | The one tuning knob: controls how fast the hedge ratio is allowed to drift. Smaller = slower-adapting/more stable (closer to a static OLS ratio); larger = faster-adapting/noisier |
+| `delta` | float | `1e-4` | Controls how fast the hedge ratio is allowed to drift. Smaller = slower-adapting/more stable (closer to a static OLS ratio); larger = faster-adapting/noisier |
+| `observation_noise` | float | `1e-3` | Measurement-noise variance. Together with `delta` this sets how fast the ratio can move: a large value trusts the model over the data and produces a ratio that barely responds, a small one chases every print |
+| `include_intercept` | bool | `True` | Estimate a time-varying intercept alongside the hedge ratio. `False` forces the spread through the origin, which is only right when the two legs genuinely have no level difference |
 | `zscore_window` | int | `20` | Rolling window (bars) for the spread z-score used to generate a signal |
+| `run_id` / `name` | str? | `None` | Both or neither. Publishes the filter's whole path, returned as `path_ref` |
 
 **Output reference:**
 
@@ -2709,6 +2797,7 @@ print(f"Current z-score     : {result.current_zscore}  →  {result.signal}")
 | `current_zscore` | `float` | Latest rolling z-score of the Kalman spread |
 | `signal` | `str` | `"long_a_short_b"` / `"short_a_long_b"` / `"neutral"`, same thresholds as `run_cointegration_test` |
 | `n_obs` | `int` | Observations used |
+| `path_ref` | `str?` | `sqt://analytic_frame/...` for the filter's per-bar path — `Hedge_Ratio`, `Intercept`, `Spread` and `Kalman_Gain`, one row per aligned observation. The scalars above are its last row and its dispersion; *when* the ratio moved is only in the path. Published only when `run_id`/`name` were given |
 
 **Interpreting the results:**
 
@@ -2780,7 +2869,7 @@ The 5 signals:
 
 `rally_score` = fraction of the 5 that are true; `is_rally = rally_score >= 0.6` (at least 3 of 5).
 
-**Auto-tuned ADX threshold (`auto_tune_adx_threshold`):** by default, `strong_trend` compares against a single fixed `adx_threshold` (25.0) for every symbol — reasonable in general, but a chronically choppy stock may never clear 25, and a chronically trending one may clear it constantly regardless of whether *today* is unusual for it. Setting `auto_tune_adx_threshold=True` instead calibrates the threshold to the symbol's **own** trailing ADX history: the effective threshold becomes the `auto_tune_percentile`-th percentile (default 60) of that symbol's ADX values over the fetched window. This is the recommended setting for an automated/agentic pipeline that calls this tool across many different symbols without a human tuning `adx_threshold` per name — see "Interpreting the results" below for why. Enabling it does not change any other default; a caller who never sets it gets byte-for-byte the same result as before this option existed.
+**Auto-tuned ADX threshold (`auto_tune_adx_threshold`):** by default, `strong_trend` compares against a single fixed `adx_threshold` (25.0) for every symbol — reasonable in general, but a chronically choppy stock may never clear 25, and a chronically trending one may clear it constantly regardless of whether *today* is unusual for it. Setting `auto_tune_adx_threshold=True` instead calibrates the threshold to the symbol's **own** trailing ADX history: the effective threshold becomes the `auto_tune_percentile`-th percentile (default 60) of that symbol's ADX values over the fetched window. This is the recommended setting for an automated/agentic pipeline that calls this tool across many different symbols without a human tuning `adx_threshold` per name — see "Interpreting the results" below for why. Enabling it changes no other default.
 
 ```python
 from standard_quant_tools.agent.tools import get_rally_signal

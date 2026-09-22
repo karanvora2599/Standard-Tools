@@ -4,13 +4,13 @@ Standard Quant Tools is pandas-first — pandas stays the default and required
 backend everywhere. [Polars](https://pola.rs) support is additive and
 opt-in: `pip install standard_quant_tools[polars]`. This tracks
 [GitHub issue #1](https://github.com/karanvora2599/Standard-Tools/issues/1),
-delivered in phases rather than one large cross-cutting rewrite — this
-document states plainly what's supported **today** and what the roadmap
-looks like, so scope is never ambiguous.
+delivered a function at a time rather than as one cross-cutting rewrite —
+this document states plainly what's supported **today** and what is not,
+so scope is never ambiguous.
 
 ---
 
-## What's supported today (Phase 1)
+## What's supported today
 
 `analysis.hurst.hurst_exponent` accepts either a `pandas.Series` or a
 `polars.Series` — the proof-of-concept function for this initiative,
@@ -30,9 +30,9 @@ now correctly validate a `polars.Series`/`polars.DataFrame` argument
 validation for anything that isn't a pandas object — see "Why this
 mattered" below.
 
-## Why this mattered: the bug this phase fixed
+## Why this mattered: the bug it fixed
 
-Before this phase, `@validate_series()`/`@validate_dataframe()` checked
+Before that, `@validate_series()`/`@validate_dataframe()` checked
 `isinstance(arg, pd.Series)`/`isinstance(arg, pd.DataFrame)` directly. A
 caller passing a `polars.Series` wouldn't fail validation — the check
 simply wouldn't match, so the decorator silently no-opped, and the
@@ -75,7 +75,7 @@ implementation of the underlying math.
 
 ## Roadmap (not yet built — tracked as follow-up work)
 
-**Phase 2 — data-provider output conversion + the rest of the "easy tier."**
+**Next — data-provider output conversion, and the rest of the "easy tier."**
 A `to_polars(df)` conversion utility for a fetched OHLCV DataFrame (via
 `pl.from_pandas`) — `DataProvider.get_ohlcv`'s actual return-type contract
 stays pandas (`yfinance` itself only ever produces pandas at the source,
@@ -89,7 +89,7 @@ likely needs nothing), `analysis.garch`, `metrics.volatility_estimators`,
 `macd`, `bollinger_bands`, `rsi`), each verified with its own dual-backend
 test following `test_polars_compat.py`'s pattern.
 
-**Phase 3 — alignment-dependent analytics, with explicit boundaries.**
+**After that — alignment-dependent analytics, with explicit boundaries.**
 `analysis.cointegration`, `analysis.regression`, `analysis.multi_factor`,
 and `metrics.risk_metrics`'s `information_ratio`/`treynor_ratio` all rely
 on pandas' implicit index alignment
@@ -102,19 +102,18 @@ join semantics in Polars. `metrics.diagnostics`'s label-range slicing
 not supported for this function yet" error — an honest, documented gap
 rather than a risky rewrite.
 
-**Phase 4 — not a near-term follow-up.** `backtest.engine`'s core
+**Not a near-term follow-up.** `backtest.engine`'s core
 `run_strategy`/`_build_trade_log`/`backtest_grid` are deeply pandas-coupled
 (`.shift()` for signal lag, `.cumprod()` for the equity curve, index
 alignment, date-keyed dict lookups) — a genuine rewrite project, well
-beyond a conversion-boundary fix. This is intentionally out of scope for
-the initiative's early phases.
+beyond a conversion-boundary fix. It is deliberately out of scope.
 
 ## What will never silently "just work"
 
-Polars input to a function not yet covered by the phases above does NOT
+Polars input to a function not listed above does NOT
 yet raise a clear error. It fails the way any un-adapted pandas call
 fails: `rsi(pl.Series(...))` raises `AttributeError: 'Series' object has
 no attribute 'values'`, which is precisely the confusing crash this
 section exists to warn about rather than a guarantee against it. Convert
-explicitly with `.to_pandas()` outside the phases above — and if you hit
-one that should be adapted, open an issue naming the specific function.
+explicitly with `.to_pandas()` outside the functions listed above — and if
+you hit one that should be adapted, open an issue naming it.

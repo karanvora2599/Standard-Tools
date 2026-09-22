@@ -18,7 +18,7 @@ not `_sqt_core` is built.
 
 | Check | Applies to | Behavior |
 |---|---|---|
-| `period`/`window` > 0 | all periodised indicators | `ValidationError`. `bollinger_bands` requires ≥ 2 (it needs a sample variance); `macd` additionally requires `fast < slow`. |
+| `period`/`window` > 0 | all periodised indicators | `ValidationError`. `macd` additionally requires `fast < slow` — an inverted pair is a sign-flipped indicator, not an error the arithmetic would show. |
 | Equal input lengths | multi-series indicators (`adx`, `atr`, `wilder_atr`, `williams_r`, `parabolic_sar`, `vwap`, `mfi`) | `ValidationError` naming the actual lengths. |
 | Finite (no NaN/Inf) | `rsi`, `adx`, `atr`, `wilder_atr`, `parabolic_sar`, `bollinger_bands`, `stochastic_oscillator` | `ValidationError` reporting how many non-finite values were found. |
 
@@ -321,7 +321,8 @@ native side one matrix, and gets one matrix back, with tickers computed in paral
 ```python
 from standard_quant_tools.indicators.panel import technical_indicators_panel
 
-# ohlcv_by_ticker: dict of ticker -> OHLCV DataFrame (needs High/Low/Close)
+# ohlcv_by_ticker: dict of ticker -> OHLCV DataFrame (High/Low/Close, plus
+# Volume when obv, vwap or mfi is asked for)
 out = technical_indicators_panel(
     ohlcv_by_ticker,
     ["rsi", "adx", "atr", "bollinger_bands", "stochastic_oscillator"],
@@ -331,16 +332,32 @@ out["rsi"]                      # (dates × tickers)
 out["bollinger_bands"]["AAPL"]  # (dates × [BB_Upper, BB_Middle, BB_Lower])
 ```
 
-Single-valued indicators (`rsi`, `atr`) come back as one column per ticker. Multi-column
-ones (`adx`, `bollinger_bands`, `stochastic_oscillator`) use a `(ticker, field)` MultiIndex
-on the columns, with **the same field names the per-ticker functions use** — `BB_Upper`,
-`DI_Plus`, `Stoch_K` — so there is no second vocabulary to learn.
+**All fourteen indicators**, not the five the kernel carries: `rsi`, `adx`, `atr`,
+`atr_simple`, `bollinger_bands`, `stochastic_oscillator`, `macd`, `sma`, `ema`,
+`williams_r`, `obv`, `vwap`, `parabolic_sar`, `mfi`. The other nine loop the per-ticker
+wrappers row by row, which is slower and is the **same number** — the wrapper is the
+definition. Which path served an indicator is not observable in its output, and that is
+the point: an indicator only the loop serves is still obtainable as a HISTORY across a
+whole universe.
 
-**Measured**, 500 tickers × 1 000 bars, all five indicators: **144.7 ms**, against 1 727.6
-ms for the per-ticker wrapper loop (11.9×).
+**`atr` in the panel is WILDER's**, the one the native kernel computes, while
+`indicators.atr` on a single series is the simple rolling mean. The simple variant is
+`atr_simple` here rather than a parameter, so neither silently becomes the other. `obv`,
+`vwap` and `mfi` read Volume and are refused by name on a High/Low/Close panel.
 
-Parameters (`rsi_period`, `bollinger_num_std`, …) are keyword-only and apply to every
-ticker. Arithmetic is identical: each row is handed to the same kernel the single-series
+Single-valued indicators (`rsi`, `atr`, `atr_simple`, `sma`, `ema`, `williams_r`, `obv`,
+`vwap`, `mfi`) come back as one column per ticker. Multi-column ones (`adx`,
+`bollinger_bands`, `stochastic_oscillator`, `macd`, `parabolic_sar`) use a
+`(ticker, field)` MultiIndex on the columns, with **the same field names the per-ticker
+functions use** — `BB_Upper`, `DI_Plus`, `Stoch_K` — so there is no second vocabulary to
+learn.
+
+**Measured**, 500 tickers × 1 000 bars, the five native indicators: **144.7 ms**, against
+1 727.6 ms for the per-ticker wrapper loop (11.9×).
+
+Every per-ticker parameter is here (`rsi_period`, `bollinger_num_std`, `macd_slow`,
+`sar_af_max`, `atr_simple_period`, …), keyword-only, applied to every ticker. Arithmetic is
+identical: each row is handed to the same kernel or the same wrapper the single-series
 path uses, so output is bit-identical to calling the per-ticker function in a loop.
 
 **The index is the intersection** of every ticker's bars — the only shape a dense panel can
@@ -366,7 +383,7 @@ from standard_quant_tools.indicators import (
     adx, parabolic_sar, obv, vwap, mfi
 )
 
-provider = DataFactory.get_provider
+provider = DataFactory.get_provider()
 df = provider.get_ohlcv("NVDA", "2023-01-01", "2024-01-01")
 
 # Trend
@@ -390,7 +407,7 @@ df['OBV']  = obv(df['Close'], df['Volume'])
 df['VWAP'] = vwap(df['High'], df['Low'], df['Close'], df['Volume'])
 df['MFI']  = mfi(df['High'], df['Low'], df['Close'], df['Volume'])
 
-print(df.tail)
+print(df.tail())
 ```
 
 
@@ -411,11 +428,19 @@ comes back as a reference instead.
 
 ```python
 compute_indicator_panel(
-    tickers=[...], indicators=["rsi", "adx"],
+    tickers=[...], indicators=["rsi", "adx", "macd", "atr_simple"],
+    start_date="2023-01-01", end_date="2024-01-01",
+    macd_slow=40, atr_simple_period=20,                # every parameter travels
     price_panel_ref="sqt://price_panel/study7/bars",   # optional
     run_id="study7", name="ind",
 )
 ```
+
+Both tools take all fourteen indicator names and every parameter behind
+them. That is newer than it sounds: `compute_indicator_panel` used to drop
+the parameters on the floor, so a PERSISTED `rsi` panel — the one a feature
+or a custom backtest then consumes — was always RSI(14) whatever was asked
+for.
 
 Passing a `price_panel_ref` from the [data runtime](26_data.md) means
 **nothing is refetched** — the same bars are reused. Without it the tool

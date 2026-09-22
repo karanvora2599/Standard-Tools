@@ -53,7 +53,7 @@ Two things genuinely did not exist anywhere and had to be written:
 | `solve_forward_carry` | What financing / dividend / borrow does this quote imply |
 | `analyze_basis_history` | Is this basis wide *for this name*; with `run_id` and `name` the basis, its annualized form and its z-scores are published as an `analytic_frame` |
 | `analyze_futures_curve` | What does the term structure look like, and what does a calendar spread price *(`curve_curvature` is null below FOUR contracts: a second difference needs three carries and three contracts give two)* |
-| `analyze_roll` | What does moving this position to the next contract cost | *(roll yield is annualized over the gap BETWEEN the two expiries, so it needs `days_between_expiries`; without it that field is null rather than annualized over the wrong period. `spread_ticks` needs `tick_value` to become a cost and is refused without it — at the old default of zero the bid-ask crossed on both legs was charged as nothing, 83% of the spread cost on a live roll)* Takes a `day_count` and names it: ACT/360 against ACT/365F moves a quarterly roll yield by about 1.4%
+| `analyze_roll` | What does moving this position to the next contract cost *(roll yield is annualized over the gap BETWEEN the two expiries, so it needs `days_between_expiries`; without it that field is null rather than annualized over the wrong period. `spread_ticks` needs `tick_value` to become a cost and is refused without it — at the old default of zero the bid-ask crossed on both legs was charged as nothing, 83% of the spread cost on a live roll)*. Takes a `day_count` — `ACT/365F`, `ACT/360`, `30/360` or `ACT/ACT` — and echoes it on the result: the same 91-day quarterly roll is 160.376 bp under the default ACT/365F and 158.179 under ACT/360, so compare a repo quoted ACT/360 against the ACT/360 number. The schema carries the rationale for each of the four, including that none of them adjusts for business days, because this library has no holiday calendar |
 | `size_futures_hedge` | How many contracts, and what does rounding leave behind |
 | `analyze_hedge_effectiveness` | Did that hedge actually work |
 | `analyze_index_basket` | Is this basket rich to its index, and which name explains it |
@@ -65,7 +65,7 @@ Two things genuinely did not exist anywhere and had to be written:
 | `analyze_dividend_points` | How many index points of dividend before expiry |
 | `analyze_index_rebalance` | What will this index change force people to trade |
 | `detect_basis_dislocation` | Has this basis *structurally shifted*, or just moved |
-| `monitor_spread_stream` | Watch any spread on a live feed, one stateful call at a time; a resumed call that changes the channel, threshold, warm-up or slack is refused (open a new monitor), and the default threshold is the streaming calibration, not the batch one that alarms on half of pure noise |
+| `monitor_spread_stream` | Watch any spread on a live feed, one stateful call at a time; a resumed call that changes the channel, label, warm-up, threshold or slack is refused by name (open a new monitor — the accumulators were learned under the old values), and the default threshold is the streaming calibration of 15.0, not the batch detector's 9.0, which on pure noise fires on nothing 45% of the time by 5,000 observations against 7% at 15.0 |
 | `scan_basis_dislocations` | Which of these pairs is wide *for itself*, ranked; the detector's reference fraction, threshold, slack and break count are inputs, echoed on the result |
 
 The first nine shipped alone, deliberately: the floor for a runtime is
@@ -125,9 +125,12 @@ An answer from this tool that does not state its horizon is not an answer.
 ## 4. Nothing here fetches
 
 Curves arrive as lists of contracts, baskets as lists of constituents,
-financing as a number. This library has no futures data provider, no
-index-constituent source and no dividend calendar, and a tool that
-pretended otherwise would compute a curve that does not exist.
+financing as a number. This library has no index-constituent source and no
+dividend calendar, and a tool that pretended otherwise would compute a
+basket that does not exist. Futures bars themselves are reachable —
+Databento serves CME Globex (`GLBX.MDP3`) through `fetch_ohlcv`, one
+contract or continuous symbol at a time — but a curve is an assembled
+object, and assembling it is the caller's.
 
 That is the same call the derivatives runtime made about option chains,
 and it has the same side benefit: every tool here works on a hypothetical
@@ -144,8 +147,9 @@ silently becomes `"SPX INDEX US Equity"`, and the timezone metadata reports
 THREE TOOLS WILL NOT BE BUILT, and the reason is the same for all three:
 `fetch_index_constituents`, `fetch_corporate_actions` and
 `fetch_contract_metadata` need data no shipped provider serves.
-`DataProvider` offers OHLCV, ticker info, ratios, an order book, trades and
-quotes; `corporate_actions` appears in `data/bundle.py` as a vocabulary
+`DataProvider` offers OHLCV, ticker info, ratios, an order book, order
+events, trades, quotes and point-in-time records; `corporate_actions`
+appears in `data/bundle.py` as a vocabulary
 label for the temporal contract, not as a source. This runtime's own rule
 covers it -- take the specialised dataset as structured arguments rather
 than pretending it exists -- which is why `analyze_index_basket` and
@@ -154,10 +158,11 @@ arguments instead of fetching them, and why every multiplier and tick
 value on this surface is an argument: no shipped source serves them, so
 there is nothing here to read one from.
 
-Nothing else on the original roadmap is now deferred. What remains is not a
-missing tool but a missing *source*: no provider shipped here serves L2 or
-intraday futures. Everything that consumes them exists and is tested
-against synthetic books, which was the sequencing
+Nothing else is deferred, and the source gap that
+used to sit here is closed: Databento serves L2 depth (`fetch_order_book`),
+the order-by-order feed below it (`fetch_order_events`) and intraday CME
+futures. Everything that consumes them was written and tested against
+synthetic books first, which was the sequencing
 `DataProvider.get_order_book` chose on purpose — see §7.
 
 ## 6. The infrastructure underneath
@@ -188,6 +193,20 @@ the gross-market-value ratio the equity engine reports. A futures book is
 at zero on that definition and many times its equity on this one, which is
 why a limit written against one and measured against the other is how a
 flat-looking book turns out not to be.
+
+**Read `max_drawdown`, not `max_drawdown_pct`.** The drawdown is a signed
+fraction at most zero (`-0.20` is a 20% drawdown), the spelling every other
+drawdown on this surface uses — including the stress test's field that is
+*named* `max_drawdown_pct` and is also a fraction. One name meant two things
+100× apart across one boundary. The percentage (`-20.0`) is kept under the
+old name for one release and is deprecated.
+
+**`n_margin_calls = 0` is not a margin report.** It says the line was never
+crossed, not by how much: `min_margin_cushion` is the narrowest the account
+ever got, as `(equity − maintenance required) / equity` minimised over bars,
+which separates comfortably margined from one tick away when both show zero
+calls. It is `None` when maintenance margin is zero, because an unmargined
+account has no line to be near.
 
 **A roll day's profit lives in the contract you just left.** One price
 series holds the NEW contract's close on a roll day, so the old contract's
@@ -240,13 +259,15 @@ provider implemented it, and said why: *"the analysis that consumes a book
 (microprice, order-flow imbalance, depth slope) can be written and tested
 against synthetic books now, so that when a source arrives the
 correctness-critical part already exists rather than being invented under
-deadline."* That analysis now exists.
+deadline."* Both halves of that bet paid: the analysis exists, and the
+source arrived — `DatabentoProvider` implements the contract, and
+`fetch_order_book` publishes a reference against it.
 
 ### A depth book says what a quote cannot
 
 `get_order_book_metrics` (in `microstructure`) reads that contract and
-nothing else, so any feed shaped to it works — including one this library
-has no provider for.
+nothing else, so any feed shaped to it works — a Databento pull, or a book
+from a venue this library has no provider for.
 
 The midpoint ignores size, so a book with 5,000 bid and 100 offered reads
 identically to its mirror, and the second is about to trade higher. The
@@ -262,8 +283,8 @@ weight behind the offer is exactly the one that ticks up and fills badly.
 
 ### One monitor, three channels, five jobs
 
-The roadmap asked for five monitors — live basis, ETF NAV, index arbitrage,
-roll spread, and a generic cross-instrument spread. They are not five
+Five monitors get asked for — live basis, ETF NAV, index arbitrage, roll
+spread, and a generic cross-instrument spread. They are not five
 computations. Four are `(a/b − 1)` in basis points and differ only in what
 the legs are *called*; the fifth is a difference in points. Five tools for
 three formulas would mint near-identical names for one rearrangement —

@@ -35,7 +35,7 @@ Agreement is now **confirmed against a real compiled `_sqt_core`**: all three te
 
 Both implementations now share that definition. They did not always: `backtest.cpp` moved to weighted-average cost basis in the earlier C++ pass while `engine.py`'s `_build_trade_log` emitted a completed trade for *every* position-changing event, so one result dict could report `num_trades=1` beside a two-row `trade_log`. On a 1.0 → 2.5 → 0 sequence that was native 1 trade averaging 17.4492% against a Python log of 2 trades averaging 8.5113%, from identical inputs.
 
-This was documented at the time as a *resize* problem. It was broader than that, and worth knowing if you read any trade log written by an older version: a partial **reduce** diverged identically. `2.0 → 1.0` is opposite-sign without being a full close, so the old code booked it as a completed trade — on `0 → 2.0 → 1.0 → 0`, containing no resize at all, native reported 1 trade at 12.8078% against an old log of 2 rows averaging 6.1583%. On a realistic 100-bar signal series the old log produced **67 rows against the kernel's 50**, with the average trade return off by **0.087pp**. Fixed in the second modeling audit's item 20; `TestNativeTradeStatsCorrectness` now *includes* resizes and partial reduces in its cross-check and asserts `num_trades == len(trade_log)`.
+This was documented at the time as a *resize* problem. It was broader than that, and worth knowing if you read any trade log written by an older version: a partial **reduce** diverged identically. `2.0 → 1.0` is opposite-sign without being a full close, so the old code booked it as a completed trade — on `0 → 2.0 → 1.0 → 0`, containing no resize at all, native reported 1 trade at 12.8078% against an old log of 2 rows averaging 6.1583%. On a realistic 100-bar signal series the old log produced **67 rows against the kernel's 50**, with the average trade return off by **0.087pp**. Both paths now agree, and `TestNativeTradeStatsCorrectness` *includes* resizes and partial reduces in its cross-check and asserts `num_trades == len(trade_log)`.
 
 ## "Unknown" is never reported as the benign value
 
@@ -86,7 +86,8 @@ drawdown are all wrong.
 
 `backtest.panel.run_signal_panel_backtest` now reindexes every ticker's signal
 onto that ticker's own full price calendar before running, controlled by
-`signal_calendar_policy`:
+`signal_calendar_policy` — spelled `signal_fill_policy` on the agent tool,
+same three values:
 
 - **`hold`** (default) — carry the last signal forward. This is what a
   rebalance schedule means: a monthly signal is a position held *through* the
@@ -258,12 +259,9 @@ same-close execution and scored them under next-open execution.
 Measured across 25 random series with a realistic overnight gap, the **winning
 parameter pair differed between the two fill modes on 7 of them**, so the
 out-of-sample number was not a test of the parameters actually chosen. Both
-walk-forward tools now pass `fill_price` into the in-sample grid.
-
-> `next_open` and `hl2_exploratory` force the Python path, because the C++
-> batch kernel only knows Close prices — so the more realistic execution mode
-> is currently the slower one. A fill-aware native kernel is the natural next
-> step and would remove that trade-off.
+walk-forward tools now pass `fill_price` into the in-sample grid, and all
+three modes take the batch kernel, so honouring the caller's mode costs
+nothing.
 
 ## Strategy parameters are validated
 
@@ -427,10 +425,10 @@ grid that ranked on a zero-rate Sharpe while the single run it is compared
 against used a real one would pick a different winner, and nothing in
 either result would say why.
 
-`backtest_grid` accepts the same `fill_price` argument and forces the
-Python execution path when it isn't `"close"` — the compiled C++ kernel
-only knows `Close` prices, so `next_open`/`hl2_exploratory` always run in
-Python regardless of whether `_sqt_core` is built.
+`backtest_grid` accepts the same `fill_price` argument, and all three modes
+take the C++ batch path — it passes the Open or HL2 reference array
+alongside the closes. See [Every fill mode runs
+natively](#every-fill-mode-runs-natively).
 
 **Validation:** `run_strategy` raises `ValidationError` if `fill_price` isn't
 one of `"close"`, `"next_open"`, `"hl2_exploratory"` — the same
@@ -646,14 +644,26 @@ results = backtest_grid(
     },
     initial_capital=10_000,
     commission_pct=0.001,
-    sort_by="sharpe_ratio",            # default: best Sharpe first;
-                                       # annualized_volatility sorts ascending
+    sort_by="sharpe_ratio",            # default: best first (ascending=False)
     n_workers=4,                       # only matters without the C++ extension
 )
 
 # 3 × 4 = 12 combinations, sorted best → worst Sharpe
 print(results[["fast_period", "slow_period", "sharpe_ratio", "total_return", "max_drawdown"]].head())
 ```
+
+**The direction follows the metric, and only the tools know that.**
+`backtest_grid` is a library function: it sorts descending unless you pass
+`ascending=True`, so `sort_by="annualized_volatility"` hands you the *worst*
+row first. The five agent tools that expose `sort_by` —
+`compare_strategies`, `run_walk_forward_backtest`,
+`run_regime_adaptive_walkforward_backtest`, `run_backtest_optimization` and
+`get_robustness_diagnostics` — apply the rule themselves over the same ten
+metrics: higher is better for a ratio, a return, a trade count and
+`max_drawdown` (a signed fraction at most zero, so −0.10 beats −0.30), and
+`annualized_volatility` is the one that sorts **ascending**. A metric a run
+could not compute sorts last either way rather than winning a minimum by
+being absent.
 
 All eight registered strategies are supported:
 
@@ -1119,9 +1129,11 @@ date): a constraint the caller asked for is not satisfied by absent data.
 Requires a `'Volume'` column. Built on `backtest/constraints.py`'s
 `adv_participation()` — see the "Liquidity & Capacity Diagnostics" section
 below for the full module, including the standalone `capacity_report()` (not
-wired into the simulation itself). The native kernel still refuses a trade
-over the cap; the engine catches that refusal and runs the Python loop, so a
-capped configuration is correct and merely slower until the kernel caps too.
+wired into the simulation itself). The native kernel takes the cap and runs
+the whole simulation while nothing breaches it; the first trade that does
+makes it refuse, and the engine catches that refusal and reruns the Python
+loop, which is the branch that can size a trade down. A capped run that
+actually caps is therefore correct and merely slower.
 
 **Scope, stated explicitly:** short-sale proceeds are credited to cash in
 full with no margin haircut modeling beyond the flat `margin_interest_rate`
@@ -1154,9 +1166,18 @@ bars, while the work that remains scales with rebalances.
 **The vectorized rebalance is narrow on purpose.** It runs only for the `pct`
 commission model with no impact model and no ADV constraint. `per_share`
 commission applies a per-*order* minimum, the impact model needs a per-ticker
-volatility lookup, and the ADV constraint must raise naming one ticker —
-those are per-element decisions, so they keep the explicit loop and are
-selected automatically. You do not choose a path; you choose a cost model.
+volatility lookup, and the ADV cap sizes trades down one ticker at a time and
+names them — those are per-element decisions, so they keep the explicit loop
+and are selected automatically. You do not choose a path; you choose a cost
+model.
+
+**The native kernel is wider than the vectorized branch.** It used to refuse
+per-share commission, the impact model and the ADV cap on the reasoning that
+each was a per-element decision — but its rebalance loop was already
+per-ticker, so what they needed was arguments rather than a different shape.
+The one configuration it covered bought 1.3×; every configuration it refused
+ran 6–21× slower with no acceleration at all. All three are now arguments to
+it.
 
 **Nothing about the economics changed.** Agreement with the previous
 implementation is within 1.7e-15 relative across every configuration,
@@ -1208,9 +1229,20 @@ target_weights = zscore_normalized(my_alpha_scores, gross_leverage=1.0)
 result = run_portfolio_simulation(price_data, target_weights)
 ```
 
-Beta-neutral, sector-neutral, risk-parity, and optimizer-generated weights
-are not implemented — each needs infrastructure this repo doesn't have yet
-(per-ticker beta/sector metadata, a QP solver).
+Beta-neutral and sector-neutral weights are not implemented here: each needs
+per-ticker beta or sector metadata no shipped provider serves. Risk-parity
+and optimizer-generated weights are not this module's job — the `portfolio`
+runtime solves both (`optimize_risk_parity`,
+`optimize_hierarchical_risk_parity`, `run_portfolio_optimization`; see
+[05_portfolio.md](05_portfolio.md)). Each returns ONE weight vector rather
+than a dated panel, so turning a sequence of them into `target_weights` is
+still the caller's step.
+
+For LLM/JSON tool-calling, these four constructions are
+`construct_weights_from_scores` in the `portfolio` runtime, which publishes an
+`sqt://weight_panel` that `run_portfolio_simulation` reads — the step where
+you look at the weights before pricing them. See
+[05_portfolio.md](05_portfolio.md#constructing-weights-as-a-step-you-can-stop-at).
 
 ### Cost Model Building Blocks (`backtest/costs.py`)
 
@@ -1372,6 +1404,12 @@ of them a substitute for `run_walk_forward_backtest`'s out-of-sample
 validation, which answers a different question ("would this have held up
 on unseen data" vs. "how sure am I this in-sample number is real").
 
+This section is the module reference for the three functions.
+[24_overfitting.md](24_overfitting.md) owns the subject — why the deflation
+is this large, what a PBO of 0.5 does and does not mean, and the eight other
+tools that answer the same question — and is the place to read before
+choosing between them.
+
 ```python
 from standard_quant_tools.backtest.robustness import (
     block_bootstrap_ci, parameter_sensitivity, deflated_sharpe_ratio,
@@ -1457,8 +1495,11 @@ trial in one call.
 | `profit_factor` | float | Gross profit / gross loss. `inf` whenever gross loss is zero (no losing trades) — including the degenerate case where gross profit is *also* zero, e.g. every trade returning exactly 0.00%. Both backends agree on this; the C++ kernel previously returned `0.0` for that 0/0 case while Python returned `inf`. |
 | `num_trades` | int | Number of completed round-trips |
 | `avg_trade_return_pct` | float | Average trade P&L in % |
+| `turnover` | float | Position changed, summed over bars, in signal units — a flat→long→flat round trip is 2.0 |
+| `realized_cost_pct` | float | `turnover × (commission_pct + slippage_pct)`: exactly what the returns were reduced by |
 | `equity_curve` | pd.Series | Day-by-day portfolio value |
-| `trade_log` | pd.DataFrame | Per-trade entry/exit details |
+| `trade_log` | pd.DataFrame | Per-trade entry/exit details (only with `include_trade_log=True`) |
+| `warnings` | list[str] | The look-ahead caveat for the chosen `fill_price`, and the split screen |
 
 
 ## Two tools it is easy to miss

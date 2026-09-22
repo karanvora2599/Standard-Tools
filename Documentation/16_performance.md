@@ -12,15 +12,15 @@ the package is fully usable without a compiler. And several entries are
 honest disappointments kept beside their predictions, because a performance
 document that only records wins is not a record of anything.
 
-For the methodology, the benchmark scripts, and a running log of edge-case
-bugs found while building and measuring this, see
-the CHANGELOG.
-For the modeling layer specifically, see
-the modelling native work,
-which states the arithmetic ceiling on that work before the method.
-The optional compiled C++ extension accelerates the highest-impact CPU-bound paths. The API is identical with or without it — pure Python fallback is automatic.
+For the methodology and a running log of edge-case bugs found while
+building and measuring this, see [CHANGELOG.md](../CHANGELOG.md); the
+harnesses every figure comes from are described in
+[tests/bench/README.md](../tests/bench/README.md). The modeling layer's
+kernels are the third honest finding below, which states the arithmetic
+ceiling on that work before its method.
 
-**Measured, not projected**, on a Windows 11 / MSVC 19.44 / Python 3.12 dev machine (16 logical cores) — each row toggles the same module's own `HAS_CPP` flag and times both paths back-to-back, so it's an apples-to-apples comparison, not separately-run numbers:
+Each row is the compiled path against the same module's own fallback, at
+the size named:
 
 | Operation | vs. numba (warm)¹ | vs. numba JIT cold-start² | Notes |
 |---|---|---|---|
@@ -65,22 +65,22 @@ The optional compiled C++ extension accelerates the highest-impact CPU-bound pat
 - **`run_strategy` originally showed only ~1.0× end-to-end**, not the then-documented 3–8×, even though the raw C++ kernel genuinely was faster in isolation (confirmed by `tests/cpp/bench_backtest.cpp`'s native-only numbers below). The gap was never the kernel — it was the Python wrapper: `pct_change`/`shift` computed unconditionally before the C++ dispatch check even though the C++ path never used them, and an unconditional Python trade-log rebuild that overwrote already-correct native stats every call. **Since fixed** (removing both, and only building the Python trade log when a caller actually asks for it via `include_trade_log=True`) — the real, current number is **~58×** (26.8ms → 0.46ms), reflected in the table above. `batch_run_strategy` never had this specific bug (its consumer already read native stats directly), but has since gained its own further ~6–11× from an allocation-free summary kernel plus OpenMP across the parameter grid.
 - **OpenMP's measured speedup for `simulate_forward_paths` is ~2.0–2.4×** on this 16-core machine (min-of-7-runs across separate process invocations, `n_simulations=200 000`) — not the near-linear-with-cores scaling the per-path independence would suggest in theory. MSVC's OpenMP support here is version 2.0 (an older spec) — some of that gap was expected going in. A later pass eliminating each path's small per-path RNG/buffer allocations moved this scaling ratio only within noise (~2.4×→~2.1×, both real measurements) — the allocation being eliminated turned out not to be the dominant cost at this problem size, a legitimate change worth keeping regardless (fewer allocations is never worse) but not the win that framing initially suggested.
 
-**A third honest finding, from the modeling kernels.** The plan for that work
-opened by stating a *ceiling* rather than a target: feature preprocessing was
-47–56% of a walk-forward run and everything else is pandas plumbing no kernel
+**A third honest finding, from the modeling kernels.** That work opened by
+stating a *ceiling* rather than a target: feature preprocessing was 47–56%
+of a walk-forward run and everything else is pandas plumbing no kernel
 reaches, so ~2× end-to-end was the arithmetic limit however fast the kernel
 got. Measured afterwards: **1.59–2.55×** end-to-end, while the kernels
-themselves are 3–53×. The prediction held, and after the first phase the
-attribution shifted exactly as it implied — preprocessing fell to 13% of a
-run and "everything else" rose to **70%**. That is why the work stopped at
-three kernels instead of chasing the remaining 70% with tools that cannot
-reach it. Two smaller things went wrong on the way and are recorded in
-the first native plan missed the pooled rank IC
-entirely (41–51% of `regression_metrics`, larger than the per-date IC it did
-name, and only visible on re-measuring between phases), and two kernels were
-initially *slower* than the Python they replaced at small sizes — fixed with
-a cheaper argument conversion and an explicit size gate, because a fast path
-that is slower is a bug rather than a trade-off.
+themselves are 3–53×. The prediction held, and once the first kernels
+landed the attribution shifted exactly as it implied — preprocessing fell to
+13% of a run and "everything else" rose to **70%**. That is why the work
+stopped at three kernels instead of chasing the remaining 70% with tools
+that cannot reach it. Two smaller things went wrong on the way: the first
+survey missed the pooled rank IC entirely (41–51% of `regression_metrics`,
+larger than the per-date IC it did name, and visible only on re-measuring
+after the first kernel landed), and two kernels were initially *slower* than
+the Python they replaced at small sizes — fixed with a cheaper argument
+conversion and an explicit size gate, because a fast path that is slower is
+a bug rather than a trade-off.
 
 Raw C++-only (no Python involved) numbers from `tests/cpp/bench_hurst.cpp` and `tests/cpp/bench_backtest.cpp`, run via `ctest`:
 
@@ -94,7 +94,7 @@ Raw C++-only (no Python involved) numbers from `tests/cpp/bench_hurst.cpp` and `
 
 The rolling Hurst gain is the most significant and the most robust to how you measure it: rather than re-entering Python for every bar, the entire sliding-window pass runs in one C++ function, with no numba equivalent to compare against either way.
 
-`rolling_factor_loadings` is the one entry in this table that got **slower on purpose**. It used incremental rank-1 XtX updates — O(k²) per bar instead of a full O(n·k²) `lstsq` — and that was 26×. It was also wrong: the pivot test compared every column against the single largest diagonal of XtX, which belongs to the intercept column and equals the window length, so factors around 1e-6 made every window read as singular and the kernel returned all-NaN where the NumPy fallback returned correct coefficients. It now runs a column-pivoted QR per window, which ranks each column by its own norm and gives a scale-invariant answer, at 2.3–10×. Recovering the speed via QR update/downdate is planned but not attempted §5.2, including why the analogous Cholesky attempt was reverted.
+`rolling_factor_loadings` is the one entry in this table that got **slower on purpose**. It used incremental rank-1 XtX updates — O(k²) per bar instead of a full O(n·k²) `lstsq` — and that was 26×. It was also wrong: the pivot test compared every column against the single largest diagonal of XtX, which belongs to the intercept column and equals the window length, so factors around 1e-6 made every window read as singular and the kernel returned all-NaN where the NumPy fallback returned correct coefficients. It now runs a column-pivoted QR per window, which ranks each column by its own norm and gives a scale-invariant answer, at 2.3–10×. Recovering the speed via a QR update/downdate is not attempted: the analogous Cholesky attempt was implemented, gated against the existing path on real data, found to break down numerically on near-singular inputs, and reverted rather than shipped.
 
 **Deeper native optimization pass** (on top of the module-level wins above): `run_strategy`/`batch_run_strategy` and `rolling_hurst` now parallelize across independent work (parameter combinations, rolling windows) via OpenMP; several kernels' Python/C++ boundary crossings were converted to direct-write into a pre-allocated NumPy buffer instead of allocate-then-copy; `rolling_beta` gained an optional runtime-dispatched AVX2+FMA reduction path (falls back safely to the portable scalar kernel on older CPUs); the build enables LTO/IPO automatically and supports an opt-in, local-only PGO workflow. One optimization (a rank-1 Cholesky *factor* update/downdate, intended to replace `rolling_factor_loadings`'s O(p³) per-step refactor with O(p²)) was implemented, gated against the existing path on real before/after data, found to break down numerically on near-singular inputs, and reverted rather than shipped — documented in `CHANGELOG.md` alongside the items that did ship.
 

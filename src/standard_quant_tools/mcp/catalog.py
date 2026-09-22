@@ -1,10 +1,10 @@
 """
 The tool catalog: which tools this server exposes, and what each one costs.
 
-WHY EXPOSURE IS A POLICY AND NOT A LIST. The two registries hold 57 tools
-whose input schemas and descriptions total about 103 KB. An MCP client
+WHY EXPOSURE IS A POLICY AND NOT A LIST. The ten runtimes hold 237 tools
+whose input schemas and descriptions total about 541 KB. An MCP client
 fetches the tool list once at connect and carries it for the whole session,
-so exposing everything spends roughly 26,000 tokens of every conversation
+so exposing everything spends roughly 138,000 tokens of every conversation
 before the user has asked anything.
 
 That is the constraint this module exists to manage. Tools are selected by
@@ -24,11 +24,12 @@ newest category. Run `sqt-mcp --print-budget` for the current table;
 
 THE RUNTIMES STAY APART. Each entry records which RUNTIME it came from, and
 `dispatch_for()` returns that runtime's dispatch function. The names happen
-not to collide (70 tools, 70 unique names), so one flat lookup would work --
+not to collide (237 tools, 237 unique names), so one flat lookup would work --
 and would be exactly the merge the library declined to make.
 
-There were two registries when this module was written and there are five
-runtimes now (research, backtest, portfolio, meta, modeling). Nothing here
+There were two registries when this module was written and there are ten
+runtimes now (research, backtest, modeling, meta, data, portfolio, delta_one,
+microstructure, derivatives, feature_lab). Nothing here
 changed in kind: a runtime is a dispatch table that refuses what it does not
 own, which is what the modeling registry always was. The server pairs each
 tool with its owning runtime's dispatcher for the same reason it always

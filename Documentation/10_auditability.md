@@ -79,6 +79,7 @@ produces a record like:
   "n_workers": null,
   "duration_ms": 6765.8,
   "output_hash": "8a2b0ca80ac84ba1",
+  "output_hash_normalized": null,
   "status": "ok",
   "error_type": null,
   "error_message": null,
@@ -93,11 +94,14 @@ produces a record like:
 
 `data_sources` has one entry per OHLCV pull, tagged `disk_cache`,
 `live_fetch`, or `session_cache`, with a content hash of the DataFrame
-actually used. `session_cache` fires on every in-memory-cache hit inside
-`YFinanceProvider.get_ohlcv()`, not just misses — a call that only ever
-touches the process's warm cache still produces a complete, auditable data
-lineage instead of an empty `data_sources` list. Failed calls still produce
-a record — `status: "error"` with `error_type` / `error_message` set, and
+actually used. `session_cache` fires on every in-memory-cache hit, not just
+misses — a call that only ever touches the process's warm cache still
+produces a complete, auditable data lineage instead of an empty
+`data_sources` list. Every shipped provider reports, not just the default:
+Databento writes `databento:<dataset>` as its `source`, so a replay can tell
+a restated feed apart from a changed tool when the same window can be
+answered by two datasets. Failed calls still produce a record —
+`status: "error"` with `error_type` / `error_message` set, and
 `output_hash: null`.
 
 > **Format change: `content_hash` values differ from those written before
@@ -186,8 +190,9 @@ outside a git checkout or when git isn't installed; resolving them never
 raises or blocks the tool call itself.
 
 `random_seed` is populated whenever the tool's input model has a
-`random_seed` field (currently `get_robustness_diagnostics`, whose block
-bootstrap needs one for reproducibility) — `null` for every other tool.
+`random_seed` field — `get_robustness_diagnostics`, whose block bootstrap
+needs one for reproducibility, and `run_monte_carlo_simulation` — and is
+`null` for every other tool.
 `strategy_source_hash` is populated whenever the input model names a
 built-in strategy via a `strategy` or `strategy_type` field (e.g.
 `run_sma_backtest`, `run_walk_forward_backtest`) — a content hash of that
@@ -219,6 +224,14 @@ surface for OpenAI/Anthropic tool calling (see
 [07_agent_tools.md](07_agent_tools.md)). Calling a tool function directly
 (`run_sma_backtest(BacktestInput(...))`, bypassing `dispatch`) does not
 produce a decision record.
+
+This page is the record, the chain and the `sqt` CLI. The seven read-only
+tools an agent reaches the same log through — `find_decisions`,
+`explain_decision`, `replay_decision`, `compare_decisions`,
+`verify_audit_integrity`, `describe_audit_log` and `export_audit_bundle` —
+are [27_meta.md](27_meta.md)'s subject. Nothing on that surface mutates the
+log: holds, sealing, garbage collection and checkpoint signing are CLI-only,
+below.
 
 ---
 
@@ -394,13 +407,17 @@ Note that `verify_replay` re-executes the tool function directly (not
 through `dispatch()`), so it does not itself write a new decision record.
 ### Replaying modeling records
 
-The modeling runtime is a second tool registry (`MODELING_TOOL_DISPATCH`, 17
-entries) deliberately kept separate from the 189-tool analysis surface — see
+There are three tool registries, not one: the 189-tool analysis surface,
+`MODELING_TOOL_DISPATCH` (37 entries) and `FEATURE_TOOL_DISPATCH` (11), the
+latter two deliberately kept separate — see
 [15_modeling.md](15_modeling.md). `verify_replay` resolves the record's
-`tool_name` against **both** registries, so a `run_model_experiment` or
-`build_model_dataset` record replays like any other. An earlier version
-looked only at the analysis registry, so every modeling record raised
-"unknown tool" and could not be replayed at all.
+`tool_name` against **all three** in turn, so a `run_model_experiment`,
+`build_model_dataset` or feature-lab record replays like any other, and an
+unknown name is refused naming all three. An earlier version looked only at
+the analysis registry, so every modeling record raised "unknown tool" and
+could not be replayed at all; the feature lab's records failed the same way
+after it, which meant the most expensive call in that runtime could be
+neither replayed nor pre-validated.
 
 Output comparison for those records falls back to a **semantic** compare.
 Each modeling run mints a fresh `dataset_id`/`model_id` and embeds it in
@@ -473,11 +490,11 @@ through the `standard_quant_tools` hierarchy.
 
 ## Data provenance without `dispatch()`
 
-`YFinanceProvider.get_ohlcv()` reports every session-cache hit, disk-cache
-hit, and live fetch into whatever decision record is currently open — this
-happens automatically inside `dispatch()`, and now covers the in-memory
-session cache as well (a call that never leaves the warm cache used to
-report nothing at all). Calling the provider directly outside of
+Every shipped provider's `get_ohlcv()` reports its session-cache hits,
+disk-cache hits and live fetches into whatever decision record is currently
+open — this happens automatically inside `dispatch()`, and covers the
+in-memory session cache as well (a call that never leaves the warm cache
+used to report nothing at all). Calling a provider directly outside of
 `dispatch()` is a no-op for provenance tracking (there's no open decision
 record to report into), but the OHLCV data itself is unaffected.
 
@@ -737,9 +754,15 @@ filesystem was never tampered with before export. When a day in the
 range was anchored with [checkpoint signing](#checkpoint-signing-ed25519),
 its `.checkpoint.json` and `.checkpoint.sig` sidecars travel in the
 bundle and are listed in its manifest; the public key that verifies them
-arrives out of band. A range that covers no day file is refused rather
-than exported as a bundle of nothing, and the result says how many days
-and records it holds. See
+arrives out of band, since a signature and the key that checks it shipped
+in one envelope prove nothing about who produced either.
+
+`export_bundle` returns an `ExportedBundle` — the path, plus `day_files`
+and `record_count` — because a range that matched nothing still produces a
+well-formed zip of a manifest, a README and a verifier, identical in shape
+to a real one. Those two counts are what tell them apart. The agent-facing
+`export_audit_bundle` refuses that case outright rather than handing an
+auditor a bundle with no audit in it. See
 [What this can and cannot certify](#auditability) at the top of this page.
 
 ---
@@ -866,9 +889,8 @@ cross-process advisory locking via a sidecar `.lock` file, unconditional
 behavior; it created a **seam** so a future backend backed by genuinely
 non-rewriteable storage (S3 Object Lock, Azure Immutable Blob) could be
 substituted without touching `AuditWriter`'s chain-hashing/locking
-orchestration logic. **That backend does not exist yet** — building one is
-explicitly out of scope for this round; this interface only makes it
-*possible* later without a rewrite.
+orchestration logic. **That backend does not exist** — this interface only
+makes one possible later without a rewrite.
 
 **Scope of what's backend-routed today:** `AuditWriter`'s own read, append,
 lock, and day-listing operations (used for writing records and for
@@ -876,10 +898,9 @@ lock, and day-listing operations (used for writing records and for
 passed in. `verify_audit_log_integrity()`, `verify_audit_trail_integrity()`,
 the retention functions (`hold_day`/`gc`/`seal_day`), and `export_bundle()`
 still read the local filesystem directly — extending those to the backend
-interface too is future work if a non-local backend is ever built, not
-something this round's scope covers.
+interface is work for whenever a non-local backend is actually built.
 
-A custom backend implements five methods (`acquire_lock`, `release_lock`,
+A custom backend implements six methods (`acquire_lock`, `release_lock`,
 `read_lines`, `append_line`, `exists`, `list_day_stems` — see
 `AuditStorageBackend`'s docstring in `audit/storage.py` for exact
 semantics). `tests/audit/test_audit_storage.py`'s fake in-memory backend is a

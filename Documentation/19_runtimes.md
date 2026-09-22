@@ -119,22 +119,23 @@ Every tool belongs to exactly one, and a test enforces it. Duplicating a
 convenient tool into a second runtime would dissolve the boundary at
 exactly the points where it matters most.
 
-### The sixth runtime, and how it was made
+### `feature_lab`, and how a runtime gets made
 
 `feature_lab` is the first runtime created by this process rather than by
 the original split, so it is worth recording what the process actually
 required.
 
-The eleven tools in it were **built inside `modeling` first** and moved once
+The tools in it were **built inside `modeling` first** and moved once
 the cluster was big enough to stand alone. That order is the rule, not an
 accident of scheduling: a runtime declared empty and filled later spends
 however long it takes to fill as a boundary that isolates nothing, and the
 tools inside it get designed against a scope nobody is using yet.
 
-The floor is checked on both sides. `feature_lab` lands at 9; `modeling`
-keeps 14. Neither number is a coincidence — the split was sequenced so that
-both would clear 8, and the existing floor test would have failed the moment
-either did not.
+The floor is checked on both sides. At the split `feature_lab` landed at
+nine and `modeling` kept fourteen; neither number was a coincidence — the
+split was sequenced so that both would clear 8, and the existing floor test
+would have failed the moment either did not. They hold eleven and
+thirty-seven now.
 
 **A split is a breaking change**, so the move is recorded. An agent scoped
 to `modeling` that calls `profile_feature` gets:
@@ -156,7 +157,7 @@ a changelog nobody reads, embedded in an error message everybody does.
 `sqt-mcp --runtime research` serves that runtime and nothing else — the
 same partition, over the protocol. This is not only a context-budget
 decision, though the budget forced it: at roughly 1,730 bytes per tool over
-the wire the session ceiling buys about 104 tools and the library has 207,
+the wire the session ceiling buys about 104 tools and the library has 237,
 so the whole surface stopped fitting in one session well before it stopped
 growing.
 
@@ -231,18 +232,24 @@ trade log.
 | `analytic_frame` | A date-indexed frame of analytic columns: a Kalman path, a basis history |
 | `price_panel` | Wide price frame or stacked OHLCV |
 | `predictions` | Long `(date, entity, prediction)` frame |
-| `feature_panel` | Computed features, entity by date |
 | `indicator_panel` | Indicator values across a universe |
 | `tick_tape` | Individual trades, `price` and `size`, timestamp-indexed |
 | `quote_panel` | Top-of-book quotes, `bid_price` and `ask_price` |
+| `order_book_panel` | L2 depth snapshots, level 0 the touch. EXTERNAL ONLY |
+| `order_event_panel` | Order-by-order adds, cancels, modifies and fills. EXTERNAL ONLY |
+| `event_panel` | Rows in event time carrying `event_time` and `available_time`. EXTERNAL ONLY |
 | `data_bundle` | A MANIFEST of other references, one row per frame |
 
-The last three arrived with the `data` runtime. `tick_tape` and
-`quote_panel` name their required COLUMNS deliberately: the microstructure
-tools refuse without `price`/`size` and `bid_price`/`ask_price`, and a
-producer that never stated the contract is what turns that refusal into a
-surprise. `data_bundle` holds references rather than frames, which is what
-keeps a bundle immutable — it cannot diverge from what it names.
+`tick_tape`, `quote_panel` and `data_bundle` arrived with the `data`
+runtime; the three external kinds with the depth and order-event fetchers.
+`tick_tape` and `quote_panel` name their required COLUMNS deliberately: the
+microstructure tools refuse without `price`/`size` and
+`bid_price`/`ask_price`, and a producer that never stated the contract is
+what turns that refusal into a surprise. An EXTERNAL kind is registered
+where it lies and read in batches rather than copied into the runs
+directory, because a depth or order-event feed is larger than anything
+worth copying. `data_bundle` holds references rather than frames, which is
+what keeps a bundle immutable — it cannot diverge from what it names.
 
 `list_reference_kinds` returns this table plus what converts to what — the
 map of which producer outputs can reach which consumer inputs.
@@ -280,6 +287,7 @@ one that refuses.
 | `predictions` | `score_panel` | Raw predictions, unscaled. |
 | `score_panel` | `weight_panel` | Through `backtest.sizing` — the same constructor `run_portfolio_simulation` would have used, not a reimplementation. |
 | `signal_panel` | `score_panel` | Relabels only. The information magnitude carried was discarded upstream and this does not recover it. |
+| `equity_curve` | `returns_panel` | Bar-to-bar returns of one curve, so any return-consuming tool can score a backtest's output. |
 
 ### Why references beat a shared dispatch table
 
@@ -324,7 +332,7 @@ Two `meta` tools exist because of the same concern the runtimes address.
 
 `describe_tool` reports one tool's arguments, result fields, owning runtime,
 and whether calling it fetches or writes. The alternative was loading all
-209 schemas — which is exactly what the MCP category budget exists to avoid,
+237 schemas — which is exactly what the MCP category budget exists to avoid,
 so a narrowly-scoped agent could not learn about a tool it had heard of
 without paying for every tool it had not. It answers for any runtime,
 because describing a tool is not calling it.

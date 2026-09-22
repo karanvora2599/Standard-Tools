@@ -14,10 +14,11 @@ run by hand (or by a dedicated CI job), not as part of the suite.
     python tests/bench/bench_modeling.py
     python tests/bench/bench_modeling.py ic build      # or one section at a time
 
-The baseline these produced on 2026-08-21 is recorded in
-the optimization sweep's section 2. That work is the reason these
-exist: every figure in it comes from one of these two scripts, so a claim in the
-plan can be re-checked rather than taken on trust.
+The baseline these produced on 2026-08-21 is what
+[Documentation/16_performance.md](../../Documentation/16_performance.md)
+reports: every kernel and universe-scale figure there comes from
+`bench_kernels.py` or `bench_universe.py`, so a published number can be
+re-measured rather than taken on trust.
 
 `bench_universe.py` measures per-unit costs on a small universe and multiplies
 out to 500/2,000 tickers. The multiplication is printed alongside the measured

@@ -939,8 +939,9 @@ def run_portfolio_simulation(
         # ── Vectorized fast path ─────────────────────────────────────────
         # Engages only for the default cost configuration. per_share
         # commission has a per-ORDER minimum, the impact model needs a
-        # per-ticker volatility lookup, and the ADV constraint must raise
-        # naming one ticker -- each is a genuinely per-element decision, so
+        # per-ticker volatility lookup, and the ADV constraint sizes one
+        # ticker's trade down and names it -- each is a genuinely
+        # per-element decision, so
         # they keep the explicit loop below rather than being bent into a
         # vector form that would have to restate their semantics.
         #

@@ -2,13 +2,13 @@
 
 The screener evaluates a list of tickers concurrently against fundamental and technical filters, returning a `pd.DataFrame` of passing stocks, optionally sorted by a chosen column.
 
-A `sort_by` naming a column the screen did not produce is refused by name, with the columns that exist; it used to be silently ignored.
+A `sort_by` naming a column the screen did not produce used to be a silent no-op — the library sorts only `if sort_by in df.columns`, so a typo or a metric this screen does not compute returned INPUT ORDER wearing the appearance of a ranking. The `run_screener` tool now refuses it by name, listing the columns the rows actually carry. The refusal lives there rather than in the library or the input model because which columns exist depends on which filters ran, so the screen has to finish before the name can be checked. Calling `screen_stocks` directly still gets the silent no-op.
 
 **Small universes (≤ 20 tickers):** all network calls run in parallel via `asyncio.gather` — screening 20 tickers takes roughly the same wall time as screening 5.
 
 **Large universes (> 20 tickers):** the ticker list is automatically split across multiple `ProcessPoolExecutor` workers. Each worker runs its own asyncio event loop, bypassing the GIL for the full pipeline (fetch + indicator compute). Combined with the Parquet disk cache, repeated runs on the same universe are near-instant.
 
-**Beta filter optimisation:** When `beta_max` or `beta_min` filters are present, SPY OHLCV data is fetched **once per `screen_stocks_async()` invocation** and reused for every ticker in that invocation that needs a beta computation. For a single-process run (≤ 20 tickers, or `n_workers=1`) that means one SPY fetch total; when the universe is split across a `ProcessPoolExecutor`, each worker independently prefetches SPY once for its own batch, i.e. one fetch per worker. On a 500-ticker universe where 200 tickers require beta, screened with the default 8-worker split, this means 8 SPY fetches instead of up to 200 — eliminating roughly 192 redundant HTTP requests compared to the naïve per-ticker fetch. If the SPY prefetch itself fails, it is silently skipped and each ticker needing beta falls back to fetching SPY individually.
+**Beta filter optimisation:** When `beta_max` or `beta_min` filters are present, SPY OHLCV data is fetched **once per `screen_stocks_async()` invocation** and reused for every ticker in that invocation that needs a beta computation. For a single-process run (≤ 20 tickers, or `n_workers=1`) that means one SPY fetch total; when the universe is split across a `ProcessPoolExecutor`, each worker independently prefetches SPY once for its own batch, i.e. one fetch per worker. On a 500-ticker universe where 200 tickers require beta, split across eight workers, this means 8 SPY fetches instead of up to 200 — eliminating roughly 192 redundant HTTP requests compared to the naïve per-ticker fetch. If the SPY prefetch itself fails, it is silently skipped and each ticker needing beta falls back to fetching SPY individually.
 
 **Error handling:** a per-ticker failure (network error, missing data, bad ratio, indicator that can't be computed, etc.) is never indistinguishable from a ticker that simply failed a filter condition. `_fetch_ticker_data` returns a `(status, ticker, payload)` tuple — `"passed"`, `"failed_filter"`, or `"error"` — and both `screen_stocks_async` and `screen_stocks` surface the non-passing cases via `DataFrame.attrs` on every DataFrame they return (including the empty-result case):
 
@@ -39,7 +39,7 @@ screen_stocks(tickers, {"beta_max": 1.2}, min_beta_obs=10)   # default 20
 
 Available as `min_beta_obs` on `screen_stocks`, `screen_stocks_async`, and `ScreenerInput` for the agent tool. `DEFAULT_MIN_BETA_OBS` is the exported default.
 
-**The floor is bounded below at 2, and that bound is not a matter of taste.** `calculate_beta` returns its all-zero sentinel below two overlapping points, and that sentinel is indistinguishable from a real beta of `0.0` — so any floor under 2 would reopen precisely the bug the floor exists to close. Values below 2, non-integers, and `True` (which subclasses `int`) all raise `ValidationError` up front rather than once per ticker.
+**The floor is bounded below at 2, and that bound is not a matter of taste.** An OLS slope through fewer than two points is not a weak estimate, it is no estimate: `calculate_beta` returns NaN for all three statistics there, so a floor under 2 would be a floor on nothing. Values below 2, non-integers, and `True` (which subclasses `int`) all raise `ValidationError` up front rather than once per ticker.
 
 The floor is applied identically whether the run is single-process or split across a `ProcessPoolExecutor`. That is worth stating because it is exactly where such a parameter goes wrong: the worker rebuilds its call from a plain tuple, and a value left out of that tuple does not fail — it silently reverts to the default inside the child, so the same request would screen differently at `n_workers=1` than at `n_workers=8`. The worker unpacks strictly, so omitting a parameter is an immediate error rather than a quiet divergence.
 
@@ -200,9 +200,11 @@ print(f"Passed: {len(result)} / {len(sp500)}")
 `source` — a provider name such as `"databento"` or `"polygon"` — and
 `None` (the default) uses the default provider. The screener was hard-wired
 to the default and could not reach Databento's consolidated tape at all,
-which mattered because a volume-based screen against a sample feed keeps
-different names: a $1bn ADV screen kept 1 of 12 names on the sample feed and
-all 12 on the real tape. `source` travels in the worker tuple, so a
+which matters because the bars are not the same bars: that provider's daily
+feed is the consolidated tape from 2024-07-01 and, before it, a sample
+carrying a few percent of consolidated volume on a UTC-day close. An RSI, an
+SMA or a beta computed on one is not the number computed on the other, and
+the screen keeps different names accordingly. `source` travels in the worker tuple, so a
 multi-process run screens the same source every batch. Fundamental filters
 still need a provider that serves financial ratios; on a bars-only provider
 those tickers land in `failed_tickers` by name rather than passing a filter
@@ -221,6 +223,8 @@ result = run_screener(ScreenerInput(
     filters={"pe_ratio_max": 35, "rsi_max": 50, "beta_max": 1.5},
     sort_by="rsi_14",
     ascending=True,
+    min_beta_obs=20,
+    source=None,
 ))
 
 print(f"Passed: {result.num_passed} / {5}")
@@ -233,9 +237,14 @@ for row in result.results:
 print(result.failed_filters)   # {ticker: filter key it failed}
 print(result.failed_tickers)   # {ticker: error message}
 print(result.failed_batches)   # [error message, ...] (n_workers > 1 only)
+print(result.warnings)         # see below
 ```
 
-The `ScreenerResult` Pydantic model is directly JSON-serializable for LLM consumption.
+The `ScreenerResult` Pydantic model is directly JSON-serializable for LLM consumption. `ScreenerInput` forbids unknown arguments, so a hallucinated field is rejected rather than dropped; `n_workers` is not among its fields, and the tool takes the library's automatic split.
+
+**Two differences from calling `screen_stocks` yourself.** An unknown `sort_by` is refused by name here (above). And when nothing passes, `sort_by` is reported in `warnings` rather than silently having sorted an empty list — with no rows there is nothing to sort and nothing to check the name against, so the ordering means nothing either way.
+
+Worked recipes and the LLM wiring are in [07_agent_tools.md](07_agent_tools.md).
 
 ---
 

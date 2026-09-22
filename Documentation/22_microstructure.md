@@ -1,13 +1,17 @@
 # Microstructure
 
-Seventeen tools for what the market will charge you to trade, in two halves
-that answer the same question at two data fidelities — plus three that
-publish the intermediate series the summary tools used to discard.
+Seventeen tools for what the market will charge you to trade, at four data
+fidelities.
 
 **Four MEASURE** from trades and quotes, and refuse to run without a tick
 feed. **Eight ESTIMATE** the same quantities from OHLCV bars — which is the
 normal case, because most environments have no tick data — and each one
-says what it is a proxy *for* and how it fails.
+says what it is a proxy *for* and how it fails; one of the eight,
+`estimate_kyle_lambda`, takes a tape instead when there is one, and says
+which estimate you were handed. **Three PUBLISH** the per-trade and
+per-quote series the summary tools used to compute and discard. **Two READ
+A BOOK** — a depth snapshot or an order-by-order feed — which neither a bar
+nor a top-of-book quote can stand in for.
 
 ## Why the refusal matters
 
@@ -339,7 +343,7 @@ the module declared computable, so the obvious call was the one that died.
 | `get_quoted_spread_series` | yes | Spread and imbalance per quote, not averaged |
 | `get_effective_spread_series` | yes | What each trade paid, optionally split, with the realized and impact means beside the effective one |
 | `get_order_book_metrics` | yes | Microprice, imbalance at the touch and cumulatively, and the depth slope -- what a top-of-book quote cannot say; inline snapshots may carry an ISO `timestamp`, which the per-second rates need, and `include_order_counts` returns the orders resting at each level when the feed carries them |
-| `get_order_event_metrics` | Queue position, order lifetime, cancels per add and event intensity — from an ORDER feed, which a depth snapshot cannot produce; the lifetime summaries carry their tail (p25 to p99) beside a mean and median that can differ fifty-fold |
+| `get_order_event_metrics` | yes | Queue position, order lifetime, cancels per add and event intensity — from an ORDER feed, which a depth snapshot cannot produce; the lifetime summaries carry their tail (p25 to p99) beside a mean and median that can differ fifty-fold |
 | `get_microstructure_metrics` | yes | Quoted and effective spread, realized/impact split, Lee-Ready signed flow |
 | `get_trade_profile` | yes | Volume by trade size and time of day |
 | `detect_liquidity_events` | yes | When a liquidity regime *changed*, by CUSUM |
@@ -370,7 +374,11 @@ cannot say
 `get_order_event_metrics` reads an ORDER feed instead: every add, cancel,
 modify and fill, each with the venue's own `order_id`. `DatabentoProvider`
 serves it through `get_order_events` (market-by-order), and it is a strictly
-deeper feed than `get_order_book`.
+deeper feed than `get_order_book`. Both feeds are reachable from a tool:
+`fetch_order_events` and `fetch_order_book` in the `data` runtime publish the
+references these two tools read as they are. Depth costs money — five minutes
+of one name at ten levels is about 42 MB — so price the request with
+`preflight_vendor_request` before paying for it.
 
 | Measure | Why a book cannot produce it |
 | --- | --- |
@@ -418,8 +426,9 @@ carries them, so a Databento extract's snapshot bit reaches the metrics.
 
 Market-by-order is one record per order event. An active name produces
 millions in a session where mbp-10 produces thousands, so the reference path
-is the normal one — pull it once, write it, and register it as an
-`sqt://order_event_panel` rather than re-fetching a metered feed.
+is the normal one — `fetch_order_events` pulls it once and publishes an
+`sqt://order_event_panel` the metrics read, rather than re-fetching a metered
+feed.
 
 
 ## Related

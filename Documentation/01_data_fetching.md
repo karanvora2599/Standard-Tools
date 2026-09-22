@@ -31,7 +31,7 @@ Supported intervals: `"1d"` (default), `"1wk"`, `"1mo"`, `"1h"`, `"15m"`, etc.
 every interval; an explicit intraday timestamp means exactly that instant.
 
 This is stated by the `DataProvider` ABC and is not optional for
-implementations. It had to be stated because the three shipped providers had
+implementations. It had to be stated because the shipped providers had
 already drifted apart on the answer:
 
 | Provider | Underlying call | Native semantics |
@@ -39,19 +39,21 @@ already drifted apart on the answer:
 | yfinance | `ticker.history(end=...)` | **exclusive** |
 | Polygon | `/v2/aggs/.../range/{from}/{to}` | inclusive |
 | Bloomberg | `request.set("endDate", ...)` | inclusive |
+| Databento | `timeseries.get_range(end=...)` | **half-open instants** |
 
 So the same call returned a different window depending only on who served
 it — and on the *default* provider it silently dropped the final bar. That
 is the mechanism behind `score_model(as_of=X)` excluding X's own data while
 still reporting X as the as-of date.
 
-Inclusive won because it matches two of the three, matches what a caller
-passing a date means, and is the only reading under which an as-of date can
-be reported honestly. `YFinanceProvider` requests an exclusive bound past
-the whole inclusive window (over-fetching at most one day, which is
-harmless — under-fetching silently changes the answer) and trims back.
+Inclusive won because it matches what a caller passing a date means, and is
+the only reading under which an as-of date can be reported honestly.
+`YFinanceProvider` requests an exclusive bound past the whole inclusive
+window (over-fetching at most one day, which is harmless — under-fetching
+silently changes the answer) and trims back; Databento's half-open range is
+pushed to the next midnight for the same reason.
 
-**All three trim through the shared `trim_to_inclusive_end`, including the
+**All four trim through the shared `trim_to_inclusive_end`, including the
 two that were already inclusive.** Deliberate: the contract then holds by
 *construction* rather than by trusting each vendor's documented boundary, so
 a vendor changing or mis-documenting its own semantics cannot quietly move
@@ -207,7 +209,7 @@ wrong number that every downstream screen silently inherits.
 
 ## Caching & Retry
 
-- **TTL cache**: identical calls within 1 hour return a `.copy()` of the cached DataFrame (no network round-trip); holds up to 100 entries, LRU-evicted beyond that. A window whose end is not yet historical (its last bar is still forming) is kept for **60 seconds** only — the hour-long TTL used to serve an unsettled bar as final for up to an hour, and a minute still turns three identical requests in one run into one metered fetch. Every provider goes through this cache, Databento included (it used to bypass both caches and the retry layer, so three identical live requests were three metered fetches)
+- **TTL cache**: identical calls within 1 hour return a `.copy()` of the cached DataFrame (no network round-trip); holds up to 100 entries, LRU-evicted beyond that. A window whose end is not yet historical (its last bar is still forming) is kept for **60 seconds** only — the hour-long TTL used to serve an unsettled bar as final for up to an hour, and a minute still turns three identical requests in one run into one metered fetch. yfinance, Polygon and Databento all go through this cache; Databento used to bypass both caches and the retry layer, so three identical live requests were three metered fetches. Bloomberg is the one provider with no cache at all (see its section below)
 - **Retry**: up to 3 attempts, waiting 1s then 2s between attempts (exponential backoff, factor 2) on transient failures
 - **Cache key**: `(provider_name, instance_token, symbol, start_date, end_date, interval)` — `get_ohlcv` checks the session cache itself rather than via a `@cached()` decorator wrapping the whole method, so an audit record is written on every call, including a session-cache hit, not just on a live fetch. The per-instance token (a UUID, not `id(self)` — CPython can reuse a freed object's `id()`) keeps a fresh provider instance from transparently reusing another instance's cached result. The cache dict itself is guarded by a module-level lock (`data/_cache.py`), so concurrent threads hitting the same or different instances/args at once are safe — the lock only wraps the get/set, not the network fetch, so calls to different keys still run concurrently
 - **Copy-on-return**: every `get_ohlcv` call — session-cache hit, disk-cache hit, or live fetch — returns a fresh copy, so a caller mutating the result in place can't corrupt the cached object shared with the next caller
@@ -546,19 +548,19 @@ the daily choice with `DATABENTO_OHLCV_DATASET` (or `DATABENTO_DATASET` /
 
 **A daily request no longer returns tomorrow.** The daily request ended one
 day past the inclusive end and nothing trimmed, so every as-of query on this
-provider read the next session's close (D1). `end_date` is inclusive here as
-on every other provider, and Databento now shares the session cache, the
+provider read the next session's close. `end_date` is inclusive here as
+on every other provider, and Databento shares the session cache, the
 disk cache, the retry layer and the index normaliser the others use — it
 used to bypass all of them, which is why the bars skipped normalisation, a
 cached frame did not round-trip, and three identical live requests were
-three metered fetches (D2). The frame carries `attrs["adjusted"] = False`
+three metered fetches. The frame carries `attrs["adjusted"] = False`
 (the venue publishes unadjusted, which the backtest split screen reads), and
 `get_temporal_contract("bars")` reports `revisions="unknown"` to agree with
 `point_in_time=False`.
 
 **A futures root is not an equity.** `ES`, `CL` and `GC` are equity tickers
 as well as roots, and the provider used to resolve them to the equity —
-`get_ohlcv("CL")` returned Colgate-Palmolive (D5). A bare ambiguous root is
+`get_ohlcv("CL")` returned Colgate-Palmolive. A bare ambiguous root is
 now refused with the spellings for each reading: `ES.c.0` (front
 continuous), `ESZ6` (a contract), `ES.FUT` (the parent) and OSI option
 strings route to the futures and options datasets (`GLBX.MDP3`,
@@ -570,13 +572,10 @@ normalisation and any ambiguity travel in it — and its `timezone` is now
 documented as a label for a normalised, naive index rather than a live
 zone.
 
-**Two things the live pass left open.** Databento marks some sessions
-`degraded`, and this provider does not read that flag, so a session the
-vendor marks is served unmarked; reading it needs the `statistics`
-schema and an entitlement check the fix could not run. And
-`compare_ratio_sources` compares fundamentals only: run against a
-provider that serves bars, it reports zero entities compared with no
-warnings, which means nothing was compared, not that nothing was found.
+**One thing still open.** Databento marks some sessions `degraded`, and
+this provider does not read that flag, so a session the vendor marks is
+served unmarked. Reading it needs the `statistics` schema and an
+entitlement check, and neither has been run against a live key.
 
 ---
 
@@ -689,9 +688,8 @@ The consumer is `FeatureScope.POINT_IN_TIME` in the modeling runtime — see
 
 Every `DataProvider` also implements `get_metadata(symbol, interval)`,
 reporting what guarantees the fetched data actually carries (adjusted?
-survivorship-free? point-in-time?), plus standalone checks for missing
-bars, stale prices, and large single-bar jumps on data you've already
-fetched. See [11_data_quality.md](11_data_quality.md) for the full
-reference — this is the credibility-of-the-data-itself counterpart to the
-backtesting engine's own trustworthiness work in
-[04_backtesting.md](04_backtesting.md).
+survivorship-free? point-in-time?) and, in `notes`, what those booleans
+cannot say. Four standalone checks run over data you've already fetched.
+[11_data_quality.md](11_data_quality.md) owns both — it is the
+credibility-of-the-data-itself counterpart to the backtesting engine's own
+trustworthiness work in [04_backtesting.md](04_backtesting.md).

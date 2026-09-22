@@ -169,7 +169,7 @@ print(result["converged"])
 
 `objective="target_return"`/`"target_volatility"` need the matching `target_return`/`target_volatility` argument (annualized). A `target_volatility` below the global minimum-variance portfolio's own volatility is infeasible and raises `ValidationError` immediately.
 
-`result["warnings"]` carries the optimizer's own caveats — currently the small-sample covariance warning, and empty when the window is long enough.
+`result["warnings"]` carries the optimizer's own caveats: the small-sample covariance warning, the ill-conditioning warning below, and anything the independent weight check found. `result["condition_number"]` is reported as a number at every level, not only above a threshold, and `result["solver"]` carries the run — `method`, `iterations`, `status`, `message`, `objective` and the multipliers, with `method="closed_form"` and no iterations on the unconstrained path.
 
 #### What the optimizer refuses to answer
 
@@ -213,8 +213,16 @@ same held for Black-Litterman, where one non-finite entry in any of
 `cov_matrix`, `market_weights`, `P`, `Q`, `omega`, `tau` or `risk_aversion`
 made the entire posterior NaN.
 
-Covariances must also be **symmetric** — an asymmetric matrix was accepted and
-silently used as though it were a covariance — and `build_bl_views` rejects
+Covariances must also be **symmetric**, under one rule for the whole library:
+the numeric contract's `require_finite_covariance`, which compares the matrix
+against its own transpose at `rtol=1e-9`, `atol=1e-12` and names the largest
+`|A − A'|` it found. `portfolio/construction.py` used to carry its own copy of
+that check at `rtol=1e-8` — two doors onto one rule, agreeing by inspection
+rather than by construction, and not quite agreeing: the local copy took an
+asymmetry ten times larger and let an infinity through to the eigenvalue code.
+It calls the contract now. Before either existed, an asymmetric matrix was
+accepted and silently used as though it were a covariance. `build_bl_views`
+rejects
 duplicate tickers, since the ticker→column map keeps the *last* index and a
 view on a repeated name would silently attach to the wrong slot.
 
@@ -232,7 +240,23 @@ print(result["risk_contributions"])   # fractional, sums to 1
 print(result["converged"])
 ```
 
-Solved via a damped multiplicative fixed-point iteration — a **documented heuristic**, not a globally-convergence-proven algorithm like the mean-variance closed form. It converges reliably in practice for well-conditioned covariance matrices (verified in `tests/portfolio/test_portfolio_optimize.py`: a diagonal covariance converges exactly to the closed-form inverse-volatility weights), but `converged` reflects whether the iteration actually reached its tolerance within `max_iterations`, not an assumption — check it.
+**There is one risk-parity solver, and this is not where it lives.** This
+function validates and delegates to `portfolio/construction.py`'s cyclical
+coordinate descent, which is what `optimize_risk_parity` has always called.
+There used to be two, both reachable from the portfolio runtime, targeting the
+same fixed point (`w_i (Σw)_i == b_i (w'Σw)`) and agreeing to about 5e-11 —
+when both converged. Over 300 sample covariances built the way callers build
+them, the damped multiplicative fixed point that used to sit here failed on
+8 of 300, worst risk-share error **0.94** (an asset carrying ninety-four
+percentage points more risk than its target); the coordinate descent failed on
+none, at error 0.0000. The failures clustered on negative correlations and
+near-singular sample matrices, not on volatility dispersion.
+
+The validation stays here and is the stricter of the two: a `risk_budget` that
+does not sum to 1 is refused rather than renormalized. `converged` still
+reports whether the iteration reached its tolerance — check it, because the
+iterate at that point is not a risk parity portfolio and using it as one is
+worse than not having it.
 
 ### Black-Litterman
 

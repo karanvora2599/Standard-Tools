@@ -61,10 +61,11 @@ true Sharpe is known by construction, and the nominal 95% interval covers it
 is the only test that would catch an IID bootstrap masquerading as a blocked
 one.
 
-Twelve statistics are available (`sharpe`, `sortino`, `max_drawdown`,
-`var_95`, `cvar_95`, `win_rate`, and the moments). The set is closed rather
-than accepting arbitrary code, because this surface is reachable from an
-agent and an eval-shaped hole is not worth the generality.
+Eleven statistics are available: `sharpe`, `sortino`, `max_drawdown`,
+`var_95`, `cvar_95`, `win_rate`, and the moments (`mean`, `median`, `std`,
+`skew`, `kurtosis`). The set is closed rather than accepting arbitrary code,
+because this surface is reachable from an agent and an eval-shaped hole is
+not worth the generality.
 
 ### `test_normality` and `estimate_tail_index`
 
@@ -232,7 +233,7 @@ that is robust.
 | `get_entropy_measures` | Is there structure a linear test would miss |
 | `run_seasonality_analysis` | Is this a calendar effect, corrected for having looked at all of them |
 | `get_lead_lag_matrix` | Which series move first — and does anything survive the search size |
-| `test_structural_break` | Did something break at this known date |
+| `test_structural_break` | Did something break at this known point — `break_index` is a position in the series, and the result names the date it lands on |
 | `detect_change_points` | When did the process change, at an unknown date |
 | `run_stationarity_tests` | ADF, KPSS and variance ratio, with the four-way verdict; `kpss_lags` (Andrews' bandwidth by default, and reported) and `vr_periods` are inputs |
 | `detect_regimes` | Label each observation with a volatility regime; with `run_id` and `name` the per-bar labels are published as an `analytic_series` |

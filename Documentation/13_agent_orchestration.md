@@ -37,7 +37,7 @@ categorization only ever needs to be correct in one place.
 ## Three registries, ten runtimes
 
 Everything above concerns the 189-tool analysis and backtest surface. There
-are two more: `standard_quant_tools.modeling.agent`, 20 tools, and the
+are two more: `standard_quant_tools.modeling.agent`, 37 tools, and the
 11-tool `feature_lab` runtime — neither of which the library merges into the
 first, see [15_modeling.md](15_modeling.md) for why. 189 + 37 + 11 is the
 237-tool whole surface. The example implementations keep the same
@@ -55,7 +55,7 @@ Each `_agent_utils.py` names a registry once and gets that registry's tool
 schemas **and** its dispatch function together:
 
 ```python
-run_agent(..., registry="modeling")     # 20 tools, modeling_dispatch
+run_agent(..., registry="modeling")     # 37 tools, modeling_dispatch
 run_agent(..., registry="analysis")     # 189 tools, dispatch  (the default)
 ```
 
@@ -85,12 +85,13 @@ reason. Each already declared a fixed, non-overlapping tool subset — that
 is the architecture — but dispatching through the union made the subset
 advisory.
 
-The analysis registry is itself divided into six **runtimes** —
-`research`, `backtest`, `portfolio`, `microstructure`, `derivatives`,
-`meta` — which are the same idea one level down: a dispatch table that
-refuses what it does not own. The modeling registry was the first runtime;
-the other seven generalize it. Results still cross freely between all
-eight, by value rather than by shared dispatch.
+The analysis registry is itself divided into eight **runtimes** —
+`research`, `backtest`, `portfolio`, `data`, `microstructure`,
+`delta_one`, `derivatives`, `meta` — which are the same idea one level
+down: a dispatch table that refuses what it does not own. The modeling
+registry was the first runtime; the other nine generalize it. Results
+still cross freely between all ten, by value rather than by shared
+dispatch.
 [19_runtimes.md](19_runtimes.md) is the whole story.
 
 That pairing is the whole point. The two registries have identical shapes —
@@ -121,13 +122,13 @@ one of 13 category keys. Each category belongs to exactly one runtime.
 | `backtest_execution` | 12 | `backtest` | Run a built-in strategy / portfolio / pair trade / strategy matrix **once**, fixed parameters |
 | `backtest_validation` | 21 | `backtest` | Optimize/validate/diagnose — grid search, walk-forward, regime-adaptive, robustness, Monte Carlo, cost sweep, drawdown table, and the overfitting layer (deflated Sharpe, PBO, purged combinatorial CV, reality check) |
 | `custom_signal` | 2 | `backtest` | Backtest a signal computed outside this library |
-| `portfolio_risk` | 18 | `portfolio` | Risk decomposition, portfolio construction/optimization, sizing, capacity, stress testing, liquidity, trade cost |
+| `portfolio_risk` | 19 | `portfolio` | Risk decomposition, portfolio construction/optimization, sizing, capacity, stress testing, liquidity, trade cost |
 | `microstructure` | 17 | `microstructure` | Spreads MEASURED from tick data, the eight bar-based estimators for when there is no tick feed, and a check of the OHLCV proxies against them |
 | `delta_one` | 18 | `delta_one` | Carry, basis, futures curves and rolls, hedge sizing, baskets and replication, ETF fair value, swaps and TRFs, and the comparison that normalizes six ways of holding one exposure |
 | `derivatives` | 12 | `derivatives` | Option pricing and second-order greeks, multi-leg payoffs, smile/term-structure fitting, put-call parity, delta-hedge simulation |
-| `data` | 17 | `data` | Fetch OHLCV, return panels, tick tapes and quotes, build continuous futures, register external datasets too large to copy, and publish them all as `sqt://` references every other runtime reads |
-| `discovery` | 13 | `meta` | What the library accepts and what the provider can serve; describe or validate a tool call before making it; the handoff reference map |
-| `provenance` | 6 | `meta` | Read and verify the decision log. Read-only by design |
+| `data` | 21 | `data` | Fetch OHLCV, return panels, tick tapes and quotes, build continuous futures, register external datasets too large to copy, and publish them all as `sqt://` references every other runtime reads |
+| `discovery` | 17 | `meta` | What the library accepts and what the provider can serve; describe or validate a tool call before making it; the handoff reference map |
+| `provenance` | 8 | `meta` | Read and verify the decision log. Read-only by design |
 
 `backtest_execution`/`backtest_validation` is a deliberate split of what
 used to be one 16-tool `backtest` bucket: "run SMA on AAPL" and "find the
@@ -236,11 +237,12 @@ classification call is caught and logged, and the function falls through to
   covers valid JSON, prose-wrapped JSON, the bare-token fallback,
   malformed/empty/all-unknown-key inputs (confirms fail-open fires exactly
   when expected), and deduplication.
-- `TestRoutingAccuracyEval` — an `@pytest.mark.integration`-gated eval: 10
-  labeled representative requests, run through a real `route_request()`
-  call, asserting ≥70% top-1 accuracy. Skipped by default (matches this
-  repo's `-m "not integration"` CI convention) since it costs real API
-  calls; run manually with `pytest -m integration tests/agent/test_router.py`
+- `TestRoutingAccuracyEval` — an `@pytest.mark.integration`-gated eval: 26
+  labeled representative requests, at least one per category and pinned by
+  an offline guard that fails when a category stops being covered, run
+  through a real `route_request()` call, asserting ≥70% top-1 accuracy.
+  Skipped by default (matches this repo's `-m "not integration"` CI
+  convention) since it costs real API calls; run manually with `pytest -m integration tests/agent/test_router.py`
   (requires `ANTHROPIC_API_KEY`). This is the first actual measurement of
   routing *correctness* in this codebase — the multi-agent coverage test
   below only ever checked tool-set coverage/disjointness, never whether a
@@ -251,7 +253,7 @@ classification call is caught and logged, and the function falls through to
 ## The multi-agent orchestrator (`Multi_Agent_Implementation/`)
 
 A heavier but more thorough answer to the same problem: instead of
-narrowing one model's tool list, delegate to one of 14 independent worker
+narrowing one model's tool list, delegate to one of 16 independent worker
 agents, each with its own session, system prompt, and fixed tool subset —
 the confusable tool is never loaded into the worker's context at all,
 not just deprioritized.
@@ -294,20 +296,19 @@ worker registry — there is no second list that can drift out of sync.
 
 **The two modeling workers are split differently, because there is nothing
 to derive them from.** The modeling runtime has no category taxonomy — it
-is sixteen tools in one ordered pipeline — so the split is by pipeline
-*stage*, written out explicitly and then checked by the coverage test the
-same way `_tools_for()` is:
+is thirty-seven tools in one ordered pipeline — so the split is by pipeline
+*stage*, written out explicitly in `worker_agents.py` and then checked by
+the coverage test the same way `_tools_for()` is:
 
 ```python
 _MODEL_RESEARCH_TOOLS = ["list_modeling_capabilities", "list_features",
-                         "build_model_dataset", "validate_pit_records",
-                         "join_point_in_time", "analyze_features",
-                         "list_datasets", "check_leakage",
-                         "validate_model_spec"]
+                         "build_model_dataset", "register_external_panel",
+                         "estimate_feature_warmup", "plan_model_experiment",
+                         "preview_sample_weights", "preview_preprocessing",
+                         "describe_estimator", ...]        # 17, up to the dataset
 _MODEL_BUILDER_TOOLS  = ["run_model_experiment", "inspect_model",
-                         "score_model", "evaluate_model_portfolio",
-                         "list_models", "compare_models",
-                         "score_predictions"]
+                         "score_model", "backtest_model_signal",
+                         "promote_model", "attest_model_package", ...]  # 20, after it
 ```
 
 The cut is at the dataset. Everything up to "is this dataset worth fitting"
@@ -323,7 +324,7 @@ first and copy the `dataset_id` verbatim into the builder's request. The
 orchestrator's system prompt states that ordering explicitly rather than
 leaving it to the general "chain specialists when needed" rule.
 
-The orchestrator's own "tools" are 14 hand-authored
+The orchestrator's own "tools" are 16
 `delegate_to_<worker>_agent(request)` tools, **auto-generated from
 `WORKER_AGENTS.keys()`** — adding, splitting, or removing a worker in
 `worker_agents.py` changes the orchestrator's delegate-tool set and system

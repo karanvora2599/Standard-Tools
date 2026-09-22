@@ -392,10 +392,12 @@ pytest tests/cpp_bindings/test_cpp_array1d_validation.py -v     # 1-D array vali
 pytest tests/cpp_bindings/test_cpp_gil_release.py -v            # GIL is actually released around every pure-C++ kernel call
 ```
 
-Or run all eleven at once:
+The directory holds more than these — the panel-indicator parity tests, the
+NaN/Inf data contract, the extension-freshness guard and the
+numerical-semantics suite among them. Run the lot:
 
 ```
-pytest tests/cpp_bindings/test_cpp_hurst.py tests/cpp_bindings/test_cpp_indicators.py tests/cpp_bindings/test_cpp_new_indicators.py tests/cpp_bindings/test_cpp_cointegration.py tests/cpp_bindings/test_cpp_backtest.py tests/cpp_bindings/test_cpp_regression.py tests/cpp_bindings/test_cpp_monte_carlo.py tests/cpp_bindings/test_cpp_garch.py tests/cpp_bindings/test_cpp_signals.py tests/cpp_bindings/test_cpp_array1d_validation.py tests/cpp_bindings/test_cpp_gil_release.py -v
+pytest tests/cpp_bindings -v
 ```
 
 Once the extension is built all skipped tests activate — run the suite to
@@ -405,8 +407,8 @@ grows as tests are added.
 A separate gated test class outside these files, `TestNativeTradeStatsCorrectness`
 in `tests/backtest/test_backtest.py`, verifies `run_strategy`'s and `batch_run_strategy`'s
 native trade-log accounting against hand-computed values once `_sqt_core`
-is built for the trade-stat
-parity background.
+is built — see [Trade-stat parity](#7-what-is-currently-in-_sqt_core) below
+for why that accounting needed pinning.
 
 ### C++ unit tests
 
@@ -416,8 +418,10 @@ cmake --build build --config Release
 ctest --test-dir build --config Release -V
 ```
 
-This runs eight test suites: `cpp_hurst`, `cpp_indicators`, `cpp_cointegration`,
-`cpp_backtest`, `cpp_monte_carlo`, `cpp_garch`, `cpp_signals`, `cpp_rolling_regression`.
+This runs ten test suites: `cpp_hurst`, `cpp_indicators`, `cpp_cointegration`,
+`cpp_backtest`, `cpp_monte_carlo`, `cpp_garch`, `cpp_signals`,
+`cpp_rolling_regression`, `cpp_panel_stats`, and `cpp_fuzz_cointegration`
+(a randomized-input harness, and the bulk of the assertion count).
 
 Or run each binary directly:
 
@@ -431,6 +435,8 @@ build\tests\cpp\Release\test_monte_carlo.exe
 build\tests\cpp\Release\test_garch.exe
 build\tests\cpp\Release\test_signals.exe
 build\tests\cpp\Release\test_rolling_regression.exe
+build\tests\cpp\Release\test_panel_stats.exe
+build\tests\cpp\Release\fuzz_cointegration.exe
 
 # Windows (Ninja) / Linux / macOS
 ./build/tests/cpp/test_hurst
@@ -441,6 +447,8 @@ build\tests\cpp\Release\test_rolling_regression.exe
 ./build/tests/cpp/test_garch
 ./build/tests/cpp/test_signals
 ./build/tests/cpp/test_rolling_regression
+./build/tests/cpp/test_panel_stats
+./build/tests/cpp/fuzz_cointegration
 ```
 
 Each binary prints its own pass count on exit, e.g.:
@@ -454,6 +462,8 @@ N / N tests passed.   ← test_monte_carlo
 N / N tests passed.   ← test_garch
 N / N tests passed.   ← test_signals
 N / N tests passed.   ← test_rolling_regression
+N / N tests passed.   ← test_panel_stats
+N / N tests passed.   ← fuzz_cointegration
 ```
 
 `N` grows as tests are added to `tests/cpp/test_*.cpp` — do not hardcode a
@@ -524,6 +534,7 @@ Standard Tools/
 │           │   ├── rolling_beta_avx2.hpp    ← AVX2+FMA rolling_beta reduction kernel API (internal, used only by rolling_regression.cpp)
 │           │   ├── monte_carlo.hpp          ← simulate_forward_paths (moving-block bootstrap) API
 │           │   ├── garch.hpp                ← GARCH(1,1) variance recursion + fused NLL/gradient API
+│           │   ├── panel_stats.hpp          ← Modeling-layer panel statistics API (preprocessing, per-date stats, label weights)
 │           │   └── signal_state_machines.hpp ← Donchian / VWAP-reversion signal hysteresis API
 │           ├── src/
 │           │   ├── isa_dispatch.cpp         ← CPUID detection + test-only override hook
@@ -540,17 +551,21 @@ Standard Tools/
 │           └── bindings/
 │               └── bindings.cpp             ← pybind11 module definition (all features, direct-write NumPy buffers)
 └── tests/
-    ├── test_cpp_hurst.py                    ← Python integration tests (Hurst)
-    ├── test_cpp_indicators.py               ← Python integration tests (RSI/ADX/PSAR/ATR)
-    ├── test_cpp_new_indicators.py           ← Python integration tests (Bollinger/Stochastic, fused technical_indicators)
-    ├── test_cpp_cointegration.py            ← Python integration tests (cointegration+OLS+Kalman)
-    ├── test_cpp_backtest.py                 ← Python integration tests (backtest + batch kernel, array-based batch return)
-    ├── test_cpp_regression.py               ← Python integration tests (rolling beta incl. AVX2 dispatch, rolling factor loadings)
-    ├── test_cpp_monte_carlo.py              ← Python integration tests (Monte Carlo, statistical parity only)
-    ├── test_cpp_garch.py                    ← Python integration tests (GARCH(1,1) recursion, fused NLL/gradient)
-    ├── test_cpp_signals.py                  ← Python integration tests (Donchian/VWAP-reversion signals)
-    ├── test_cpp_array1d_validation.py       ← Python integration tests (1-D array validation across every binding)
-    ├── test_cpp_gil_release.py              ← Python integration tests (GIL actually released around pure-C++ calls)
+    ├── cpp_bindings/                        ← Python-side parity tests, one file per kernel family
+    │   ├── test_cpp_hurst.py                ← Hurst + rolling Hurst
+    │   ├── test_cpp_indicators.py           ← RSI/ADX/PSAR/ATR
+    │   ├── test_cpp_new_indicators.py       ← Bollinger/Stochastic, fused technical_indicators
+    │   ├── test_cpp_panel_indicators.py     ← whole-universe indicator panel
+    │   ├── test_cpp_cointegration.py        ← cointegration + OLS + Kalman
+    │   ├── test_cpp_backtest.py             ← backtest + batch kernel, array-based batch return
+    │   ├── test_cpp_regression.py           ← rolling beta (incl. AVX2 dispatch), rolling factor loadings
+    │   ├── test_cpp_monte_carlo.py          ← Monte Carlo, statistical parity only
+    │   ├── test_cpp_garch.py                ← GARCH(1,1) recursion, fused NLL/gradient
+    │   ├── test_cpp_signals.py              ← Donchian/VWAP-reversion signals
+    │   ├── test_cpp_array1d_validation.py   ← 1-D array validation across every binding
+    │   ├── test_cpp_gil_release.py          ← GIL actually released around pure-C++ calls
+    │   ├── test_cpp_nan_data_contract.py    ← the NaN/Inf contract the fuzz harness does not generate
+    │   └── test_extension_freshness.py      ← a stale ABI-tagged build fails here rather than as broken numerics
     └── cpp/
         ├── CMakeLists.txt                   ← C++ test build rules
         ├── test_hurst.cpp                   ← 26 C++ unit tests (no framework needed)
@@ -562,6 +577,7 @@ Standard Tools/
         ├── test_signals.cpp                 ← 12 C++ unit tests
         ├── test_rolling_regression.cpp      ← 12 C++ unit tests (incl. AVX2-vs-scalar tolerance gate, forced-scalar-path test)
         ├── test_panel_stats.cpp             ← 43 C++ assertions (quantile interpolation rule, ddof=1, NaN skipped by moments but preserved by transforms, infinities not missing, in-place aliasing)
+        ├── fuzz_cointegration.cpp           ← randomized-input harness: the largest assertion count of any binary here, and finite inputs only — the NaN/Inf contract is covered on the Python side
         ├── bench_hurst.cpp                  ← Hurst timing benchmark (run manually)
         └── bench_backtest.cpp               ← Backtest kernel timing benchmark (run manually)
 ```
@@ -652,8 +668,7 @@ since they share the same trade-log code in `backtest.cpp`.
 (Along the way, 4 of `tests/cpp/test_backtest.cpp`'s own hand-written
 expectations turned out to be wrong, based on a mistaken `prices[i]`-vs-
 `prices[i-1]` reference-price assumption unrelated to the fix being validated
-— those were corrected too; see the CHANGELOG's
-Executive Summary for the full bug list.) `backtest/engine.py`'s Python-side
+— those were corrected too; see the CHANGELOG for the full bug list.) `backtest/engine.py`'s Python-side
 override for `run_strategy` is still kept in place — it's a working safety
 net, not a sign of remaining doubt — but a `batch_run_strategy` grid search
 sorted by `win_rate`/`profit_factor` can now be treated as trustworthy against

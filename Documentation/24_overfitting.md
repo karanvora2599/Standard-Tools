@@ -41,6 +41,13 @@ iteration is not a PBO of 0.2. Every result in this module says so.
 
 ## Multiple-testing corrections
 
+Everything in this section corrects a set of **backtests**. For a bare set of
+p-values from anywhere — twelve signals, two IC series, a screen's output —
+`compare_signals` in the `modeling` runtime applies Holm, Bonferroni or
+Benjamini-Hochberg and carries the same warning this whole document does: it
+controls the error of *those* tests, not the error of having selected the
+candidates on the same sample.
+
 ### `get_deflated_sharpe_ratio`
 
 After Bailey and Lopez de Prado (2014). Two steps: compute the Sharpe a
@@ -83,7 +90,8 @@ Validated by construction:
 | 15 configurations correlated at 0.997 | 0.243 (and flagged) |
 
 That last row is why the result reports the **median pairwise correlation**
-between configurations — and why the PBO beside it should not be read at
+between configurations (`median_configuration_correlation`) — and why the
+PBO beside it should not be read at
 all. A hundred settings correlated at 0.99 are one strategy with a parameter
 nudged; every split ranks them identically, so the number the estimator
 returns is arbitrary rather than low. The correlation is the finding; the

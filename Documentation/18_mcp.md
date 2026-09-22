@@ -145,13 +145,13 @@ that most often causes the disconnect.
 
 ## Choosing what to serve
 
-The 237 tools cost about **358 KB of schema, ~92,000 tokens**, held for the
+The 237 tools cost about **541 KB of schema, ~138,000 tokens**, held for the
 whole session. That is the constraint the whole design manages, so this is
 the first decision, not a tuning knob.
 
 That wall has already been hit and passed. Over the wire a tool averages
 1,730 bytes and the session ceiling that used to be 189,000 would buy about 104 tools.
-There are 207. **The whole surface has not fitted in one session since the
+There are 237. **The whole surface has not fitted in one session since the
 83rd tool**, and no amount of schema-shrinking brings it back — which is why
 scoping stopped being an optimization and became the way the server is
 meant to be run. Serving `--runtime all` is a diagnostic, not a deployment.
@@ -168,41 +168,41 @@ sqt-mcp --print-budget
 
 ```
 runtime              tools    bytes   ~tokens
-backtest                35   82,037    20,509
-modeling                20   60,622    15,155
-research                42   47,772    11,943
-delta_one               18   38,529     9,632
-portfolio               18   32,094     8,023
-microstructure          17   23,512     5,878
-feature_lab              9   22,121     5,530
-data                    17   18,956     4,739
-derivatives             12   17,878     4,469
-meta                    19   14,489     3,622
-all                    207  358,010    89,502
+modeling                37  175,150    43,787
+backtest                35   87,642    21,910
+research                42   62,123    15,530
+delta_one               18   43,918    10,979
+feature_lab             11   38,773     9,693
+portfolio               19   35,887     8,971
+data                    21   34,141     8,535
+microstructure          17   30,242     7,560
+meta                    25   24,508     6,127
+derivatives             12   21,153     5,288
+all                    237  553,537   138,384
 
-  a client is served ONE runtime: backtest is the most expensive at 82,037 bytes (23% of the total).
+  a client is served ONE runtime: modeling is the most expensive at 175,150 bytes (32% of the total).
 
 category             tools    bytes   ~tokens
-modeling                20   60,622    15,155
-delta_one               18   38,529     9,632
-backtest_validation     21   38,114     9,528
-backtest_execution      12   37,041     9,260
-portfolio_risk          18   32,094     8,023
-quant_research          26   28,382     7,095
-microstructure          17   23,512     5,878
-feature_lab              9   22,121     5,530
-data                    17   18,956     4,739
-derivatives             12   17,878     4,469
-analysis                14   17,355     4,338
-discovery               13   10,655     2,663
-custom_signal            2    6,882     1,720
-provenance               6    3,834       958
-screener                 2    2,035       508
+modeling                37  175,150    43,787
+delta_one               18   43,918    10,979
+backtest_validation     21   40,687    10,171
+backtest_execution      12   39,409     9,852
+feature_lab             11   38,773     9,693
+portfolio_risk          19   35,887     8,971
+data                    21   34,141     8,535
+quant_research          26   31,854     7,963
+microstructure          17   30,242     7,560
+analysis                14   27,617     6,904
+derivatives             12   21,153     5,288
+discovery               17   17,200     4,300
+custom_signal            2    7,546     1,886
+provenance               8    7,308     1,827
+screener                 2    2,652       663
 ```
 
 **The total is a number nobody pays.** The row that matters is the runtime
-a client is actually served, and the most expensive of those is 80 KB at
-full detail — 23% of the whole surface.
+a client is actually served, and the most expensive of those is 171 KB at
+full detail — 32% of the whole surface.
 
 There is deliberately **no fixed per-runtime limit**. There was one, at
 72 KB, and it was the wrong shape for what it was guarding: what a client
@@ -215,24 +215,24 @@ preference wearing a limit's clothes.
 What replaces it is measurement. `--print-budget` reports what each runtime
 costs, `estimate_tool_cost` reports it to an agent, and `--tool-detail auto`
 keeps the served size well under the full-detail figure without anyone
-having to pick a threshold: `backtest` serves at 42 KB against 89 KB full.
+having to pick a threshold: `backtest` serves at 42 KB against 93 KB full.
 
 **Tool count and cost are barely related**, which is the useful thing to
-know when picking. `analysis` carries 14 tools for 16.9 KB; `custom_signal`
-carries 2 for 6.7 KB — a seventh of the tools for two-fifths of the bytes.
-`modeling` and `backtest_validation` are two categories out of fifteen and
-more than a quarter of the surface between them. Choosing by how many tools
-a category holds gets the budget almost exactly backwards.
+know when picking. `analysis` carries 14 tools for 27.0 KB; `custom_signal`
+carries 2 for 7.4 KB — a seventh of the tools for over a quarter of the
+bytes. `modeling` and `backtest_validation` are two categories out of
+fifteen and nearly two-fifths of the surface between them. Choosing by how
+many tools a category holds gets the budget almost exactly backwards.
 
-The default — `screener,analysis,quant_research,discovery`, 55 tools,
-~15k tokens — covers screening, risk and technical snapshots, the
+The default — `screener,analysis,quant_research,discovery`, 59 tools,
+~20k tokens of schema — covers screening, risk and technical snapshots, the
 factor/cointegration/Hurst research path, the statistical diagnostics
 (stationarity, structural breaks, bootstrap intervals, seasonality), and
 the offline discovery tools.
 
 `discovery` is in the default despite being one of the newest categories,
-because it is the only one that makes the OTHERS cheaper to use: 13 tools
-for 10.3 KB, and the questions it answers — which parameters a strategy takes,
+because it is the only one that makes the OTHERS cheaper to use: 17 tools
+for 16.8 KB, and the questions it answers — which parameters a strategy takes,
 which stress windows exist, whether this provider has ticks, whether these
 arguments are even valid — were previously answered by a failed call and an
 error round trip, which costs more than the category does.
@@ -240,13 +240,13 @@ error round trip, which costs more than the category does.
 Serve a runtime, or narrow inside one:
 
 ```bash
-sqt-mcp --runtime research                    # 42 tools, 43 KB served
+sqt-mcp --runtime research                    # 42 tools, 45 KB served
 sqt-mcp --runtime backtest                    # 35 tools, 42 KB served
-sqt-mcp --runtime derivatives                 # 12 tools, 21 KB served
-sqt-mcp --runtime microstructure              # 17 tools, 28 KB served
+sqt-mcp --runtime derivatives                 # 12 tools, 24 KB served
+sqt-mcp --runtime microstructure              # 17 tools, 34 KB served
 sqt-mcp --runtime research+meta               # research plus discovery/provenance
 sqt-mcp --runtime research --categories screener
-sqt-mcp --runtime all                         # ~28k tokens served, and it says so
+sqt-mcp --runtime all                         # ~32k tokens served, and it says so
 ```
 
 `+` joins runtimes because that is how `combine()` names a joined runtime in
@@ -264,31 +264,33 @@ as a broken install rather than as two flags disagreeing.
 one is sent at connect.
 
 ```bash
-sqt-mcp --runtime backtest --tool-detail full     # 71 KB, every schema
-sqt-mcp --runtime backtest                       # 34 KB, 12 tools thinned (the default)
-sqt-mcp --runtime backtest --tool-detail thin    # 14 KB, all thinned
+sqt-mcp --runtime backtest --tool-detail full     # 93 KB, every schema
+sqt-mcp --runtime backtest                       # 42 KB, 15 tools thinned (the default)
+sqt-mcp --runtime backtest --tool-detail thin    # 19 KB, all thinned
 ```
 
 A **thinned** tool is still listed and still callable. What it loses is its
 argument schema: the listing carries the name, one line of purpose, and an
-instruction to call `describe_tool` for the rest. Measured, that is 483
-bytes against 1,615 — **70% smaller**.
+instruction to call `describe_tool` for the rest. Measured across the whole
+surface, that is 538 bytes a tool against 2,643 — **80% smaller**.
 
 `auto` is the mode worth using. It thins the **most expensive** tools and
 stops as soon as the runtime fits `--detail-budget` (32 KB by default):
 
 | runtime | full | `auto` | thinned by `auto` | thin |
 |---|---:|---:|---:|---:|
-| `backtest` | 71 KB | 34 KB | 12 | 14 KB |
-| `modeling` | 46 KB | 25 KB | 2 | 6 KB |
-| `research` | 44 KB | 33 KB | 8 | 18 KB |
-| `portfolio` | 29 KB | 29 KB | 0 | 9 KB |
-| `derivatives` | 17 KB | 17 KB | 0 | 7 KB |
-| `microstructure` | 15 KB | 15 KB | 0 | 8 KB |
-| `meta` | 14 KB | 14 KB | 0 | 8 KB |
-| `feature_lab` | 11 KB | 11 KB | 0 | 5 KB |
+| `modeling` | 184 KB | 43 KB | 19 | 21 KB |
+| `backtest` | 93 KB | 42 KB | 15 | 19 KB |
+| `research` | 71 KB | 45 KB | 11 | 21 KB |
+| `delta_one` | 49 KB | 38 KB | 3 | 10 KB |
+| `feature_lab` | 42 KB | 22 KB | 1 | 7 KB |
+| `portfolio` | 41 KB | 37 KB | 1 | 11 KB |
+| `data` | 39 KB | 36 KB | 1 | 12 KB |
+| `microstructure` | 34 KB | 34 KB | 0 | 10 KB |
+| `meta` | 30 KB | 30 KB | 0 | 14 KB |
+| `derivatives` | 24 KB | 24 KB | 0 | 7 KB |
 
-**`auto` is the default now, not an option.** At full detail `backtest`
+**`auto` is the default now, not an option.** At full detail `modeling`
 is the most expensive runtime by a wide margin, and paying that on every
 connection to reach a handful of its tools is waste rather than a limit
 being breached. `auto` thins only what exceeds `--detail-budget`, so the
@@ -296,9 +298,9 @@ runtimes already under it are returned byte-for-byte unchanged and only the
 expensive ones differ. `--tool-detail full` still exists and
 still does exactly what it did; it simply stopped being implicit.
 
-Five runtimes already fit and pay nothing. That ordering is deliberate: a
+Three runtimes already fit and pay nothing. That ordering is deliberate: a
 runtime's cost is concentrated in a few large schemas — `modeling`'s top
-three are 65% of it — so thinning three tools buys what thinning fifteen
+three are a third of it — so thinning three tools buys what thinning fifteen
 cheap ones would not, and **every tool left described is one an agent calls
 without a round trip.** Minimising bytes and minimising round trips turn
 out to be the same instruction.
@@ -318,9 +320,6 @@ thinned** and never thins it. Under `--runtime backtest --tool-detail thin`
 the instruction would otherwise be unfollowable and every thinned tool
 uncallable. It is the one place scope widens automatically, and it is
 reported at startup.
-
-`--tool-detail auto` is the DEFAULT; pass `full` explicitly for every
-invocation.
 
 Naming a category the runtime does not own is refused at startup, by name:
 
@@ -383,15 +382,17 @@ invented a name to go and widen a scope that could never contain it.
 | `research` | `screener`, `analysis`, `quant_research` |
 | `backtest` | `backtest_execution`, `backtest_validation`, `custom_signal` |
 | `portfolio` | `portfolio_risk` |
+| `data` | `data` |
 | `microstructure` | `microstructure` |
+| `delta_one` | `delta_one` |
 | `derivatives` | `derivatives` |
 | `meta` | `discovery`, `provenance` |
 | `modeling` | `modeling` |
 | `feature_lab` | `feature_lab` |
 
-Selecting `--categories microstructure` is therefore not the same as
-`--runtime portfolio`: it advertises three tools rather than ten, and those
-three still execute inside `portfolio`.
+Selecting `--categories provenance` is therefore not the same as
+`--runtime meta`: it advertises eight tools rather than twenty-five, and
+those eight still execute inside `meta`.
 
 Naming a category outside the chosen runtime is refused at startup rather
 than quietly intersected, because serving the intersection would hand back a
@@ -399,9 +400,12 @@ surface neither flag describes.
 
 ### Two categories worth knowing about
 
-`microstructure` needs a data provider with a **tick feed**. Every tool in
-it refuses by name on a bar-only provider rather than approximating from
-OHLCV — call `describe_data_capabilities` (in `discovery`) first.
+`microstructure` splits in two. The tools that MEASURE from a tape need a
+provider with a **tick feed** (Polygon or Databento) and refuse by name on
+a bar-only one, naming the providers that serve ticks rather than
+approximating from OHLCV; the bar-based estimators beside them work from
+OHLCV and say what each is a proxy for. Call `describe_data_capabilities`
+(in `discovery`) first.
 
 `provenance` reads and verifies the decision log. It is read-only by
 design: retention operations that could destroy evidence (`gc`, `seal`,
@@ -438,8 +442,8 @@ own decisions is not audited by it.
 Every one of the 237 tools has a typed Pydantic return, so the server can
 declare an output schema for all of them — and does return
 `structuredContent` on every call regardless. Declaring the schemas as well
-roughly doubles the surface. The plan assumed that was free; measured, it
-is not, so it became a flag rather than a default.
+roughly doubles the surface. That was assumed to be free before it was
+measured; it is not, so it became a flag rather than a default.
 
 ### Why long-running tools are hidden
 
@@ -483,8 +487,8 @@ loop free to send heartbeats while the work proceeds.
 
 **What this is not.** It is not cancellation. The library's tools are
 synchronous CPU-bound Python, and a thread cannot be killed — stopping one
-mid-flight needs the process pool that Phase 3 still has open. A client
-that gives up stops *listening*; the work continues to completion.
+mid-flight would need a process pool, which is not built. A client that
+gives up stops *listening*; the work continues to completion.
 
 ---
 
@@ -583,7 +587,7 @@ The other two hints are derived from the code rather than maintained by
 hand: `openWorldHint` is true when a tool's input schema names a symbol,
 ticker or universe anywhere (including nested specs — `build_model_dataset`
 hides its universe two levels down), and `idempotentHint` is false for the
-six tools that persist a new artifact per call.
+eight tools that persist a new artifact per call.
 
 Read-only is a statement about what the tools do, not about who may call
 them. Over stdio the only caller is the process that launched the server;
@@ -598,16 +602,16 @@ rate limit whether or not anything is mutated. See
 
 **Ten runtimes, one server.** Thirteen of the fifteen categories come from
 the 189-tool analysis surface, spread across eight runtimes; the other two
-are the separate 25-tool `modeling` and 11-tool `feature_lab` runtimes. They
+are the separate 37-tool `modeling` and 11-tool `feature_lab` runtimes. They
 stay apart inside — `dispatch_for(entry)` returns that tool's own RUNTIME's
 dispatcher, so schemas and executor are never chosen separately, and a tool
 served from `research` is executed by a table holding only research tools —
 but a user configures one server, not ten.
 
-**Schemas are dereferenced.** Seven tools carry `$ref`/`$defs` upstream, and
-they are the seven most complex tools in the library. The server inlines
+**Schemas are dereferenced.** Twenty-seven tools carry `$ref`/`$defs`
+upstream — every one of them a tool with a nested spec. The server inlines
 them and a test asserts nothing reaching a client still contains a `$ref`.
-Inlining turned out to *shrink* the payload by 5.4%, not grow it.
+Inlining turned out to *shrink* the payload by 3.1%, not grow it.
 
 **The server holds no logic.** It converts protocol shapes, routes to a
 dispatcher, and converts back. `Implementation/` holds four copies of an
@@ -619,8 +623,8 @@ is the fifth surface onto the same registries and gets the same rule.
 ## Testing
 
 ```bash
-pytest tests/mcp -m "not integration"   # 48 schema and wiring tests, no subprocess
-pytest tests/mcp -m integration         # 10 real stdio sessions
+pytest tests/mcp -m "not integration"   # 186 schema and wiring tests, no subprocess
+pytest tests/mcp -m integration         # 11 real stdio sessions
 ```
 
 The integration file spawns the server as a subprocess and drives it with a

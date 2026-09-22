@@ -1,24 +1,24 @@
 # Modeling Runtime (`standard_quant_tools.modeling`)
 
 A second, independent runtime alongside the 189-tool
-`standard_quant_tools.agent` analysis/backtest surface — not tool #133.
-This document explains why that split exists, what's built in this first
-phase, and what's deliberately deferred.
+`standard_quant_tools.agent` analysis/backtest surface — not tool #190.
+This document explains why that split exists, what is built, and what is
+deliberately deferred.
 
 ---
 
-## Why a separate runtime, not a 133rd tool
+## Why a separate runtime, not a 190th tool
 
 `agent/tools.py`'s `TOOL_CATEGORY` router and `Multi_Agent_Implementation/`'s
 worker split (see
 [Documentation/13_agent_orchestration.md](13_agent_orchestration.md))
-exist specifically because handing an LLM 174 similarly-shaped tools on
+exist specifically because handing an LLM 189 similarly-shaped tools on
 every call causes selection ambiguity. Fitting/validating/registering a
 statistical model doesn't fit that surface's shape at all — it isn't a
 point-in-time snapshot (`analyze_stock_risk`) or a single backtest run
 (`run_sma_backtest`); it's a small, ordered pipeline (build data → fit →
 validate → register → score) that needs its own vocabulary. Adding it as
-tool #133 would make the ambiguity problem worse, not better.
+tool #190 would make the ambiguity problem worse, not better.
 
 So `standard_quant_tools.modeling` is a **second registry**:
 `modeling.agent.get_modeling_tools()` / `modeling.agent.modeling_dispatch()`,
@@ -57,11 +57,11 @@ because the order is the point.
 | `check_leakage` | a feature set → whether it is temporally safe to fit on, from each feature's declared temporal support, answered **before** a dataset is built with it; with a `dataset_id`, the empirical lead-lag screen also runs on the built panel, and `scope` says which of the two `safe` rests on |
 | `build_model_dataset` | `DatasetSpec` → fetches OHLCV, computes features + target, persists a Parquet panel, returns a `dataset_id` |
 | `register_external_panel` | a Parquet/CSV feature matrix computed ELSEWHERE → a `dataset_id`, without copying it. Declares one label or SEVERAL, each with its own horizon, so one panel serves a whole horizon curve |
-| `build_model_ensemble` | several `model_id`s → one combined `sqt://predictions` reference, from their OUT-OF-SAMPLE series only. Reports the pairwise correlation that says whether it was worth building, and `correlation_basis` saying whether that correlation was taken on ranks or on levels |
+| `build_model_ensemble` | several `model_id`s → one combined `sqt://predictions` reference, from their OUT-OF-SAMPLE series only. Reports the pairwise correlation that says whether it was worth building, and `correlation_basis` saying whether that correlation was taken on ranks or on levels. The reference carries no realized outcome, so `score_predictions` refuses it directly — run it through `attach_model_outcomes` first, which the description and a run-time warning both say |
 | `analyze_model_errors` | a `model_id` → where its errors are, by entity, period, prediction decile and any feature's decile, plus whether its SCALE is right. The question an R2 cannot answer |
 | `list_datasets` | → every built panel, newest first, with row/entity/feature counts and date span |
 | `analyze_features` | `dataset_id` → per-feature coverage, turnover, IC/ICIR, decile spread and monotonicity, redundancy clusters, and a lead-lag causality screen. The overview, as one nested report |
-| `explain_dataset_row_loss` | `dataset_id` → which column cost which rows, with `n_sole_missing` beside `n_missing`. The second is the actionable one: a 252-day feature behind a 500-day one has `n_missing` in the hundreds of thousands and `n_sole_missing` of zero, so removing it gives back nothing |
+| `explain_dataset_row_loss` | `dataset_id` → which column cost which rows, with `n_sole_missing` beside `n_missing`. The second is the actionable one: a 252-day feature behind a 500-day one has `n_missing` in the hundreds of thousands and `n_sole_missing` of zero, so removing it gives back nothing. `per_entity_rows_dropped` answers the other half — a warning fires when one name carries most of the loss, which is a universe problem rather than a feature one |
 | `validate_pit_records` | point-in-time records → whether they are joinable, checked before anything is joined |
 | `join_point_in_time` | `dataset_id` + records → each panel row gets the most recent record **available by then**, never the one describing that date |
 | `validate_model_spec` | `ModelSpec` → that the estimator exists for the task, that its parameters are accepted, how many fits the spec implies once a search grid multiplies through every fold, and whether that is under the spec's `budget.max_fits`; with a `dataset_id`, a universe whose keys resolve to one provider symbol is refused here, before any fetch, and a calendar the build adopted from the universe's venue is named in `warnings` |
@@ -78,7 +78,7 @@ because the order is the point.
 | `score_model` | `model_id` + `as_of` + `universe` → predictions, persisted as a Parquet artifact and published as a predictions reference (`predictions_ref`) that `attach_model_outcomes` and `convert_reference` read, with `interval_stats` when the model carries a conformal band and a warning when that band is wider than the cross-section's spread |
 | `attach_model_outcomes` | `model_id`, or a predictions reference + `dataset_id` → the predictions joined to the realized target and published as a reference `score_predictions` reads. Refuses a multi-horizon panel rather than guessing its label, and returns the `horizon` to pass on. This is what makes an ensemble's reference scoreable |
 | `backtest_model_signal` | `model_id` → the model's out-of-sample predictions as a `signal_panel` reference for `run_signal_panel_backtest`, through the VERIFIED branch of the bridge: the task comes from the manifest (there is no `task` argument to get wrong), the predictions file is checked against the hash the manifest recorded, and a cpcv model is refused by name with the walk-forward remedy |
-| `score_predictions` | a predictions reference → accuracy metrics, cross-sectional IC and ICIR, a predict-the-mean baseline, and an effective sample size adjusted for overlapping forward returns |
+| `score_predictions` | a predictions reference → accuracy metrics, cross-sectional IC and ICIR, a predict-the-mean baseline, `prediction_turnover` (the bridge between an IC and a net-of-cost P&L), and an effective sample size adjusted for overlapping forward returns. Pass `train_mean`: without it the baseline is the TEST set's own mean, whose R2 is zero by construction — an oracle no forecaster could have met |
 | `evaluate_model_portfolio` | `model_id` + `PredictionTransformSpec` + `PortfolioSimSpec` → OOS predictions turned into target weights and simulated as one shared-cash account, returning Sharpe/drawdown/turnover/exposure plus a persisted weights artifact |
 | `evaluate_predictions_portfolio` | a predictions reference (an ensemble, an external alpha, a scored run) + `task` + the same `PredictionTransformSpec` and `PortfolioSimSpec` → the same simulation as `evaluate_model_portfolio`, inheriting interval, provider, calendar and window from a `dataset_id` or taking them explicitly. Provenance names the reference and its producer, not a model id, and says so |
 | `score_prediction_intervals` | a predictions reference carrying quantile or `lower`/`upper` columns → whether the intervals cover: pinball loss per quantile, the crossing rate, and coverage against the nominal level, pooled or `by` date or entity, because a band that covered 97% in calm and 62% in a selloff is one pooled number away from looking fine. These metrics used to run inside the engine's fold loop and be averaged into one number |
@@ -88,7 +88,7 @@ because the order is the point.
 | `list_remote_models` | a store URL (or `SQT_MODEL_MIRROR_URL`) → the model ids the mirror holds; an unknown scheme is refused naming the ones that work |
 | `pull_model_package` | `model_id` + a store URL → the package registered into this runs root with the promotion log it travelled with, verified file by file, optionally requiring a signature or pinning a key; a second pull refuses without `overwrite`, and an unsigned package is accepted with a warning that says so |
 | `promote_model` | `model_id` + `to_stage` + `reason` (+ `actor`, `evidence`) → a lifecycle decision appended to `promotions.jsonl` beside the manifest, one stage at a time: `candidate` → `validated` → `staging` → `production`, or `archived` from anywhere. The manifest is never touched. The decision is GATED on integrity: a package whose files do not verify against their digests is refused, naming what mismatched, because a stage is a statement that somebody read the evidence and the evidence must be the one that was registered; `require_verified_package=False` records the decision anyway, `require_signature` and `public_key_path` demand a pinned signature, and the manifest's digest is written into the promotion's evidence |
-| `monitor_model` | `model_id` + a `score_model` `predictions_uri` (+ `outcomes_ref`) → PSI and KS per feature against the training reference kept at registration, prediction drift against the out-of-sample sample, and — with outcomes — the realized cross-sectional IC beside the validation's, every status reported with the threshold it was read against |
+| `monitor_model` | `model_id` + a `score_model` `predictions_uri` (+ `outcomes_ref`) → PSI and KS per feature against the training reference kept at registration, prediction drift against the out-of-sample sample, and — with outcomes — the realized cross-sectional IC beside the validation's, every status reported with the threshold it was read against, and the `training_profile` those numbers were read against returned beside them |
 
 **From a registered model to a backtest, verified.** The bridge from a model's out-of-sample predictions to a signal panel has two branches. Given a `model_id` it reads the task from the manifest, refuses a combinatorial-purged model by name, and verifies the predictions file against the hash the manifest recorded; given a file and a task it takes both on trust, and its own docstring says so. Until `backtest_model_signal` existed only the second branch was reachable from a tool, through `convert_reference` on a published copy of the predictions -- a route that accepted a wrong `task` (a regression model converted as a classifier gave an all-zero panel and a NaN Sharpe with no error anywhere) and a sign-flipped copy alike. `backtest_model_signal` is the verified route and has no `task` argument to get wrong; `convert_reference` remains for predictions that never had a manifest. The scoring side is continuous in the same way: `run_model_experiment`, `build_model_ensemble` and `score_model` publish predictions without the realized outcome, `attach_model_outcomes` joins it, and `score_predictions` reads the result; `evaluate_predictions_portfolio` simulates any of those references as a portfolio.
 
@@ -125,8 +125,8 @@ own worker for the same reason.
 `Implementation/{Anthropic,OpenAI,Gemini}/Agent_Model_Builder.py` runs the
 whole pipeline as a single agent, on all three providers. It is the one
 example script that does not use the 189-tool surface: it passes
-`registry="modeling"` to `run_agent()`, which loads these seventeen schemas
-and `modeling_dispatch` together.
+`registry="modeling"` to `run_agent()`, which loads all thirty-seven
+schemas and `modeling_dispatch` together.
 
 It also skips the category router, deliberately. Routing exists to narrow
 a large surface of similarly-shaped tools down to the relevant few; the
@@ -136,8 +136,9 @@ they are used in sequence. Passing `categories=` alongside
 
 For the split-agent version, `Multi_Agent_Implementation/` gives these
 tools two workers rather than one — `model_research` (capabilities,
-catalog, build, point-in-time joins, leakage and spec checks, analyze) and
-`model_builder` (fit, inspect, compare, score, evaluate). The cut is at the dataset, which is the only handoff in the
+catalog, build, point-in-time joins, leakage and spec checks, the previews
+and the plan, analyze) and `model_builder` (fit, inspect, compare, score,
+attest, evaluate). The cut is at the dataset, which is the only handoff in the
 pipeline that carries a single value (`dataset_id`) rather than a whole
 panel — and therefore the only one that survives two agent sessions that
 cannot see each other's context. See
@@ -146,14 +147,18 @@ cannot see each other's context. See
 `run_model_experiment` doing fit+validate+register in one call is
 deliberate: there is no separate "just fit" tool, so it's structurally
 impossible to register a model that was never walk-forward validated.
-`inspect_model` is one tool with four views instead of four separate
+`inspect_model` is one tool with five views instead of five separate
 inspection tools, for the same reason `get_rally_signal` returns five
 signal fields in one call instead of six tools.
 
-The count has grown from five to seventeen, and the invariant was never
+The count has grown from five to thirty-seven, and the invariant was never
 the count — it is that **every tool is a decision the agent makes, not a
-step it merely executes**. A pipeline stage with no choice in it belongs
-inside another tool, not beside one.
+step it merely executes**. Choosing features is a decision
+(`analyze_features`); so is choosing a model against what is actually
+installed (`list_modeling_capabilities`), where the alternative was a tool
+per model — surface with no decision in it. A pipeline stage with no choice
+in it belongs inside another tool, not beside one.
+
 ### The feature cluster
 
 `analyze_features` answers every question at once and returns an untyped
@@ -162,7 +167,7 @@ everything else — to find out whether one feature is worth keeping, a caller
 had to profile the whole panel and then guess at key names no schema
 promised.
 
-Eight tools now ask one question each, with typed answers. They compute
+Eleven tools now ask one question each, with typed answers. They compute
 almost nothing new; what changed is that the answers have a shape, and that
 the shape leaves room for a recommendation rather than a table:
 
@@ -193,8 +198,17 @@ the shape leaves room for a recommendation rather than a table:
   as `null="within_date"`, and the result reports `null` and
   `ic_autocorrelation_lag1` so a reader can see which regime a feature is
   in. The p-value is two-sided so a strong negative IC counts as strong.
-  Its `null_p95_abs` is the defensible floor to pass to
-  `select_features(min_abs_rank_ic=...)`.
+  Its `null_p95_abs` is that one feature's floor; the floor for a whole
+  panel is the **maximum** of them, which is what
+  `screen_feature_significance` returns as `honest_floor` and what
+  `select_features(min_abs_rank_ic=...)` should be given. A threshold set
+  from a single feature keeps whatever noise produces one time in twenty
+  across the rest of the panel.
+- **`screen_feature_stability` asks the drift question without a name.**
+  `get_feature_drift` and `get_feature_regime_stability` need a feature to
+  ask about; the screen runs both over every feature at once, with a
+  per-block PSI curve against the first block or the previous one, so a
+  feature that has stopped being the same measurement surfaces on its own.
 
 `select_features` deliberately has no greedy search. A selector scored on
 the panel it selects from manufactures overfit that looks like evidence, and
@@ -216,12 +230,6 @@ selects on everything, and the warning says so.
 same as zero: a panel with too few entities per date has no cross-section,
 and an IC of `null` there means the question was unanswerable, not that the
 feature is useless.
-
-plumbing**. Choosing features is a decision (`analyze_features`); so is
-choosing a model against what is actually installed
-(`list_modeling_capabilities`). The alternative to that second one was a
-tool per model, which would have grown the surface without adding a single
-decision to it.
 
 ### End-to-end example
 
@@ -277,6 +285,9 @@ score_result = score_model(ScoreModelInput(
     universe=["AAPL", "MSFT", "GOOGL", "META", "AMZN"],
 ))
 print(score_result.predictions_uri)
+# predictions_ref is the same predictions published as a reference, which
+# attach_model_outcomes and convert_reference read without a file path.
+print(score_result.predictions_ref)
 
 print(inspect_model(InspectModelInput(model_id=exp_result.model_id, view="feature_importance")).data)
 ```
@@ -379,7 +390,7 @@ to be a table here, and the table said 21 entries when the registry held
   `obv.pct_change()` — OBV is seeded at exactly 0 and crosses zero freely,
   so a ratio against it blows up.
 
-The three `volume.*` features are the only ones that need the OHLCV
+The five `volume.*` features are the only ones that need the OHLCV
 panel's `Volume` column — every other feature only needs Open/High/Low/Close.
 
 **Two scopes** exist because PCA needs the whole universe's return panel
@@ -562,14 +573,14 @@ into the model — and `evaluate_model_portfolio` annualizes an intraday
 model's Sharpe by it. The library is optional, guarded like optuna: a spec
 that names a calendar on a machine without it is refused by name, and
 `list_modeling_capabilities` reports `exchange_calendars` under
-`optional_dependencies`. `AssetKey` (venue, asset class, contract) is
-still not built; `universe` stays a list of symbols.
+`optional_dependencies`. `describe_exchange_calendar` reads the same two
+numbers out of the library before a spec is written, and refuses an unknown
+code with the refusal `DatasetSpec.calendar` gives. A universe entry is an
+asset key rather than a bare symbol, and a venue every key shares is where
+the calendar comes from when the spec names none — see [Asset
+keys](#asset-keys-a-universe-entry-is-more-than-a-symbol).
 
-**Intraday intervals raise rather than guess.** There is no correct constant
-without knowing the session length, which is venue-specific — 6.5 hours on
-US equities, 23 on CME futures, 24 on crypto — and not derivable from the
-interval string. Inventing one would produce a number that looks
-authoritative and is wrong by whatever the venue mismatch happens to be. A
+**An intraday interval with no calendar raises rather than guesses.** A
 missing interval still means daily, so callers that never passed one are
 unaffected.
 
@@ -656,6 +667,13 @@ The same attribution appears in the error raised when *nothing* survives,
 which previously left the caller to guess which feature was too long for
 the window they asked for.
 
+All of that is after the build. `estimate_feature_warmup` answers the same
+question before one is paid for: each feature's lookback **resolved from
+the parameters actually requested** rather than the catalog's default
+(`market.momentum` at `lookback=900` burns 900 bars, not 20), plus the
+deepest lag, with the binding feature named and a calendar-day estimate.
+It is also the number `score_model(lookback_days=)` needs.
+
 **`entities` reports what reached the panel**, not what was fetched. The
 two differ whenever a symbol's history is shorter than the feature
 lookbacks plus the target horizon; reporting the fetched list made a
@@ -701,7 +719,9 @@ DatasetSpec(
     missing=MissingDataSpec(
         policy="forward_fill_bounded",
         max_staleness_bars=3,
-        features=["fundamental.book_to_price"],   # output names; an allowlist, never "all"
+        # Output names, and an allowlist rather than "all". A name this spec
+        # does not produce is refused at construction, with the names it does.
+        features=["fundamental.diluted_eps"],
     ),
 )
 ```
@@ -771,14 +791,19 @@ Three consequences, each pinned:
   names one — the same code, so there is no second field to keep in step
   — which is what makes an intraday interval annualizable from the
   universe alone. A venue that is not a known calendar is refused by
-  name when the calendar library is present.
+  name when the calendar library is present. A calendar adopted this way
+  is never silent: it is named in the `warnings` of both
+  `validate_model_spec` and `build_model_dataset`.
 - **The collision is refused where it would have been made.** No shipped
   provider resolves a venue; it fetches by symbol. Two keys that fetch as
   one symbol (`BHP@XASX` beside `BHP@XNYS`, or `AAA` beside `AAA~etf`)
   would return one series under two identities, so the builder refuses
-  them before anything is fetched and says which symbol they share.
-  Spell the venue-specific symbol the provider knows (`BHP.AX@XASX`) and
-  they are two series.
+  them before anything is fetched and says which symbol they share. A
+  dataset that already carries such a pair — one registered by reference,
+  which fetched nothing — comes back as a `dataset_id` problem from
+  `validate_model_spec`, before an experiment is spent on it. Spell the
+  venue-specific symbol the provider knows (`BHP.AX@XASX`) and they are
+  two series.
 - **The bridge refuses a qualified universe by name.** The backtest
   runtime addresses prices by bare symbol, so a signal panel keyed by
   `AAA@XNYS` would fetch nothing or the wrong series;
@@ -786,9 +811,6 @@ Three consequences, each pinned:
   is the path for a keyed model.
 
 ---
-
----
-
 
 ## A panel this library did not build
 
@@ -1090,8 +1112,8 @@ correlation spans nothing in particular.
 
 ## Estimators
 
-`modeling.estimators.registry.ESTIMATOR_REGISTRY` — an explicit allowlist,
-keyed by `(task, name)`:
+`modeling.estimators.registry.ESTIMATOR_REGISTRY` is an explicit
+allowlist, keyed by `(task, name)`.
 
 Every `(task, name)` pair, with the bounded parameters each accepts and
 what each supports (sample weights, probabilities, query groups,
@@ -1248,6 +1270,15 @@ hyperparameters, and a test asserts realistic values still pass so the
 guard cannot quietly become an obstruction. Non-finite values, wrong types,
 fractional counts, and `True` passed as a count (bool subclasses int) are
 all rejected.
+
+`describe_estimator` is how a caller reads a bound instead of discovering
+it: one estimator's parameters with their kinds, ranges, choices and the
+notes written beside them — the 2,000-tree ceiling and why, the 4,096
+leaves, the solver-by-penalty matrix below, the losses that expose no
+probability — plus its calibration options and, with
+`include_unavailable`, the optional estimators this machine lacks. The
+capability report lists the names bare; this is the payload behind one of
+them, because the unfiltered version is tens of kilobytes and says so.
 
 The same reasoning now covers the rest of the request surface, which it did
 not originally reach:
@@ -1516,7 +1547,14 @@ All three signed keys are **NaN for tree estimators**, whose
 direction — deliberately NaN rather than a plausible default, so "no sign
 information exists" cannot be misread as "the sign was stable". Exact-zero
 coefficients (routine under L1) are excluded from `sign_consistency` rather
-than counted as agreeing with either side.
+than counted as agreeing with either side. They are also NaN for every
+feature on a run with `estimator.calibration != "none"`:
+`CalibratedClassifierCV` exposes neither coefficients nor importances, and
+the run warns by name rather than letting the NaNs read as a broken model.
+
+Each row is labelled as well as keyed: a `technical.rsi__lag3` column is
+reported as "technical.rsi at lag 3", so the lag expansion is readable
+without the reader parsing the column name.
 
 After validation, the registered model is refit on the **full** panel —
 folds are for validation, deployment uses every observation. The fitted
@@ -1552,12 +1590,17 @@ selections, and `inspect_model(view="summary")` shows `estimator_params`,
 matters more than the estimator does, and the default is the simplest rather
 than the best.
 
+These six are the ones `build_model_dataset` can derive from a Close
+series. The other twelve arrive through `register_external_panel`; the
+whole set, with the tasks each declares, is the generated [target
+table](29_modeling_reference.md#targets-6-buildable-from-prices-12-external-only).
+
 | Type | Task | What it is |
 |---|---|---|
-| `forward_return` (default) | regression | `(close[t+h] - close[t]) / close[t]` |
-| `forward_return_vol_scaled` | regression | that return over the entity's own trailing volatility, scaled to the horizon |
-| `forward_return_rank` | regression | the return's rank within its date's cross-section, mapped to `[-0.5, 0.5]` |
-| `forward_return_market_neutral` | regression | the return minus that date's equal-weighted universe return |
+| `forward_return` (default) | regression, ranking | `(close[t+h] - close[t]) / close[t]` |
+| `forward_return_vol_scaled` | regression, ranking | that return over the entity's own trailing volatility, scaled to the horizon |
+| `forward_return_rank` | regression, ranking | the return's rank within its date's cross-section, mapped to `[-0.5, 0.5]` |
+| `forward_return_market_neutral` | regression, ranking | the return minus that date's equal-weighted universe return |
 | `forward_direction` | classification | `1.0` when the forward return exceeds `threshold`, else `0.0` |
 | `triple_barrier` | classification | `1.0` upper barrier first, `0.0` lower first, `2.0` neither |
 
@@ -1612,21 +1655,19 @@ not counted.
 
 ### Labels this library records but cannot build
 
-Six of the fourteen target types are computed from a Close series.
-**Eight are not, and could not be.** A markout is measured from a fill, a
+Six of the eighteen target types are computed from a Close series.
+**Twelve are not, and could not be.** A markout is measured from a fill, a
 fill probability needs queue position and cancellations, a spread forecast
-needs the book. No column of closing prices contains any of them.
+needs the book, an order-flow imbalance needs book updates. No column of
+closing prices contains any of them.
 
-| Type | Task | What it is |
-| --- | --- | --- |
-| `future_mid_return` | regression, ranking | Return of the MIDPOINT. Not a trade-price return — the mid moves without a trade, and it is where a passive order is measured from |
-| `future_microprice_return` | regression, ranking | Return of the size-weighted touch price. Leads the mid when the book is lopsided, which is when the mid is least informative |
-| `future_markout` | regression, ranking | Mid move measured FROM a fill, signed by the side taken |
-| `next_mid_direction` | classification | Whether the midpoint's next move is up or down |
-| `future_spread` | regression, ranking | The quoted spread at t+horizon — what it will COST to cross, not where the price goes |
-| `fill_probability` | classification | Whether a passive order at a stated level fills within the horizon |
-| `time_to_fill` | survival | How long it waits. **Censored by construction** — an order that never fills has no time, so the panel declares an `event_column` beside it and the [survival task](#survival-models) fits the pair; a regression on the duration alone is refused |
-| `adverse_selection` | regression, ranking | How far the mid moves against a fill after it happens |
+Every one of the twelve, with its tasks and what it measures, is in the
+generated [target table](29_modeling_reference.md#targets-6-buildable-from-prices-12-external-only);
+`time_to_fill` is the one with a shape of its own, **censored by
+construction** — an order that never fills has no time, so the panel
+declares an `event_column` beside it and the [survival
+task](#survival-models) fits the pair, and a regression on the duration
+alone is refused.
 
 `build_target` **refuses** every one of them by name, and says to compute it
 where the book is and bring the panel in with `register_external_panel`. It
@@ -1763,6 +1804,13 @@ transform — checked against the default values rather than against which
 fields were set, because a spec round-trips through `model_dump()` on every
 persist and a dump writes every field.
 
+`preview_preprocessing` runs the resolved pipeline on a by-date split of a
+panel without fitting anything: each step's columns in and out, the state
+shape the engine would produce, a whitening step's explained variance, and
+the two traps that used to surface only inside a fold — `pca_whiten`
+refuses NaN and refuses more components than columns, and
+`missing_indicator` doubles the width.
+
 ### Fit on train, apply to test, persist the state
 
 A step is `fit(X, ctx) -> state` and `transform(X, state, ctx)`, with the
@@ -1827,10 +1875,7 @@ functions with the fused native kernel that took preprocessing from half a
 walk-forward run to a fraction of it. When the resolved steps are that
 pair the pipeline calls those functions and reads the state off their
 statistics; the generic step classes are the reference, and a test pins the
-two paths equal to 1e-12 on both the native and the Python path. The
-legacy `preprocessing_stats.json` is still written, byte for byte, from the
-state for one release, so an older reader keeps loading; the state file is
-the record.
+two paths equal to 1e-12 on both the native and the Python path.
 
 ### Adding your own step
 
@@ -1878,11 +1923,10 @@ Default `none`: every row at weight 1.
 | `time_decay` | a relationship that drifts, so older evidence is less relevant |
 | `uniqueness_and_time_decay` | both |
 
-`effective_sample_size` has always been reported next to the OOS metrics: a
-`horizon`-bar forward return generated every bar produces labels that share
-`horizon - 1` of their bars, so 2,000 daily rows of a 20-day return carry
-roughly 100 independent observations per entity. That number was computed
-and then acted on by nothing. These are the weights that act on it.
+`effective_sample_size` has always been reported next to the OOS metrics
+(see [What the metrics mean](#what-the-metrics-mean) for the arithmetic).
+That number was computed and then acted on by nothing. These are the
+weights that act on it.
 
 `label_uniqueness` weights each row by the mean of `1/concurrency` over the
 bars its own label spans (López de Prado, *Advances in Financial Machine
@@ -1898,6 +1942,13 @@ An estimator that does not accept `sample_weight` raises rather than
 silently ignoring it. A weighting the caller believes is active but which
 never reached the fit is worse than an error — the model looks like it
 corrected for label overlap and did not.
+
+`preview_sample_weights` shows the distribution a spec implies before a fit
+pays for it: the percentiles, the max/min ratio, the share of the weight on
+the newest decile, and the Kish effective sample size beside the
+overlap-based one. The two answer different questions — Kish measures how
+uneven the weights are, the overlap figure how much the labels repeat
+themselves — and a weighting can leave one fine and the other ruinous.
 
 ---
 
@@ -2078,7 +2129,16 @@ searches, which is the most the spec can cost; walk-forward's fold count
 depends on the date axis and
 is reported as unknown rather than guessed.
 
-`feature_ablation`'s own `max_fits` is a separate ceiling on the whole
+`plan_model_experiment` returns the plan itself rather than its total:
+every fold's train and test spans, the rows the purge removes, the inner
+folds each window supports (zero when it is too short, and that fold is
+then priced at one fit), the fits per estimator that quantiles and
+conformal blocks multiply, the `node_hash` the run will reproduce, and the
+candidate grid on request. Over budget comes back as `within_budget=False`
+rather than a refusal — reading a split you are not going to pay for is
+the point — and `run_model_experiment` still refuses.
+
+`run_feature_ablation`'s own `max_fits` is a separate ceiling on the whole
 ablation, which runs one experiment per feature; each of those experiments
 is still planned and checked against the spec's budget on its own.
 
@@ -2134,8 +2194,8 @@ library.
 
 ### `max_parallelism`: what the knob controls
 
-`budget.max_parallelism` was not built with the rest of the budget in
-phase 4, because nothing in the engine ran in parallel and no registered
+`budget.max_parallelism` was not built with the rest of the budget,
+because nothing in the engine ran in parallel and no registered
 estimator read `n_jobs`: the knob would have controlled nothing. It
 controls two things now:
 
@@ -2243,11 +2303,13 @@ without a dataset, `declared_and_empirical` with one.
 
 ### One horizon, for now
 
-Everything is measured against the panel's own `target`, because that is the
-only target a built dataset carries. The more useful question — *at what
-horizon* is this predictive — needs multi-horizon targets in the dataset
-first. The module is shaped per-(feature, target) so that becomes a loop
-rather than a rewrite.
+Everything is measured against the panel's **primary** `target`. A panel
+can carry several labels — [`TargetSpec.horizons` and
+`register_external_panel(targets=...)`](#several-horizons-one-panel) — and
+`run_model_experiment(target=...)` picks between them, but no feature tool
+takes that argument: the horizon curve is available to a model and not yet
+to the feature analysis. The module is shaped per-(feature, target) so that
+becomes a loop rather than a rewrite.
 
 ---
 
@@ -2371,9 +2433,8 @@ metric and why R² on the same label means nothing — it is not reported.
 question asked of each date's rows alone, and is the headline. A search
 selects on `scoring="concordance"` and on nothing else: an IC of a risk
 against a censored duration measures nothing. The integrated Brier score
-is not reported; it needs a survival function, which only a baseline
-hazard supplies, and `scikit-survival` is neither installed nor
-declared.
+is reported beside it, from the survival function every estimator here
+carries — see below.
 
 **What a risk is not.** An ensemble refuses to average a survival model
 with a regressor or a ranker: a hazard ordering says which name's event
@@ -2405,7 +2466,12 @@ here has one:
   minimum extreme value XGBoost calls `extreme`.
 
 `predict_survival_function(X, times)` returns the `(n, len(times))`
-matrix, and the survival adapter hands it to the metrics. The
+matrix, and the survival adapter hands it to the metrics.
+`predict_survival_curve` is the tool over it: a registered survival model
+scored as of a date returns each entity's curve and the horizon at which
+it crosses one half, under every gate `score_model` enforces. The level is
+the fitted baseline's, and a median past the last grid time is reported as
+unknown rather than as never. The
 **integrated Brier score** (Graf et al., 1999) is then read from it: the
 squared error of `S(t | x)` against "still going at t", each row weighted
 by the inverse probability of not having been censored by the time its
@@ -2485,9 +2551,9 @@ consume; `tabular` is the one kind today, reported by
 `list_modeling_capabilities`.
 
 No `RepresentationSpec` was added. A one-valued field would churn every
-persisted `ModelSpec` for no behaviour, and the repository's own spike
-measured a shared representation at +0.0014 R² on the most favourable
-panel it could be given. A `sequence` kind — `(n, T, F)` per entity,
+persisted `ModelSpec` for no behaviour, and what a shared representation
+was measured to be worth is under [Why there is no multi-output
+estimator](#why-there-is-no-multi-output-estimator). A `sequence` kind — `(n, T, F)` per entity,
 built within the fold from the same index — waits for a measured case in
 which an MLP over lag columns loses to a sequence model by more than
 bootstrap noise. Until then the lag columns are the sequence.
@@ -2632,9 +2698,7 @@ A custom point-in-time feature registers like any other, with
 that omits any of them, and `requires`/`lookback` do not apply.
 
 
-
 ---
-
 
 
 ## Model registry
@@ -2648,10 +2712,13 @@ SQT_RUNS_DIR/<model_id>/
                               # random_seed, oos_predictions_uri
     model.joblib
     model_spec.json
-    preprocessing_stats.json
+    preprocessing_state.json # the fitted pipeline; preprocessing_stats.json is
+                              # written beside it for an older reader
     dataset_spec.json        # the model's OWN copy of its training spec
     oos_predictions.parquet  # walk-forward OOS predictions -- see "Backtesting a
                               # trained model" below
+    manifest.sig             # when a signing key is configured
+    promotions.jsonl         # once promoted; the stage IS the last line
 ```
 
 Same directory-per-id convention `backtest.artifacts.save_artifact`
@@ -2795,7 +2862,7 @@ Two operations are written against the protocol:
 | Operation | What it does |
 |---|---|
 | `verify_model_package(model_id, require_signature=False, public_key=None)` | hashes every artifact the manifest covers and names the `verified`, `mismatched` and `missing` files; names the `unhashed` files too — the signature, the promotion log, scoring outputs — so a reader knows what the hashes do **not** vouch for; carries the signature record or the reason it failed. `inspect_model(view="lineage")` reports it as `package` |
-| `mirror_model_package(model_id, store)` | copies a verified package to another store under the model id (the only prefix a package is written under: `list_remote_models` finds it by that key and `pull_model_package` refuses a manifest naming another id), manifest **last** so the commit-point property holds on the target, re-hashing every covered file *through the target* after the copy; refuses a package that does not verify locally, because a mirror of a tampered package is a tampered package with a second address |
+| `mirror_model_package(model_id, store)` | copies a verified package to another store, always under the model id and with no prefix argument to override it — `list_remote_models` finds a package by that key and `pull_model_package` refuses a manifest naming another id, so a package written anywhere else is one nothing can list or pull. Manifest **last**, so the commit-point property holds on the target, re-hashing every covered file *through the target* after the copy; refuses a package that does not verify locally, because a mirror of a tampered package is a tampered package with a second address |
 
 ```python
 from standard_quant_tools.artifact_store import store_from_url
@@ -2977,8 +3044,8 @@ resolves.
 ## Lifecycle and monitoring
 
 A registered model is a **`candidate`**: fitted and walk-forward validated,
-which is a fact about the fit and not a judgement about the evidence. Until
-this phase that was also the last thing anyone recorded about it. Whether
+which is a fact about the fit and not a judgement about the evidence. It
+used to be the last thing anyone recorded about it, too. Whether
 somebody had read the folds and accepted them, whether it was being paper
 traded, whether it was live, and whether the universe it was scoring had
 drifted from the panel it was trained on — none of it had anywhere to go,
@@ -3010,6 +3077,16 @@ The rules are the ones the log exists to make visible:
 - **A reason is required** and must be more than a word. It is read months
   later by someone deciding whether to trust the model, and `ok` does not
   help them.
+- **The move is gated on the package's integrity.** A stage is a statement
+  that somebody read the evidence, so the evidence has to be the one that
+  was registered: a package whose files do not verify against their digests
+  is refused by name, with what mismatched, and the manifest's digest is
+  written into the promotion's `evidence`. `require_signature` and
+  `public_key_path` demand a pinned signature as well;
+  `require_verified_package=False` records the decision anyway, which is a
+  choice the log then carries. Without this a corrupted artifact was driven
+  to production while the same session's `inspect_model` reported it
+  mismatched.
 
 `list_models` takes a `stage` filter and every summary carries `stage`;
 `inspect_model`'s summary view carries `stage` and the full `promotions`
@@ -3091,7 +3168,18 @@ an IC with no validation dispersion to compare to) never masquerades as
 A model registered before the references were kept is refused by
 `monitor_model`, not approximated: a reference read from the scoring window
 itself would find no drift by construction, and the honest answer is to
-retrain.
+retrain. The references themselves are stored as **bare filenames** inside
+the model's directory and resolved there, so a package pulled onto another
+machine is monitorable where it lands; the old absolute form is still
+accepted when it names the same file.
+
+`inspect_model(view="provenance")` is where the rest of the manifest that
+no other view returned comes out: the `training_information_cutoff`
+`score_model` gates `as_of` on, the conformal band the artifact carries
+(the precondition for `uncertainty_scaled`), the feature provenance
+enforced at scoring time, the content hashes, these monitoring references,
+and a diff of the environment the model was trained in against the current
+one.
 
 ---
 
@@ -3126,8 +3214,16 @@ blocks of n^(1/3) consecutive dates are resampled, the rule
 bootstrap p-value comes back beside the interval, and across several
 candidates the p-values are **Holm-adjusted**. What Holm does not do is
 control for the candidates having been *chosen* on this same sample —
-that is what SPA-style tests exist for — and the result's note says so
-rather than letting the adjustment imply it.
+that is what `run_reality_check` and the other SPA-style tests exist for —
+and the result's note says so rather than letting the adjustment imply it.
+
+**Neither the pairing nor the correction needs a registered model.**
+`compare_signals` is the same machinery off the registry: two prediction
+references compared `paired` on the per-date IC difference, two per-date IC
+series compared `ic_series` with the Newey-West variance beside the naive
+one, or a bare set of p-values from anywhere adjusted under Holm,
+Bonferroni or Benjamini-Hochberg. It carries the same caveat, because the
+caveat is about the sample and not about where the numbers came from.
 
 **Where the task has a loss with units, a Diebold-Mariano test** on the
 per-date loss differential is reported too: squared error for a regressor,
@@ -3221,6 +3317,15 @@ Planted on a Gaussian panel, both the 0.05/0.95 pair and the `alpha=0.1`
 band cover between 87% and 93% of out-of-sample outcomes at a width
 within 15% of the true `2 × 1.645σ`.
 
+**Those numbers are fold averages, and an average is where a band hides.**
+`score_prediction_intervals` reads the published columns back — any
+reference carrying quantiles or a `lower`/`upper` pair — and reports
+pinball loss per level, the crossing rate and coverage against the nominal
+level, pooled or `by` date or entity, with the worst and best group named.
+A band that covered 97% in the calm half and 62% in the selloff is one
+pooled number away from looking fine, and the pooled number was the only
+one the engine kept.
+
 **The deployed distribution travels with the model.** The refit fits the
 quantile models on the full panel and reads the conformal radius off
 held-out blocks of it; `distribution.json` and `quantile_models.joblib`
@@ -3246,17 +3351,24 @@ three-block calibration make one "fit" of the spec cost seven.
 It doesn't answer "does this work as a trading strategy" — that requires
 an actual backtest, and this codebase already has one
 (`run_signal_panel_backtest`, in the *other* 189-tool surface).
-`modeling.bridge.oos_predictions_to_signal_panel` connects the two —
-a plain Python function, deliberately **not** a tool, because it only
-reshapes an artifact the caller already holds and hands it to a tool in
-the other registry. That is argument-shaping, not a decision, and it is
-the "artifacts, not tool calls" boundary between the two registries.
+`modeling.bridge.oos_predictions_to_signal_panel` connects the two, and
+`backtest_model_signal` is the tool over it: given a `model_id` and
+nothing else about the task, it publishes a `signal_panel` reference that
+`run_signal_panel_backtest` prices. Everything the tool adds over the
+function is a refusal the function's callers had to make themselves —
+the task is read from the manifest rather than passed, the predictions
+file is checked against the hash the manifest recorded, and a `cpcv`
+model is refused by name with the walk-forward remedy. Reaching the same
+place through `convert_reference` on a published copy of the predictions
+takes both the task and the bytes on trust; that route stays for
+predictions that never had a manifest.
 
 For the *portfolio* question — one shared cash balance, weights rather
 than direction signals — see [Evaluating a model as a
-portfolio](#evaluating-a-model-as-a-portfolio) below, which **is** a tool
-(`evaluate_model_portfolio`). The distinction is not the count but the
-kind: that one runs a simulation and produces new persisted artifacts.
+portfolio](#evaluating-a-model-as-a-portfolio) below
+(`evaluate_model_portfolio`, or `evaluate_predictions_portfolio` for a
+reference with no model behind it). The distinction is the kind of work:
+that one runs a simulation and produces new persisted artifacts.
 
 **Why the bridge reads `run_model_experiment`'s output, not
 `score_model`'s**: `score_model` produces a single as-of snapshot for
@@ -3293,7 +3405,9 @@ exp = run_model_experiment(RunModelExperimentInput(dataset_id=ds.dataset_id, spe
 # Prefer model_id=: it resolves the artifact AND the task from the manifest,
 # so the two cannot disagree. Passing `task` by hand allows regression
 # predictions to be thresholded as classification probabilities, which
-# produces a nonsensical but perfectly valid-looking signal panel.
+# produces a nonsensical but perfectly valid-looking signal panel. From a
+# tool call, `backtest_model_signal(model_id=...)` is this call with no
+# `task` argument to get wrong, returning a signal_panel reference.
 signal_panel = oos_predictions_to_signal_panel(model_id=exp.model_id)
 
 result = run_signal_panel_backtest(SignalPanelBacktestInput(
@@ -3515,6 +3629,19 @@ target gross, an interval with no defined annualization factor, the
 dataset coverage warnings carried from the model manifest, and any the
 simulator itself raised (insolvency, negative cash).
 
+### Without a model behind the predictions
+
+`evaluate_predictions_portfolio` runs the same simulation on any
+predictions reference — an ensemble, an external alpha, a live
+`score_model` run — with the same `PredictionTransformSpec` and
+`PortfolioSimSpec` and the same result shape. What it cannot read off a
+manifest it inherits from a `dataset_id`, or takes explicitly: `interval`,
+`provider`, `calendar` and the window. `task` is required, because no
+reference carries one. `provenance` then names the reference and its
+producer where the model-backed version names a `model_id`, and says which
+it is, so a Sharpe cannot be read as a registered model's when no
+registered model produced it.
+
 ---
 
 ## Error handling
@@ -3549,11 +3676,13 @@ own `ValidationError`).
   `require_finite_array` over every feature/target column before
   returning — a degenerate computation producing `inf` is caught here,
   not left to fail confusingly inside `sklearn`.
-- **Task/target mismatch**: `regression` requires a `forward_return`
-  target and `classification` a `forward_direction` one; both directions
-  are rejected before fitting. The regression-on-binary case is the
-  dangerous one — it would otherwise fit happily and report meaningless
-  R²/IC.
+- **Task/target mismatch**: every label declares the tasks it can be
+  consumed by, and the engine's check is derived from that declaration
+  rather than restating it, so a task the label does not list is rejected
+  before fitting. The regression-on-binary case is the dangerous one — it
+  would otherwise fit happily and report meaningless R²/IC — and a
+  censored label handed to anything but `survival` is refused for the
+  same reason.
 - **Degenerate walk-forward folds**: a fold whose training window is
   empty, whose training rows were entirely purged for target overlap, or
   (classification only) that lands entirely on one class, is skipped
@@ -3561,8 +3690,11 @@ own `ValidationError`).
   reason in `validation_report`. `run_model_experiment` raises if *every*
   fold was skipped, or if fewer than `min_folds` completed.
 - **Historical scoring**: `score_model` rejects an `as_of` at or before
-  the model's `train_end_date` — the registered estimator saw those dates
-  in training, so the "prediction" would be future-informed.
+  the model's `training_information_cutoff` — the registered estimator saw
+  those dates in training, directly or through a label that read prices
+  past them, so the "prediction" would be future-informed. A model
+  registered before that field existed falls back to `train_end_date`, and
+  the warning says the guard is the looser one.
 - **Tampered artifacts**: any model artifact whose content hash no longer
   matches the manifest is rejected on load, `model.joblib` before it is
   deserialized.
@@ -3600,8 +3732,6 @@ Records written before that field existed report `output_match=None`
 ("not comparable") rather than `False`: their literal mismatch cannot be
 distinguished from a genuine one, and reporting drift would be a false
 accusation.
-
----
 
 ---
 
@@ -3648,10 +3778,10 @@ native plan said so before a line of C++ was written, and the measured
 end-to-end numbers landed where that arithmetic put them. It is also why the
 work stopped: the remaining profile has no numeric loop in it.
 
-`cross_sectional` normalization is measurably *faster* than `pooled` (469 ms
-against 898 ms on a 50-entity walk-forward), because it skips the quantile
-fitting entirely. That is a side effect, not the reason to choose it — see
-**Preprocessing** above for the reason.
+`cross_sectional` normalization is measurably *faster* than `pooled`,
+because it skips the quantile fitting entirely — the measurement and the
+reason to choose it are both under [Why the default is still
+pooled](#why-the-default-is-still-pooled). The speed is a side effect.
 
 ### Reproducing any of this
 
@@ -3688,7 +3818,7 @@ they replaced on small panels.
 Not built here, and not accidentally half-built either:
 
 - **Semantic feature search** — `list_features` is a plain catalog
-  lookup. A catalog of two dozen entries doesn't need ranking; revisited
+  lookup. A catalog of thirty entries doesn't need ranking; revisited
   only if the catalog grows large enough that it does.
 - **Point-in-time fundamentals beyond Polygon** — Polygon's quarterly
   financials are the shipped point-in-time source (see [A point-in-time
@@ -3717,7 +3847,8 @@ Not built here, and not accidentally half-built either:
   yourself.
 - **A remote registry root** — the runtime lists, checks and appends by
   path in its own runs directory. What exists is mirror-on-register and a
-  verified pull (see [A registry that reaches another
+  verified pull, reachable from `list_remote_models` and
+  `pull_model_package` (see [A registry that reaches another
   machine](#a-registry-that-reaches-another-machine)); pointing the
   runtime itself at a bucket would need every directory operation behind
   the store protocol, and nothing measured yet asks for it.

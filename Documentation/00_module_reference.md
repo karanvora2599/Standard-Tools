@@ -2,7 +2,7 @@
 
 Every public module in one place: what it holds, and where the deep
 documentation for it lives. This exists because the per-module guides
-(`01_data_fetching.md` through `17_correctness.md`) each go deep on one
+(`01_data_fetching.md` through `30_build_guide.md`) each go deep on one
 subject, and none of them answers "what is actually in this library".
 
 The prose here is the orientation layer. When a section raises a question it
@@ -10,7 +10,7 @@ does not answer, the linked guide answers it.
 
 ## Data (`standard_quant_tools.data`)
 
-Three providers implement the same `DataProvider` ABC — `DataFactory.get_provider("yfinance" | "bloomberg" | "polygon")` — so switching is a one-line change with zero changes downstream.
+Four providers implement the same `DataProvider` ABC — `DataFactory.get_provider("yfinance" | "bloomberg" | "polygon" | "databento")` — so switching is a one-line change with zero changes downstream.
 
 | Function | Description | Returns |
 |---|---|---|
@@ -20,13 +20,13 @@ Three providers implement the same `DataProvider` ABC — `DataFactory.get_provi
 | `get_financial_ratios(symbol)` | P/E, P/B, D/E, ROE, margins, etc. | `FinancialRatios` (Pydantic) |
 | `get_metadata(symbol, interval)` | Dataset provenance: adjusted, survivorship-free, point-in-time, timezone | `DataSetMetadata` (Pydantic) |
 
-**`YFinanceProvider`** (default) — **Caching:** Historical OHLCV calls are saved as Parquet files under `~/.cache/standard_quant_tools/ohlcv/`. Subsequent calls — even from a new Python process — load from disk rather than the network. Override the cache directory with `SQT_CACHE_DIR`.
+**`YFinanceProvider`** (default) — **Caching:** Historical OHLCV calls are saved as Parquet files under `~/.cache/standard_quant_tools/ohlcv/`, by every provider rather than this one alone (`data._cache`). Subsequent calls — even from a new Python process — load from disk rather than the network. Override the cache directory with `SQT_CACHE_DIR`; `sqt cache gc` lists (and with `--confirm` deletes) files of a dead format generation, and nothing else.
 
 **`BloombergProvider`** — talks to a local, logged-in Bloomberg Terminal via Desktop API (`blpapi`, optional dependency). No API key: DAPI authenticates via the Terminal login itself; only `SQT_BLOOMBERG_HOST`/`SQT_BLOOMBERG_PORT` are configurable (via `.env` locally or CI secrets — see Config & secrets above), and neither is a secret. Daily/weekly/monthly bars only. See [Documentation/01_data_fetching.md](01_data_fetching.md#bloomberg-provider) for the full reference.
 
 **`PolygonProvider`** — talks to Polygon.io's plain REST API, no vendor SDK required. Needs an API key (`SQT_POLYGON_API_KEY`, no default — free tier available at [polygon.io/dashboard/api-keys](https://polygon.io/dashboard/api-keys)). Supports `1m`/`5m`/`15m`/`30m`/`60m`/`1d`/`1wk`/`1mo`/`3mo` bars via the Aggregates endpoint; `get_financial_ratios` derives P/E, P/B, D/E, ROE, and margins from the most recent financials filing plus market cap (no forward estimates or dividend yield). See [Documentation/01_data_fetching.md](01_data_fetching.md#polygonio-provider) for the full reference.
 
-**Data quality (`standard_quant_tools.data.quality`):** `detect_missing_bars`, `detect_stale_prices`, `detect_price_jumps` — heuristic checks on an already-fetched OHLCV frame (weekday gaps, frozen prices, large single-bar jumps). `detect_missing_bars` has no market-holiday calendar, so U.S. holidays show up as false-positive gaps — treat findings as leads to investigate, not confirmed defects. Exposed together with `get_metadata` via the `get_data_quality_report` agent tool.
+**Data quality (`standard_quant_tools.data.quality`):** `detect_missing_bars`, `detect_stale_prices`, `detect_price_jumps` — heuristic checks on an already-fetched OHLCV frame (missing sessions, frozen prices, large single-bar jumps). `detect_missing_bars` asks `exchange_calendars` for the venue's sessions (`calendar="XNYS"` by default), so a market holiday is not a gap; without that package, or for a code it does not know, it falls back to the weekday rule and every entry says which basis it used. Exposed together with `get_metadata` via the `get_data_quality_report` agent tool, which takes the source, the calendar and the volume-anomaly thresholds.
 
 ---
 
@@ -109,14 +109,14 @@ Computed entirely from data a backtest already produces (`equity_curve`, `trade_
 
 ## Analysis (`standard_quant_tools.analysis`)
 
-12 functions across five areas. Several functions have a **C++ fast path** via `_sqt_core` — numbers below are measured, not projected (see the CHANGELOG for the full methodology and an earlier round of unmeasured projections that turned out to overstate several of these, since corrected):
+16 functions plus the options module. Several have a **C++ fast path** via `_sqt_core` — numbers below are measured, not projected (see the CHANGELOG for the full methodology and an earlier round of unmeasured projections that turned out to overstate several of these, since corrected):
 - `calculate_beta` — 2-variable OLS via closed-form normal equations (1.4× vs. `np.linalg.lstsq` — a real but modest win, not the 10–20× originally projected before this was actually benchmarked)
 - `rolling_beta` — incremental O(1)-per-bar sum updates (4.7× vs. two pandas rolling passes), plus a further ~1.1–1.5× from an optional runtime AVX2+FMA dispatch path
 - `half_life` / `compute_spread` — same OLS kernel, same modest (~1.1×) speedup
 - `cointegration_test` — full Engle-Granger pipeline (23× vs. statsmodels at n=500; **86×** at n=2 000, because the ADF lag sweep now reads every candidate lag off a single nested factorization instead of factorizing once per lag)
 - `scan_cointegrated_pairs` — every pair of a universe in one native call, parallel across pairs. A 2 000-ticker screen is ~5 min at 2 000 bars rather than ~9.8 h looping `cointegration_test`
 - `hurst_exponent` / `rolling_hurst` — DFA + R/S + sliding window (83–131× / 274×)
-- `rolling_factor_loadings` — per-window rank-revealing QR with column pivoting (2.3–10× vs. per-window `lstsq`, larger at shorter windows). This deliberately replaced a much faster incremental-Cholesky path that was **wrong**: its pivot test compared every factor column against the intercept column's diagonal, so factor values around 1e-6 made the whole window read as singular and it returned all-NaN where NumPy returned correct coefficients. Correctness first §5.2 for the plan to recover the speed without giving the rank policy back
+- `rolling_factor_loadings` — per-window rank-revealing QR with column pivoting (2.3–10× vs. per-window `lstsq`, larger at shorter windows). This deliberately replaced a much faster incremental-Cholesky path that was **wrong**: its pivot test compared every factor column against the intercept column's diagonal, so factor values around 1e-6 made the whole window read as singular and it returned all-NaN where NumPy returned correct coefficients. Recovering the speed via a QR update/downdate is not attempted; see [16_performance.md](16_performance.md)
 
 ### Options Pricing, Greeks & Implied Volatility
 
@@ -374,7 +374,7 @@ result = screen_stocks(sp500_tickers, filters={...}, n_workers=8)
 
 189 LLM-callable tools with Pydantic input/output models and OpenAI/Anthropic function-calling schemas — including two tools that backtest a signal you computed yourself rather than one of the built-in indicator strategies.
 
-`Implementation/{Anthropic,OpenAI,Gemini}/` are single-agent reference scripts across all three providers — each narrows the tool list per request via a lightweight **router** (`standard_quant_tools.agent.router`) instead of handing the model all 189 tools on every call: one cheap classification call picks the 1-2 relevant tool categories before the real agent loop starts, no separate agent session required. Each provider folder also carries `Agent_Model_Builder.py`, the one script that drives the separate 20-tool modeling runtime instead — it passes `registry="modeling"` and skips the router, since twenty tools in one ordered pipeline have no selection ambiguity to remove. For a heavier, more thorough split, `Multi_Agent_Implementation/` (Anthropic only for now) is a full **orchestrator-workers** architecture — a lead agent that delegates to 16 specialist sub-agents, thirteen over the analysis runtimes, two over the modeling one and one over `feature_lab`, each with its own independent session scoped to a small, non-overlapping tool subset. The analysis workers build on the same category taxonomy (`TOOL_CATEGORY`), so a tool's categorization only needs to be correct in one place. Splitting tools this way is a direct fix for tool-selection confusion between similar tools (e.g. a built-in strategy backtest vs. a bring-your-own-signal backtest, or "run this strategy" vs. "optimize this strategy's parameters"): a worker/routed request that was never given the other tool cannot call it by mistake. See [Documentation/13_agent_orchestration.md](13_agent_orchestration.md).
+`Implementation/{Anthropic,OpenAI,Gemini}/` are single-agent reference scripts across all three providers — each narrows the tool list per request via a lightweight **router** (`standard_quant_tools.agent.router`) instead of handing the model all 189 tools on every call: one cheap classification call picks the 1-2 relevant tool categories before the real agent loop starts, no separate agent session required. Each provider folder also carries `Agent_Model_Builder.py`, the one script that drives the separate 37-tool modeling runtime instead — it passes `registry="modeling"` and skips the router, since one ordered pipeline has no selection ambiguity to remove. For a heavier, more thorough split, `Multi_Agent_Implementation/` (Anthropic only for now) is a full **orchestrator-workers** architecture — a lead agent that delegates to 16 specialist sub-agents, thirteen over the analysis runtimes, two over the modeling one and one over `feature_lab`, each with its own independent session scoped to a small, non-overlapping tool subset. The analysis workers build on the same category taxonomy (`TOOL_CATEGORY`), so a tool's categorization only needs to be correct in one place. Splitting tools this way is a direct fix for tool-selection confusion between similar tools (e.g. a built-in strategy backtest vs. a bring-your-own-signal backtest, or "run this strategy" vs. "optimize this strategy's parameters"): a worker/routed request that was never given the other tool cannot call it by mistake. See [Documentation/13_agent_orchestration.md](13_agent_orchestration.md).
 
 ```python
 from standard_quant_tools.agent.tools import (
@@ -436,43 +436,37 @@ result = run_hurst_analysis(HurstInput(
 print(result.regime)   # "trending" | "random_walk" | "mean_reverting"
 ```
 
-**Core backtest & analysis tools (14):** `run_sma_backtest`, `run_rsi_backtest`, `run_macd_backtest`, `run_bollinger_backtest`, `run_buy_and_hold`, `compare_strategies`, `analyze_stock_risk`, `get_technical_analysis`, `get_portfolio_analysis`, `run_screener`, `run_factor_regression`, `run_cointegration_test`, `run_pca_analysis`, `run_hurst_analysis`
-
-**Advanced agentic tools (8):** `run_regime_adaptive_backtest`, `run_regime_adaptive_walkforward_backtest`, `scan_pairs`, `run_walk_forward_backtest`, `get_portfolio_risk_attribution`, `run_portfolio_optimization`, `get_position_size`, `run_portfolio_simulation`
-
-**Supplementary tools (6):** `get_stock_fundamentals`, `run_backtest_optimization`, `get_advanced_indicators`, `get_rolling_beta`, `get_extended_risk_metrics`, `get_backtest_diagnostics`
-
-**Custom signal tools (2):** `run_custom_signal_backtest`, `run_signal_panel_backtest`
-
-**Diagnostics, capacity & specialized backtests (5):** `run_pair_trade_backtest`, `get_robustness_diagnostics`, `get_capacity_report`, `get_data_quality_report`, `run_backtest_compact`
-
-**Analytics tools (8):** `get_volatility_estimators`, `get_correlation_analysis`, `run_monte_carlo_simulation`, `run_stress_test`, `get_liquidity_metrics`, `run_garch_volatility_forecast`, `run_kalman_hedge_ratio`, `get_tail_risk_metrics`
-
-**Options pricing tools (2):** `get_option_pricing`, `get_implied_volatility`
+Every tool by name, with the description the model reads and every
+argument, is in [20_tool_index.md](20_tool_index.md) — generated from the
+live registry, so it cannot drift. The prose is split between
+[07_agent_tools.md](07_agent_tools.md) (the core fourteen and the agent
+loop) and [09_advanced_agent_tools.md](09_advanced_agent_tools.md) (the
+advanced, supplementary, custom-signal, analytics, options and diagnostic
+tools).
 
 ## Modeling Runtime (`standard_quant_tools.modeling`)
 
-A second, independent 20-tool runtime — `list_modeling_capabilities`,
-`list_features`, `check_leakage`, `build_model_dataset`, `list_datasets`,
-`analyze_features`, `validate_pit_records`, `join_point_in_time`,
-`validate_model_spec`, `run_model_experiment`, `list_models`,
-`inspect_model`, `compare_models`, `score_model`, `score_predictions`,
-`evaluate_model_portfolio` — for building walk-forward-validated
-statistical models from this library's own features (21 built-in:
-technical, market, risk, volume, statistical and PCA-derived factors),
-never merged into the 189-tool `get_agent_tools`/`TOOL_CATEGORY` surface
-above. A sibling `feature_lab` runtime holds 9 more, for interrogating
-those features before a model exists.
+A second, independent 37-tool runtime for building walk-forward-validated
+statistical models from this library's own features (30 built-in:
+technical, market, risk, volume, statistical, network, fundamental and
+PCA-derived factors) or from a matrix computed elsewhere and registered
+without copying it — never merged into the 189-tool
+`get_agent_tools`/`TOOL_CATEGORY` surface above. A sibling `feature_lab`
+runtime holds 11 more, for interrogating those features before a model
+exists. Every tool with its arguments is in
+[20_tool_index.md](20_tool_index.md); every feature, estimator, target and
+spec option is generated into
+[29_modeling_reference.md](29_modeling_reference.md).
 
 | Axis | What is available |
 |---|---|
-| **Targets** | `forward_return`, `forward_return_vol_scaled`, `forward_return_rank`, `forward_return_market_neutral` (regression); `forward_direction`, `triple_barrier` (classification) |
-| **Tasks** | `regression`, `classification`, `ranking` — each behind a `ModelAdapter` that owns how its arrays are built, scored and measured |
-| **Estimators** | 20 — 12 regression, 6 classification, 2 ranking. scikit-learn throughout, plus `lightgbm`/`xgboost` when installed, two quantile-regression forms, and LambdaRank rankers |
-| **Validation** | walk-forward (rolling or expanding) and purged K-fold, both with a target-overlap purge |
+| **Targets** | 18 — six buildable from prices (`forward_return`, `forward_return_vol_scaled`, `forward_return_rank`, `forward_return_market_neutral`, `forward_direction`, `triple_barrier`), the other twelve arriving through `register_external_panel` |
+| **Tasks** | `regression`, `classification`, `ranking`, `survival` — each behind a `ModelAdapter` that owns how its arrays are built, scored and measured |
+| **Estimators** | 19 always available, 8 more when their library is installed. scikit-learn throughout, plus `lightgbm`/`xgboost`, quantile-regression forms, LambdaRank rankers and a panel MLP |
+| **Validation** | walk-forward (rolling or expanding), purged K-fold and combinatorial purged CV, all with a target-overlap purge |
 | **Preprocessing** | pooled or cross-sectional normalization |
 | **Weighting** | none, label uniqueness, time decay, or both |
-| **Search** | optional grid or random search on each fold's training window |
+| **Search** | optional grid, random or TPE search on each fold's training window |
 
 Everything past the defaults is opt-in behind an explicit spec field, so an
 existing `ModelSpec` predicts exactly what it predicted before.
@@ -503,12 +497,12 @@ trained model, so `inspect_model(view="lineage")` shows them next to the OOS
 numbers.
 
 See [Documentation/15_modeling.md](15_modeling.md) for the
-full reference, including what is explicitly deferred (fundamentals need a
-point-in-time provider first; time-varying universe membership needs
+full reference, including what is explicitly deferred (Polygon is the one
+point-in-time fundamentals source, so yfinance and Bloomberg still report
+`point_in_time=False`; time-varying universe membership needs
 index-constituent history no shipped provider exposes, so survivorship bias
-is disclosed rather than corrected).
-
----
+is disclosed rather than corrected; sequence and graph models wait for a
+measured case).
 
 ---
 

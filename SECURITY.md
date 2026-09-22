@@ -31,12 +31,13 @@ declined (e.g. not reproducible, out of scope), you'll get an explanation.
 
 ## Scope Notes
 
-This library fetches market data from third-party providers (currently
-`yfinance`) and executes user-supplied strategy code (custom signal
-callables passed to `run_custom_signal_backtest` / `run_signal_panel_backtest`
-/ `backtest_grid`). Relevant classes of concern:
+This library fetches market data from third-party providers (`yfinance`,
+Bloomberg's Desktop API, Polygon.io and Databento) and executes
+user-supplied strategy code (custom signal callables passed to
+`run_custom_signal_backtest` / `run_signal_panel_backtest` /
+`backtest_grid`). Relevant classes of concern:
 
-- **Data provider trust**: OHLCV/fundamentals data returned by `yfinance` is
+- **Data provider trust**: OHLCV/fundamentals data returned by a provider is
   not authenticated or cryptographically verified — this library treats it
   as trusted input from the configured provider, consistent with
   [`Documentation/11_data_quality.md`](Documentation/11_data_quality.md)'s
@@ -55,11 +56,32 @@ callables passed to `run_custom_signal_backtest` / `run_signal_panel_backtest`
   underlying function, and filesystem-path-adjacent inputs are further
   restricted — `backtest.artifacts.save_artifact`'s `run_id`/`name` are
   validated against a plain-slug pattern and the resolved path is confirmed
-  to stay inside `SQT_RUNS_DIR`, and `data.yfinance_provider`'s Parquet
-  cache path similarly contains the symbol/date/interval used to build the
-  cache file path before any read/write. If you find an input that bypasses
-  one of these checks and reaches an unintended path or code branch, that's
-  a legitimate report — please include the specific tool name and payload.
+  to stay inside `SQT_RUNS_DIR`, and `data._cache`'s Parquet cache path
+  (shared by every provider) similarly constrains the
+  symbol/date/interval used to build the cache file path before any
+  read/write. All four roots — the OHLCV cache, the artifact store, the runs
+  directory and the audit-bundle export — go through one containment check
+  (`_containment.require_within`), which also handles Windows'
+  extended-length prefix; before that, three of the four did not, and a cold
+  runs directory was refused as a traversal. If you find an input that
+  bypasses one of these checks and reaches an unintended path or code
+  branch, that's a legitimate report — please include the specific tool name
+  and payload.
+- **Model packages are code**: a registered model's `model.joblib` is
+  deserialized by `joblib.load`, which executes what the file contains, so
+  the package's integrity is a trust boundary rather than a tidiness
+  concern. `manifest.json` is the commit point, and it cannot hash itself:
+  `verify_model_package` checks the artifacts against the hashes the
+  manifest records and, when a signature is present or required, the Ed25519
+  signature over the manifest itself — without that signature an edited
+  manifest verifies clean, which is why an attestation requires one;
+  `attest_model_package` requires one by default and takes a public key to
+  pin, and `promote_model` refuses to move a package that does not verify.
+  `pull_model_package` brings a package from a mirror into this root and
+  will require a signature or a pinned key on request — pulling an unsigned
+  package from a store you do not control is loading somebody else's code.
+  A verification gap here, or a package that verifies after being modified,
+  is a legitimate report.
 - **Audit trail integrity**: `standard_quant_tools.audit`'s decision-record
   log is hash-chained (`prev_record_hash`/`record_hash` on every JSONL
   record, checked by `verify_audit_log_integrity()`) **across every
@@ -117,5 +139,8 @@ callables passed to `run_custom_signal_backtest` / `run_signal_panel_backtest`
   written — the raw value never touches disk. This is a one-way hash, not
   encryption; do not rely on it if the redacted value space is small enough
   to brute-force by hashing candidate values and comparing (e.g. a 4-digit
-  PIN). It's intended for values you want comparable-but-hidden (account
-  IDs, SSNs), not secret material where guessability matters.
+  PIN). Set `SQT_AUDIT_REDACT_SALT` to a long random secret so that
+  placeholder is not brute-forceable offline for a small value space — an
+  unset salt still redacts and logs a one-time warning. It's intended for
+  values you want comparable-but-hidden (account IDs, SSNs), not secret
+  material where guessability matters.

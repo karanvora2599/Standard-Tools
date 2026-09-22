@@ -61,7 +61,8 @@ counts as one.
    tests/
      conftest.py        shared fixtures (mock_provider, …) — visible to every subdirectory
      agent/  analysis/  audit/  backtest/  backtesting/  data/
-     indicators/  mcp/  metrics/  modeling/  portfolio/  screener/
+     delta_one/  indicators/  mcp/  metrics/  modeling/
+     portfolio/  screener/
      core/              cross-cutting: errors, compat shims, regression suites
      surface/           whole-surface layers: invariants, fuzzing, metamorphic, determinism
      docs/              the generated-documentation checks
@@ -103,7 +104,10 @@ counts as one.
    in the existing style, but a `mypy` pass isn't a merge requirement yet.
 4. **CI matrix**: tests run against Python 3.10, 3.11, and 3.12
    (`.github/workflows/ci.yml`). A change that only works on one of these
-   will fail CI.
+   will fail CI. A push touching `_cpp/**` also builds and runs the C++
+   tests (`build-cpp.yml`); a nightly job rebuilds them under
+   ThreadSanitizer (`nightly-tsan.yml`), which is where a data race in a
+   parallel kernel shows up rather than in your PR.
 
 ## Code Conventions
 
@@ -128,8 +132,14 @@ counts as one.
   `agent/__init__.py`'s `__all__`, which a test also pins, (e) a
   regenerated `Documentation/20_tool_index.md`
   (`python scripts/generate_tool_index.py` — `tests/docs/` fails the
-  build otherwise), and (f) a matching section in
-  `Documentation/07_agent_tools.md` or `09_advanced_agent_tools.md`.
+  build otherwise), and (f) a matching section in the guide that owns the
+  tool's runtime — `Documentation/21_derivatives.md`,
+  `22_microstructure.md`, `26_data.md`, `27_meta.md`, `28_delta_one.md`,
+  `15_modeling.md`, or `07_agent_tools.md`/`09_advanced_agent_tools.md`
+  for the analysis surface. Those runtime guides are checked row by row
+  against their runtime's tool list, so an omitted table row fails the
+  build too, and a new modeling feature, estimator or target additionally
+  needs `python scripts/generate_modeling_reference.py` committed.
   Adding a whole RUNTIME additionally needs `RUNTIME_CATEGORIES`,
   `RUNTIME_LABELS` and `RUNTIME_DESCRIPTIONS` entries, a category in
   `agent/router.py`, a worker in `Multi_Agent_Implementation/worker_agents.py`,

@@ -1,6 +1,6 @@
 # Metrics
 
-All metric functions accept `pd.Series`. Most return a single `float` — the exception is `drawdown_series`, which returns a full `pd.Series` (one drawdown value per bar). The `risk_metrics` functions (`sharpe_ratio`, `sortino_ratio`, `max_drawdown`, `calmar_ratio`, `var_historical`, `var_parametric`, `cvar`, `information_ratio`, `treynor_ratio`) are decorated with `@validate_series`, which raises `ValidationError` on empty input. The `return_metrics` functions (`cumulative_return`, `cagr`, `annualized_volatility`) and `drawdown_series` are **not** decorated: `cumulative_return`/`cagr` return `0.0` on an empty series, while `annualized_volatility` and `drawdown_series` now RAISE `ValidationError` on an empty series rather than returning `nan` or an empty `Series`; `drawdown_series` also refuses a non-positive opening level.
+All metric functions accept `pd.Series`. Most return a single `float`; two do not — `drawdown_series` returns a full `pd.Series` (one drawdown value per bar) and `evt_tail_risk` returns a dict describing one fitted tail. The `risk_metrics` functions (`sharpe_ratio`, `sortino_ratio`, `max_drawdown`, `calmar_ratio`, `var_historical`, `var_parametric`, `cvar`, `information_ratio`, `treynor_ratio`, `evt_tail_risk`) are decorated with `@validate_series`, which raises `ValidationError` on empty input. The `return_metrics` functions (`cumulative_return`, `cagr`, `annualized_volatility`) and `drawdown_series` are **not** decorated: `cumulative_return`/`cagr` return `0.0` on an empty series, while `annualized_volatility` and `drawdown_series` now RAISE `ValidationError` on an empty series rather than returning `nan` or an empty `Series`; `drawdown_series` also refuses a non-positive opening level.
 
 ---
 
@@ -53,6 +53,8 @@ print(f"Sortino : {srt:.2f}")  # Sortino ≥ Sharpe when returns are right-skewe
 - `sortino_ratio` = `(mean(excess_returns) * periods_per_year) / downside_deviation`, where `excess_returns = returns - risk_free_rate/periods_per_year` and `downside_deviation = sqrt(mean(min(excess_returns, 0)**2)) * sqrt(periods_per_year)`. Note the denominator is the RMS of `min(excess_return, 0)` averaged over **all** N periods (zero contribution from winning bars), not just the subset of losing periods — the Sortino & Price (1994) convention. This gives a larger, more conservative denominator than dividing by the count of negative-return bars only, which some other libraries do. Returns `inf` when downside deviation is zero or `nan`.
 
 **Sortino vs Sharpe:** Sortino only penalizes downside deviation, making it more appropriate for strategies with asymmetric returns.
+
+> **A series with no dispersion has no Sharpe, and gets `nan`.** Zero would read as "measured, and there is no edge"; a flat series at +10bp a day has a positive excess return and no risk, which is the opposite. The test is relative, not `std == 0.0`: a strategy beating its benchmark by exactly 10bp every day has a standard deviation of 5.3e-19, and an equality test never fired on it.
 
 ---
 
@@ -117,7 +119,9 @@ print(f"Information Ratio : {ir:.2f}")   # > 0.5 = strong active management
 print(f"Treynor Ratio     : {tr:.4f}")
 ```
 
-> **Index alignment in `treynor_ratio`** — both the beta denominator and the excess-return numerator are computed on `returns.loc[common_idx]`, where `common_idx = returns.index.intersection(benchmark_returns.index)`. `beta` comes from `calculate_beta` on that same aligned slice, so the numerator and denominator always cover the identical date range, even when `returns` and `benchmark_returns` don't already share an identical index. `information_ratio` uses the same common-index-first approach for its active returns.
+> **Index alignment in `treynor_ratio`** — both the beta denominator and the excess-return numerator are computed on `returns.loc[common_idx]`, where `common_idx = returns.index.intersection(benchmark_returns.index)`. `beta` comes from `calculate_beta` on that same aligned slice, so the numerator and denominator always cover the identical date range, even when `returns` and `benchmark_returns` don't already share an identical index. `information_ratio` uses the same common-index-first approach for its active returns. `treynor_ratio` also takes `risk_free_rate` (annual, divided internally, as above).
+
+> **Both return `nan` where the ratio is undefined, and `0.0` only where zero is the answer.** `treynor_ratio` is `nan` when beta could not be estimated and when beta is exactly 0.0 — excess return per unit of systematic risk, where the unit is zero. `information_ratio` is `0.0` when the active return is constant at zero (the portfolio held the benchmark: no bet, no skill) and `nan` when it is constant at anything else (beat the benchmark by the same amount every day: undefined, and emphatically not zero).
 
 ---
 
@@ -170,10 +174,35 @@ arithmetic.
 ```python
 calculate_series_metrics(
     series={"ref": "sqt://returns_panel/study7/rets"},   # or {"symbol": ...}
-    metrics=["sharpe_ratio", "calmar_ratio", "max_drawdown"],
+    benchmark={"symbol": "SPY"},                          # same three shapes
+    metrics=["sharpe_ratio", "information_ratio", "drawdown_series",
+             "evt_tail_risk"],
     risk_free_rate=0.04,
+    run_id="study7", name="rets",
 )
 ```
+
+**Fourteen metrics**, the whole `metrics` package: `cumulative_return`,
+`cagr`, `annualized_volatility`, `sharpe_ratio`, `sortino_ratio`,
+`calmar_ratio`, `var_historical`, `var_parametric`, `cvar`, `max_drawdown`,
+`information_ratio`, `treynor_ratio`, `drawdown_series`, `evt_tail_risk`.
+
+**Four of them answer with something other than one number, and each says
+so in its own field** rather than being flattened into `values`:
+
+| Name | Needs | Comes back as |
+|---|---|---|
+| `information_ratio`, `treynor_ratio` | `benchmark` | `values`, with `benchmark_observations` |
+| `drawdown_series` | `run_id` + `name` | `drawdown_ref`, an `sqt://analytic_series/...` |
+| `evt_tail_risk` | — | the `evt` block: threshold, exceedances, `shape_xi`, `scale_beta`, `var_evt`, `cvar_evt` |
+
+A benchmark is refused rather than guessed: which index is *the* benchmark
+is the caller's decision, and defaulting it would answer a different
+question. It must cover the same bars as `series` — equal length is not
+alignment. `drawdown_series` without `run_id` and `name` is refused too,
+because a few hundred floats inline beside the scalars is not a readable
+payload; ask for `max_drawdown` when the single deepest number is what you
+want, and for the reference when *when* the curve was under water matters.
 
 **The metric set is closed, not open.** It accepts names from a fixed list
 rather than an expression, because this surface is reachable from an agent
@@ -184,3 +213,19 @@ The alternative — `calculate_sharpe`, `calculate_sharpe_from_returns`,
 `calculate_sharpe_from_artifact` — is how a surface ends up answering one
 question under three names. The tool is the QUESTION; the input says where
 the bytes are.
+
+## The rest of the package
+
+Three families live in `metrics/` and are documented where they are used
+rather than a second time here:
+
+- **`evt_tail_risk`** — Peaks-Over-Threshold VaR/CVaR from a fitted
+  Generalized Pareto tail, including why `confidence` must exceed
+  `1 - tail_fraction`: [08_analysis.md](08_analysis.md).
+- **`parkinson_volatility`, `garman_klass_volatility`,
+  `yang_zhang_volatility`** — OHLC realized volatility, all taking
+  `periods_per_year`: [08_analysis.md](08_analysis.md).
+- **`drawdown_periods`, `top_n_drawdowns`, `trade_expectancy`,
+  `trade_excursions`, `exposure_stats`** — the per-episode and per-trade
+  diagnostics the backtest engine reports, signature by signature in
+  [00_module_reference.md](00_module_reference.md).

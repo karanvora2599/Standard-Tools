@@ -1,8 +1,8 @@
 # Analysis
 
-The analysis module provides statistical tools for understanding return series, factor exposures, and market structure. Most functions are pure NumPy / Pandas with no external dependencies. Several functions have optional **C++ fast paths** via the `_sqt_core` extension:
+The analysis module provides statistical tools for understanding return series, factor exposures, and market structure. Most functions are pure NumPy / Pandas with no external dependencies. The error bars, multiple-testing corrections and structure tests built around this surface — bootstrap intervals, normality, stationarity, regimes, seasonality, lead-lag — are a separate family and live in [23_inference.md](23_inference.md); nothing here duplicates them. Several functions have optional **C++ fast paths** via the `_sqt_core` extension:
 
-- **Hurst exponent** — measured 83–131× faster (DFA, n=500/n=2 000); measured 274× for rolling Hurst (n=2 000, window=200). Pure-Python fallback is automatic when the extension is not built.
+- **Hurst exponent** — measured 83–131× faster (DFA, n=500/n=2 000); measured 274× for rolling Hurst (n=2 000, window=200). Pure-Python fallback is automatic when the extension is not built. Those are the numbers this document quotes everywhere; earlier, unmeasured 20–80×/30–100× projections appeared here before `_sqt_core` was benchmarked.
 - **Cointegration** — measured 23× faster at n=500 and **86× at n=2 000** (Engle-Granger OLS + ADF + MacKinnon 2010, vs. statsmodels). The ratio grows with sample size rather than shrinking, because the ADF lag sweep is no longer quadratic: it used to run one column-pivoted QR per candidate lag, `O(T·L³)` in total, and now reads every candidate's residual off a single nested factorization, `O(T·L²)`. Bypasses statsmodels for the actual computation when built, but `statsmodels` remains a required install either way (it's imported unconditionally at module load, not lazily behind the C++ check).
 - **`scan_cointegrated_pairs`** — every pair of a universe in one native call, parallel across pairs. A 2 000-ticker screen at 2 000 bars takes ~5 min instead of ~9.8 h looping `cointegration_test`.
 - **`calculate_beta`, `half_life`, `compute_spread`** — measured 1.1–1.4× faster (2-variable OLS via closed-form normal equations, avoids LAPACK `lstsq` overhead) — a real but modest win; `lstsq` on a 2-variable system turned out not to carry as much LAPACK-call overhead as originally estimated. (An earlier, unmeasured 10–20× projection appeared in this doc before `_sqt_core` was actually built and benchmarked for the full before/after story.)
@@ -29,13 +29,13 @@ The analysis module provides statistical tools for understanding return series, 
 from standard_quant_tools.data.factory import DataFactory
 from standard_quant_tools.analysis import multi_factor_regression
 
-provider = DataFactory.get_provider
+provider = DataFactory.get_provider()
 
 # Fetch asset and factors
-aapl  = provider.get_ohlcv("AAPL",  "2021-01-01", "2024-01-01")["Close"].pct_change.dropna
-spy   = provider.get_ohlcv("SPY",   "2021-01-01", "2024-01-01")["Close"].pct_change.dropna
-iwm   = provider.get_ohlcv("IWM",   "2021-01-01", "2024-01-01")["Close"].pct_change.dropna
-tlt   = provider.get_ohlcv("TLT",   "2021-01-01", "2024-01-01")["Close"].pct_change.dropna
+aapl  = provider.get_ohlcv("AAPL",  "2021-01-01", "2024-01-01")["Close"].pct_change().dropna()
+spy   = provider.get_ohlcv("SPY",   "2021-01-01", "2024-01-01")["Close"].pct_change().dropna()
+iwm   = provider.get_ohlcv("IWM",   "2021-01-01", "2024-01-01")["Close"].pct_change().dropna()
+tlt   = provider.get_ohlcv("TLT",   "2021-01-01", "2024-01-01")["Close"].pct_change().dropna()
 
 import pandas as pd
 factors = pd.DataFrame({"mkt": spy, "smb_proxy": iwm, "bond": tlt})
@@ -53,7 +53,7 @@ print(f"Adj. R²           : {result['adj_r_squared']:.3f}")
 ### Interpreting t-stats and p-values
 
 ```python
-for factor, t in result["t_stats"].items:
+for factor, t in result["t_stats"].items():
     p = result["p_values"][factor]
     sig = "***" if p < 0.01 else "**" if p < 0.05 else "*" if p < 0.10 else ""
     print(f"  {factor:<15} t={t:+.2f}  p={p:.3f} {sig}")
@@ -73,10 +73,10 @@ for factor, t in result["t_stats"].items:
 factors_ff3 = pd.DataFrame({
     "mkt":  spy,          # market excess return proxy
     "smb":  iwm - spy,    # small-minus-big proxy (IWM - SPY)
-    "hml":  provider.get_ohlcv("IWD", "2021-01-01", "2024-01-01")["Close"].pct_change.dropna,
+    "hml":  provider.get_ohlcv("IWD", "2021-01-01", "2024-01-01")["Close"].pct_change().dropna(),
 })
 
-tsla = provider.get_ohlcv("TSLA", "2021-01-01", "2024-01-01")["Close"].pct_change.dropna
+tsla = provider.get_ohlcv("TSLA", "2021-01-01", "2024-01-01")["Close"].pct_change().dropna()
 result = multi_factor_regression(tsla, factors_ff3)
 
 print(f"TSLA market beta  : {result['loadings']['mkt']:.2f}")
@@ -115,7 +115,7 @@ from standard_quant_tools.analysis import rolling_factor_loadings
 rolling = rolling_factor_loadings(aapl, factors, window=60)
 
 # rolling is a DataFrame: index = dates, columns = ["alpha", "mkt", "smb_proxy", "bond"]
-print(rolling.tail)
+print(rolling.tail())
 ```
 
 **`window` must be at least `k + 2`** (`k` factors plus an intercept, plus one
@@ -139,7 +139,7 @@ applies to `multi_factor_regression`.
 ```python
 import plotly.graph_objects as go
 
-fig = go.Figure
+fig = go.Figure()
 for col in ["mkt", "smb_proxy"]:
     fig.add_trace(go.Scatter(
         x=rolling.index,
@@ -147,7 +147,7 @@ for col in ["mkt", "smb_proxy"]:
         name=f"Rolling {col} loading",
     ))
 fig.update_layout(title="60-Day Rolling Factor Loadings — AAPL")
-fig.show
+fig.show()
 ```
 
 ### Parameters
@@ -191,10 +191,10 @@ because nothing is accumulated across bars.
 rank policy, shared with the NumPy fallback, so both backends agree on whether a window has
 an answer.
 
-Recovering the speed via QR update/downdate across the sliding window (which would restore
-`O(p²)` per bar without giving back the conditioning or the rank policy) is planned and not
-yet attempted, including why the analogous
-Cholesky update/downdate was implemented, gated and reverted.
+A QR update/downdate across the sliding window would restore `O(p²)` per bar without
+giving back the conditioning or the rank policy. It is not implemented. The analogous
+Cholesky update/downdate was written, gated behind a flag and then removed, for the two
+reasons above — which is why the slower QR is what ships.
 
 ```python
 from standard_quant_tools.analysis.multi_factor import HAS_CPP
@@ -218,29 +218,27 @@ universe = screen_stocks(
 )
 
 # Step 2: run factor model on each survivor
-spy_ret = provider.get_ohlcv("SPY", "2022-01-01", "2024-01-01")["Close"].pct_change.dropna
+spy_ret = provider.get_ohlcv("SPY", "2022-01-01", "2024-01-01")["Close"].pct_change().dropna()
 factor_df = pd.DataFrame({"mkt": spy_ret})
 
 for ticker in universe.index:
-    rets = provider.get_ohlcv(ticker, "2022-01-01", "2024-01-01")["Close"].pct_change.dropna
+    rets = provider.get_ohlcv(ticker, "2022-01-01", "2024-01-01")["Close"].pct_change().dropna()
     r = multi_factor_regression(rets, factor_df)
     print(f"{ticker}: beta={r['loadings']['mkt']:.2f}, alpha={r['alpha']:.5f}, R²={r['r_squared']:.2f}")
 ```
 
 ### Via Agent Tool
 
-The analysis module is not yet wrapped as a standalone agent tool, but its results are plain dicts and DataFrames — JSON-serialise the dict with `json.dumps(result)` before passing to an LLM.
-
-```python
-import json
-from standard_quant_tools.analysis import multi_factor_regression
-
-result = multi_factor_regression(asset_returns, factor_returns)
-
-# Prepare LLM-friendly payload (exclude n_obs if not needed)
-payload = {k: v for k, v in result.items if k != "n_obs"}
-print(json.dumps(payload, indent=2))
-```
+Every function in this document has an agent tool over it in the `research`
+runtime: `run_factor_regression`, `run_cointegration_test`, `scan_pairs`,
+`run_pca_analysis`, `run_hurst_analysis`, `run_kalman_hedge_ratio`,
+`run_garch_volatility_forecast`. They fetch the bars themselves from a
+symbol and return Pydantic models rather than dicts, so nothing needs
+JSON-serialising by hand. Argument lists are in
+[20_tool_index.md](20_tool_index.md#research--research); the worked
+examples are in [07_agent_tools.md](07_agent_tools.md) and
+[09_advanced_agent_tools.md](09_advanced_agent_tools.md). Call the library
+functions directly when you already hold the series.
 
 ---
 
@@ -248,15 +246,9 @@ print(json.dumps(payload, indent=2))
 
 ## Cointegration & Pairs Spread Analysis *(C++ / statsmodels)*
 
-The `run_kalman_hedge_ratio` tool publishes the Kalman path (hedge ratio,
-intercept, spread, gain) as an `analytic_frame` when `run_id` and `name`
-are given; the intercept column is all zero when no intercept was fitted,
-and the result says so.
-
-
 Two price series are **cointegrated** when a linear combination of them is stationary, even though each series individually follows a random walk. This is the statistical foundation of pairs trading.
 
-`cointegration_test` uses the **C++ extension** (`_sqt_core`) when available — a self-contained Engle-Granger implementation (OLS + ADF + MacKinnon 2010 response surface) with no dependency on `statsmodels`. The C++ path is **5–15× faster** on typical series lengths (n = 250–1 000). The statsmodels fallback is used automatically when the extension is not built; the API and return format are identical either way.
+`cointegration_test` uses the **C++ extension** (`_sqt_core`) when available — a self-contained Engle-Granger implementation (OLS + ADF + MacKinnon 2010 response surface) with no dependency on `statsmodels` for the computation. Measured **23× at n = 500 and 86× at n = 2 000**, the ratio growing with sample size because the ADF lag sweep is no longer quadratic. The statsmodels fallback is used automatically when the extension is not built; the API and return format are identical either way.
 
 `autolag` must be exactly `"aic"` or `"bic"`; anything else raises `ValidationError`. This is enforced because the two backends previously disagreed on a typo: the C++ path mapped any string that wasn't exactly `"bic"` onto AIC, while the statsmodels fallback passed it straight through to `coint`. A misspelled criterion therefore ran a *different* lag selection depending on the build, and echoed the typo back in the result either way.
 
@@ -275,7 +267,7 @@ The toolkit provides four functions covering the full pairs workflow:
 from standard_quant_tools.data.factory import DataFactory
 from standard_quant_tools.analysis import cointegration_test
 
-provider = DataFactory.get_provider
+provider = DataFactory.get_provider()
 
 ko  = provider.get_ohlcv("KO",  "2020-01-01", "2024-01-01")["Close"]
 pep = provider.get_ohlcv("PEP", "2020-01-01", "2024-01-01")["Close"]
@@ -326,7 +318,7 @@ spread = compute_spread(ko, pep)
 # Or supply a known/previously fitted ratio
 spread = compute_spread(ko, pep, hedge_ratio=result["hedge_ratio"])
 
-print(spread.describe)
+print(spread.describe())
 ```
 
 `compute_spread` returns a `pd.Series` named `"spread"`, aligned to the common index of the two inputs.
@@ -367,7 +359,7 @@ z_static = spread_zscore(spread)
 # Typical entry/exit thresholds
 entry_long  = z_rolling < -2.0   # buy series_a, sell series_b
 entry_short = z_rolling >  2.0   # sell series_a, buy series_b
-exit_signal = z_rolling.abs < 0.5
+exit_signal = z_rolling.abs() < 0.5
 ```
 
 > **Look-ahead bias warning** — with `window=None` (the default), `spread_zscore` normalises using the full-sample mean and standard deviation at **every** row, including bars that lie in the future relative to that row. This makes the static form unsuitable for generating historical trading signals in a backtest — each timestamp's z-score would be informed by returns that hadn't happened yet at that point in time. Use it only for descriptive statistics on a fixed historical sample (e.g. summarising how far the spread has strayed from its mean over the full period). Always pass an explicit `window` (20–60 bars is typical) when producing signals for backtesting or live trading.
@@ -384,7 +376,7 @@ from standard_quant_tools.analysis import (
 )
 from standard_quant_tools.backtest.engine import run_strategy
 
-provider = DataFactory.get_provider
+provider = DataFactory.get_provider()
 start, end = "2020-01-01", "2024-01-01"
 
 # 1. Load price series
@@ -410,7 +402,7 @@ entry_thresh, exit_thresh = 2.0, 0.5
 signals = pd.Series(0.0, index=z.index)
 in_pos = 0
 for i in range(len(z)):
-    if z.isna.iloc[i]:
+    if z.isna().iloc[i]:
         continue
     zv = z.iloc[i]
     if in_pos == 0:
@@ -440,7 +432,7 @@ import pandas as pd
 from standard_quant_tools.analysis import cointegration_test
 
 tickers = ["KO", "PEP", "MCD", "WEN", "YUM", "SBUX"]
-provider = DataFactory.get_provider
+provider = DataFactory.get_provider()
 
 prices = {t: provider.get_ohlcv(t, "2021-01-01", "2024-01-01")["Close"]
           for t in tickers}
@@ -523,7 +515,7 @@ returns and every returns-taking tool can read them. Its factor
 contributions come from the same decomposition as its loadings.
 
 
-`pca_returns` decomposes a multi-asset return matrix into orthogonal principal components (PCs) using full SVD — pure NumPy, no sklearn required. `factor_contributions` then quantifies how much each PC explains for each individual asset.
+`pca_returns` decomposes a multi-asset return matrix into orthogonal principal components (PCs) — pure NumPy, no sklearn required. `method="svd"` (the default) forms every singular triplet; `method="power_iteration"` solves only the `n_components` asked for, which is cheaper on a wide universe and is why PC1-only refits use it. The two agree on any component whose eigenvalue is well separated from its neighbours; near-degenerate eigenvalues leave the basis within that subspace unstable for either method, which is a property of PCA rather than of a path. `factor_contributions` then quantifies how much each PC explains for each individual asset.
 
 ### When to use
 
@@ -541,14 +533,14 @@ from standard_quant_tools.data.factory import DataFactory
 from standard_quant_tools.analysis import pca_returns
 import pandas as pd
 
-provider = DataFactory.get_provider
+provider = DataFactory.get_provider()
 tickers = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "JPM", "GS", "BAC"]
 start, end = "2021-01-01", "2024-01-01"
 
 returns = pd.DataFrame({
-    t: provider.get_ohlcv(t, start, end)["Close"].pct_change
+    t: provider.get_ohlcv(t, start, end)["Close"].pct_change()
     for t in tickers
-}).dropna
+}).dropna()
 
 result = pca_returns(returns, n_components=3)
 
@@ -576,7 +568,7 @@ print(result["loadings"])
 ```python
 evr = result["explained_variance_ratio"]
 # How many PCs to reach 80% explained variance?
-n_for_80 = (result["cumulative_variance_ratio"] < 0.80).sum + 1
+n_for_80 = (result["cumulative_variance_ratio"] < 0.80).sum() + 1
 print(f"Need {n_for_80} PCs to explain 80% of variance")
 ```
 
@@ -591,9 +583,9 @@ loadings = result["loadings"]
 print(loadings["PC1"].sort_values(ascending=False))
 
 # Assets that load in opposite directions on PC2 tend to hedge each other
-hedges = loadings["PC2"].sort_values
-print("PC2 shorts:", hedges.head(3).index.tolist)
-print("PC2 longs :", hedges.tail(3).index.tolist)
+hedges = loadings["PC2"].sort_values()
+print("PC2 shorts:", hedges.head(3).index.tolist())
+print("PC2 longs :", hedges.tail(3).index.tolist())
 ```
 
 #### Factor returns (PC time series)
@@ -604,11 +596,11 @@ factor_rets = result["factor_returns"]
 # Use it as a systematic benchmark or for regime analysis
 
 import plotly.graph_objects as go
-fig = go.Figure
+fig = go.Figure()
 fig.add_trace(go.Scatter(x=factor_rets.index, y=factor_rets["PC1"], name="PC1"))
 fig.add_trace(go.Scatter(x=factor_rets.index, y=factor_rets["PC2"], name="PC2"))
 fig.update_layout(title="First Two Risk Factors")
-fig.show
+fig.show()
 ```
 
 ### Output reference
@@ -617,6 +609,7 @@ fig.show
 |---|---|---|
 | `explained_variance_ratio` | `pd.Series` | Fraction of total variance per PC, indexed "PC1", "PC2",... |
 | `cumulative_variance_ratio` | `pd.Series` | Running sum of EVR |
+| `explained_variance_ratio_full` | `pd.Series` | The WHOLE spectrum, summing to 1 — `explained_variance_ratio` is its prefix. Without it there is no telling a third component carrying 4% of a remaining 6% from one carrying 4% of a remaining 40%. Empty under `method="power_iteration"`, which never forms the rest. |
 | `loadings` | `pd.DataFrame` | Shape (n_assets × n_components). Each column is a unit-norm eigenvector. |
 | `factor_returns` | `pd.DataFrame` | Shape (n_dates × n_components). PC time series; pairwise correlations are exactly 0. |
 | `n_components` | `int` | Actual number of PCs returned (capped at min(n_assets, n_obs)) |
@@ -654,10 +647,10 @@ print(contrib)
 #...
 
 # Total systematic R² for each asset
-print(contrib.sum(axis=1).sort_values)
+print(contrib.sum(axis=1).sort_values())
 
 # Which assets are most idiosyncratic (least explained by top 3 PCs)?
-print("Most idiosyncratic:", contrib.sum(axis=1).nsmallest(3).index.tolist)
+print("Most idiosyncratic:", contrib.sum(axis=1).nsmallest(3).index.tolist())
 ```
 
 Each cell is the **marginal R²** added by including that PC. Values are additive: `contrib["PC1"] + contrib["PC2"] + contrib["PC3"]` equals the total R² from regressing the asset on the first 3 PCs.
@@ -678,7 +671,7 @@ pc1 = result["factor_returns"]["PC1"]
 
 # Treat PC1 as the "market" — compute each asset's IR vs the first factor
 for ticker in returns.columns:
-    ir = information_ratio(returns[ticker].dropna, pc1, periods_per_year=252)
+    ir = information_ratio(returns[ticker].dropna(), pc1, periods_per_year=252)
     print(f"{ticker}: IR vs PC1 = {ir:.2f}")
 ```
 
@@ -689,7 +682,7 @@ import numpy as np
 
 # What fraction of equal-weight portfolio variance comes from PC1?
 weights = np.ones(len(tickers)) / len(tickers)
-loadings = result["loadings"].to_numpy
+loadings = result["loadings"].to_numpy()
 
 # Portfolio loading on each PC = weighted sum of asset loadings
 port_loadings = weights @ loadings  # (n_components,)
@@ -697,7 +690,7 @@ evr = result["explained_variance_ratio"].values
 
 # Approximate variance attribution (valid when PCs are orthogonal, which they are)
 pc_contrib_to_portfolio = port_loadings ** 2 * evr
-pc_contrib_to_portfolio /= pc_contrib_to_portfolio.sum
+pc_contrib_to_portfolio /= pc_contrib_to_portfolio.sum()
 
 for i, name in enumerate(result["explained_variance_ratio"].index):
     print(f"{name}: {pc_contrib_to_portfolio[i]:.1%} of equal-weight portfolio variance")
@@ -717,7 +710,7 @@ The Hurst exponent H classifies the long-memory scaling behaviour of a return se
 | 0.45 ≤ H ≤ 0.55 | **Random walk** | No persistent edge from past prices alone |
 | H < 0.45 | **Mean-reverting** | Contrarian / mean-reversion strategies — overshoots tend to reverse |
 
-> **Input must be returns, not prices.** Pass `close.pct_change.dropna` or log-returns — not the price series itself. The algorithm works on the scaling of cumulative return fluctuations.
+> **Input must be returns, not prices.** Pass `close.pct_change().dropna()` or log-returns — not the price series itself. The algorithm works on the scaling of cumulative return fluctuations.
 
 ---
 
@@ -725,10 +718,10 @@ The Hurst exponent H classifies the long-memory scaling behaviour of a return se
 
 The Hurst module ships with an optional compiled C++ backend (`_sqt_core`). When the extension is built it is used automatically — the Python API is identical either way.
 
-| Operation | Python fallback | C++ (`_sqt_core`) | Speedup |
-|---|---|---|---|
-| `hurst_exponent` single call (n = 500) | ~5–15 ms | ~0.1–0.5 ms | **20–80×** |
-| `rolling_hurst` (2 000 bars, window = 200) | ~5–15 s | ~0.1–0.3 s | **30–100×** |
+| Operation | Speedup, measured |
+|---|---|
+| `hurst_exponent` single call (DFA, n = 500 / n = 2 000) | **83–131×** |
+| `rolling_hurst` (2 000 bars, window = 200) | **274×** |
 
 The rolling gain is the most significant: rather than calling back into Python for every bar, the entire sliding-window pass executes inside one C++ function. This makes `rolling_hurst` practical for live pipelines and for `run_regime_adaptive_backtest`, which calls it internally.
 
@@ -791,9 +784,9 @@ The API is the same regardless of whether the C++ extension is built.
 from standard_quant_tools.data.factory import DataFactory
 from standard_quant_tools.analysis import hurst_exponent
 
-provider = DataFactory.get_provider
+provider = DataFactory.get_provider()
 close = provider.get_ohlcv("AAPL", "2020-01-01", "2024-01-01")["Close"]
-returns = close.pct_change.dropna
+returns = close.pct_change().dropna()
 
 result = hurst_exponent(returns)
 
@@ -841,14 +834,14 @@ import pandas as pd
 from standard_quant_tools.analysis import hurst_exponent
 from standard_quant_tools.data.factory import DataFactory
 
-provider = DataFactory.get_provider
+provider = DataFactory.get_provider()
 tickers = ["AAPL", "MSFT", "NVDA", "TSLA", "SPY", "GLD", "TLT", "BTC-USD"]
 start, end = "2021-01-01", "2024-01-01"
 
 rows = []
 for ticker in tickers:
     try:
-        rets = provider.get_ohlcv(ticker, start, end)["Close"].pct_change.dropna
+        rets = provider.get_ohlcv(ticker, start, end)["Close"].pct_change().dropna()
         r = hurst_exponent(rets)
         rows.append({
             "ticker":  ticker,
@@ -863,24 +856,24 @@ df = pd.DataFrame(rows).sort_values("hurst")
 print(df)
 
 # Split by regime
-trending = df[df["regime"] == "trending"]["ticker"].tolist
-mean_rev = df[df["regime"] == "mean_reverting"]["ticker"].tolist
+trending = df[df["regime"] == "trending"]["ticker"].tolist()
+mean_rev = df[df["regime"] == "mean_reverting"]["ticker"].tolist()
 print(f"Trending:       {trending}")
 print(f"Mean-reverting: {mean_rev}")
 ```
 
-With the C++ extension this loop runs in under a second for 8 tickers on 3 years of data. Without it, each `hurst_exponent` call takes ~5–15 ms, so the loop still completes in well under a second at this scale — the C++ gain becomes dominant only in `rolling_hurst` and in screening hundreds of tickers.
+Eight tickers on three years of data completes in well under a second either way — a single `hurst_exponent` call is cheap on both paths. The measured 83–131× only becomes the difference between usable and not in `rolling_hurst` and in screening hundreds of tickers.
 
 ---
 
 ### Rolling Hurst — regime shift detection
 
-`rolling_hurst` computes H over a sliding window, making it possible to detect when a market switches regimes. This is where the C++ extension provides its largest benefit: without it, a 2 000-bar series at `window=252` takes 5–15 seconds; with it, the same call takes under 300 ms.
+`rolling_hurst` computes H over a sliding window, making it possible to detect when a market switches regimes. This is where the C++ extension provides its largest benefit: 274× measured at 2 000 bars, `window=200`, because the whole sliding-window pass runs inside one C++ call instead of re-entering Python per bar.
 
 ```python
 from standard_quant_tools.analysis import rolling_hurst
 
-returns = provider.get_ohlcv("SPY", "2018-01-01", "2024-01-01")["Close"].pct_change.dropna
+returns = provider.get_ohlcv("SPY", "2018-01-01", "2024-01-01")["Close"].pct_change().dropna()
 
 # window=252 (one trading year), step=5 to compute every 5 bars
 rolling = rolling_hurst(returns, window=252, step=5)
@@ -890,14 +883,14 @@ import numpy as np
 trending_mask = rolling > 0.55
 mean_rev_mask = rolling < 0.45
 
-print(f"Trending bars  : {trending_mask.sum}")
-print(f"Mean-rev bars  : {mean_rev_mask.sum}")
+print(f"Trending bars  : {trending_mask.sum()}")
+print(f"Mean-rev bars  : {mean_rev_mask.sum()}")
 
 # Fraction of time each regime was active
-total_valid = rolling.dropna
-print(f"Fraction trending   : {(total_valid > 0.55).mean:.1%}")
-print(f"Fraction mean-rev   : {(total_valid < 0.45).mean:.1%}")
-print(f"Fraction random walk: {((total_valid >= 0.45) & (total_valid <= 0.55)).mean:.1%}")
+total_valid = rolling.dropna()
+print(f"Fraction trending   : {(total_valid > 0.55).mean():.1%}")
+print(f"Fraction mean-rev   : {(total_valid < 0.45).mean():.1%}")
+print(f"Fraction random walk: {((total_valid >= 0.45) & (total_valid <= 0.55)).mean():.1%}")
 ```
 
 > **`step` parameter without C++** — setting `step > 1` skips bars and fills them with `NaN`, reducing total calls proportionally. Even without the C++ extension, `step=5` makes a 2 000-bar series ~5× faster. With the C++ extension the entire pass runs in one shot regardless of `step`, so `step` becomes a resolution choice rather than a performance lever.
@@ -907,7 +900,7 @@ print(f"Fraction random walk: {((total_valid >= 0.45) & (total_valid <= 0.55)).m
 ```python
 import plotly.graph_objects as go
 
-fig = go.Figure
+fig = go.Figure()
 fig.add_trace(go.Scatter(x=rolling.index, y=rolling, name="Rolling H (252d, step=5)"))
 fig.add_hline(y=0.55, line_dash="dash", line_color="green",
               annotation_text="Trending threshold")
@@ -916,7 +909,7 @@ fig.add_hline(y=0.45, line_dash="dash", line_color="red",
 fig.add_hline(y=0.50, line_dash="dot", line_color="gray",
               annotation_text="Random walk")
 fig.update_layout(title="Rolling Hurst Exponent — SPY", yaxis_title="H")
-fig.show
+fig.show()
 ```
 
 ---
@@ -930,9 +923,9 @@ from standard_quant_tools.analysis import hurst_exponent
 from standard_quant_tools.agent.tools import run_rsi_backtest, run_sma_backtest
 from standard_quant_tools.agent.models import BacktestInput
 
-provider = DataFactory.get_provider
+provider = DataFactory.get_provider()
 ticker, start, end = "MSFT", "2021-01-01", "2024-01-01"
-rets = provider.get_ohlcv(ticker, start, end)["Close"].pct_change.dropna
+rets = provider.get_ohlcv(ticker, start, end)["Close"].pct_change().dropna()
 result = hurst_exponent(rets)
 
 # `strategy_type` is a Literal, so it cannot be left blank and filled in
@@ -1033,7 +1026,7 @@ diversification_ratio(returns_df, weights=None)       # None = equal-weight; ret
 pairwise_correlation_summary(returns_df)               # dict: correlation_matrix, avg_pairwise_correlation, highest/lowest_correlated_pair
 ```
 
-Both require at least 2 asset columns in `returns_df`; raise `ValidationError` otherwise. Hierarchical clustering of the universe was considered but deliberately left out of this pass (would need an optional `scipy.cluster` dependency guard for marginal benefit).
+Both require at least 2 asset columns in `returns_df`; raise `ValidationError` otherwise. Neither clusters the universe: that lives in `portfolio.construction.hierarchical_risk_parity`, which does single-linkage on correlation distance `sqrt(0.5·(1−ρ))` without scipy and turns the tree into weights. See [05_portfolio.md](05_portfolio.md).
 
 ---
 
@@ -1103,7 +1096,7 @@ from standard_quant_tools.analysis.garch import garch_volatility_forecast
 garch_volatility_forecast(returns, forecast_horizon=10, periods_per_year=252)
 ```
 
-Returns a dict with fitted parameters (`omega`, `alpha`, `beta`, `persistence`), fit diagnostics (`converged`, `log_likelihood`, `aic`, `bic`), and volatility figures (`current_annualized_vol`, `long_run_annualized_vol`, `forecast_annualized_vol` — a closed-form geometric decay toward the long-run level, no loop needed for the forecast itself). Raises `ValidationError` below 100 observations (GARCH fits are unstable on small samples) or without scipy installed. Scope is GARCH(1,1) with normal innovations and a constant mean only — EGARCH/GJR-GARCH and Student-t innovations are real extensions, not built here.
+Returns a dict with fitted parameters (`omega`, `alpha`, `beta`, `persistence`), fit diagnostics (`converged`, `log_likelihood`, `aic`, `bic`), residual diagnostics (`ljung_box_p`, `ljung_box_squared_p`, `standardized_skew`, `standardized_kurtosis` — excess — and `misspecified`), the whole `conditional_variance` path on the returns' own index, and volatility figures (`current_annualized_vol`, `long_run_annualized_vol`, `forecast_annualized_vol` — a closed-form geometric decay toward the long-run level, no loop needed for the forecast itself). Raises `ValidationError` below 100 observations (GARCH fits are unstable on small samples) or without scipy installed. Scope is GARCH(1,1) with normal innovations and a constant mean only — EGARCH/GJR-GARCH and Student-t innovations are real extensions, not built here.
 
 ---
 
@@ -1120,6 +1113,13 @@ kalman_hedge_ratio(
 ```
 
 Returns a `pd.DataFrame` (`Hedge_Ratio`, `Intercept`, `Spread`, `Kalman_Gain` columns) indexed on the common index of the two series — matching `rolling_beta`'s DataFrame-return convention. `delta` is the one exposed tuning knob (smaller = slower-adapting, closer to a static ratio); as `delta → 0` the terminal `Hedge_Ratio` converges to `cointegration_test`'s static OLS `hedge_ratio` on the same pair. Deliberately **not** wired into `backtest.pairs.run_pair_backtest`, which still takes a single static `float` hedge ratio for the whole window.
+
+The `run_kalman_hedge_ratio` tool publishes this whole frame as an
+`analytic_frame` when `run_id` and `name` are given, returned as
+`path_ref` — the six scalars it reports inline are read off an 875-row
+path that used to be discarded. With `include_intercept=False` the
+`Intercept` column is all zero and the result says so in a warning, so a
+constraint of the fit is not read as a finding about the two legs.
 
 ---
 

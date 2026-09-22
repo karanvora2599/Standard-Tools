@@ -5,24 +5,28 @@ Pricing under four models, the second-order greeks that explain why a
 delta-hedged book still loses money, the internal consistency of a quoted
 surface, and what a hedge actually costs to run.
 
-`12_options.md` covers the pricing models themselves — Black-Scholes,
-Black-76, Bachelier, the binomial lattice — and is the right place to start
-if the question is "what does this option cost". This document is about
-everything that happens after that number exists.
+`12_options.md` is the reference for `analysis/options.py`: Black-Scholes-Merton
+pricing, greeks and implied volatility as library functions, with the unit
+conventions and the no-arbitrage bound check spelled out. The other three
+models `get_option_pricing` offers — Black-76, Bachelier, the binomial lattice
+— live in `analysis/pricing.py` and are described here. This document is about
+everything that happens after a price exists.
 
-## There is no options data provider, and that is deliberate
+## Nothing here fetches a chain, and that is deliberate
 
-Nothing here fetches a chain. Every tool takes quotes as arguments: a smile
-arrives as parallel lists of strikes and implied vols, a term structure as a
-mapping of expiry to volatility, an execution as a list of fills.
+Every tool takes quotes as arguments: a smile arrives as parallel lists of
+strikes and implied vols, a term structure as a mapping of expiry to
+volatility, an execution as a list of fills.
 
-The library has no options data source, and a tool that pretended otherwise
-would fetch equity prices and compute a "chain" that does not exist. Passing
-the quotes in has a second benefit that turns out to matter more: the same
-tools work on a hypothetical surface, which is most of what they are used
-for. Asking "what would this structure be worth if the skew steepened" is a
-more common question than "what is it worth right now", and it is one a
-chain-fetching tool could not answer at all.
+One option is fetchable — `fetch_ohlcv` with an OSI symbol
+(`AAPL  240119C00190000`) routes to Databento's OPRA feed. A *chain* is not:
+nothing turns an underlying and an expiry into the strikes that exist, so a
+tool that promised one would have to enumerate what no shipped provider
+serves. Passing the quotes in has a second benefit that turns out to matter
+more: the same tools work on a hypothetical surface, which is most of what
+they are used for. Asking "what would this structure be worth if the skew
+steepened" is a more common question than "what is it worth right now", and
+it is one a chain-fetching tool could not answer at all.
 
 ## The three misreadings these tools exist to prevent
 
@@ -39,9 +43,13 @@ volatility, a fraction of the underlying per year. Bachelier takes an
 Passing `0.30` to Bachelier on an $80 future means thirty cents of annual
 volatility, not 30%, and the resulting price is wrong by two orders of
 magnitude. No type system catches this: both are positive floats in the same
-range. `get_option_pricing` says so in its description and `12_options.md`
-says so at length, and it remains the easiest way to get a badly wrong
-number out of this library.
+range. `get_option_pricing` says so in its description, and it remains the
+easiest way to get a badly wrong number out of this library.
+
+Only the **binomial** lattice prices early exercise. `american=true` on any
+other model is refused by name rather than pricing a European option and
+letting the early-exercise premium go missing — which is largest exactly where
+it matters, deep in the money on a dividend payer.
 
 Bachelier also has **no dividend term** — it prices a forward-like normal
 underlying — so `price_option(model="bachelier", dividend_yield=...)` is
@@ -209,7 +217,7 @@ down-spot/up-vol diagonal rather than a row.
 
 | Tool | Answers |
 |---|---|
-| `get_option_pricing` | What is this option worth, under four models. A dividend yield or borrow rate may be negative within plus or minus ten, on every tool here, because a foreign rate or a convenience yield is one |
+| `get_option_pricing` | What is this option worth, under four models — and only the binomial lattice takes `american=true`. A dividend yield or borrow rate may be negative within plus or minus ten, on every tool here, because a foreign rate or a convenience yield is one |
 | `get_implied_volatility` | What volatility reproduces this price. A price at the no-arbitrage bound has no identifiable volatility: every value at or below the true one reproduces it, so the result carries `at_bound`, `price_error` and a warning that the number is a ceiling |
 | `get_option_greeks` | How does the risk change — vanna, volga, charm, speed |
 | `analyze_option_strategy` | Payoff, breakevens and aggregate greeks of an arbitrary multi-leg position |

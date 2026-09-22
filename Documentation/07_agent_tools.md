@@ -56,64 +56,34 @@ print(result)  # plain dict, JSON-ready
 
 ## Tool Registry
 
-`get_agent_tools()` returns **189 tool definitions** in the format both OpenAI and Anthropic expect. (That is the analysis surface; the separate `modeling` and `feature_lab` runtimes add 17 and 9 more, for 200 in total — see [15_modeling.md](15_modeling.md) and [19_runtimes.md](19_runtimes.md).) The schemas are derived automatically from Pydantic — no manual JSON authoring.
+`get_agent_tools()` returns **189 tool definitions** in the format both OpenAI and Anthropic expect. (That is the analysis surface; the separate `modeling` and `feature_lab` runtimes add 37 and 11 more, for 237 in total — see [15_modeling.md](15_modeling.md) and [19_runtimes.md](19_runtimes.md).) The schemas are derived automatically from Pydantic — no manual JSON authoring.
 
 ```python
 from standard_quant_tools.agent import get_agent_tools
 
 tools = get_agent_tools()
-print(len(tools))  # 174
+print(len(tools))  # 189
 
 # Each tool follows the OpenAI function-calling format:
 # {"type": "function", "function": {"name": ..., "description": ..., "parameters": <JSON Schema>}}
 for t in tools:
     print(t["function"]["name"], "—", t["function"]["description"])
-# run_sma_backtest      — SMA crossover backtest.
-# run_rsi_backtest      — RSI mean-reversion backtest.
-# run_macd_backtest     — MACD crossover backtest.
-# run_bollinger_backtest — Bollinger Band mean-reversion backtest.
-# run_buy_and_hold      — Buy-and-hold baseline: long the full period. Use as a passive benchmark.
-# compare_strategies    — Run all four strategies on the same symbol and return ranked results vs buy-and-hold.
-# analyze_stock_risk    — Full risk analysis: alpha, beta, Sharpe, VaR, CVaR.
-# get_technical_analysis — Compute configurable technical indicators.
-# get_portfolio_analysis — Multi-asset portfolio metrics.
-# run_screener          — Filter a stock universe by fundamental and technical criteria.
-# run_factor_regression — Multi-factor OLS regression: alpha, loadings, t-stats, p-values, R².
-# run_cointegration_test — Engle-Granger cointegration: hedge ratio, half-life, spread z-score signal.
-# run_pca_analysis      — PCA on multi-asset returns: explained variance, loadings, factor contributions.
-# run_hurst_analysis    — Hurst exponent (DFA/R-S): regime classification and optional rolling breakdown.
-# run_regime_adaptive_backtest — Classify market regime via Hurst, auto-select and optimise the best strategy.
-# scan_pairs            — Scan a ticker universe for cointegrated pairs, ranked by half-life.
-# run_walk_forward_backtest — Walk-forward validation: optimise in-sample, evaluate out-of-sample, return OOS stats.
-# get_portfolio_risk_attribution — Deep portfolio risk decomposition: MCR per asset, PCA attribution, optional factor model.
-# get_position_size     — ATR-based position sizing with optional Kelly criterion.
-# get_stock_fundamentals — Fetch company metadata and key financial ratios (PE, P/B, debt/equity, ROE, market cap).
-# run_backtest_optimization — Grid-search strategy parameters and return the top N combinations ranked by a chosen metric.
-# get_advanced_indicators — Compute Parabolic SAR (trend), Wilder ATR (volatility), and MFI (volume-flow oscillator).
-# get_rolling_beta      — Compute rolling OLS beta to detect beta drift over time vs a benchmark.
-# get_extended_risk_metrics — Extended risk: Calmar ratio, Treynor ratio, parametric VaR 95/99, historical VaR 99, CVaR 99.
-# run_custom_signal_backtest — Backtest a signal computed outside this library (your own alpha model) on one symbol.
-# run_signal_panel_backtest — Backtest a pre-computed signal panel across a ticker universe, combined into portfolio metrics.
-# run_regime_adaptive_walkforward_backtest — Leakage-free regime-adaptive backtest: regime/strategy/parameter selection per walk-forward window, evaluated strictly out-of-sample.
-# get_backtest_diagnostics — Extended diagnostics for a built-in strategy: top drawdown episodes, trade expectancy/payoff/streaks with MAE/MFE, and exposure stats.
-# run_portfolio_simulation — True shared-cash portfolio simulation with rebalancing at target-weight dates.
-# run_pair_trade_backtest — Backtest a cointegrated pair as one synchronized two-leg trade sharing a single cash account.
-# get_robustness_diagnostics — Same-sample robustness checks for a grid search: parameter sensitivity, Deflated Sharpe Ratio, block-bootstrap CI.
-# get_capacity_report — How much account size a target-weight portfolio can support before positions outgrow each ticker's own trading volume.
-# get_data_quality_report — Dataset provenance plus missing-bar/stale-price/price-jump detection on a symbol's OHLCV.
-# run_backtest_compact — Compact backtest result: summary/risk/exposure/cost sub-reports plus equity-curve/trade-log artifact URIs.
-# run_portfolio_optimization — Produce portfolio weights via Markowitz mean-variance, risk parity, or Black-Litterman.
-# get_option_pricing    — Black-Scholes-Merton price and Greeks for a European option.
-# get_implied_volatility — Solve for Black-Scholes-Merton implied volatility from an observed option price.
-# (get_agent_tools() also includes get_volatility_estimators, get_correlation_analysis,
-#  run_monte_carlo_simulation, run_stress_test, get_liquidity_metrics,
-#  run_garch_volatility_forecast, run_kalman_hedge_ratio, and get_tail_risk_metrics
-#  — see 09_advanced_agent_tools.md)
 
 # Inspect the parameter schema for any tool:
 import json
 print(json.dumps(tools[0]["function"]["parameters"], indent=2))
 ```
+
+**The catalogue itself is not kept here.** Every tool name, the runtime that
+owns it, its required and optional parameters, and the exact description the
+model reads are in [20_tool_index.md](20_tool_index.md), which is regenerated
+from the live registry and fails the test suite if it drifts. A hand-copied
+list beside it can only be wrong later. This guide covers the fourteen core
+tools in depth — what each is for, how to read its output, and how they
+chain; [09_advanced_agent_tools.md](09_advanced_agent_tools.md) does the same
+for the rest of the backtest/portfolio/analytics surface, and
+[19_runtimes.md](19_runtimes.md) explains the ten execution boundaries the
+tools are split across.
 
 ### Dispatch — the recommended wiring approach
 
@@ -128,7 +98,7 @@ result = dispatch("analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY"})
 ```
 
 Errors:
-- **`ValueError`** — unknown tool name; message lists all 46 valid names.
+- **`ValueError`** — unknown tool name; message lists all 189 valid names.
 - **`pydantic.ValidationError`** — arguments don't match the tool's input schema (bad types, missing required fields).
 
 Every call through `dispatch()` can also produce an auditable decision record — inputs, data provenance, and an output hash, replayable later to check whether the result would still reproduce. See [10_auditability.md](10_auditability.md).
@@ -207,7 +177,13 @@ while True:
 
 ### Recommended system prompt
 
-Tell the model what tools are available and how to use them together:
+Tell the model what tools are available and how to use them together.
+
+The list below is a working subset chosen for a single-agent loop, not the
+whole surface. A prompt that tries to enumerate all 189 stops being
+maintainable the day a tool is added; scope the model with a runtime instead
+(see [19_runtimes.md](19_runtimes.md)) and let
+[20_tool_index.md](20_tool_index.md) carry the full catalogue.
 
 ```python
 SYSTEM = """
@@ -531,7 +507,7 @@ parameters={"fast": 5, "slow": 35, "signal": 5}
 
 **When to use:** Range-bound, oscillating instruments. Highly effective on commodity ETFs (GLD, USO), bond ETFs (TLT), and defensive sectors. Poor on strongly trending stocks.
 
-**Signal logic:** Enter long when the closing price touches or crosses below the lower band. Exit when price returns to the middle band (the 20-day SMA). Position is held between these events regardless of how many bars it takes.
+**Signal logic:** Enter long when the closing price touches or crosses below the lower band. Exit when price returns to the middle band (the `period`-bar SMA, 20 by default). Position is held between these events regardless of how many bars it takes.
 
 ```python
 from standard_quant_tools.agent.tools import run_bollinger_backtest
@@ -582,7 +558,8 @@ inp = BacktestInput(
     symbol="AAPL",               # Required: ticker symbol
     start_date="2020-01-01",     # Required: ISO date string
     end_date="2024-01-01",       # Required: ISO date string
-    strategy_type="sma_crossover",  # Required: strategy key (informational only)
+    strategy_type="sma_crossover",  # Required: and it DECIDES which strategy runs —
+                                    #   see the note below. Not a label.
     parameters={                 # Optional: strategy-specific params (see each tool)
         "fast_period": 10,
         "slow_period": 50,
@@ -590,7 +567,9 @@ inp = BacktestInput(
     initial_capital=10_000.0,    # Optional: default $10,000
     commission_pct=0.001,        # Optional: fraction per trade side (default 0.1%)
     slippage_pct=0.0005,         # Optional: fraction per trade side (default 0.05%)
-    fill_price="close",          # Optional: "close" (default) or "next_open" — see below
+    fill_price="close",          # Optional: "close" (default), "next_open", "hl2_exploratory"
+    risk_free_rate=0.0,          # Optional: annual rate the Sharpe/Sortino excess is measured
+                                 #   against (default 0.0 — a 0% cash rate, which flatters both)
 )
 
 # All BacktestResult fields:
@@ -608,12 +587,25 @@ result.avg_trade_return_pct   # Average per-trade P&L in percent
 result.final_equity           # Portfolio value at end date
 result.equity_curve           # List[float] — daily portfolio value
 result.trade_log              # Optional[List[Trade]] — per-trade details
+result.warnings               # List[str] — what the result knows that the numbers
+                              #   do not say: the engine's split screen, the
+                              #   fill_price look-ahead caveat, too few trades
+
+# strategy_type names the strategy that ACTUALLY RUNS. The four tools below each
+# default to their namesake when the field is somehow absent, but the field is
+# required and the tool honours it: run_sma_backtest(strategy_type="adx_trend")
+# runs adx_trend. It accepts sma_crossover, rsi_mean_reversion, macd_crossover,
+# bollinger_reversion, donchian_breakout, momentum_timeseries, vwap_reversion,
+# adx_trend and buy_and_hold. custom_signal is refused by name — that one
+# supplies its own series, so use run_custom_signal_backtest.
 
 # fill_price controls execution timing:
 #   "close" (default) — signal known at bar t-1's close is filled at that same close.
 #   "next_open" — more conservative; entries/exits/holds are priced off the bar's own
 #                 Open where relevant (see run_strategy's docstring for the exact
 #                 overnight/intraday decomposition).
+#   "hl2_exploratory" — that bar's own (High + Low) / 2. Not a bid/ask midpoint and
+#                 only knowable after the bar completed; exploratory use only.
 
 # Quick benchmarking table — what's "good":
 # Sharpe > 1.0     acceptable  |  > 2.0 excellent
@@ -688,7 +680,8 @@ print(f"Final Equity : ${result.final_equity:,.0f}")
 | `initial_capital` | float | `10_000.0` | Starting equity |
 | `commission_pct` | float | `0.001` | One-time buy commission fraction |
 | `slippage_pct` | float | `0.0005` | One-time buy slippage fraction |
-| `fill_price` | str | `"close"` | `"close"` (default) or `"next_open"` — see `BacktestInput.fill_price` |
+| `fill_price` | str | `"close"` | `"close"` (default), `"next_open"`, `"hl2_exploratory"` — see `BacktestInput.fill_price` |
+| `risk_free_rate` | float | `0.0` | Annual rate the Sharpe/Sortino excess is measured against |
 
 **Output:** `BacktestResult` — same schema as active strategy backtests. See the full reference above.
 
@@ -727,12 +720,13 @@ for s in result.strategies:
 | `initial_capital` | float | `10_000.0` | Starting equity |
 | `commission_pct` | float | `0.001` | Commission fraction per trade side |
 | `slippage_pct` | float | `0.0005` | Slippage fraction per trade side |
-| `sort_by` | str | `"sharpe_ratio"` | Metric to rank by: `total_return`, `sharpe_ratio`, `sortino_ratio`, `calmar_ratio`, `max_drawdown` |
+| `sort_by` | str | `"sharpe_ratio"` | Metric to rank by: `sharpe_ratio`, `sortino_ratio`, `calmar_ratio`, `total_return`, `profit_factor`, `win_rate`, `max_drawdown`, `annualized_volatility`, `avg_trade_return_pct`, `num_trades`. `annualized_volatility` ranks *ascending* — the least volatile combination wins — because for that one metric the smallest value is the best one; every other metric ranks descending |
 | `sma_parameters` | dict\|None | `None` | Override default SMA params |
 | `rsi_parameters` | dict\|None | `None` | Override default RSI params |
 | `macd_parameters` | dict\|None | `None` | Override default MACD params |
 | `bollinger_parameters` | dict\|None | `None` | Override default Bollinger params |
-| `fill_price` | str | `"close"` | `"close"` (default) or `"next_open"` — see `BacktestInput.fill_price` |
+| `fill_price` | str | `"close"` | `"close"` (default), `"next_open"`, `"hl2_exploratory"` — see `BacktestInput.fill_price` |
+| `risk_free_rate` | float | `0.0` | Annual rate the Sharpe/Sortino excess is measured against — it sets the *ranking*, not just the number beside each row |
 
 **Output:** `CompareStrategiesResult`
 
@@ -744,7 +738,7 @@ for s in result.strategies:
 | `buy_and_hold_return` | float | Passive baseline total return |
 | `strategies` | List[StrategyComparison] | All four strategies, sorted best first |
 
-**`StrategyComparison` fields:** `strategy`, `parameters`, `total_return`, `sharpe_ratio`, `sortino_ratio`, `max_drawdown`, `calmar_ratio`, `win_rate`, `num_trades`, `final_equity`
+**`StrategyComparison` fields:** `strategy`, `parameters`, `total_return`, `sharpe_ratio`, `sortino_ratio`, `max_drawdown`, `calmar_ratio`, `win_rate`, `num_trades`, `final_equity`, `annualized_volatility`, `profit_factor`, `avg_trade_return_pct` — the last three carry the metrics `sort_by` offers, so ranking by one of them is a real ordering rather than a tie between rows that all read zero.
 
 **Custom parameter grids:**
 
@@ -775,7 +769,8 @@ from standard_quant_tools.agent.models import AnalysisInput
 result = analyze_stock_risk(AnalysisInput(
     symbol="NVDA",
     benchmark="SPY",   # Default. Use "QQQ" for tech comparison, "GLD" for commodity
-    period="2y",       # "6mo", "1y", "2y", "3y", or "Nd" for N days
+    period="2y",       # <number><unit>, unit one of d/w/mo/y: "30d", "4w", "6mo", "2y".
+                       # Default "1y". Anything else is refused by name, not guessed at.
 ))
 
 print(f"Alpha            : {result.alpha:.4f}")        # Daily excess return vs benchmark
@@ -1072,7 +1067,11 @@ print(f"Survivors: {result.tickers_passed}")
 print(json.dumps(result.model_dump(), indent=2))
 ```
 
-**Distinguishing "didn't pass" from "couldn't be evaluated":** a ticker missing from `tickers_passed` isn't necessarily one that failed a filter. `result.failed_filters` (`ticker -> filter key`) names genuine rejections; `result.failed_tickers` (`ticker -> error message`) is a separate bucket for data-fetch/compute exceptions, so a broken fetch is never silently indistinguishable from a ticker that simply didn't meet the bar. When `n_workers > 1`, `result.failed_batches` also carries any worker-process error that prevented an entire batch from returning results.
+**Distinguishing "didn't pass" from "couldn't be evaluated":** a ticker missing from `tickers_passed` isn't necessarily one that failed a filter. `result.failed_filters` (`ticker -> filter key`) names genuine rejections; `result.failed_tickers` (`ticker -> error message`) is a separate bucket for data-fetch/compute exceptions, so a broken fetch is never silently indistinguishable from a ticker that simply didn't meet the bar. `result.failed_batches` carries any worker-process error that prevented a whole batch from returning results, and `result.warnings` says what the numbers do not — most often that nothing passed, so a requested ordering sorted nothing.
+
+**`sort_by` is checked against the real result.** Which columns a screen produces depends on which filters ran: `rsi_14` only exists when an `rsi_max`/`rsi_min` filter asked for it, and `forward_pe`/`dividend_yield`/`market_cap` only when a fundamental filter did. A `sort_by` naming a column this screen did not produce is **refused** by name — with the columns the passing rows actually carry — rather than silently returning input order wearing the appearance of a ranking. Pass `sort_by=None` for input order.
+
+**Two inputs that are not filters:** `source` picks the provider for the bars the technical filters read (a bars-only provider fails the fundamental tickers by name), and `min_beta_obs` (default 20) is the minimum shared history a ticker needs before a `beta_max`/`beta_min` filter acts on its estimate — below it the ticker lands in `failed_tickers` rather than being given a beta of 0.0, which would *pass* a `beta_max` screen by reading "could not be estimated" as "very low beta".
 
 **All supported filters:**
 
@@ -1251,51 +1250,10 @@ from standard_quant_tools.agent import get_agent_tools, dispatch
 
 # ── Agent loop ────────────────────────────────────────────────────────────────
 
-SYSTEM = """
-You are a quantitative investment analyst. You have access to a 189-tool
-financial toolkit; the ones covered here are the most commonly used (see
-09_advanced_agent_tools.md for the remaining execution/diagnostic tools):
-
-Core (14): run_sma_backtest, run_rsi_backtest, run_macd_backtest,
-run_bollinger_backtest, run_buy_and_hold (passive baseline),
-compare_strategies (rank all 4 strategies in one call),
-analyze_stock_risk, get_technical_analysis, get_portfolio_analysis,
-run_screener, run_factor_regression, run_cointegration_test,
-run_pca_analysis, run_hurst_analysis.
-
-Advanced (5): run_regime_adaptive_backtest (Hurst + grid search in one call),
-scan_pairs (find cointegrated pairs in a universe), run_walk_forward_backtest
-(OOS validation), get_portfolio_risk_attribution (MCR + PCA decomposition),
-get_position_size (ATR stop-loss + optional Kelly sizing).
-
-Supplementary (6): get_stock_fundamentals (PE, P/B, D/E, ROE, market cap),
-run_backtest_optimization (exhaustive parameter grid search, top N combos),
-get_advanced_indicators (Parabolic SAR, Wilder ATR, MFI),
-get_rolling_beta (rolling OLS beta drift over time),
-get_extended_risk_metrics (Calmar, Treynor, parametric VaR 95/99, CVaR 99),
-get_backtest_diagnostics (drawdown episodes, trade expectancy/MAE-MFE, exposure stats).
-
-Custom signal (2): run_custom_signal_backtest (backtest a signal the user/an
-upstream model already computed — never one you invent), run_signal_panel_backtest
-(same idea across a ticker universe, combined into portfolio metrics).
-
-Guidelines:
-- Screen first if a broad universe is mentioned.
-- Use compare_strategies for multi-strategy comparison; run_buy_and_hold
-  as the passive reference when evaluating any single active strategy.
-- Use run_regime_adaptive_backtest for single-click regime detection + strategy.
-- Use scan_pairs before run_cointegration_test to narrow candidates.
-- Use run_walk_forward_backtest to validate before recommending capital deployment.
-- Use get_position_size after a backtest to size the trade.
-- Use get_stock_fundamentals early in any fundamental workflow.
-- Use run_backtest_optimization to find best params before running a single backtest.
-- Use get_extended_risk_metrics alongside analyze_stock_risk for a full risk picture.
-- Use run_custom_signal_backtest / run_signal_panel_backtest whenever the user
-  supplies their own signal — do not substitute a built-in strategy for it.
-- Always use at least 2 years of data for backtests.
-- Interpret all numbers — translate Sharpe ratios, drawdowns, and betas into
-  plain English before responding.
-"""
+# SYSTEM is the prompt from "Recommended system prompt" above. Keep one copy,
+# in one place — a second edited copy is the fastest way to get a prompt that
+# advertises a tool the loop no longer passes.
+SYSTEM = """..."""
 
 
 def run_agent(user_message: str, max_turns: int = 10) -> str:
@@ -1728,13 +1686,18 @@ for ticker, contribs in result.factor_contributions.items():
 | `start_date` | str | — | ISO date |
 | `end_date` | str | — | ISO date |
 | `n_components` | int | 3 | Number of PCs to extract (≤ number of tickers) |
+| `standardize` | bool | `True` | Z-score each asset's returns first, so the components describe **correlation** structure. `False` leaves them driven by whichever asset happens to be most volatile — a different question |
+| `method` | str | `"svd"` | `"svd"` is exact; `"power_iteration"` is iterative and cheaper on a wide universe when only the leading components matter |
+| `run_id` / `name` | str? | `None` | Both or neither — one alone is refused. Publishes the PC **scores** (the factor return series, one column per component) as a `returns_panel` reference, returned as `factor_returns_ref` |
 
 **Interpreting output:**
 
 - **`explained_variance_ratio`**: Fraction of total return variance each PC captures. A PC1 of 0.60+ means a single market factor dominates — the portfolio is concentrated.
+- **`explained_variance_ratio_full`**: The whole spectrum in order, not just the `n_components` kept, so its entries sum to 1. `explained_variance_ratio` is its prefix — without the rest there is no telling a third component carrying 4% of a remaining 6% from one carrying 4% of a remaining 40%.
 - **`cumulative_variance_ratio`**: Cumulative coverage. If PC1 + PC2 covers 90%, a 2-factor model is sufficient.
 - **`loadings`**: Each column is an eigenvector (the PC). High loadings on many tech stocks → PC = "tech factor". Opposite signs → contrast factor (growth vs value).
-- **`factor_contributions`**: How much of each asset's return variance each PC explains. An asset with low PC1 contribution is largely driven by idiosyncratic factors.
+- **`factor_contributions`**: How much of each asset's return variance each PC explains, from the same decomposition the loadings come from. An asset with low PC1 contribution is largely driven by idiosyncratic factors.
+- **`factor_returns_ref`**: `sqt://returns_panel/...` for the PC scores, null unless `run_id`/`name` were given. A score series *is* a return series, so it resolves into anything that scores returns.
 
 **Diagnosing hidden concentration in a portfolio:**
 
@@ -1885,6 +1848,8 @@ if result.rolling_current is not None:
 | `end_date` | str | — | ISO date |
 | `method` | `Literal["dfa","rs"]` | `"dfa"` | `"dfa"` (Detrended Fluctuation Analysis) or `"rs"` (Rescaled Range) — any other value is rejected at input validation with a Pydantic error, not silently treated as `"rs"` |
 | `rolling_window` | int | None | If set, compute rolling Hurst and return regime fractions |
+| `min_window` | int | 10 | Smallest scale in the log-log fit. The exponent is the *slope across scales*, so the range is not a detail: too small a floor lets microstructure noise flatten it toward 0.5, which the regime call downstream reads as `random_walk` |
+| `max_window` | int? | None | Largest scale in the fit. `None` lets the estimator choose from the series length |
 
 **Regime table:**
 
@@ -2059,159 +2024,73 @@ print(f"Example params: {playbook['example_params']}")
 
 ## Model Summary
 
-### Input Models
+The tools' input and output models live in `agent/models.py`, and every
+tool's **required and optional parameter names** are listed per tool in
+[20_tool_index.md](20_tool_index.md), regenerated from the live registry.
+Neither is restated here, because a second hand-maintained copy of a
+schema is a copy that goes quietly wrong. What this section keeps is what
+the schema listing cannot say: the cross-field rules, and the three places
+where a field's *name* does not tell you what it holds.
 
-**Backtest tools (3 models, covering 6 tools — `BacktestInput` is shared by `run_sma_backtest`/`run_rsi_backtest`/`run_macd_backtest`/`run_bollinger_backtest`)**
+Default values are in the per-tool tables above and in each model's field
+descriptions, which are the same strings the JSON Schema hands the model.
 
-| Model | Required | Optional (with defaults) |
-|---|---|---|
-| `BacktestInput` | `symbol`, `start_date`, `end_date`, `strategy_type` | `parameters={}`, `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005`, `fill_price="close"` |
-| `BuyAndHoldInput` | `symbol`, `start_date`, `end_date` | `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005`, `fill_price="close"` |
-| `CompareStrategiesInput` | `symbol`, `start_date`, `end_date` | `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005`, `sort_by="sharpe_ratio"`, `sma/rsi/macd/bollinger_parameters=None`, `fill_price="close"` |
-
-**Analysis tools (8)**
-
-| Model | Required | Optional (with defaults) |
-|---|---|---|
-| `AnalysisInput` | `symbol` | `benchmark="SPY"`, `period="1y"` |
-| `TechnicalInput` | `symbol`, `start_date`, `end_date` | `indicators=["rsi","macd","bollinger","atr"]` |
-| `PortfolioInput` | `tickers`, `weights`, `start_date`, `end_date` | `benchmark="SPY"` |
-| `ScreenerInput` | `tickers`, `filters` | `start_date`, `end_date`, `sort_by=None`, `ascending=True` |
-| `FactorRegressionInput` | `symbol`, `factor_tickers`, `start_date`, `end_date` | `factor_names=None`, `rolling_window=None` |
-| `CointegrationInput` | `symbol_a`, `symbol_b`, `start_date`, `end_date` | `zscore_window=30` |
-| `PCAInput` | `tickers`, `start_date`, `end_date` | `n_components=3` (must be ≥ 1) |
-| `HurstInput` | `symbol`, `start_date`, `end_date` | `method="dfa"` (`"dfa"`/`"rs"`, strictly validated), `rolling_window=None` |
-
-**Advanced tools (8)**
-
-| Model | Required | Optional (with defaults) |
-|---|---|---|
-| `PortfolioOptimizationInput` | `tickers`, `start_date`, `end_date` | `method="max_sharpe"` (`"max_sharpe"`/`"min_volatility"`/`"target_return"`/`"target_volatility"`/`"risk_parity"`/`"black_litterman"`), `risk_free_rate=0.0`, `target_return=None`, `target_volatility=None`, `allow_short=False`, `max_weight=None`, `risk_budget=None`, `market_weights=None`, `views=None` (`List[BLViewInput]`), `risk_aversion=2.5`, `tau=0.05`, `periods_per_year=252` — see 09_advanced_agent_tools.md and 05_portfolio.md for the per-method requirements |
-| `RegimeAdaptiveInput` | `symbol`, `start_date`, `end_date` | `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005`, `hurst_method="dfa"` (`"dfa"`/`"rs"`, strictly validated), `sma/rsi/macd/bollinger_param_grid=None`, `n_workers=1` |
-| `RegimeAdaptiveWalkForwardInput` | `symbol`, `start_date`, `end_date` | `train_bars=252`, `test_bars=63`, `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005`, `hurst_method="dfa"` (`"dfa"`/`"rs"`, strictly validated), `sma/rsi/macd/bollinger_param_grid=None`, `sort_by="sharpe_ratio"`, `fill_price="close"` (`"close"`/`"next_open"`/`"hl2_exploratory"`, applied to each window's OOS leg) |
-| `PairScannerInput` | `tickers`, `start_date`, `end_date` | `max_pairs=10`, `min_half_life=5.0`, `max_half_life=126.0`, `p_value_threshold=0.05`, `zscore_window=30` |
-| `WalkForwardInput` | `symbol`, `start_date`, `end_date`, `strategy`, `param_grid` | `train_bars=252`, `test_bars=63`, `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005`, `sort_by="sharpe_ratio"`, `fill_price="close"` (`"close"`/`"next_open"`/`"hl2_exploratory"`, applied to each window's OOS leg) |
-| `RiskAttributionInput` | `tickers`, `weights`, `start_date`, `end_date` | `benchmark="SPY"`, `n_components=3`, `factor_tickers=None`, `factor_names=None` |
-| `PositionSizerInput` | `symbol`, `start_date`, `end_date`, `account_equity` | `risk_per_trade_pct=0.01` (must be in (0,1]), `atr_period=14`, `atr_multiplier=2.0`, `win_rate=None`, `avg_win_pct=None`, `avg_loss_pct=None` |
-| `PortfolioSimulationInput` | `tickers`, `start_date`, `end_date`, `target_weights` | `signal_type="target_weight"`, `construction_method=None`, `gross_leverage=1.0`, `n_long=None`, `n_short=None`, `vol_lookback=20`, `make_dollar_neutral=False`, `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005`, `max_gross_leverage=1.0`, `max_position_pct=1.0`, `fill_price="close"` (`"close"`/`"next_open"`/`"hl2_exploratory"`), `commission_model="pct"`, `per_share_rate=0.0`, `min_commission=0.0`, `use_impact_model=False`, `impact_coefficient=1.0`, `impact_lookback=20`, `borrow_fee_bps=0.0`, `margin_interest_rate=0.0`, `max_adv_participation=None`, `benchmark=None` — see 09_advanced_agent_tools.md for how the cost-model and construction-method fields interact |
-
-**Supplementary tools (6)**
-
-| Model | Required | Optional (with defaults) |
-|---|---|---|
-| `FundamentalsInput` | `symbol` | — |
-| `BacktestOptInput` | `symbol`, `start_date`, `end_date`, `strategy`, `param_grid` | `initial_capital=10000`, `sort_by="sharpe_ratio"`, `top_n=5`, `n_workers=1`, `fill_price="close"` |
-| `AdvancedIndicatorsInput` | `symbol`, `start_date`, `end_date` | `mfi_period=14`, `atr_period=14`, `sar_af_start=0.02`, `sar_af_max=0.2` |
-| `RollingBetaInput` | `symbol`, `start_date`, `end_date` | `benchmark="SPY"`, `window=60` |
-| `ExtendedRiskInput` | `symbol`, `start_date`, `end_date` | `benchmark="SPY"` |
-| `BacktestDiagnosticsInput` | `symbol`, `start_date`, `end_date`, `strategy_type` | `parameters={}`, `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005`, `top_n_drawdowns=5`, `fill_price="close"` |
-
-**Custom signal tools (2)**
-
-| Model | Required | Optional (with defaults) |
-|---|---|---|
-| `CustomSignalBacktestInput` | `symbol`, `start_date`, `end_date`, `signals` (`{date: value}`) | `signal_type="direction"`, `max_abs_weight=1.0`, `signal_fill_policy="hold"`, `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005`, `fill_price="close"` |
-| `SignalPanelBacktestInput` | `tickers`, `start_date`, `end_date`, `signal_panel` (`{ticker: {date: value}}`) | `weights=None` (equal weight), `signal_fill_policy="hold"`, `initial_capital=10000`, `commission_pct=0.001`, `slippage_pct=0.0005`, `benchmark=None`, `include_trade_log=False`, `fill_price="close"`, `signal_type="score"`, `max_abs_weight=1.0` |
-
-**Options tools (2)** — see [12_options.md](12_options.md)
-
-| Model | Required | Optional (with defaults) |
-|---|---|---|
-| `OptionPricingInput` | `spot`, `strike`, `time_to_expiry`, `risk_free_rate`, `volatility` | `option_type="call"` (`"call"`/`"put"`), `dividend_yield=0.0` |
-| `ImpliedVolatilityInput` | `option_price`, `spot`, `strike`, `time_to_expiry`, `risk_free_rate` | `option_type="call"`, `dividend_yield=0.0` |
+**The one nested input model.** `PortfolioOptimizationInput.views` is a list
+of `BLViewInput`, the only place on this surface where a parameter is a model
+rather than a scalar or a mapping. Each view carries `assets`
+(ticker → pick coefficient: `{"AAPL": 1.0}` is an absolute view on AAPL,
+`{"AAPL": 1.0, "MSFT": -1.0}` a relative one — "AAPL will outperform MSFT by
+`view_return`"), `view_return` (the annualized return the view implies) and
+`confidence` (default `1.0`, the standard He-Litterman view uncertainty;
+lower values widen it proportionally so the view moves the posterior less).
+It pairs with `market_weights` (ticker → prior/market-cap weight, `None` for
+equal weight), and both belong to `method="black_litterman"` alone, which
+requires at least one view — see [05_portfolio.md](05_portfolio.md) for what
+the posterior does with them, and `view_absorption` in the result for how much
+of each stated spread actually survived.
 
 **`signal_type` — what a custom signal's values mean, opt-in validation:**
 
 | `signal_type` | Meaning | Validation |
 |---|---|---|
-| `"score"` | Unrestricted — you own the scale/leverage semantics | None — exactly today's original permissive behavior |
+| `"score"` | Unrestricted — you own the scale/leverage semantics | None |
 | `"direction"` (default for `CustomSignalBacktestInput`) | Position direction | Every value must be exactly `-1`, `0`, or `1` |
 | `"target_weight"` | Portfolio weight for this position | Every `\|value\|` must be ≤ `max_abs_weight` (default `1.0`) |
 
-`run_strategy`'s math never changes based on `signal_type` — it always multiplies the (lagged) signal value by the bar's return: `strategy_return = lagged_signal * market_return`. Under `"score"`, that value is a literal leverage multiplier (a value of 10 means a 10x position), not a normalized "confidence score" — which is why `CustomSignalBacktestInput` defaults to `"direction"` rather than `"score"`: an LLM-facing single-asset tool should not silently accept an arbitrary score as if it were a bounded confidence value (an approved breaking change from the prior default). `SignalPanelBacktestInput` and `PortfolioSimulationInput` still default to `"score"`, because in both of those a score is converted into a bounded weight via an explicit `construction_method` (`backtest/sizing.py`) before it ever reaches a return calculation, so the same hazard doesn't apply. `signal_type` only controls whether malformed values are rejected up front with a Pydantic `ValidationError` naming the offending date/ticker/value, instead of silently backtesting a typo. For `SignalPanelBacktestInput`, the chosen mode applies uniformly across every ticker in `signal_panel`, and validation errors name which ticker failed.
+`run_strategy`'s math never changes based on `signal_type` — it always multiplies the (lagged) signal value by the bar's return: `strategy_return = lagged_signal * market_return`. Under `"score"`, that value is a literal leverage multiplier (a value of 10 means a 10x position), not a normalized "confidence score" — which is why `CustomSignalBacktestInput` defaults to `"direction"` rather than `"score"`: an LLM-facing single-asset tool should not silently accept an arbitrary score as if it were a bounded confidence value. `SignalPanelBacktestInput` defaults to `"score"`, because there a score is converted into a bounded weight via an explicit `construction_method` (`backtest/sizing.py`) before it ever reaches a return calculation, so the same hazard doesn't apply; `PortfolioSimulationInput` defaults to `"target_weight"`, since its values are already portfolio weights. `signal_type` only controls whether malformed values are rejected up front with a Pydantic `ValidationError` naming the offending date/ticker/value, instead of silently backtesting a typo. For `SignalPanelBacktestInput`, the chosen mode applies uniformly across every ticker in `signal_panel`, and validation errors name which ticker failed.
 
 **Validation rules (Pydantic v2):**
 - `PortfolioInput` and `RiskAttributionInput`: `weights` must sum to 1.0 and `len(weights) == len(tickers)`.
 - `PCAInput`: `n_components` must be ≥ 1.
 - `PositionSizerInput`: `risk_per_trade_pct` must be in (0, 1].
-- `SignalPanelBacktestInput`: `signal_panel` must have an entry for every ticker in `tickers`; if `weights` is given, its keys must exactly match `tickers` and sum to 1.0.
+- `SignalPanelBacktestInput`: exactly one of `signal_panel` (inline) or `signal_panel_ref` (a published panel reference) — both would leave it ambiguous which one ran. The panel must have an entry for every ticker in `tickers`; if `weights` is given, its keys must exactly match `tickers` and sum to 1.0.
 - `CustomSignalBacktestInput` / `SignalPanelBacktestInput`: signal values must satisfy `signal_type`'s constraint (see table above).
-- `PortfolioSimulationInput`: `target_weights` must have an entry for every ticker in `tickers`, and every ticker must share the identical set of rebalance dates. When `signal_type="target_weight"` (default), each date's weights must also satisfy the `target_weight` constraint and gross leverage must not exceed `max_gross_leverage`. When `signal_type="score"`, `construction_method` is required (and `n_long`/`n_short` are required when it is `"equal_weight_top_bottom"`).
+- `PortfolioSimulationInput`: supply `target_weights` inline or a `target_weights_ref` pointing at a published `weight_panel`/`score_panel` (the kind must match `signal_type`), not both. The panel must have an entry for every ticker in `tickers`, and every ticker must share the identical set of rebalance dates. When `signal_type="target_weight"` (default), each date's weights must also satisfy the `target_weight` constraint and gross leverage must not exceed `max_gross_leverage`. When `signal_type="score"`, `construction_method` is required (and `n_long`/`n_short` are required when it is `"equal_weight_top_bottom"`).
 
-### Output Models
+### Three fields whose name is not the whole story
 
-**Backtest tools**
+- **`Trade.entry_price`** is the weighted-average cost basis over the lot — a
+  computed basis, not necessarily a level that traded. **`Trade.position_size`**
+  is the lot's **peak** signed exposure (1.0/−1.0 for `direction`, fractional
+  or leveraged for `score`, and the largest size held if the lot was resized);
+  `return_pct` scales with it.
+- **`OptionGreeks.vega`** is per 1.0 of volatility, not per volatility point,
+  and **`theta`** is per year, not per day. Both are the raw Black-Scholes
+  derivatives; scale them yourself if you want the trader's convention.
+- **`ImpliedVolatilityResult.converged`** is about the volatility step
+  (`tol_sigma`), never a price tolerance alone. **`at_bound`** says the
+  observed price sits at the no-arbitrage bound, so the returned volatility is
+  a *ceiling* rather than an estimate — read it together with `price_error`
+  before treating the number as an implied vol. A deep-in-the-money price has
+  no identifiable volatility, and this is how the tool says so.
 
-| Model | Key fields |
-|---|---|
-| `BacktestResult` | `total_return`, `annualized_volatility`, `sharpe_ratio`, `sortino_ratio`, `max_drawdown`, `calmar_ratio`, `win_rate`, `profit_factor`, `num_trades`, `avg_trade_return_pct`, `final_equity`, `equity_curve`, `trade_log` |
-| `StrategyComparison` | `strategy`, `parameters`, `total_return`, `sharpe_ratio`, `sortino_ratio`, `max_drawdown`, `calmar_ratio`, `win_rate`, `num_trades`, `final_equity` |
-| `CompareStrategiesResult` | `symbol`, `sort_by`, `best_strategy`, `buy_and_hold_return`, `strategies` (List[StrategyComparison]) |
-
-**Analysis tools**
-
-| Model | Key fields |
-|---|---|
-| `AnalysisResult` | `symbol`, `benchmark`, `alpha`, `beta`, `r_squared`, `sharpe_ratio`, `sortino_ratio`, `max_drawdown`, `var_95`, `cvar_95`, `information_ratio` |
-| `TechnicalResult` | `symbol`, `last_close`, `last_values` (dict), `signals` (dict) |
-| `PortfolioResult` | `tickers`, `weights`, `annualized_return`, `annualized_volatility`, `sharpe_ratio`, `sortino_ratio`, `max_drawdown`, `calmar_ratio`, `var_95`, `cvar_95`, `information_ratio`, `total_return`, `correlation_matrix` |
-| `ScreenerResult` | `num_passed`, `tickers_passed`, `results` (list of dicts), `failed_filters` (`Dict[str, str]` — ticker → filter key it failed), `failed_tickers` (`Dict[str, str]` — ticker → data-fetch/compute error), `failed_batches` (`List[str]` — worker-batch errors when `n_workers > 1`) |
-| `Trade` | `entry_date`, `exit_date`, `direction`, `entry_price` (weighted-average cost basis over the lot — a computed basis, not necessarily a traded level), `exit_price`, `position_size` (the lot's **peak** signed exposure — 1.0/-1.0 for DIRECTION, fractional/leveraged for SCORE, and the largest size held if the lot was resized; `return_pct` scales with it), `return_pct` |
-| `FactorRegressionResult` | `symbol`, `factors`, `alpha`, `loadings`, `t_stats`, `p_values`, `r_squared`, `adj_r_squared`, `n_obs`, `rolling_alpha_tail`, `rolling_loadings_tail` |
-| `CointegrationResult` | `symbol_a`, `symbol_b`, `cointegrated`, `p_value`, `hedge_ratio`, `adf_statistic`, `half_life_days`, `critical_values`, `spread_mean`, `spread_std`, `current_zscore`, `signal`, `n_obs` |
-| `PCAResult` | `tickers`, `n_components`, `n_obs`, `explained_variance_ratio`, `cumulative_variance_ratio`, `loadings`, `factor_contributions` |
-| `HurstResult` | `symbol`, `hurst`, `regime`, `fit_r_squared`, `method`, `n_obs`, `rolling_current`, `rolling_regime_fractions` |
-
-**Advanced tools**
-
-| Model | Key fields |
-|---|---|
-| `RegimeAdaptiveResult` | `symbol`, `regime`, `hurst`, `fit_r_squared`, `selected_strategy`, `best_parameters`, `grid_combinations`, `backtest` (full `BacktestResult`) |
-| `RegimeAdaptiveWalkForwardResult` | `symbol`, `n_windows`, `windows` (List[`RegimeAdaptiveWalkForwardWindow`]), `avg_oos_sharpe`, `avg_oos_return`, `avg_oos_max_drawdown`, `pct_windows_profitable`, `strategy_stability`, `stitched_oos_return`, `stitched_oos_sharpe`, `stitched_oos_sortino`, `stitched_oos_max_drawdown`, `stitched_oos_calmar`, `worst_oos_window`, `longest_losing_window_streak` |
-| `RegimeAdaptiveWalkForwardWindow` | `window_index`, `train_start`, `train_end`, `test_start`, `test_end`, `regime`, `hurst`, `fit_r_squared`, `selected_strategy`, `best_params`, `in_sample_sharpe`, `in_sample_return`, `out_of_sample_sharpe`, `out_of_sample_return`, `out_of_sample_max_drawdown` |
-| `PairScannerResult` | `n_pairs_tested`, `n_pairs_cointegrated`, `n_pairs_returned`, `pairs` (List[`PairResult`]), `failed_pairs` (List[`PairFailure`]), `failed_tickers` (`Dict[str, str]`) |
-| `PairResult` | `symbol_a`, `symbol_b`, `p_value`, `hedge_ratio`, `half_life_days`, `adf_statistic`, `current_zscore`, `signal` |
-| `PairFailure` | `symbol_a`, `symbol_b`, `reason` |
-| `WalkForwardResult` | `symbol`, `strategy`, `n_windows`, `windows` (List[`WalkForwardWindow`]), `avg_oos_sharpe`, `avg_oos_return`, `avg_oos_max_drawdown`, `pct_windows_profitable`, `param_stability`, `stitched_oos_return`, `stitched_oos_sharpe`, `stitched_oos_sortino`, `stitched_oos_max_drawdown`, `stitched_oos_calmar`, `is_to_oos_sharpe_decay`, `is_to_oos_return_decay`, `worst_oos_window`, `longest_losing_window_streak`, `parameter_turnover` |
-| `WalkForwardWindow` | `window_index`, `train_start`, `train_end`, `test_start`, `test_end`, `best_params`, `in_sample_sharpe`, `in_sample_return`, `out_of_sample_sharpe`, `out_of_sample_return`, `out_of_sample_max_drawdown` |
-| `RiskAttributionResult` | `tickers`, `weights`, `annualized_return`, `annualized_volatility`, `sharpe_ratio`, `sortino_ratio`, `max_drawdown`, `var_95`, `cvar_95`, `information_ratio`, `asset_risk_contributions`, `pca_variance_explained`, `portfolio_pc_exposures`, `factor_loadings`, `factor_r_squared`, `factor_alpha` |
-| `PortfolioOptimizationResult` | `tickers`, `method`, `weights`, `expected_return`, `expected_volatility`, `sharpe_ratio`, `converged`, `risk_contributions` (risk_parity only), `warnings` |
-| `PositionSizerResult` | `symbol`, `last_close`, `atr`, `atr_pct`, `stop_distance`, `shares_fixed_risk`, `position_value_fixed_risk`, `portfolio_pct_fixed_risk`, `max_loss_fixed_risk`, `kelly_fraction`, `shares_half_kelly`, `position_value_half_kelly`, `portfolio_pct_half_kelly`, `recommended_sizing`, `recommended_shares`, `recommended_position_value` |
-| `PortfolioSimulationResult` | `tickers`, `n_rebalances`, `rebalance_log` (List[`RebalanceEvent`]), `total_return`, `annualized_return`, `annualized_volatility`, `sharpe_ratio`, `sortino_ratio`, `max_drawdown`, `calmar_ratio`, `var_95`, `cvar_95`, `information_ratio`, `final_equity`, `final_cash`, `avg_gross_leverage`, `max_gross_leverage_used`, `equity_curve`, `warnings` |
-| `RebalanceEvent` | `date`, `turnover_pct`, `gross_leverage_after`, `n_positions` |
-
-**Supplementary tools**
-
-| Model | Key fields |
-|---|---|
-| `FundamentalsResult` | `symbol`, `name`, `sector`, `industry`, `country`, `full_time_employees`, `market_cap`, `trailing_pe`, `forward_pe`, `price_to_book`, `debt_to_equity`, `return_on_equity`, `profit_margins`, `dividend_yield` |
-| `OptimizationRun` | `rank`, `parameters`, `total_return`, `sharpe_ratio`, `sortino_ratio`, `calmar_ratio`, `max_drawdown`, `num_trades` |
-| `BacktestOptResult` | `symbol`, `strategy`, `n_combinations`, `sort_by`, `best_params`, `best_sharpe`, `best_return`, `top_results` (List[`OptimizationRun`]) |
-| `AdvancedIndicatorsResult` | `symbol`, `last_close`, `sar_value`, `sar_trend`, `sar_signal`, `wilder_atr`, `wilder_atr_pct`, `mfi`, `mfi_signal` |
-| `RollingBetaResult` | `symbol`, `benchmark`, `window`, `current_beta`, `beta_1m_ago`, `beta_3m_ago`, `beta_6m_ago`, `beta_trend`, `beta_min`, `beta_max`, `beta_mean`, `n_obs` |
-| `ExtendedRiskResult` | `symbol`, `benchmark`, `annualized_return`, `calmar_ratio`, `treynor_ratio`, `var_parametric_95`, `var_parametric_99`, `var_historical_99`, `cvar_99`, `beta` |
-| `BacktestDiagnosticsResult` | `symbol`, `strategy_type`, `total_return`, `sharpe_ratio`, `sortino_ratio`, `max_drawdown`, `calmar_ratio`, `num_trades`, `top_drawdowns` (List[`DrawdownEpisode`]), `trade_diagnostics` (`TradeDiagnostics`), `exposure` (`ExposureDiagnostics`) |
-| `DrawdownEpisode` | `start`, `trough`, `end`, `depth`, `duration_bars`, `recovery_bars` |
-| `TradeDiagnostics` | `expectancy_pct`, `avg_winner_pct`, `avg_loser_pct`, `payoff_ratio`, `max_consecutive_wins`, `max_consecutive_losses`, `avg_mae_pct`, `avg_mfe_pct` |
-| `ExposureDiagnostics` | `time_in_market`, `avg_gross_exposure`, `avg_net_exposure`, `pct_long`, `pct_short`, `avg_holding_period_bars` |
-
-**Custom signal tools**
-
-| Model | Key fields |
-|---|---|
-| `run_custom_signal_backtest` output | Reuses `BacktestResult` — identical shape to the built-in strategy backtests |
-| `SignalPanelBacktestResult` | `tickers`, `per_ticker` (`Dict[str, BacktestResult]`), `portfolio_metrics` (same shape as `portfolio.portfolio_metrics()` output: `annualized_return`, `annualized_volatility`, `sharpe_ratio`, `sortino_ratio`, `max_drawdown`, `calmar_ratio`, `var_95`, `cvar_95`, `total_return`, `tickers`, `weights`, plus `information_ratio` when `benchmark` was set) |
-
-**Options tools**
-
-| Model | Key fields |
-|---|---|
-| `OptionPricingResult` | `option_type`, `price`, `greeks` (`OptionGreeks`), `d1`, `d2` |
-| `OptionGreeks` | `delta`, `gamma`, `vega` (per 1.0 of volatility, not per vol point), `theta` (per year, not per day), `rho` |
-| `ImpliedVolatilityResult` | `implied_volatility`, `converged` (on the volatility step, `tol_sigma`, never on a price tolerance alone), `iterations`, `method` (`"newton"`/`"bisection"`), `price_error` (absolute pricing error at the returned volatility), `at_bound` (the price sits at intrinsic, so the volatility is a ceiling rather than an estimate) |
+Every other result model's fields are documented beside the tool that returns
+them — in the per-tool sections above, or in
+[09_advanced_agent_tools.md](09_advanced_agent_tools.md) for the rest of the
+surface.
 
 ---
 
 ## Advanced Tools
 
-The remaining 31 advanced, supplementary, custom-signal, analytics, options, and diagnostic tools compose existing primitives into single, LLM-callable operations covering complete research workflows. Full documentation with output reference tables and multi-step chaining examples is in [Documentation/09_advanced_agent_tools.md](09_advanced_agent_tools.md).
+Thirty-two further advanced, supplementary, custom-signal, analytics, options and diagnostic tools compose these primitives into single, LLM-callable operations covering complete research workflows — output reference tables and multi-step chaining examples in [09_advanced_agent_tools.md](09_advanced_agent_tools.md). The remainder of the 189 — the data, microstructure, delta-one, derivatives, discovery and provenance surfaces — are catalogued in [20_tool_index.md](20_tool_index.md) and documented by their own runtime guides, listed in [19_runtimes.md](19_runtimes.md).

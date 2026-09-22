@@ -21,6 +21,12 @@ print(call, put)   # ~4.76, ~0.81
 call_with_div = black_scholes_price(42, 40, 0.5, 0.10, 0.20, "call", dividend_yield=0.03)
 ```
 
+**A yield is bounded on magnitude, never on sign.** `dividend_yield` is
+accepted anywhere in `[-MAX_RATE, MAX_RATE]` (`MAX_RATE = 10.0`, matching
+`analysis.derivatives`), because a negative continuous yield is the ordinary
+case for an FX option's foreign rate and for a commodity whose convenience
+yield exceeds its storage cost. A `>= 0` guard refused exactly those.
+
 **Scope, stated explicitly:** `time_to_expiry` must be strictly `> 0`. An expired or expiring option's value is its intrinsic value (`max(S-K, 0)` / `max(K-S, 0)`) — not something these formulas are valid for. Compute that directly rather than calling `black_scholes_price` with `time_to_expiry=0`.
 
 ---
@@ -55,8 +61,8 @@ result = implied_volatility(
     spot=42, strike=40, time_to_expiry=0.5, risk_free_rate=0.10, option_type="call",
 )
 print(result)
-# {'implied_volatility': 0.2, 'converged': True, 'iterations': 3, 'method': 'newton',
-#  'price_error': 1.2e-12, 'at_bound': False}
+# {'implied_volatility': 0.2, 'converged': True, 'iterations': 1, 'method': 'newton',
+#  'price_error': 0.0, 'at_bound': False}
 ```
 
 **Solve method:** Newton-Raphson (vega as the derivative) with a bisection fallback over `[1e-6, 5.0]` (500% annualized vol — a deliberately generous practical cap) when vega falls below `VEGA_FLOOR` or a step leaves that bracket. Newton alone is not robust here: vega can be tiny for deep ITM/OTM options, making a raw Newton step overshoot or divide by ~zero. Bisection is slower but guaranteed to converge whenever a solution exists in the bracket, since Black-Scholes price is strictly increasing in volatility for any fixed inputs.
@@ -71,14 +77,18 @@ from standard_quant_tools.error import ValidationError
 try:
     implied_volatility(option_price=50.0, spot=42, strike=40, time_to_expiry=0.5, risk_free_rate=0.10)
 except ValidationError as e:
-    print(e)   # "... is outside the no-arbitrage range [0.000000, 42.000000] ..."
+    print(e)   # "... is outside the no-arbitrage range [3.950823, 42.000000] ..."
+               # the lower bound is the discounted intrinsic, not zero
 ```
 
 ---
 
 ## Via Agent Tools
 
-Two tools, registered in `get_agent_tools()` and `dispatch()` like every other tool in the library:
+Two tools carry this module onto the agent surface, registered in
+`get_agent_tools()` and `dispatch()` like every other tool in the library. They
+are two of the derivatives runtime's twelve — the other ten are in
+[21_derivatives.md](21_derivatives.md).
 
 ```python
 from standard_quant_tools.agent.tools import get_option_pricing, get_implied_volatility, dispatch
@@ -102,7 +112,19 @@ iv_result = get_implied_volatility(ImpliedVolatilityInput(
 print(iv_result.implied_volatility)
 ```
 
-`get_option_pricing` bundles price + all five Greeks in one call (avoiding two separate round trips for a common combined need); `get_implied_volatility` is the reverse direction (price known, volatility unknown).
+`get_option_pricing` bundles price + all five Greeks in one call (avoiding two
+separate round trips for a common combined need); `get_implied_volatility` is
+the reverse direction (price known, volatility unknown).
+
+**Two things the tool does that this module does not.** `get_option_pricing`
+takes `model` (`black_scholes`, `black_76`, `bachelier`, `binomial`) and
+`american`, so it reaches `analysis/pricing.py`'s lattice — the one model here
+that prices early exercise — and it is not European-only the way this module
+is. And its greeks are **scaled to the conventional quote**: `vega` per one
+volatility point (0.01) and `theta` per calendar day, where
+`black_scholes_greeks` above returns both raw. The same inputs give
+`vega 8.813` from the function and `0.088134` from the tool; neither is wrong
+and they are not the same number.
 
 ---
 
@@ -111,9 +133,11 @@ print(iv_result.implied_volatility)
 ```python
 from standard_quant_tools.error import ValidationError
 
-# spot/strike/time_to_expiry/volatility <= 0, an unknown option_type, or a
-# negative dividend_yield all raise ValidationError with a message naming
-# the offending field and value.
+# spot/strike/time_to_expiry/volatility <= 0 or above their magnitude limits
+# (1e12 for a price, 100 for a year count or a volatility), and an unknown
+# option_type, all raise ValidationError with a message naming the offending
+# field and value. A negative dividend_yield does not: it is bounded on
+# magnitude at MAX_RATE and priced as given.
 ```
 
 `black_scholes_price`/`black_scholes_greeks`/`implied_volatility` never raise anything other than `ValidationError` — there is no network call, external API, or optional dependency in this module to fail in a different way.

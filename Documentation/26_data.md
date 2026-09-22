@@ -21,14 +21,16 @@ another agent could reason over.**
 
 ## These tools return a reference, not the data
 
-Every fetch tool here publishes an `sqt://` artifact and returns its id.
-Every one of them — and `fetch_financial_ratios` and `get_dataset_metadata`
-— takes an optional `source` (`"yfinance"`, `"polygon"`, `"databento"`,
-...); left out, the default provider answers. This runtime could only ever
-reach the default before, so a tick tape or a quote panel from Databento
-was out of reach, and the refusal for a provider without ticks said only
-Polygon served them. It now names both providers that do and the `source`
-that selects them.
+Every fetch tool here returns a reference id rather than the frame. Bars,
+returns, tapes and quotes publish an `sqt://` artifact; `fetch_order_book`
+and `fetch_order_events` register an external one instead, for the size
+reason [below](#data-this-library-did-not-fetch). Every fetch tool — and
+`fetch_financial_ratios`, `get_dataset_metadata`, `infer_temporal_contract`,
+`preflight_vendor_request` and `register_external_dataset` — takes an
+optional `source` (`"yfinance"`, `"polygon"`, `"databento"`, ...); left out,
+the default provider answers. The refusal for a provider without ticks names
+both providers that serve them, Polygon and Databento, and the `source` that
+selects either.
 
 ```
 fetch_ohlcv_panel(tickers=[...], run_id="study7", name="bars")
@@ -63,11 +65,12 @@ returned nothing. They are named in `warnings`, because a complete-case join
 downstream will not see they were ever requested — the panel simply looks
 like a smaller universe that someone chose.
 
-**A truncated tape is not a short one.** `fetch_tick_tape` and
-`fetch_quote_panel` take a `limit`, and hitting it means the window is
-incomplete. Every rate and total computed from a truncated tape understates
-the real one, so the result says the cap was reached rather than leaving the
-number to look like a measurement.
+**A truncated tape is not a short one.** `fetch_tick_tape`,
+`fetch_quote_panel`, `fetch_order_book` and `fetch_order_events` take a
+`limit`, and hitting it means the window is incomplete. The cap is a PREFIX
+of the session, whose open is its least typical part, and every rate and
+total computed from one understates the real thing — so the result says the
+cap was reached rather than leaving the number to look like a measurement.
 
 **Quotes are top of book.** Depth is a different call: `fetch_order_book`
 serves it where the provider does, and resting size at each level is in
@@ -79,7 +82,24 @@ from aggregated size at a price.
 their original dates.** `get_dataset_metadata` reports that, along with
 whether prices are adjusted and whether the universe is survivorship-free.
 A backtest joining on those dates is using information nobody had, and the
-warning says so in those terms rather than as a flag.
+warning says so in those terms rather than as a flag. Its `notes` carry what
+no boolean can: which feed answered, and where a provider names its own
+sampling.
+
+## Ask what it costs before it is spent
+
+`preflight_vendor_request` answers, from the vendor's free metadata
+endpoints, the three things a fetch settles only by being made: which
+dataset would answer, that dataset's coverage window, and the billable size
+of the request. Size is in BYTES, not dollars, because a subscription quotes
+any request at zero and a metered one does not. A window no provider
+reported comes back null rather than a plausible-looking guess.
+
+This matters for depth in particular, where the WINDOW is what the vendor
+bills and `limit` only bounds what gets written: five minutes of one active
+name at ten levels measured about 42 MB, and the same five minutes of
+order-by-order events about 14 MB, denser by orders of magnitude in event
+count.
 
 ## Temporal contracts, and the two ways to get one
 
@@ -117,6 +137,15 @@ frames it names, and assembling one is therefore free. That is also why
 there is no `add_bundle_frame`: a mutable bundle would let two callers
 disagree about which version was the one that got validated.
 
+**`frame_kind` is not a comment.** `validate_data_bundle` picks the
+temporal contract from that label, so a reference whose own kind
+contradicts it is refused naming both and saying which label the reference
+belongs under — otherwise the bundle answers confidently about data it does
+not hold. A derived result has no source to promise anything and cannot be
+labelled at all; bundle what it was computed from. A raw artifact path
+carries no kind, so its label is taken on trust and a warning says the
+check did not happen.
+
 `validate_data_bundle` returns a verdict rather than raising, because the
 answer is usually "yes, with caveats" and a caller needs the caveats to
 decide.
@@ -136,7 +165,17 @@ disagreement rather than only measuring it.
 That distinction is the whole tool. A unit mismatch is fixable by rescaling.
 A definition difference is not, and averaging across one produces a number
 neither provider would stand behind. Reporting only a percentage gap leaves
-the reader unable to tell which they are looking at.
+the reader unable to tell which they are looking at. A scale verdict carries
+the conversion `ratio` itself, so the fix is arithmetic rather than a hunt.
+
+**No overlap is silence, not agreement.** It compares FUNDAMENTALS only, so
+two payloads from providers that serve bars have nothing to put side by
+side. A field no entity reported from both sides is `no_overlap`, and a
+result where every field lands there says NOTHING WAS COMPARED in its
+warnings — the one outcome that otherwise reads as a clean bill of health.
+It also accepts `fetch_financial_ratios`' own result shape, so handing it
+this runtime's two payloads no longer makes two identical inputs disagree on
+every field.
 
 `validate_financial_ratios` flags values implausible on their face. It is a
 weak signal in one direction only: it catches ratios that are obviously
@@ -145,38 +184,26 @@ wrong, never ratios that are merely incorrect.
 ## What is deliberately not here
 
 **Data quality checks.** `get_data_quality_report` in `research` already
-reports missing bars, stale prices and price jumps. A second name for those
-would be exactly the confusable duplication the runtime split exists to
-prevent.
-
-**Order book FETCHING.** `DataProvider.get_order_book` and `get_order_events`
-are implemented by the Databento provider (mbp-10 depth to ten levels, and
-the mbo order stream), reachable programmatically and recorded in the audit
-trail; there is no fetch tool for them yet. The tool is proposed as
-`fetch_order_book` / `fetch_order_events`, and this paragraph used to say no
-shipped provider served depth, which stopped being true when that provider
-landed.
-
-That was never the only way to have a book, though, and only fetching was
-ever blocked. `register_external_dataset` takes depth you already hold — a
-vendor extract, an ITCH replay — and makes it resolvable without copying it,
-and `get_order_book_metrics` reads it through that reference. The analytics
-were written and tested against the column contract long before a source
-existed. What arrived is the source, not the analytics.
+reports missing bars, stale prices and price jumps — see
+[11_data_quality.md](11_data_quality.md). A second name for those would be
+exactly the confusable duplication the runtime split exists to prevent.
 
 ## Data this library did not fetch
 
-Every other tool here fetches. These three do the opposite, and they exist
-because the fetch path has a ceiling the rest of the surface never has to
-notice.
+Most tools here fetch and publish. The registration tools do neither, and
+they exist because the publish path has a ceiling the rest of the surface
+never has to notice.
 
 A provider call returns one whole `pd.DataFrame`, and `publish` then writes
 a second complete copy under `SQT_RUNS_DIR`. Two full materializations of
 the same bytes is fine for a decade of daily bars and impossible for an
-afternoon of L2 depth. The only concession to size anywhere else is
-`fetch_tick_tape`'s `limit`, which does not sample — it **truncates**, so
-every rate and total computed downstream understates the real one and
-nothing in the numbers says so.
+afternoon of L2 depth. That is why the two depth fetchers do not publish:
+`fetch_order_book` and `fetch_order_events` write **one** Parquet and
+register it, so a book reached from a tool and a book you already held
+arrive by the same path. The other concession to size is a `limit` —
+on the tape, the quote panel and both depth fetchers — which does not
+sample but **truncates**, so every rate and total computed downstream
+understates the real one and only the result's own flag says so.
 
 So `register_external_dataset` takes a Parquet or CSV file — or a directory
 read as one partitioned dataset — and stores a POINTER and a schema. Nothing
@@ -189,12 +216,14 @@ projection means reading four columns of a sixty-column book reads four.
 | kind | what it holds |
 | --- | --- |
 | `order_book_panel` | L2 depth snapshots, the shape `get_order_book_metrics` reads |
+| `order_event_panel` | `timestamp`, `order_id`, `action`, `side`, `price`, `size` — the shape `get_order_event_metrics` reads |
 | `event_panel` | Rows carrying `event_time` and `available_time` |
 | `tick_tape` | Trades, with `price` and `size` |
 | `quote_panel` | Top of book, with `bid_price` and `ask_price` |
 
-The first two are external-only — nothing in this library produces one, so
-there is no in-memory publish path to preserve. The other two exist both
+The first three are external-only: no in-memory publish path exists for
+them, and `fetch_order_book` and `fetch_order_events` land here rather than
+in the artifact store for the size reason above. The other two exist both
 ways on purpose: a tape `fetch_tick_tape` fetched and a tape bought from a
 vendor are the same content addressed differently, and one kind with two
 storages beats an `external_tick_tape` that would double the taxonomy and
@@ -293,23 +322,23 @@ vendor normalizer produces one.
 
 | Tool | Answers |
 |---|---|
-| `fetch_ohlcv` | One symbol's bars, as a `price_panel` reference, carrying the vendor `dataset`, the `provider` and whether the bars are `adjusted`, read from the frame; below 2024-07-01 the Databento daily feed is a sample, and the result says which feed answered |
+| `fetch_ohlcv` | One symbol's bars, as a `price_panel` reference, carrying the vendor `dataset`, the `provider`, whether the bars are `adjusted` and the two as one `source` string, read from the frame the handler already held; below 2024-07-01 the Databento daily feed is a sample, and the result says which feed answered |
 | `fetch_ohlcv_panel` | A universe's bars, stacked long with an `entity` column |
 | `fetch_returns_panel` | A wide date-by-ticker return frame, ready for panel analysis |
 | `fetch_tick_tape` | Individual trades, for measuring rather than estimating |
 | `fetch_quote_panel` | Top-of-book quotes, what Lee-Ready signing needs |
-| `fetch_order_book` | L2 depth snapshots, written once and returned as an EXTERNAL `order_book_panel` reference that `get_order_book_metrics` streams in batches -- the only way to obtain a book here short of already having one. Metered: five minutes of one active name at ten levels measured about 42 MB, and the WINDOW is what the vendor bills, not `limit` |
-| `fetch_order_events` | Order-by-order events, as an `order_event_panel` reference for `get_order_event_metrics`. Deeper than depth in kind rather than in levels: aggregation per price is what makes queue position, order lifetime and a true cancellation rate unrecoverable. Denser by orders of magnitude, about 14 MB for the same five minutes |
-| `preflight_vendor_request` | What a request would cost and whether the data is there, before it is made: the dataset that would answer, that dataset's coverage window, the billable BYTES -- not dollars, which a subscription quotes at zero for a request of any size -- and the reference kind the schema produces. A window nobody reported is null, never a plausible-looking guess |
+| `fetch_order_book` | L2 depth snapshots, written once and returned as an EXTERNAL `order_book_panel` reference that `get_order_book_metrics` streams in batches -- the only way to obtain a book here short of already having one |
+| `fetch_order_events` | Order-by-order events, as an `order_event_panel` reference for `get_order_event_metrics`. Deeper than depth in kind rather than in levels: aggregation per price is what makes queue position, order lifetime and a true cancellation rate unrecoverable |
+| `preflight_vendor_request` | What a request would cost and whether the data is there, before it is made: the dataset that would answer, its coverage window, the billable bytes, and the reference kind the schema produces |
 | `fetch_financial_ratios` | A company's ratios, with implausible values flagged |
 | `get_dataset_metadata` | What the provider guarantees: adjusted, survivorship, point-in-time; carries the provider's `notes`, where Databento names its sampling |
 | `infer_temporal_contract` | What a frame's own columns imply about timing |
 | `build_continuous_futures_series` | Stitch a futures chain into one series, returning the back-adjusted research series and the tradeable contract map SEPARATELY -- an adjusted price is fine for indicators and is not a price anyone could have traded |
-| `build_data_bundle` | Name several published frames as one unit; a reference whose handoff kind contradicts its declared frame kind is refused naming both |
+| `build_data_bundle` | Name several published frames as one unit; a reference whose own kind contradicts its declared `frame_kind` is refused naming both |
 | `describe_data_bundle` | What a bundle contains and what its sources promise |
 | `validate_data_bundle` | Is this safe to model on, and what blocks it |
 | `validate_financial_ratios` | Check ratios you already hold, without fetching |
-| `compare_ratio_frames` | Two sources side by side, each gap classified; reads the keys the classifier emits, reports the conversion `ratio`, counts `no_overlap` as silence rather than disagreement, and accepts `fetch_financial_ratios`' own shape |
+| `compare_ratio_frames` | Two sources side by side, each gap classified `scale`, `definition`, `agree` or `no_overlap`, with the conversion `ratio` on a scale verdict |
 | `prepare_vendor_extract` | Convert a raw vendor export into this library's contract, reporting the judgements that change the numbers |
 | `register_external_dataset` | Make a file you already hold resolvable, without copying it |
 | `describe_external_dataset` | Its schema and size, and whether it changed since registration |

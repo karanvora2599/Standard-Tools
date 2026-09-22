@@ -8,14 +8,15 @@ It is kept as a record rather than a summary because the pattern is the
 useful part. Most findings were not exotic; they were ordinary code that
 looked right, and the reason each survived review is usually more
 instructive than the fix.
+
 Most functions here have two implementations: a C++ kernel in `_sqt_core`
 and a Python/NumPy fallback used when the extension isn't built. **The two
 are contractually required to return the same answer**, and that requirement
-is now tested directly rather than assumed.
+is tested directly rather than assumed.
 
-Both tiers went through a line-by-line correctness audit (31 findings in the
-Python tier, 10 in the C++ tier — full write-ups in
-[CHANGELOG.md](../CHANGELOG.md)). Nine themes are worth knowing as a user:
+The line-by-line audit found 31 items in the Python tier and 10 in the C++
+tier; the full write-ups are in [CHANGELOG.md](../CHANGELOG.md). Ten themes
+are worth knowing as a user:
 
 1. **Backend divergences.** Five cases were found where the same call
    returned a different answer depending on whether `_sqt_core` was built —
@@ -70,7 +71,9 @@ Python tier, 10 in the C++ tier — full write-ups in
      `training_information_cutoff` and `score_model` gates on it.
    - `end_date` was exclusive on yfinance and inclusive on Polygon and
      Bloomberg, so the default provider silently dropped the final bar. The
-     ABC now specifies **inclusive** and all three providers trim to it.
+     ABC now specifies **inclusive** and every provider trims to it —
+     including Databento, which arrived afterwards and was held to the same
+     contract.
    - `score_model` returned a "cross-section" that could mix dates, because
      each entity contributed its own latest surviving bar. Now one
      `effective_score_date`, with `stale_entities` and `staleness_days`.
@@ -108,7 +111,7 @@ Python tier, 10 in the C++ tier — full write-ups in
    Both optimizer findings also split the two solver paths, which now share
    one gate.
 
-7. **A full-codebase audit, Pass 1 — the older quant runtime.** A fresh
+7. **A full-codebase audit — the older quant runtime.** A fresh
    review found the modeling runtime is no longer the weak point; the
    remaining risk sat in backtesting, metrics, data normalization and the
    audit trail, which never gained the input/output contracts modeling now
@@ -134,7 +137,7 @@ Python tier, 10 in the C++ tier — full write-ups in
    - **"Unknown" stopped meaning free**: a ticker with no volume data used
      to score `$0` market impact against `$3bn` for one with real data.
 
-8. **Pass 2 — one shared numerical contract.** Around 40 of the audit's
+8. **One shared numerical contract.** Around 40 of the audit's
    findings were a single problem wearing different clothes:
    `@validate_series` checked emptiness and nothing else, so the same invalid
    input gave `nan` from one metric, `+inf` from another, and an
@@ -147,7 +150,7 @@ Python tier, 10 in the C++ tier — full write-ups in
    is validated wherever it multiplies. Cost primitives no longer accept
    negative rates, which returned negative costs — a backtest paid to trade.
 
-9. **Passes 3–5 — solvers, schemas and audit policy.** A solver reporting
+9. **Solvers, schemas and audit policy.** A solver reporting
    success is not a valid answer: a covariance with condition number
    **3.8e+14** (full rank, so the rank check passed) produced a maximum
    weight of **197,838× capital** with `converged: True`, and a long-only
@@ -159,6 +162,26 @@ Python tier, 10 in the C++ tier — full write-ups in
    gained a fail-closed mode, refuses to replay a redacted record (redaction
    and exact replay are in tension by construction), and treats a
    previously-failed call as a first-class replay outcome.
+
+10. **The live-data pass, 2026-09-20 to 22.** The first run against a real
+    vendor tape, and the first sweep of what the tool surface reports back.
+    Twenty defects no synthetic fixture could show, and each of them a
+    plausible number rather than an error: a quarter of live timestamps
+    repeat, so three microstructure functions aligned trades to their signs
+    by LABEL and reported a signed volume larger than the tape's whole
+    volume; Kyle's lambda from bars regressed `sign(y)·V` on `y`, so it was
+    positive by construction and now says `circular=True`; a deep
+    in-the-money price has no identifiable volatility, and the solver's
+    `at_bound` flag was discarded, handing back seven times the truth as
+    converged; a grid sorted every metric descending, so
+    `annualized_volatility` returned the worst row; seven derivatives inputs
+    pinned the dividend yield and the borrow rate at zero while the pricing
+    admits a negative one; and a day rewritten and re-chained from its own
+    published head verified clean, because nothing compared a day's ending
+    hash to the next day's recorded head. Alongside the fixes, the results
+    now carry what they had computed and dropped — a GARCH fit reports
+    whether it removed the clustering it was fitted to remove, and every
+    fetch says which vendor dataset answered.
 
 If you have audit records written before this release, note that
 `content_hash` values are not comparable across the change — see the format
