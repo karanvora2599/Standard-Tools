@@ -928,7 +928,8 @@ class TestExportBundle:
 
         result = audit.export_bundle("2024-01-01", "2024-01-01", out_path, tmp_path)
 
-        assert result == out_path
+        assert result.path == out_path
+        assert Path(result) == out_path  # still usable as the path it wrote
         with zipfile.ZipFile(out_path) as zf:
             names = set(zf.namelist())
         assert "2024-01-01.jsonl" in names

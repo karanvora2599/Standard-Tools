@@ -126,6 +126,11 @@ def verify_replay(record: Dict[str, Any]) -> ReplayResult:
     means the provider revised historical data; an output mismatch with
     matching data sources means the code/logic changed since the record
     was written.
+
+    The hashes behind that verdict come back with it — the output hash the
+    replay produced, the one the record stored, and both hashes for every
+    data source — so "the code changed" arrives with what changed rather
+    than as a bare claim.
     """
     fn, model_cls, surface = _resolve_tool(record["tool_name"])
     tool_name = record["tool_name"]
@@ -185,11 +190,18 @@ def verify_replay(record: Dict[str, Any]) -> ReplayResult:
         _data_sources_var.reset(token_data)
 
     if original_status == "error":
+        # The failure did not reproduce, which is an answer about the call,
+        # not about the replay machinery. This arm used to name a field
+        # that does not exist on ReplayResult, so it raised TypeError and
+        # the caller was told the replay could not run — see the CHANGELOG
+        # entry of 2026-09-22. There is no stored output hash to compare
+        # against (the original produced no output), so what the replay
+        # produced this time is reported on its own.
         return ReplayResult(
             request_id=record.get("request_id", ""),
             tool_name=tool_name,
             output_match=False,
-            data_sources_match=None,
+            new_output_hash=hash_payload(new_output),
             notes=[
                 f"The original call failed with {original_error}, but the "
                 "replay SUCCEEDED. The failure no longer reproduces — the "
@@ -206,6 +218,7 @@ def verify_replay(record: Dict[str, Any]) -> ReplayResult:
     )
 
     notes: List[str] = []
+    normalized_hash: Optional[str] = None
 
     # ── Semantic comparison for surfaces with non-deterministic ids ──────
     # Modeling mints a fresh UUID-based dataset_id/model_id on every run and
@@ -290,4 +303,7 @@ def verify_replay(record: Dict[str, Any]) -> ReplayResult:
         output_match=output_match,
         data_source_matches=data_matches,
         notes=notes,
+        new_output_hash=new_output_hash,
+        stored_output_hash=stored_output_hash,
+        new_output_hash_normalized=normalized_hash,
     )

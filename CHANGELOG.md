@@ -1,5 +1,40 @@
 # Changelog
 
+## A rewritten day no longer verifies, and the trail says when there is no trail
+
+The audit log is hash-chained per day, and a chain index records each
+day's starting head. Nothing compared a day's ending hash to the next
+day's recorded head, so a day rewritten and re-chained from its own
+published head verified clean through the library, the command line and
+the verifier shipped inside the auditor bundle. The tail is now checked
+in all three, and a re-chained day is named against the head the index
+says it should end at.
+
+- **Verifying one day works past the first.** The `date=` branch checked
+  every day against the genesis hash instead of the index's recorded
+  head, so every day but the first was reported tampered, permanently.
+- **"No trail" and "intact" are different answers.** With recording
+  disabled the verifier found nothing and said intact. The result now
+  carries `recording_enabled` and a `verdict` of `intact`, `tampered`,
+  `no_trail` or `recording_disabled`, and a `signature_state` that names
+  which of six things a failed checkpoint check means: no checkpoint, no
+  signature, a wrong key, corrupt bytes, content that legitimately moved
+  after signing, or an unavailable library. Verifying today's signed
+  checkpoint appends a record, which is the sixth of those, and the
+  result says so.
+- **The auditor bundle carries the checkpoint sidecars** it used to omit,
+  and its README no longer says signing is planned. An export whose date
+  range covers no day file is refused instead of returned as a bundle of
+  nothing, and a real export reports how many days and records it holds.
+- **A failure that no longer reproduces is reported as that.** A replay
+  of a call that failed originally and succeeds now raised a type error
+  inside the replay machinery and came back as "replay could not run".
+  Replay results also carry the new output hash and the old and new hash
+  of every data source, so "the code changed" comes with what changed.
+- **`explain_decision` returns the whole record.** Four of nineteen
+  fields never crossed, among them the hash of the strategy source that
+  ran, which exists precisely so a run can be tied to the code behind it.
+
 ## The registry's security control has an interface, and a pulled model works where it lands
 
 Signing worked end to end and no tool could ask for it. `verify_model_package`

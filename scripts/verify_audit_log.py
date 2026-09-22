@@ -83,11 +83,36 @@ def verify_log_file(path: Path, expected_prev_hash: str = _GENESIS_HASH) -> List
     return problems
 
 
+def _last_record_hash(path: Path) -> Optional[str]:
+    """The record_hash on a day file's last non-blank line -- the chain head
+    the next indexed day has to claim. None when the file is missing, empty
+    or its last line cannot be read as a record. Mirrors
+    audit.verify._last_record_hash exactly."""
+    if not path.exists():
+        return None
+    last_line: Optional[str] = None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    last_line = line
+        if last_line is None:
+            return None
+        parsed = json.loads(last_line)
+    except (OSError, ValueError):
+        return None
+    return parsed.get("record_hash") if isinstance(parsed, dict) else None
+
+
 def verify_trail(directory: Path) -> List[str]:
     """Verify the full cross-day trail: the chain index's own hash chain,
     that every day file the index attests to still exists (and vice versa),
-    and each day file's internal chain seeded with the index's claimed
-    starting point. Mirrors audit.verify_audit_trail_integrity exactly."""
+    each day file's internal chain seeded with the index's claimed starting
+    point, and each day's ending hash against the next indexed day's
+    recorded chain head -- a day rewritten and re-chained from the head the
+    index publishes is internally consistent and correctly seeded, so its
+    tail is the only thing that gives it away. Mirrors
+    audit.verify_audit_trail_integrity exactly."""
     problems: List[str] = []
     index_path = directory / _INDEX_FILENAME
 
@@ -143,13 +168,28 @@ def verify_trail(directory: Path) -> List[str]:
                 "this file was created outside the normal write path)."
             )
 
+    prev_date: Optional[str] = None
+    prev_tail: Optional[str] = None
     for entry in index_entries:
         date = entry.get("date")
         if date not in on_disk_dates:
-            continue  # already reported above
+            # Already reported above. The tail of a file that is gone is
+            # unknown, so the next day is not accused of re-chaining.
+            prev_date, prev_tail = date, None
+            continue
         day_path = directory / f"{date}.jsonl"
         expected_head = entry.get("chain_head", _GENESIS_HASH)
+        if prev_tail is not None and expected_head != prev_tail:
+            problems.append(
+                f"chain index says {date} chains onto {expected_head}, but "
+                f"{prev_date}.jsonl ends at {prev_tail} — a day was re-chained "
+                "from its published head (the head of every day is in "
+                "plaintext in the chain index, so a rewritten day can be made "
+                "to start exactly where the index says; where it ENDS is what "
+                "gives it away)."
+            )
         problems.extend(verify_log_file(day_path, expected_prev_hash=expected_head))
+        prev_date, prev_tail = date, _last_record_hash(day_path)
 
     return problems
 

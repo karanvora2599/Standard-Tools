@@ -52,3 +52,18 @@ class ReplayResult:
     output_match: Optional[bool]
     data_source_matches: List[Dict[str, Any]] = field(default_factory=list)
     notes: List[str] = field(default_factory=list)
+    # The hashes the comparison was actually made on. `output_match` is the
+    # verdict; these are the evidence behind it, and without them "the
+    # output changed" is a claim the caller cannot check, narrow down or
+    # quote. `new_output_hash` is what the replay produced,
+    # `stored_output_hash` what the record carried, and
+    # `new_output_hash_normalized` the replay's hash with run-specific
+    # dataset/model identifiers normalized away — set only when that
+    # second comparison was the one that decided the verdict (see
+    # replay.normalize_identifiers). Each is None when the arm that runs
+    # did not compute it: a replay of a call that FAILED originally has no
+    # stored output to compare against. Per-data-source `old_hash`/
+    # `new_hash` live on each entry of `data_source_matches`.
+    new_output_hash: Optional[str] = None
+    stored_output_hash: Optional[str] = None
+    new_output_hash_normalized: Optional[str] = None

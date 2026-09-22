@@ -18,9 +18,9 @@ from standard_quant_tools.agent.models import (
     ExportAuditBundleInput,
     ListReferenceKindsInput,
     ListReferenceKindsResult,
-    ReadReferenceInput,
     ListStrategiesInput,
     ListStressScenariosInput,
+    ReadReferenceInput,
     ReferenceKind,
     ReplayDecisionInput,
     TemporalContractInput,
@@ -116,12 +116,12 @@ TOOL_DEFS = [
     ),
     (
         "verify_audit_integrity",
-        "Check the audit log's tamper-evident hash chain, for one day or the whole trail, optionally including that day's Ed25519 checkpoint signature. Read-only.",
+        "Check the audit log's tamper-evident hash chain, for one day or the whole trail, optionally including that day's Ed25519 checkpoint signature. The verdict separates intact, tampered, no_trail and recording_disabled, because an empty directory is not an intact one, and signature_state names which of six things a failed checkpoint check means. Read-only.",
         VerifyAuditIntegrityInput,
     ),
     (
         "export_audit_bundle",
-        "Package a date range of the audit log plus its chain index and manifest into one zip. Writes a new file; modifies no existing record.",
+        "Package a date range of the audit log plus its chain index, any checkpoint sidecars and a manifest into one zip; a range covering no day file is refused rather than exported as a bundle of nothing. Writes a new file; modifies no existing record.",
         ExportAuditBundleInput,
     ),
     (

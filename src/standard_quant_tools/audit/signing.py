@@ -179,6 +179,100 @@ def checkpoint_and_sign(
     return checkpoint_path
 
 
+# Raw Ed25519 signature length, in bytes. A .sig file that does not decode
+# to exactly this is damaged rather than merely wrong.
+_ED25519_SIGNATURE_BYTES = 64
+
+
+def verify_checkpoint_state(
+    date: str,
+    public_key_path: Union[str, Path],
+    audit_dir: Optional[Union[str, Path]] = None,
+) -> str:
+    """
+    Verify a day's signed checkpoint and name WHICH of seven states it is
+    in, rather than collapsing them into one bool (see the CHANGELOG entry
+    of 2026-09-22 — "not verified" was returned identically for a day that
+    was never signed, a wrong public key and a record legitimately appended
+    after signing, and the three call for completely different responses):
+
+        "valid"             the signature checks out under this public key
+                            and the checkpoint still describes the day file
+                            and index entry as they stand now
+        "no_checkpoint"     this day was never anchored
+        "no_signature"      a checkpoint exists with no .sig beside it
+        "key_mismatch"      a well-formed signature that does not verify
+                            under this public key — the wrong key, or
+                            signature bytes altered in a way that is
+                            indistinguishable from the wrong key
+        "corrupt_signature" the .sig file does not decode to a 64-byte
+                            Ed25519 signature at all
+        "content_drift"     the signature is authentic, but the day has
+                            moved past what was signed — most often one
+                            more record appended, which is ordinary for a
+                            day still being written to and is NOT evidence
+                            of tampering by itself
+        "unavailable"       the check could not be made: no public key file,
+                            an unreadable key or checkpoint, a day file
+                            whose tail cannot be read
+
+    Order matters, and the signature is checked BEFORE the content: drift
+    never breaks a signature (it is taken over the stored checkpoint file,
+    which a later record does not touch), so a signature that fails is
+    reported as a signature failure and never as benign drift.
+
+    Never raises for any of the above; `_require_cryptography()` still
+    raises when `cryptography` itself is missing, since that is a statement
+    about this installation rather than about the trail.
+    """
+    _require_cryptography()
+    directory = Path(audit_dir) if audit_dir else _audit_dir()
+    checkpoint_path = directory / f"{date}.checkpoint.json"
+    sig_path = directory / f"{date}.checkpoint.sig"
+    if not checkpoint_path.exists():
+        return "no_checkpoint"
+    if not sig_path.exists():
+        return "no_signature"
+
+    try:
+        stored_checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        canonical = json.dumps(stored_checkpoint, sort_keys=True).encode("utf-8")
+    except Exception:
+        return "unavailable"
+
+    try:
+        signature = bytes.fromhex(sig_path.read_text(encoding="utf-8").strip())
+    except Exception:
+        return "corrupt_signature"
+    if len(signature) != _ED25519_SIGNATURE_BYTES:
+        return "corrupt_signature"
+
+    try:
+        public_key = Ed25519PublicKey.from_public_bytes(
+            Path(public_key_path).read_bytes()
+        )
+    except Exception:
+        return "unavailable"
+
+    try:
+        public_key.verify(signature, canonical)  # raises InvalidSignature on mismatch
+    except Exception:
+        return "key_mismatch"
+
+    try:
+        current_content = _derive_checkpoint_content(date, directory)
+    except Exception:
+        return "unavailable"
+
+    if (
+        stored_checkpoint.get("final_record_hash")
+        != current_content["final_record_hash"]
+        or stored_checkpoint.get("index_hash") != current_content["index_hash"]
+    ):
+        return "content_drift"
+    return "valid"
+
+
 def verify_checkpoint_signature(
     date: str,
     public_key_path: Union[str, Path],
@@ -195,31 +289,10 @@ def verify_checkpoint_signature(
     Returns `False` (never raises) for: missing checkpoint/signature files,
     a public key that doesn't match the signing key, a corrupted signature,
     or a checkpoint that no longer matches the current on-disk state.
+    `verify_checkpoint_state` is the same check reporting WHICH of those it
+    found; this is that answer narrowed to the one bit a caller who only
+    wants a gate needs.
     """
-    _require_cryptography()
-    directory = Path(audit_dir) if audit_dir else _audit_dir()
-    checkpoint_path = directory / f"{date}.checkpoint.json"
-    sig_path = directory / f"{date}.checkpoint.sig"
-    if not checkpoint_path.exists() or not sig_path.exists():
-        return False
-
-    try:
-        stored_checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
-        signature = bytes.fromhex(sig_path.read_text(encoding="utf-8").strip())
-        public_key = Ed25519PublicKey.from_public_bytes(
-            Path(public_key_path).read_bytes()
-        )
-
-        canonical = json.dumps(stored_checkpoint, sort_keys=True).encode("utf-8")
-        public_key.verify(signature, canonical)  # raises InvalidSignature on mismatch
-
-        current_content = _derive_checkpoint_content(date, directory)
-        if (
-            stored_checkpoint.get("final_record_hash")
-            != current_content["final_record_hash"]
-            or stored_checkpoint.get("index_hash") != current_content["index_hash"]
-        ):
-            return False
-        return True
-    except Exception:
-        return False
+    return (
+        verify_checkpoint_state(date, public_key_path, audit_dir=audit_dir) == "valid"
+    )

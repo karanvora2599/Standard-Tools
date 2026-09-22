@@ -66,6 +66,30 @@ def verify_audit_log_integrity(
     return problems
 
 
+def _last_record_hash(path: Path) -> Optional[str]:
+    """
+    The `record_hash` on a day file's last non-blank line — the chain head
+    the NEXT indexed day has to claim. None when the file is missing, empty,
+    or its last line cannot be read as a record: that is a different
+    complaint, already made by the per-record walk above, and guessing a
+    tail here would turn one problem into two.
+    """
+    if not path.exists():
+        return None
+    last_line: Optional[str] = None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    last_line = line
+        if last_line is None:
+            return None
+        parsed = json.loads(last_line)
+    except (OSError, ValueError):
+        return None
+    return parsed.get("record_hash") if isinstance(parsed, dict) else None
+
+
 def verify_audit_trail_integrity(
     audit_dir: Optional[Union[str, Path]] = None,
 ) -> List[str]:
@@ -74,11 +98,22 @@ def verify_audit_trail_integrity(
     independent chain-index witness log's own hash chain, that every day
     file the index attests to still exists on disk (and the reverse — a day
     file present with no matching index entry, for any date at or after the
-    index's earliest entry), and each day file's own internal record chain
+    index's earliest entry), each day file's own internal record chain
     seeded with the chain head the index claims for that day — so a
     wholesale-regenerated day file with a fabricated-but-internally-
     consistent chain is still caught, which verify_audit_log_integrity(path)
-    alone (with its default genesis-hash assumption) cannot detect.
+    alone (with its default genesis-hash assumption) cannot detect — and,
+    since the CHANGELOG entry of 2026-09-22, each day's ENDING hash against
+    the next indexed day's recorded chain head.
+
+    That last check is what closes the hole the head check leaves open: a
+    day's head is published in plaintext in the chain index sitting next to
+    the day files, so an attacker who rewrites a day's records and
+    re-derives its chain from that real head produces a file that is
+    internally consistent AND correctly seeded. Only where that day ENDS
+    gives it away, and the next day's index entry — written before the
+    rewrite and chained into the index's own hash chain — is the
+    independent record of where it should have ended.
 
     Days before the chain index's earliest entry (audit activity that
     predates this feature, or an audit directory with no index at all) are
@@ -145,14 +180,29 @@ def verify_audit_trail_integrity(
                 "this file was created outside the normal write path)."
             )
 
+    prev_date: Optional[str] = None
+    prev_tail: Optional[str] = None
     for entry in index_entries:
         date = entry.get("date")
         if date not in on_disk_dates:
-            continue  # already reported above
+            # Already reported above. The tail of a file that is gone is
+            # unknown, so the next day is not accused of re-chaining.
+            prev_date, prev_tail = date, None
+            continue
         day_path = directory / f"{date}.jsonl"
         expected_head = entry.get("chain_head", _GENESIS_HASH)
+        if prev_tail is not None and expected_head != prev_tail:
+            problems.append(
+                f"chain index says {date} chains onto {expected_head}, but "
+                f"{prev_date}.jsonl ends at {prev_tail} — a day was re-chained "
+                "from its published head (the head of every day is in "
+                "plaintext in the chain index, so a rewritten day can be made "
+                "to start exactly where the index says; where it ENDS is what "
+                "gives it away)."
+            )
         problems.extend(
             verify_audit_log_integrity(day_path, expected_prev_hash=expected_head)
         )
+        prev_date, prev_tail = date, _last_record_hash(day_path)
 
     return problems

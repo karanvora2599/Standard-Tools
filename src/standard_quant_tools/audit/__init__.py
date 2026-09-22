@@ -44,7 +44,7 @@ from .context import (
     record_data_access,
 )
 from .dispatch import _run_and_record, last_request_id
-from .export import export_bundle
+from .export import ExportedBundle, export_bundle
 from .hashing import hash_dataframe, hash_payload
 from .models import DecisionRecord, ReplayResult
 from .paths import (
@@ -69,6 +69,7 @@ from .signing import (
     checkpoint_and_sign,
     generate_keypair,
     verify_checkpoint_signature,
+    verify_checkpoint_state,
 )
 from .storage import AuditStorageBackend, LocalFilesystemBackend
 from .verify import verify_audit_log_integrity, verify_audit_trail_integrity
@@ -78,6 +79,7 @@ __all__ = [
     "AuditStorageBackend",
     "AuditWriter",
     "DecisionRecord",
+    "ExportedBundle",
     "HAS_CRYPTOGRAPHY",
     "LocalFilesystemBackend",
     "ReplayResult",
@@ -100,5 +102,6 @@ __all__ = [
     "verify_audit_log_integrity",
     "verify_audit_trail_integrity",
     "verify_checkpoint_signature",
+    "verify_checkpoint_state",
     "verify_replay",
 ]

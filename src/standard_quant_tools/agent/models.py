@@ -4476,11 +4476,47 @@ class ExplainDecisionResult(BaseModel):
         ),
     )
     output_hash: Optional[str] = None
+    output_hash_normalized: Optional[str] = Field(
+        None,
+        description=(
+            "The same output hashed with run-specific dataset/model "
+            "identifiers normalized away. This is what replay compares for "
+            "tools that mint a fresh id per run, whose literal output_hash "
+            "can never reproduce. None for records written before the "
+            "field existed."
+        ),
+    )
+    n_workers: Optional[int] = Field(
+        None,
+        description=(
+            "Worker processes the call was given, when it took that "
+            "argument. Part of why a parallel result reproduces or does "
+            "not; None for a tool that has no such knob."
+        ),
+    )
+    strategy_source_hash: Optional[str] = Field(
+        None,
+        description=(
+            "Content hash of the registered strategy's SOURCE CODE as it "
+            "stood when the call ran -- the one field that ties a run to "
+            "the code behind it rather than to the repository state as a "
+            "whole. None when the call named no registered strategy."
+        ),
+    )
     git_commit_sha: Optional[str] = None
     package_version: Optional[str] = None
     random_seed: Optional[int] = None
     error_type: Optional[str] = None
     error_message: Optional[str] = None
+    prev_record_hash: Optional[str] = Field(
+        None,
+        description=(
+            "The hash this record chains onto: the preceding record's "
+            "record_hash, or '0' * 16 for the first record of a day. "
+            "Together with record_hash it is the link verify_audit_integrity "
+            "walks, and it is what places this record in the day's order."
+        ),
+    )
     record_hash: Optional[str] = None
 
 
@@ -4509,6 +4545,22 @@ class DataSourceMatch(BaseModel):
         ),
     )
     detail: Optional[str] = None
+    old_hash: Optional[str] = Field(
+        None,
+        description=(
+            "Content hash of that input AS RECORDED. With new_hash it says "
+            "WHAT moved, not merely that something did."
+        ),
+    )
+    new_hash: Optional[str] = Field(
+        None,
+        description=(
+            "Content hash of the same input re-fetched now. None when the "
+            "replay did not read it -- a symbol or range the tool no longer "
+            "fetches is reported with old_hash and no new one, rather than "
+            "dropped."
+        ),
+    )
 
 
 class ReplayDecisionResult(BaseModel):
@@ -4534,6 +4586,22 @@ class ReplayDecisionResult(BaseModel):
             "data still matches but the output does not — the only "
             "combination that implicates the library. 'not_comparable' the "
             "record cannot be checked. 'failed' the replay itself errored."
+        ),
+    )
+    stored_output_hash: Optional[str] = Field(
+        None,
+        description=(
+            "The output hash the record carries. None when the replay could "
+            "not run at all."
+        ),
+    )
+    new_output_hash: Optional[str] = Field(
+        None,
+        description=(
+            "The output hash the re-run produced. Paired with "
+            "stored_output_hash so a 'code_changed' verdict comes with the "
+            "two values it was decided from, which is the difference "
+            "between an answer and an assertion."
         ),
     )
     notes: List[str] = Field(default_factory=list)
@@ -4614,13 +4682,57 @@ class VerifyAuditIntegrityInput(BaseModel):
 
 class VerifyAuditIntegrityResult(BaseModel):
     scope: str = Field(..., description="'trail' or the single date verified.")
-    intact: bool
+    intact: bool = Field(
+        ...,
+        description=(
+            "True when nothing checked came back broken. Read `verdict` "
+            "instead where the difference matters: an empty directory has "
+            "nothing to break, and this field said True for it."
+        ),
+    )
+    verdict: Literal["intact", "tampered", "no_trail", "recording_disabled"] = Field(
+        ...,
+        description=(
+            "'intact' records were found and every chain link holds. "
+            "'tampered' something checked did not hold -- see `problems` "
+            "and `signature_state`. 'no_trail' recording is ON and there is "
+            "nothing to verify, which is not the same answer as intact. "
+            "'recording_disabled' SQT_AUDIT_ENABLED is off, so no record is "
+            "being written and an empty directory proves nothing."
+        ),
+    )
+    recording_enabled: bool = Field(
+        ...,
+        description=(
+            "Whether SQT_AUDIT_ENABLED currently lets dispatch() write a "
+            "record. False means calls made now leave no trace, whatever "
+            "this verification says about the days already on disk."
+        ),
+    )
     problems: List[str] = Field(
         default_factory=list,
         description="Every broken link found, in the order encountered.",
     )
     checkpoint_signature_valid: Optional[bool] = Field(
-        None, description="None when no public key was supplied."
+        None,
+        description=(
+            "True when the signature checks out. False when a check ran and "
+            "did not pass. None when no public key was supplied, or when "
+            "there was nothing to check -- a day nobody anchored has no "
+            "signature to break. `signature_state` says which."
+        ),
+    )
+    signature_state: Optional[str] = Field(
+        None,
+        description=(
+            "Why the checkpoint check came out the way it did, when a "
+            "public key was supplied: 'valid', 'no_checkpoint' (that day "
+            "was never anchored), 'no_signature', 'key_mismatch' (signed by "
+            "a different key), 'corrupt_signature', 'content_drift' (the "
+            "signature verifies but the day's content moved after it was "
+            "signed) or 'unavailable' (the check could not be made at all). "
+            "A single boolean collapsed all six into 'no'."
+        ),
     )
     notes: List[str] = Field(default_factory=list)
 
@@ -4663,6 +4775,26 @@ class ExportAuditBundleResult(BaseModel):
     start_date: str
     end_date: str
     size_bytes: int
+    day_files: int = Field(
+        ...,
+        ge=1,
+        description=(
+            "How many day files the bundle holds. A range covering none of "
+            "them is refused rather than exported, so this is never zero -- "
+            "the manifest, the README and the verifier weigh several "
+            "kilobytes on their own, which made a bundle of nothing look "
+            "like a bundle."
+        ),
+    )
+    record_count: int = Field(
+        ...,
+        ge=0,
+        description=(
+            "How many decision records those day files contain, summed from "
+            "the bundle's own manifest -- the same arithmetic the auditor "
+            "receiving it will do."
+        ),
+    )
     notes: List[str] = Field(default_factory=list)
 
 

@@ -12,6 +12,7 @@ audit record are deliberately absent -- see the provenance tools' own notes.
 
 import datetime
 import hashlib
+import json
 import logging
 import math
 import os
@@ -72,7 +73,12 @@ from standard_quant_tools.agent.models import (
     VerifyAuditIntegrityResult,
 )
 from standard_quant_tools.audit.export import export_bundle as _export_bundle
-from standard_quant_tools.audit.paths import _audit_dir
+from standard_quant_tools.audit.paths import (
+    _INDEX_FILENAME,
+    _audit_dir,
+    _audit_enabled,
+    _iter_day_files,
+)
 from standard_quant_tools.audit.replay import verify_replay as _verify_replay
 from standard_quant_tools.audit.verify import verify_audit_log_integrity as _verify_day
 from standard_quant_tools.audit.verify import (
@@ -159,6 +165,12 @@ def explain_decision(input_data: ExplainDecisionInput) -> ExplainDecisionResult:
     any other means. C++, Numba and pure Python are chosen at call time and
     fall back transparently, so "which one ran" is knowable only because
     the record says so.
+
+    Every field the record carries crosses. Four of them used not to, and
+    the notable one is `strategy_source_hash`: a registered strategy's
+    source is hashed at call time precisely so a run can be tied to the
+    code that produced it, which `git_commit_sha` does only for a checkout
+    that still exists and only at repository granularity.
     """
     record = _find_audit_record(input_data.request_id)
     sources = [
@@ -180,12 +192,16 @@ def explain_decision(input_data: ExplainDecisionInput) -> ExplainDecisionResult:
         data_sources=sources,
         duration_ms=float(record.get("duration_ms", 0.0)),
         execution_path="C++" if record.get("cpp_available") else "Python/Numba",
+        n_workers=record.get("n_workers"),
         output_hash=record.get("output_hash"),
+        output_hash_normalized=record.get("output_hash_normalized"),
+        strategy_source_hash=record.get("strategy_source_hash"),
         git_commit_sha=record.get("git_commit_sha"),
         package_version=record.get("package_version"),
         random_seed=record.get("random_seed"),
         error_type=record.get("error_type"),
         error_message=record.get("error_message"),
+        prev_record_hash=record.get("prev_record_hash"),
         record_hash=record.get("record_hash"),
     )
 
@@ -202,6 +218,10 @@ def replay_decision(input_data: ReplayDecisionInput) -> ReplayDecisionResult:
     not" implicates the library -- that is `code_changed`. When the inputs
     moved, the verdict is `data_changed` and the output difference is
     expected rather than suspicious.
+
+    The hashes behind the verdict come with it: the stored and new output
+    hash, and both hashes of every data source, so a caller told the code
+    changed can see WHICH input still matched and which output did not.
     """
     record = _find_audit_record(input_data.request_id)
     try:
@@ -224,6 +244,8 @@ def replay_decision(input_data: ReplayDecisionInput) -> ReplayDecisionResult:
                 f"{match.get('start')} -> {match.get('end')} "
                 f"({match.get('interval')})"
             ),
+            old_hash=match.get("old_hash"),
+            new_hash=match.get("new_hash"),
         )
         for match in result.data_source_matches
     ]
@@ -266,6 +288,11 @@ def replay_decision(input_data: ReplayDecisionInput) -> ReplayDecisionResult:
         output_match=result.output_match,
         data_source_matches=matches,
         verdict=verdict,
+        # The two hashes the verdict was decided from. "The code changed"
+        # without them is an assertion; with them it is an answer the
+        # caller can carry to a diff.
+        stored_output_hash=result.stored_output_hash,
+        new_output_hash=result.new_output_hash,
         notes=notes,
     )
 
@@ -329,6 +356,88 @@ def compare_decisions(input_data: CompareDecisionsInput) -> CompareDecisionsResu
     )
 
 
+def _indexed_chain_head(date: str, directory: Path) -> Optional[str]:
+    """
+    The chain head the index says a day's first record must claim, or None
+    when the index has no entry for that date.
+
+    A day file verified with no head given is checked against the genesis
+    hash, which is right only for the very first day the trail ever wrote.
+    Every later day's first record chains onto the previous day's last one,
+    and the chain index is where that head is written down -- so verifying
+    a single day without consulting it reported every day but the first as
+    a broken chain, permanently, for a log nobody had touched.
+
+    The last matching entry wins: the index is append-only and a date
+    appears once, but a duplicated entry means the most recent claim is
+    the one the writer committed to.
+    """
+    index_path = directory / _INDEX_FILENAME
+    if not index_path.exists():
+        return None
+    head: Optional[str] = None
+    with open(index_path, "r", encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            try:
+                entry = json.loads(line)
+            except Exception:
+                # A malformed index line is the trail check's finding to
+                # report, not this helper's to raise on.
+                continue
+            if entry.get("date") == date and entry.get("chain_head"):
+                head = entry["chain_head"]
+    return head
+
+
+#: The checkpoint states where a check RAN and did not pass. The others --
+#: a day nobody ever anchored, a checkpoint with no signature beside it, a
+#: check that could not be made at all -- are the ABSENCE of evidence, and
+#: reporting them as False made "nobody signed this day" read exactly like
+#: "this day was forged".
+_SIGNATURE_CHECK_FAILED = {"key_mismatch", "corrupt_signature", "content_drift"}
+
+#: What each non-valid checkpoint state means and what to do about it. A
+#: single boolean collapsed all six into "no", which is the same shape of
+#: answer as an integrity check that cannot tell an empty directory from
+#: an intact trail.
+_SIGNATURE_STATE_NOTES: Dict[str, str] = {
+    "no_checkpoint": (
+        "No checkpoint file exists for this day, so there is nothing to "
+        "verify -- the day was never anchored. This is not evidence of "
+        "tampering; it is the absence of the evidence that would detect it."
+    ),
+    "no_signature": (
+        "A checkpoint exists for this day but its signature file does not, "
+        "so the checkpoint is unsigned and proves nothing on its own."
+    ),
+    "key_mismatch": (
+        "The signature is well-formed but was not made by the key that "
+        "matches the public key supplied. Either the wrong public key was "
+        "given, or the checkpoint was signed by someone else."
+    ),
+    "corrupt_signature": (
+        "The signature file could not be read as a signature over this "
+        "checkpoint -- truncated, re-encoded or altered bytes."
+    ),
+    "content_drift": (
+        "The signature is valid, but the day's content has moved since it "
+        "was signed. Verifying a signed checkpoint is itself a recorded "
+        "call -- THIS call appends a record to today's file -- so today's "
+        "day drifts by design. Sign a day after it closes, or verify "
+        "yesterday's date, before reading this as tampering."
+    ),
+    "unavailable": (
+        "The signature could not be checked at all -- no public key file at "
+        "that path, an unreadable key or checkpoint, a day whose tail cannot "
+        "be read, or no Ed25519 implementation installed. This is a MISSING "
+        "check, not a failed one, so it is reported as unknown rather than "
+        "as a broken signature."
+    ),
+}
+
+
 def verify_audit_integrity(
     input_data: VerifyAuditIntegrityInput,
 ) -> VerifyAuditIntegrityResult:
@@ -344,9 +453,20 @@ def verify_audit_integrity(
 
     With no date, the full cross-day trail is verified, which additionally
     catches a missing day that a per-file check cannot see.
+
+    READ `verdict`, NOT `intact`. "Nothing was found broken" is true of a
+    directory with nothing in it, and of a directory nothing is being
+    written to — three different states that all produced the same
+    reassuring boolean. `verdict` separates them, `recording_enabled` says
+    whether calls made now are recorded at all, and `signature_state`
+    names which of six things a failed checkpoint check means.
     """
     notes: List[str] = []
     signature_valid: Optional[bool] = None
+    signature_state: Optional[str] = None
+    directory = _audit_dir()
+    recording_enabled = _audit_enabled()
+    day_files = _iter_day_files(directory)
 
     if input_data.date is None:
         problems = list(_verify_trail())
@@ -357,13 +477,29 @@ def verify_audit_integrity(
         # argument is LLM-reachable and goes into a filesystem path.
         if not _DATE_RE.match(input_data.date):
             raise ValidationError(f"date={input_data.date!r} must be YYYY-MM-DD.")
-        path = _audit_dir() / f"{input_data.date}.jsonl"
+        path = directory / f"{input_data.date}.jsonl"
         if not path.exists():
             raise ValidationError(
                 f"no audit file for {input_data.date}. Verify the whole "
                 "trail (omit `date`) to see which days exist."
             )
-        problems = list(_verify_day(path))
+        # Seeded with the head the chain index recorded for this day, which
+        # is what makes a single-day check agree with the trail check.
+        # Without it the file is measured against genesis and every day but
+        # the first is called broken.
+        expected_head = _indexed_chain_head(input_data.date, directory)
+        if expected_head is None:
+            problems = list(_verify_day(path))
+            notes.append(
+                f"The chain index has no entry for {input_data.date}, so "
+                "this file's first record was checked against the genesis "
+                "hash. That is correct for the first day the trail ever "
+                "wrote and for days that predate the index; a later day "
+                "missing from the index is itself a finding, which the "
+                "trail check reports (omit `date`)."
+            )
+        else:
+            problems = list(_verify_day(path, expected_prev_hash=expected_head))
         scope = input_data.date
         notes.append(
             "A single day verified in isolation cannot detect a MISSING "
@@ -371,17 +507,32 @@ def verify_audit_integrity(
         )
 
     if input_data.public_key_path is not None:
-        from standard_quant_tools.audit.signing import verify_checkpoint_signature
-
         try:
-            signature_valid = bool(
-                verify_checkpoint_signature(
-                    input_data.date, input_data.public_key_path  # type: ignore[arg-type]
+            from standard_quant_tools.audit.signing import verify_checkpoint_state
+
+            signature_state = str(
+                verify_checkpoint_state(
+                    input_data.date,  # type: ignore[arg-type]
+                    input_data.public_key_path,
                 )
             )
         except Exception as exc:
-            signature_valid = False
+            signature_state = "unavailable"
             notes.append(f"checkpoint signature could not be verified: {exc}")
+        if signature_state == "valid":
+            signature_valid = True
+        elif signature_state in _SIGNATURE_CHECK_FAILED:
+            signature_valid = False
+        else:
+            # Nothing to check, or nothing able to check it. Left unknown
+            # so the verdict stays what the chain says rather than calling
+            # an unsigned day tampered.
+            signature_valid = None
+        if signature_state in _SIGNATURE_STATE_NOTES:
+            notes.append(
+                f"signature_state={signature_state}: "
+                f"{_SIGNATURE_STATE_NOTES[signature_state]}"
+            )
     elif input_data.date is not None:
         notes.append(
             "No public key supplied, so this is a chain check only. The "
@@ -390,17 +541,49 @@ def verify_audit_integrity(
         )
 
     intact = not problems and signature_valid is not False
+    if not intact:
+        verdict = "tampered"
+    elif day_files:
+        verdict = "intact"
+    elif recording_enabled:
+        verdict = "no_trail"
+    else:
+        verdict = "recording_disabled"
+
+    if verdict == "no_trail":
+        notes.append(
+            f"There are no day files under {directory}, so nothing was "
+            "verified. An empty trail is not an intact one: recording is "
+            "on, and this directory holds no record of any call."
+        )
+    elif verdict == "recording_disabled":
+        notes.append(
+            "SQT_AUDIT_ENABLED is off, so dispatch() writes no record and "
+            "this directory is empty because nothing was ever recorded, not "
+            "because nothing was tampered with. Set SQT_AUDIT_ENABLED=1 to "
+            "have calls recorded."
+        )
+    elif not recording_enabled:
+        notes.append(
+            "SQT_AUDIT_ENABLED is off. The days already on disk were "
+            "verified as reported, but calls made from now on leave no "
+            "record."
+        )
+
     logger.debug(
-        "[verify_audit_integrity] scope=%s intact=%s problems=%d",
+        "[verify_audit_integrity] scope=%s verdict=%s problems=%d",
         scope,
-        intact,
+        verdict,
         len(problems),
     )
     return VerifyAuditIntegrityResult(
         scope=scope,
         intact=intact,
+        verdict=verdict,
+        recording_enabled=recording_enabled,
         problems=problems,
         checkpoint_signature_valid=signature_valid,
+        signature_state=signature_state,
         notes=notes,
     )
 
@@ -472,14 +655,36 @@ def export_audit_bundle(
     input_data: ExportAuditBundleInput,
 ) -> ExportAuditBundleResult:
     """
-    Package a date range of the audit log, plus the chain index and a
-    manifest, into one zip for handing to someone outside this process.
+    Package a date range of the audit log, plus the chain index, any signed
+    checkpoints and a manifest, into one zip for handing to someone outside
+    this process.
 
     This is the only tool in the provenance set that writes anything, and
     what it writes is a NEW file — no existing record is modified, moved or
     removed. Retention operations that could destroy evidence (gc, seal,
     hold) stay CLI-only on purpose.
+
+    A range covering no day file is REFUSED. The manifest, the README and
+    the standalone verifier weigh several kilobytes on their own, so a
+    bundle of nothing came back with a plausible size and an ok status and
+    was indistinguishable from a real export.
     """
+    # Refused BEFORE anything is written, so a range that names no day
+    # leaves no file behind to be mistaken for evidence.
+    directory = _audit_dir()
+    in_range = [
+        p
+        for p in _iter_day_files(directory)
+        if input_data.start_date <= p.stem <= input_data.end_date
+    ]
+    if not in_range:
+        raise ValidationError(
+            f"export_audit_bundle: no audit day file falls in "
+            f"{input_data.start_date}..{input_data.end_date}, so the bundle "
+            "would hold a manifest, a README and a verifier and not one "
+            "record. Call describe_audit_log to see which dates the log "
+            "actually holds, then export a range that covers them."
+        )
     # CONTAINED, like every other write in this library.
     #
     # `out_path` is a free string chosen by a model, and this is the only
@@ -496,9 +701,16 @@ def export_audit_bundle(
     # got committed.
     out_path = _contained_bundle_path(input_data.out_path)
     notes: List[str] = []
-    written = _export_bundle(input_data.start_date, input_data.end_date, out_path)
-    size = int(Path(written).stat().st_size)
-    logger.debug("[export_audit_bundle] wrote %s (%d bytes)", written, size)
+    exported = _export_bundle(input_data.start_date, input_data.end_date, out_path)
+    written = Path(exported)
+    size = int(written.stat().st_size)
+    logger.debug(
+        "[export_audit_bundle] wrote %s (%d bytes, %d days, %d records)",
+        written,
+        size,
+        exported.day_files,
+        exported.record_count,
+    )
     notes.append(
         "The bundle is a copy. Verifying it proves the copy is internally "
         "consistent, not that the live log was untouched — run "
@@ -509,6 +721,8 @@ def export_audit_bundle(
         start_date=input_data.start_date,
         end_date=input_data.end_date,
         size_bytes=size,
+        day_files=exported.day_files,
+        record_count=exported.record_count,
         notes=notes,
     )
 

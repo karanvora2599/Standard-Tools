@@ -120,11 +120,11 @@ an agent can reach should not be able to edit its own record.
 
 | Tool | Answers |
 |---|---|
-| `explain_decision` | What one recorded call did: inputs, the data it read with content hashes, which execution path ran |
-| `replay_decision` | Re-run it and classify: reproduced, `data_changed`, or a genuine code change |
+| `explain_decision` | What one recorded call did: inputs, the data it read with content hashes, which execution path ran, and every field of the record, including the hash of the strategy source that ran |
+| `replay_decision` | Re-run it and classify: reproduced, `data_changed`, or a genuine code change, with the old and new hash of the output and of every data source so a change comes with what changed; a failure that no longer reproduces is an answer, not a machinery error |
 | `compare_decisions` | Diff two recorded calls and say which of the differences explains the outcome |
-| `verify_audit_integrity` | Check the tamper-evident hash chain, for one day or the whole trail |
-| `export_audit_bundle` | Package a date range plus its chain index and manifest into one zip for an external auditor |
+| `verify_audit_integrity` | Check the tamper-evident hash chain, for one day or the whole trail. The `verdict` separates `intact`, `tampered`, `no_trail` and `recording_disabled` (an empty directory used to read as intact), and `signature_state` names which of six things a failed checkpoint check means, including the record this very call appends |
+| `export_audit_bundle` | Package a date range plus its chain index, checkpoint sidecars and manifest into one zip for an external auditor; a range covering no day is refused |
 
 **`replay_decision`'s classification is the point.** "The output changed"
 is not useful on its own; "the inputs are identical and the output moved"

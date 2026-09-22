@@ -305,6 +305,18 @@ wholesale-regenerated day file with a fabricated-but-internally-consistent
 chain, which `verify_audit_log_integrity(path)` alone (with its default
 genesis-hash assumption) cannot.
 
+**The tail is checked as well as the head.** Seeding a day with the head
+the index claims catches a day regenerated from a fabricated head. It
+does not catch a day regenerated from the REAL head, which sits in
+plaintext in the index next door: an attacker who rewrites a day's
+records and re-derives its chain from that published head produces a
+file that is internally consistent and correctly seeded. Since the
+change of 2026-09-22 the verifier also reads each day's last
+`record_hash` and requires it to equal the next indexed day's
+`chain_head`; a day re-chained from its published head is named against
+the head the index says it should end at. The same check is in
+`sqt verify` and in the standalone verifier the auditor bundle carries.
+
 **Pre-existing audit directories need no migration.** Day files written
 before this feature was deployed remain independently valid — verify them
 with `verify_audit_log_integrity(path)` directly. Cross-day linkage begins
@@ -721,11 +733,13 @@ python verify_audit_log.py .
 
 A clean result confirms the exported records are internally self-consistent
 and match their hash chain. It does **not** prove the source system's
-filesystem was never tampered with before export. `export_bundle()` doesn't
-currently bundle a signed checkpoint automatically — if you're anchoring
-the exported range with [checkpoint signing](#checkpoint-signing-ed25519),
-run `sqt anchor`/copy the `.checkpoint.json`/`.checkpoint.sig` sidecars into
-the bundle yourself before handing it off. See
+filesystem was never tampered with before export. When a day in the
+range was anchored with [checkpoint signing](#checkpoint-signing-ed25519),
+its `.checkpoint.json` and `.checkpoint.sig` sidecars travel in the
+bundle and are listed in its manifest; the public key that verifies them
+arrives out of band. A range that covers no day file is refused rather
+than exported as a bundle of nothing, and the result says how many days
+and records it holds. See
 [What this can and cannot certify](#auditability) at the top of this page.
 
 ---
