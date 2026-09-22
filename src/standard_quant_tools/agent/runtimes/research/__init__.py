@@ -100,7 +100,11 @@ TOOL_DEFS = [
         "`sqt://` reference from another runtime, or values passed inline. "
         "The same arithmetic analyze_stock_risk applies to a ticker, "
         "available for a model's out-of-sample returns, an external fund's "
-        "series, or a panel another agent already computed. The metric set "
+        "series, or a panel another agent already computed. Takes an "
+        "optional `benchmark` in the same three shapes, which is what "
+        "information_ratio and treynor_ratio are measured against; also "
+        "serves the drawdown series (published as a reference) and an "
+        "extreme-value fit of the loss tail. The metric set "
         "is closed rather than open, because this surface is reachable from "
         "an agent and an arbitrary-expression argument would be a code path "
         "wearing a statistics costume.",
@@ -112,8 +116,9 @@ TOOL_DEFS = [
         "reference per indicator. get_technical_panel answers what the "
         "indicators are NOW; this answers what they have been, which is "
         "what a signal, a feature or a custom backtest actually consumes. "
-        "Pass a price_panel_ref from the data runtime and nothing is "
-        "refetched -- the same bars are reused.",
+        "Fourteen indicators, every one of them parameterized here rather "
+        "than fixed at its default. Pass a price_panel_ref from the data "
+        "runtime and nothing is refetched -- the same bars are reused.",
         IndicatorPanelInput,
     ),
     (

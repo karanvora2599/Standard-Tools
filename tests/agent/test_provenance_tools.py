@@ -309,3 +309,54 @@ class TestRetentionStaysOffTheToolSurface:
         reachable = {fn for fn, _model in _TOOL_DISPATCH.values()}
         for name in ("gc", "seal_day", "hold_day", "release_hold"):
             assert getattr(retention, name) not in reachable, name
+
+    def test_the_signing_functions_that_touch_the_private_key_are_unreachable(self):
+        """Verification with a public key is safe and is exposed. Signing
+        is not: an agent that can re-sign a checkpoint can re-anchor a
+        rewritten day and defeat the one check the chain cannot perform on
+        itself."""
+        from standard_quant_tools.agent.tools import _TOOL_DISPATCH
+        from standard_quant_tools.audit import signing
+
+        reachable = {fn for fn, _model in _TOOL_DISPATCH.values()}
+        for name in ("generate_keypair", "checkpoint_and_sign"):
+            assert getattr(signing, name) not in reachable, name
+
+    def test_no_dispatchable_name_in_the_meta_runtime_carries_a_mutating_verb(self):
+        """The read-only tools that report holds, seals, signatures and
+        retention candidates arrived beside the mutating functions they
+        report on, and the names are one edit apart. A tool named for the
+        action rather than for the report is the mistake this catches --
+        see the CHANGELOG entry of 2026-09-22.
+
+        Tokens, not substrings: `release_hold` is forbidden and
+        `describe_audit_log` is not, and a substring rule would catch
+        neither correctly."""
+        from standard_quant_tools.agent.runtimes import resolve
+
+        forbidden = {"gc", "seal", "hold", "release", "keypair", "sign", "delete"}
+        offenders = {
+            name: sorted(forbidden & set(name.split("_")))
+            for name in resolve("meta").dispatch_table
+            if forbidden & set(name.split("_"))
+        }
+        assert not offenders, (
+            "these meta tools are named for an action that must stay "
+            f"CLI-only: {offenders}. An agent able to prune, seal, unhold "
+            "or re-sign its own history is not audited by it."
+        )
+
+    def test_the_read_only_counterparts_are_reachable(self):
+        """The other half of the rule. Reporting a hold, a seal, a
+        signature and the retention preview is what makes the mutating
+        functions' absence a boundary rather than a blind spot."""
+        from standard_quant_tools.agent.runtimes import resolve
+
+        meta = resolve("meta")
+        assert "describe_audit_log" in meta.dispatch_table
+        assert "find_decisions" in meta.dispatch_table
+
+        result = meta.dispatch("describe_audit_log", {"include_days": True})
+        assert "gc_candidate_dates" in result
+        for field in ("held", "sealed", "checkpoint_signed"):
+            assert all(field in day for day in result["day_summaries"])

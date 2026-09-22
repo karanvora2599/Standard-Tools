@@ -4,6 +4,7 @@ advertised without being dispatchable or the reverse."""
 
 from standard_quant_tools.agent.models import (
     CapacityReportInput,
+    EfficientFrontierInput,
     EstimateCovarianceInput,
     EstimateTradeCostInput,
     LiquidityAnalysisInput,
@@ -36,6 +37,7 @@ from .tools import (
     estimate_covariance,
     estimate_trade_cost,
     get_capacity_report,
+    get_efficient_frontier,
     get_liquidity_metrics,
     get_microstructure_metrics,
     get_portfolio_risk_attribution,
@@ -78,6 +80,24 @@ TOOL_DEFS = [
         "run_portfolio_optimization",
         "Produce portfolio weights via Markowitz mean-variance (max_sharpe/min_volatility/target_return/target_volatility), risk parity, or Black-Litterman — unlike get_portfolio_analysis, which only scores weights already chosen.",
         PortfolioOptimizationInput,
+    ),
+    (
+        "get_efficient_frontier",
+        "The WHOLE efficient frontier in one call, exactly, from the "
+        "closed form. run_portfolio_optimization(method='target_return') "
+        "answers for ONE target return, so tracing a curve through it "
+        "costs a tool call and an agent turn per point, and leaves the "
+        "caller to guess which target returns are worth asking about. "
+        "This returns the span, the points on it, the global "
+        "minimum-variance portfolio, the condition number of the "
+        "covariance it inverted, and the tangency portfolio at a given "
+        "rate -- null with a warning when no such portfolio exists rather "
+        "than a normalization onto the inefficient branch. Weights are "
+        "unbounded and sum to one, which is the condition the algebra "
+        "describes; a long-only or capped frontier is a different curve "
+        "with no closed form and is still run_portfolio_optimization "
+        "point by point.",
+        EfficientFrontierInput,
     ),
     (
         "get_portfolio_risk_attribution",
@@ -127,6 +147,7 @@ TOOL_DISPATCH = {name: (globals()[name], model) for name, _d, model in TOOL_DEFS
 TOOL_CATEGORY = {
     "construct_weights_from_scores": "portfolio_risk",
     "run_portfolio_optimization": "portfolio_risk",
+    "get_efficient_frontier": "portfolio_risk",
     "plan_rebalance": "portfolio_risk",
     "estimate_covariance": "portfolio_risk",
     "get_portfolio_risk_attribution": "portfolio_risk",
@@ -155,6 +176,7 @@ __all__ = [
     "check_spread_proxy",
     "estimate_trade_cost",
     "get_capacity_report",
+    "get_efficient_frontier",
     "get_liquidity_metrics",
     "get_microstructure_metrics",
     "get_portfolio_risk_attribution",

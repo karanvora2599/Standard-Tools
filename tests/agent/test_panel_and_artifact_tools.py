@@ -240,7 +240,9 @@ class TestDescribeArtifact:
         assert result["rows"] == 300
         assert result["columns"] == ["equity"]
         assert result["index_start"].startswith("2022-01-03")
-        assert len(result["content_hash"]) == 64
+        # The artifact store's digest, so a listing and a description of one
+        # file compare directly -- see the CHANGELOG entry of 2026-09-22.
+        assert len(result["content_hash"]) == 16
 
     def test_the_hash_is_over_the_file_not_the_uri(self, equity_curve_uri):
         """Two reads of one artifact must agree, and a different artifact

@@ -20,21 +20,26 @@ inside one tool died there and the next runtime refetched it.
 WHAT IS DELIBERATELY ABSENT. Data QUALITY checks -- `get_data_quality_report`
 in `research` already reports missing bars, stale prices and price jumps, and
 a second name for those is the confusable duplication runtimes exist to
-prevent. Order book FETCHING, still -- but for a different reason than
-before. `DataProvider.get_order_book` now HAS an implementation:
-`DatabentoProvider` serves depth from its depth dataset. A fetch tool in
-this runtime would have to answer for every provider, and nine of ten
-refuse, so the way in is the one below.
+prevent.
 
-WHAT CHANGED THAT FOR. Fetching a book and HAVING one are different problems,
-and only the first was ever blocked. `register_external_dataset` takes depth the
-caller already holds -- a vendor extract, an ITCH replay, a Nasdaq Basic
-tape -- and makes it resolvable without copying it, which is what the fetch
-path could never do: every provider call materializes a whole frame and
-`publish` then writes a second complete copy under SQT_RUNS_DIR. That is
-survivable for a decade of daily bars and not for an afternoon of depth. So
-these three tools store a pointer and a schema, and read in batches, which
-is also why they are the only tools in this runtime that fetch nothing.
+DEPTH IS NOT ABSENT ANY MORE, and the argument that kept it out did not
+survive being written down. It ran: `DataProvider.get_order_book` has one
+implementation, a fetch tool would have to answer for every provider, and
+nine of ten refuse. But refusing for nine of ten is what `fetch_tick_tape`
+and `fetch_quote_panel` have always done -- by name, pointing at
+`describe_data_capabilities` -- and meanwhile the two tools that consume a
+book could be fed only by `register_external_dataset`, which requires
+already holding one. Fetching a book and HAVING a book are different
+problems and only the first was ever blocked.
+
+WHAT THE FETCH TOOLS DO INSTEAD OF PUBLISHING. The reason the depth kinds
+are external is real and unchanged: every provider call materializes a whole
+frame and `publish` then writes a SECOND complete copy under SQT_RUNS_DIR,
+which is survivable for a decade of daily bars and not for an afternoon of
+depth. So `fetch_order_book` and `fetch_order_events` write one Parquet and
+REGISTER it -- one copy, a pointer, a schema, and batched reads -- which is
+the same shape the three registration tools give a file the caller already
+had, reached without having to have it first.
 """
 
 from .models import (
@@ -47,10 +52,13 @@ from .models import (
     FetchFinancialRatiosInput,
     FetchOhlcvInput,
     FetchOhlcvPanelInput,
+    FetchOrderBookInput,
+    FetchOrderEventsInput,
     FetchQuotePanelInput,
     FetchReturnsPanelInput,
     FetchTickTapeInput,
     InferTemporalContractInput,
+    PreflightVendorRequestInput,
     PrepareVendorExtractInput,
     RegisterExternalDatasetInput,
     ValidateDataBundleInput,
@@ -66,11 +74,14 @@ from .tools import (
     fetch_financial_ratios,
     fetch_ohlcv,
     fetch_ohlcv_panel,
+    fetch_order_book,
+    fetch_order_events,
     fetch_quote_panel,
     fetch_returns_panel,
     fetch_tick_tape,
     get_dataset_metadata,
     infer_temporal_contract,
+    preflight_vendor_request,
     prepare_vendor_extract,
     register_external_dataset,
     validate_data_bundle,
@@ -130,6 +141,67 @@ TOOL_DEFS = [
         "position is in neither: it needs an order-level feed and cannot be "
         "inferred from aggregated size at a level.",
         FetchQuotePanelInput,
+    ),
+    (
+        "fetch_order_book",
+        "Fetch L2 depth snapshots -- price and resting size at each level, "
+        "level 1 the touch -- write them once under the run and return an "
+        "order_book_panel reference. THIS IS THE ONLY WAY TO OBTAIN A BOOK "
+        "in this library other than already having one: the analysis that "
+        "reads depth could previously be fed only by register_external_"
+        "dataset, which wants a file you captured elsewhere. The reference "
+        "is external, so resolving it streams the file in batches rather "
+        "than loading a session into memory; hand it to "
+        "get_order_book_metrics as `ref`, and to detect_liquidity_events' "
+        "depth channels once that detector grows the per-snapshot series "
+        "step they name. THE FEED IS METERED AND DEPTH IS THE EXPENSIVE "
+        "SCHEMA: five minutes of one active name at ten levels measured "
+        "about 42 MB. The WINDOW is what the vendor bills -- `limit` "
+        "(20,000 snapshots by default, roughly half an hour of an active "
+        "name) caps only what is written, and the result says when it "
+        "bound. Price the window with preflight_vendor_request before "
+        "widening it. Needs a provider that serves depth; one that does not "
+        "refuses by name and points at describe_data_capabilities.",
+        FetchOrderBookInput,
+    ),
+    (
+        "fetch_order_events",
+        "Fetch order-by-order events -- every add, cancel, modify and fill "
+        "with its own id -- write them once under the run and return an "
+        "order_event_panel reference for get_order_event_metrics to read as "
+        "`ref`. A STRICTLY DEEPER FEED THAN DEPTH, and the difference is "
+        "identity rather than levels: a book snapshot aggregates size per "
+        "price, and that aggregation is what makes queue position, order "
+        "lifetime and a true cancellation rate impossible to recover. It is "
+        "also far denser -- the window that yields thousands of book "
+        "snapshots yields millions of events -- though cheaper per unit "
+        "time than depth: the same five minutes of one name measured about "
+        "14 MB. `limit` defaults to 100,000 events, a few minutes of an "
+        "active name, and caps what is WRITTEN rather than what the vendor "
+        "bills; the window does that. Needs a provider with an order-level "
+        "feed; one without refuses by name pointing at "
+        "describe_data_capabilities.",
+        FetchOrderEventsInput,
+    ),
+    (
+        "preflight_vendor_request",
+        "What a vendor request would cost and whether the data is even "
+        "there -- asked for free, before the request is made. Returns the "
+        "DATASET that would answer (the routing is date-dependent and "
+        "feed-dependent: daily bars prefer a consolidated summary where it "
+        "reaches and fall back to a sample feed carrying a few percent of "
+        "volume, while depth comes from one venue), that dataset's coverage "
+        "window, the BYTES the vendor would bill, and the reference kind "
+        "the schema produces. Bytes rather than money on purpose: an "
+        "account whose subscription already includes the feed is quoted "
+        "$0.00 for a request of any size, so the price is silent about "
+        "exactly the thing it is consulted for. A window the dataset does "
+        "not cover is said so rather than fabricated, and a dataset that "
+        "reports nothing comes back null rather than as a guess. Call it "
+        "before fetch_order_book or fetch_order_events, which are the "
+        "metered ones. Needs a provider that routes named vendor datasets; "
+        "one without refuses naming source='databento'.",
+        PreflightVendorRequestInput,
     ),
     (
         "fetch_financial_ratios",
@@ -289,6 +361,12 @@ TOOL_DISPATCH = {
     "fetch_returns_panel": (fetch_returns_panel, FetchReturnsPanelInput),
     "fetch_tick_tape": (fetch_tick_tape, FetchTickTapeInput),
     "fetch_quote_panel": (fetch_quote_panel, FetchQuotePanelInput),
+    "fetch_order_book": (fetch_order_book, FetchOrderBookInput),
+    "fetch_order_events": (fetch_order_events, FetchOrderEventsInput),
+    "preflight_vendor_request": (
+        preflight_vendor_request,
+        PreflightVendorRequestInput,
+    ),
     "fetch_financial_ratios": (
         fetch_financial_ratios,
         FetchFinancialRatiosInput,
@@ -343,11 +421,14 @@ __all__ = [
     "fetch_financial_ratios",
     "fetch_ohlcv",
     "fetch_ohlcv_panel",
+    "fetch_order_book",
+    "fetch_order_events",
     "fetch_quote_panel",
     "fetch_returns_panel",
     "fetch_tick_tape",
     "get_dataset_metadata",
     "infer_temporal_contract",
+    "preflight_vendor_request",
     "prepare_vendor_extract",
     "register_external_dataset",
     "validate_data_bundle",

@@ -267,6 +267,52 @@ print(result["implied_weights"])     # sums to 1
 
 The market-equilibrium prior (`pi = risk_aversion * cov @ market_weights`) is blended with your views via the standard He & Litterman (1999) formula. `confidence` in `build_bl_views` (default `1.0`, the standard He-Litterman uncertainty) is a **documented simplification** of Idzorek's (2005) full confidence-scaling method, not a reimplementation of it — lower values widen that view's uncertainty proportionally, letting it move the posterior less.
 
+## The whole frontier, not one point of it
+
+`get_efficient_frontier` returns the curve itself: the trade-off between
+expected return and volatility across a universe, plus the two portfolios
+on it that have names.
+
+```python
+from standard_quant_tools.agent.tools import get_efficient_frontier
+from standard_quant_tools.agent.models import EfficientFrontierInput
+
+curve = get_efficient_frontier(EfficientFrontierInput(
+    tickers=["AAPL", "MSFT", "GOOGL", "XOM"],
+    start_date="2022-01-01", end_date="2024-01-01",
+    n_points=25,
+    risk_free_rate=0.03,
+))
+print(curve.min_variance.weights)                 # needs no return forecast
+print(curve.tangency.expected_return)             # None when no such portfolio exists
+print([(p.expected_return, p.volatility) for p in curve.points])
+```
+
+`run_portfolio_optimization(method="target_return")` answers for ONE target
+return. Tracing a curve through it is a tool call and an agent turn per
+point, and it leaves the caller guessing which target returns the universe
+can even support — the default span here runs from the global
+minimum-variance portfolio's own return to the highest single-asset mean,
+which is the stretch anybody is choosing among. Pass `return_range` to
+choose the span deliberately.
+
+**The weights are unbounded and sum to one.** That is not a relaxation for
+convenience; it is the condition under which the Merton frontier constants
+describe the frontier at all. A weight may be negative (a short) or above 1
+(levered by that short). A long-only or capped frontier is a different
+curve with no closed form, and it remains `run_portfolio_optimization`
+point by point — which under `allow_short=True, max_weight=None` takes the
+same closed-form branch this tool does, so the two agree to the last place
+either of them publishes.
+
+`tangency` is the maximum-Sharpe portfolio at `risk_free_rate`, and it is
+**null with a warning** when the rate sits at or above the minimum-variance
+portfolio's own return: there is then no maximum-Sharpe portfolio on the
+efficient branch, and normalizing the same algebra anyway lands on the
+inefficient one and reads as an ordinary answer. `condition_number` is
+reported at every level rather than only above the warning threshold — the
+frontier inverts that covariance for every point it returns.
+
 ### Via Agent Tool
 
 ```python

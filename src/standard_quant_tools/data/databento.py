@@ -115,7 +115,15 @@ SCHEMA_KINDS: Dict[str, str] = {
     "bbo-1m": "quote_panel",
     "tbbo": "quote_panel",
     "trades": "tick_tape",
-    "mbo": "order_book_panel",
+    # `mbo` said `order_book_panel` here and it is not one. Market-by-order
+    # carries `order_id` and `action` per record and aggregates nothing;
+    # normalize_mbo produces ORDER_EVENT_COLUMNS, which is the
+    # `order_event_panel` contract. Nothing read this map while it was
+    # wrong -- it acquired its first reader with the depth fetch tools
+    # (CHANGELOG 2026-09-22), which would have registered an order tape
+    # under the book's own kind and then failed inside the book statistics
+    # on a `bid_price_0` that market-by-order does not have.
+    "mbo": "order_event_panel",
     "ohlcv-1s": "price_panel",
     "ohlcv-1m": "price_panel",
     "ohlcv-1h": "price_panel",

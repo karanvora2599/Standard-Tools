@@ -1,6 +1,6 @@
 # The Data Runtime
 
-Eighteen tools for getting the bytes and saying what they can support.
+Twenty-one tools for getting the bytes and saying what they can support.
 
 Every other runtime answers a question about markets. This one answers where
 the data is — and it is the only runtime whose output is meant to be
@@ -69,9 +69,11 @@ incomplete. Every rate and total computed from a truncated tape understates
 the real one, so the result says the cap was reached rather than leaving the
 number to look like a measurement.
 
-**Quotes are top of book.** No shipped provider exposes depth, so queue
-position and resting size at a level are not in the data and cannot be
-inferred from it.
+**Quotes are top of book.** Depth is a different call: `fetch_order_book`
+serves it where the provider does, and resting size at each level is in
+that and not in a quote panel. Queue position is in neither — it needs an
+order-level feed, which is `fetch_order_events`, and it cannot be inferred
+from aggregated size at a price.
 
 **A provider that is not point-in-time hands back restated values under
 their original dates.** `get_dataset_metadata` reports that, along with
@@ -296,6 +298,9 @@ vendor normalizer produces one.
 | `fetch_returns_panel` | A wide date-by-ticker return frame, ready for panel analysis |
 | `fetch_tick_tape` | Individual trades, for measuring rather than estimating |
 | `fetch_quote_panel` | Top-of-book quotes, what Lee-Ready signing needs |
+| `fetch_order_book` | L2 depth snapshots, written once and returned as an EXTERNAL `order_book_panel` reference that `get_order_book_metrics` streams in batches -- the only way to obtain a book here short of already having one. Metered: five minutes of one active name at ten levels measured about 42 MB, and the WINDOW is what the vendor bills, not `limit` |
+| `fetch_order_events` | Order-by-order events, as an `order_event_panel` reference for `get_order_event_metrics`. Deeper than depth in kind rather than in levels: aggregation per price is what makes queue position, order lifetime and a true cancellation rate unrecoverable. Denser by orders of magnitude, about 14 MB for the same five minutes |
+| `preflight_vendor_request` | What a request would cost and whether the data is there, before it is made: the dataset that would answer, that dataset's coverage window, the billable BYTES -- not dollars, which a subscription quotes at zero for a request of any size -- and the reference kind the schema produces. A window nobody reported is null, never a plausible-looking guess |
 | `fetch_financial_ratios` | A company's ratios, with implausible values flagged |
 | `get_dataset_metadata` | What the provider guarantees: adjusted, survivorship, point-in-time; carries the provider's `notes`, where Databento names its sampling |
 | `infer_temporal_contract` | What a frame's own columns imply about timing |

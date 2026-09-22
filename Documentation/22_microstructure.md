@@ -347,7 +347,7 @@ the module declared computable, so the obvious call was the one that died.
 | `estimate_roll_spread` | no | Effective spread from bid-ask bounce — with its noise floor |
 | `estimate_corwin_schultz_spread` | no | Spread from the high-low range |
 | `get_amihud_illiquidity` | no | Price move per dollar traded, as a percentile; with `run_id` and `name` the rolling series is published as an `analytic_series` |
-| `estimate_kyle_lambda` | no | Market depth, and the impact of a given size |
+| `estimate_kyle_lambda` | either | Market depth, and the impact of a given size. Give it a `trades_ref` (and a `quotes_ref`) and the flow is signed print by print, bucketed at `freq`; give it `close`/`volume` and the only sign available is the bar's own return, so the result comes back `circular=True` -- a number that was 3.2x the signed one on the same live tape while its r-squared looked 2.7x better. `circular`, `sign_source` and `freq` say which estimate you were handed |
 | `get_order_flow_imbalance` | no | Signed volume imbalance, and whether it predicts anything |
 | `estimate_vpin` | no | Flow one-sidedness in volume time |
 | `get_intraday_volume_profile` | no | The U-shape, for scheduling; takes the venue's `exchange_timezone` and session, since a London tape under the New York session is refused rather than mis-measured |

@@ -80,6 +80,136 @@ class FetchResult(_Result):
     )
 
 
+class DepthFetchResult(_Result):
+    """A depth or order feed, written once and registered where it landed.
+
+    NOT a `FetchResult`, and the difference is the storage. A book and an
+    order tape are registered EXTERNAL references: the bytes stay in one
+    file and a consumer streams them in batches, because the tools that
+    read them are built to never hold a session in memory. So this result
+    reports what the file holds and how much of the window reached it,
+    rather than what a published frame contains.
+    """
+
+    ref: str = Field(
+        ...,
+        description=(
+            "An external `sqt://` reference. Hand it to "
+            "get_order_book_metrics or get_order_event_metrics as `ref`; "
+            "resolving it returns a streaming handle rather than a frame, "
+            "which is what lets a session-sized dataset be read at all."
+        ),
+    )
+    kind: str = Field(..., description="The reference kind that was registered.")
+    rows: int = 0
+    columns: List[str] = Field(default_factory=list)
+    entities: List[str] = Field(
+        default_factory=list, description="The symbol this window is for."
+    )
+    start: Optional[str] = Field(
+        None,
+        description=(
+            "First timestamp in the data, read from the `timestamp` COLUMN "
+            "-- depth and order feeds carry it as a column rather than as "
+            "the index, because a book update is not unique in time."
+        ),
+    )
+    end: Optional[str] = Field(None, description="Last timestamp, the same way.")
+    truncated: bool = Field(
+        False,
+        description=(
+            "The `limit` bound the write. Everything registered is a PREFIX "
+            "of the window, so every mean, rate and total computed from it "
+            "describes the opening of the window rather than all of it -- "
+            "and the opening is its least typical part."
+        ),
+    )
+    levels: Optional[int] = Field(
+        None,
+        description=(
+            "Complete depth levels in the registered book. Null for an "
+            "order feed, which has no levels: it aggregates nothing."
+        ),
+    )
+    path: str = Field(
+        "", description="Where the file was written, under the runs directory."
+    )
+    size_bytes: int = Field(0, description="What the written file occupies on disk.")
+    dataset: Optional[str] = Field(
+        None,
+        description=(
+            "The vendor dataset that actually answered, when the provider "
+            "says. Depth comes from a single venue, so this names the venue "
+            "whose book it is -- a national picture it is not."
+        ),
+    )
+    provider: Optional[str] = Field(
+        None, description="Which provider served it, when the frame records it."
+    )
+
+
+class VendorPreflightResult(_Result):
+    """What a vendor request would cost, and whether the data is there."""
+
+    symbol: str = ""
+    vendor_schema: str = Field("", description="The vendor product that was priced.")
+    start_date: str = ""
+    end_date: str = ""
+    dataset: Optional[str] = Field(
+        None,
+        description=(
+            "The dataset that would answer, by the same routing the fetch "
+            "uses. Null only when the provider names no candidate at all."
+        ),
+    )
+    datasets_considered: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Every dataset the request would be offered to, in preference "
+            "order. The first one that covers the window answers, which is "
+            "why the chosen one is not always the first."
+        ),
+    )
+    coverage_start: Optional[str] = Field(
+        None,
+        description=(
+            "First instant the chosen dataset published, ISO-8601 UTC. NULL "
+            "when the provider cannot say -- never a guessed window, "
+            "because a fabricated one is exactly what a caller would plan "
+            "the request around."
+        ),
+    )
+    coverage_end: Optional[str] = Field(None, description="Last instant, the same way.")
+    covers_request: Optional[bool] = Field(
+        None,
+        description=(
+            "Whether the chosen dataset's window contains the requested "
+            "one. Null when coverage is unknown, which is not the same as "
+            "False."
+        ),
+    )
+    billable_bytes: Optional[int] = Field(
+        None,
+        description=(
+            "Bytes the vendor would bill for this request, asked for free "
+            "before making it. BYTES RATHER THAN MONEY: an account whose "
+            "subscription already includes the feed is quoted 0.00 for a "
+            "request of any size, so the price is silent about exactly the "
+            "thing it is consulted for. Null when the vendor declined to "
+            "answer, with the reason in `warnings`."
+        ),
+    )
+    kind: Optional[str] = Field(
+        None,
+        description=(
+            "The `sqt://` reference kind this schema produces here, so the "
+            "preflight says which tools could read the result before "
+            "anything is fetched."
+        ),
+    )
+    provider: Optional[str] = Field(None, description="Which provider was asked.")
+
+
 class FinancialRatiosResult(_Result):
     symbol: str
     ratios: Dict[str, Any] = Field(default_factory=dict)
@@ -366,6 +496,7 @@ __all__ = [
     "BundleVerdictResult",
     "DataBundleResult",
     "DatasetMetadataResult",
+    "DepthFetchResult",
     "ExternalDatasetResult",
     "ExternalValidationResult",
     "FetchResult",
@@ -374,6 +505,7 @@ __all__ = [
     "RatioFieldComparison",
     "Stat",
     "TemporalContractResult",
+    "VendorPreflightResult",
 ]
 
 

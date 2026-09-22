@@ -1,5 +1,49 @@
 # Changelog
 
+## Nine doors for capability that had none
+
+Nine tools, each over functions that existed, worked, and could not be
+reached: two data fetchers for the only level-two implementation in the
+library, a preflight for what a vendor request would cost, a closed-form
+frontier, a tick-signed Kyle lambda, a benchmark slot for the one tool
+that scores an arbitrary series, nine more indicators in the panel, and
+five tools that make the audit log and the library's own rules readable.
+
+- **`fetch_order_book` and `fetch_order_events`** reach Databento's
+  depth and order-by-order feeds, which 872 lines of microstructure
+  analytics could consume and no tool could produce. Both publish an
+  external reference the book and event tools read as they are. Depth
+  costs money: five minutes of one name at ten levels is about 42 MB,
+  and the description and the default limit say so.
+  **`preflight_vendor_request`** returns the coverage window of the
+  dataset that would answer and the billable size, from free metadata
+  endpoints, before a fetch is paid for.
+- **`get_efficient_frontier`** returns the Merton frontier in closed
+  form, exact and in under a millisecond for forty points, where an
+  agent used to call the solver once per point.
+- **`estimate_kyle_lambda`** takes a tick tape and a quote panel and
+  signs trades with Lee-Ready; every lambda it could return before was
+  the circular path, three times too large and looking better fitted.
+- **`calculate_series_metrics`** takes a `benchmark`, so a strategy
+  return series can be scored with the information ratio and the
+  Treynor ratio, run through extreme-value tail risk, or turned into a
+  drawdown series; every other door needed a listed ticker.
+- **The indicator panel covers all fourteen indicators** with their
+  parameters, not five at fixed periods.
+- **`describe_audit_log` and `find_decisions`** make the provenance
+  family usable: an agent holding a log of two hundred records can now
+  see what is there and find a request id, where it could only verify
+  wholesale, export wholesale, or explain one record by an id it had to
+  already possess. The seven audit settings, the hold and seal state,
+  and the retention candidates are read-only visible.
+- **`describe_numeric_contract`, `describe_effective_config` and
+  `list_artifacts`** report the rules enforced on every call and
+  readable by nobody, the twenty settings consulted across the library
+  and reported by no tool (secrets as set or unset only), and the
+  artifact store the tool surface never touched. `validate_tool_call`
+  runs the numeric contract on inline payloads instead of passing what
+  execution refuses, and `describe_artifact` accepts a store key.
+
 ## What was computed and thrown away is published or returned
 
 The dominant finding across every runtime was a series computed and

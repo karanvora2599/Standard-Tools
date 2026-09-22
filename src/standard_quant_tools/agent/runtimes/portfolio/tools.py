@@ -22,10 +22,13 @@ from standard_quant_tools.agent.models import (
     CapacityReportInput,
     CapacityReportResult,
     ChannelResult,
+    EfficientFrontierInput,
+    EfficientFrontierResult,
     EstimateCovarianceInput,
     EstimateCovarianceResult,
     EstimateTradeCostInput,
     EstimateTradeCostResult,
+    FrontierPoint,
     LiquidityAnalysisInput,
     LiquidityAnalysisResult,
     LiquidityEventsInput,
@@ -107,10 +110,13 @@ from standard_quant_tools.metrics.risk_metrics import (
 )
 from standard_quant_tools.portfolio.optimize import (
     _check_covariance_estimable,
+    _conditioning_warnings,
     _small_sample_warnings,
     annualized_mean_cov,
     black_litterman,
     build_bl_views,
+    frontier_stats,
+    frontier_weights,
     mean_variance_optimize,
     risk_parity_weights,
     view_absorption,
@@ -332,6 +338,170 @@ def run_portfolio_optimization(
 #: (covariance scales linearly with periods_per_year, not by its root) and
 #: are worth having in one place.
 _mean_cov_for_tools = annualized_mean_cov
+
+
+def _frontier_point(
+    weights: np.ndarray,
+    mu: np.ndarray,
+    cov: np.ndarray,
+    tickers: List[str],
+) -> FrontierPoint:
+    """One solved weight vector, priced under the same (mu, cov)."""
+    expected = float(weights @ mu)
+    variance = float(weights @ cov @ weights)
+    return FrontierPoint(
+        expected_return=round(expected, 6),
+        # A tiny negative variance is floating-point noise around zero, not
+        # a negative risk; clamping before the root keeps a NaN out of a
+        # field typed as a plain float.
+        volatility=round(float(np.sqrt(max(variance, 0.0))), 6),
+        weights={t: round(float(w), 6) for t, w in zip(tickers, weights)},
+    )
+
+
+def get_efficient_frontier(
+    input_data: EfficientFrontierInput,
+) -> EfficientFrontierResult:
+    """
+    The whole efficient frontier in one call, from the closed form.
+
+    `run_portfolio_optimization(method="target_return")` answers for ONE
+    target return, so a forty-point curve was forty tool calls and forty
+    agent turns -- and the caller had to guess which forty target returns
+    to ask about, with no way to see the span the universe actually
+    supports. Here the Merton constants are computed once and every point
+    is one matrix-vector product off them.
+
+    The two tools are the SAME arithmetic where they overlap: with
+    `allow_short=True` and `max_weight=None` the optimizer takes the exact
+    closed-form branch as well, so a point of this curve and a
+    `target_return` run at that return agree to the last place either of
+    them publishes. That agreement is pinned by test, and it is what makes
+    this a shape rather than a second implementation.
+
+    WHAT THE CURVE ASSUMES. sum(w) = 1 and nothing else: weights may go
+    negative and may exceed 1. That is not a relaxation added for
+    convenience, it is the condition under which the Merton constants
+    describe the frontier at all. A bounded frontier (long-only, or
+    capped) is a different curve with no closed form, and it is
+    `run_portfolio_optimization` point by point.
+
+    `tangency` is the maximum-Sharpe portfolio at `risk_free_rate`. It is
+    null, with a warning, when no such portfolio exists on the efficient
+    branch -- a rate at or above the minimum-variance portfolio's own
+    return -- rather than being approximated into a plausible-looking
+    number on the inefficient branch.
+    """
+    logger.debug(
+        "[efficient_frontier] tickers=%s  points=%d  %s → %s",
+        input_data.tickers,
+        input_data.n_points,
+        input_data.start_date,
+        input_data.end_date,
+    )
+    returns_df = fetch_returns_sync(
+        input_data.tickers, input_data.start_date, input_data.end_date
+    )
+    solved_tickers = list(returns_df.columns)
+    warnings: List[str] = list(
+        _small_sample_warnings(returns_df.shape[0], len(solved_tickers))
+    )
+    # The same gate the optimizer applies, before any inverse is taken: a
+    # covariance that is singular by construction has no frontier, and the
+    # refusal names the remedy rather than letting np.linalg.inv raise.
+    _check_covariance_estimable(
+        returns_df.shape[0], len(solved_tickers), returns_df.cov().to_numpy()
+    )
+
+    mu, cov = _mean_cov_for_tools(returns_df, input_data.periods_per_year)
+    conditioning, condition_number = _conditioning_warnings(cov, solved_tickers)
+    warnings.extend(conditioning)
+
+    sigma_inv, ones, A, B, C, D = frontier_stats(mu, cov)
+
+    min_variance_return = B / A
+    min_variance = _frontier_point(
+        frontier_weights(sigma_inv, ones, mu, A, B, C, D, min_variance_return),
+        mu,
+        cov,
+        solved_tickers,
+    )
+
+    if input_data.return_range is not None:
+        low, high = (float(v) for v in input_data.return_range)
+    else:
+        # From the point that needs no forecast to the best single asset.
+        # Above the top single-asset mean the frontier is pure leverage on
+        # one name, which is a real portfolio and a strange default.
+        low = min_variance_return
+        high = float(np.max(mu))
+        if not (high > low):
+            # Every asset's mean at or below the minimum-variance return:
+            # the efficient branch is a point. Spanning downward keeps the
+            # curve non-degenerate and says so.
+            high = low
+            low = float(np.min(mu))
+            warnings.append(
+                "every asset's annualized mean return is at or below the "
+                f"minimum-variance portfolio's own ({min_variance_return:.6f}), "
+                "so the efficient branch is a single point. The returned "
+                "curve spans the asset means instead, and its lower half is "
+                "the INEFFICIENT branch — pass return_range to choose the "
+                "span deliberately."
+            )
+        if not (high > low):
+            high = low + max(abs(low), 1.0) * 1e-3
+
+    targets = np.linspace(low, high, input_data.n_points)
+    points = [
+        _frontier_point(
+            frontier_weights(sigma_inv, ones, mu, A, B, C, D, float(target)),
+            mu,
+            cov,
+            solved_tickers,
+        )
+        for target in targets
+    ]
+
+    tangency: Optional[FrontierPoint] = None
+    try:
+        raw = sigma_inv @ (mu - input_data.risk_free_rate * ones)
+        denominator = float(ones @ raw)  # == B - rf*A
+        if abs(denominator) < 1e-14:
+            raise ValidationError(
+                "tangency portfolio is degenerate (the raw weights sum to "
+                "~0 at this risk_free_rate)"
+            )
+        if denominator < 0:
+            raise ValidationError(
+                f"risk_free_rate={input_data.risk_free_rate:.6f} is at or "
+                f"above the minimum-variance portfolio's expected return "
+                f"({min_variance_return:.6f})"
+            )
+        tangency = _frontier_point(raw / denominator, mu, cov, solved_tickers)
+    except ValidationError as exc:
+        # Reported as an absent field plus the reason, not raised: the
+        # frontier itself is well defined here and is the answer the caller
+        # asked for. Only the point on it that depends on the rate is not.
+        warnings.append(
+            f"no maximum-Sharpe (tangency) portfolio at this risk_free_rate: "
+            f"{exc}. `tangency` is null rather than a normalization onto the "
+            "INEFFICIENT branch, which is what the same algebra produces "
+            "there and which reads as an ordinary answer. Use a "
+            f"risk_free_rate below {min_variance_return:.6f}, or read "
+            "`min_variance`, which needs no rate."
+        )
+
+    return EfficientFrontierResult(
+        tickers=solved_tickers,
+        points=points,
+        tangency=tangency,
+        min_variance=min_variance,
+        condition_number=condition_number,
+        periods_per_year=input_data.periods_per_year,
+        n_observations=int(returns_df.shape[0]),
+        warnings=warnings,
+    )
 
 
 def get_portfolio_risk_attribution(

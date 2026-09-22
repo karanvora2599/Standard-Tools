@@ -1,6 +1,6 @@
 # The Meta Runtime
 
-Twenty tools that answer questions about **this library and this
+Twenty-five tools that answer questions about **this library and this
 session**, never about a market.
 
 Every other runtime tells you something about the world. This one tells you
@@ -113,7 +113,7 @@ ordered by the size of the change.
 
 ## The audit trail, read-only
 
-Four of these five READ the decision log; `export_audit_bundle` copies a
+Six of these seven READ the decision log; `export_audit_bundle` copies a
 range of it out. **None of them mutates it** — holds, sealing, garbage
 collection and checkpoint signing stay on the `sqt` CLI, because a surface
 an agent can reach should not be able to edit its own record.
@@ -125,6 +125,8 @@ an agent can reach should not be able to edit its own record.
 | `compare_decisions` | Diff two recorded calls and say which of the differences explains the outcome |
 | `verify_audit_integrity` | Check the tamper-evident hash chain, for one day or the whole trail. The `verdict` separates `intact`, `tampered`, `no_trail` and `recording_disabled` (an empty directory used to read as intact), and `signature_state` names which of six things a failed checkpoint check means, including the record this very call appends |
 | `export_audit_bundle` | Package a date range plus its chain index, checkpoint sidecars and manifest into one zip for an external auditor; a range covering no day is refused |
+| `describe_audit_log` | What the log holds -- dates, records, bytes -- and what it is CONFIGURED to do, since a count of zero means something different under recording-off. Per day, on request, whether it is held, sealed or carries a signed checkpoint. The retention window is a PREVIEW of what a policy would make eligible; the redaction salt is reported as set or unset and never as a value |
+| `find_decisions` | Search by tool, status and date, and get back the request ids the three tools above take. `dispatch()` returns the payload alone, so nothing else hands one back in process -- and this is the only way to read a call that FAILED |
 
 **`replay_decision`'s classification is the point.** "The output changed"
 is not useful on its own; "the inputs are identical and the output moved"
@@ -141,7 +143,7 @@ point of view — it copies, never edits.
 | Tool | Answers |
 |---|---|
 | `describe_tool` | One tool's full contract, for any runtime |
-| `validate_tool_call` | Are these arguments valid — without calling |
+| `validate_tool_call` | Are these arguments valid — without calling. Three layers: the schema, the strategy parameter contract, and the numerical contract run on any numbers already written into the call |
 | `estimate_tool_cost` | What each runtime costs a client's context |
 | `describe_runtime` | What each runtime is for and what it owns |
 | `list_reference_kinds` | What a reference can carry, and what converts to what |
@@ -150,7 +152,7 @@ point of view — it copies, never edits.
 | `describe_data_capabilities` | What the active provider can actually serve, including depth, order events, point-in-time records and the temporal contract per provider, and the cache's size and dead-generation count |
 | `describe_temporal_contract` | What a source can say about when facts became knowable |
 | `compare_data_sources` | Two providers, one field: unit or definition difference |
-| `describe_artifact` | What a persisted Parquet artifact contains |
+| `describe_artifact` | What a persisted Parquet artifact contains, by URI or by the store key `list_artifacts` reports |
 | `describe_reference` | What a handoff reference points at, with the vendor dataset, provider and adjustment the frame carries |
 | `read_reference` | The actual values at chosen rows of one |
 | `convert_reference` | Turn one published kind into another |
@@ -160,6 +162,11 @@ point of view — it copies, never edits.
 | `compare_decisions` | Diff two recorded calls |
 | `verify_audit_integrity` | Is the hash chain intact |
 | `export_audit_bundle` | Package a date range for an auditor |
+| `describe_audit_log` | What the decision log holds, and what it is configured to do |
+| `find_decisions` | Search the log; the request ids the other three tools take |
+| `describe_numeric_contract` | The numerical rules every boundary enforces, with the message each raises |
+| `describe_effective_config` | Every `SQT_*` setting in force; a secret reports only that it is set |
+| `list_artifacts` | Everything this library has persisted, or one run's |
 
 Full argument lists: [20_tool_index.md](20_tool_index.md#meta--discovery--provenance).
 

@@ -53,7 +53,7 @@ import re
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple, Union
+from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Set, Tuple, Union
 
 import pandas as pd
 
@@ -446,6 +446,77 @@ class DatabentoProvider(DataProvider):
         if route.family != "equity":
             return self._datasets_for(route.family, "mbp-10")
         return [self._depth_dataset]
+
+    #: Schemas whose routing is NOT the bar routing. Depth and
+    #: order-by-order come from the depth venue alone; the tape schemas
+    #: follow the same venue order intraday bars do, so bars and ticks for
+    #: one window come from one tape.
+    DEPTH_SCHEMAS = ("mbp-10", "mbo")
+    TICK_SCHEMAS = ("trades", "tbbo", "mbp-1", "bbo-1s", "bbo-1m")
+
+    def datasets_for_schema(
+        self,
+        symbol: str,
+        schema: str,
+        start_date: Optional[Union[str, datetime]] = None,
+    ) -> List[str]:
+        """
+        The datasets a request would be offered to, in preference order.
+
+        The same three routers the fetch methods use, chosen by schema
+        rather than by method name, plus the two window guards `_fetch`
+        applies before it asks anyone: the sample feed does not exist
+        before its start date and the summary feed answers daily bars
+        only. What is NOT applied is the live coverage check -- that costs
+        a metadata round trip per dataset and belongs to the caller that
+        wants it, which is why `get_dataset_coverage` is a separate call.
+
+        This is a PREVIEW of the routing, so it can say which feed would
+        answer without transferring anything. Preferring the first entry
+        blind would be wrong for a window the preferred feed does not
+        reach; pair it with the coverage windows to choose.
+        """
+        if schema in self.DEPTH_SCHEMAS:
+            return self._depth_datasets(symbol)
+        if schema in self.TICK_SCHEMAS:
+            return self._tick_datasets(symbol)
+        route = self.resolve_symbol(symbol)
+        start = (
+            _to_utc(start_date, end_of_day=False) if start_date is not None else None
+        )
+        candidates = self._datasets_for(route.family, schema, start)
+        return [
+            name
+            for name in candidates
+            if not (
+                name == DATASET_CONSOLIDATED
+                and start is not None
+                and start < CONSOLIDATED_START
+            )
+            and not (
+                name == DATASET_SUMMARY
+                and (
+                    schema not in SUMMARY_SCHEMAS
+                    or (start is not None and start < SUMMARY_START)
+                )
+            )
+        ]
+
+    def _known_datasets(self) -> List[str]:
+        """Every dataset this provider is configured to reach, deduplicated."""
+        ordered = [
+            DATASET_SUMMARY,
+            DATASET_CONSOLIDATED,
+            self._dataset,
+            self._depth_dataset,
+            self._futures_dataset,
+            self._options_dataset,
+        ]
+        seen: List[str] = []
+        for name in ordered:
+            if name and name not in seen:
+                seen.append(name)
+        return seen
 
     @staticmethod
     def resolve_symbol(symbol: str) -> SymbolRoute:
@@ -995,6 +1066,113 @@ class DatabentoProvider(DataProvider):
         _record(symbol, start_date, end_date, "mbo", _dataset, out)
         return _with_attrs(
             out, {"dataset": _dataset, "provider": "databento", "adjusted": False}
+        )
+
+    def get_dataset_coverage(
+        self, datasets: Optional[Sequence[str]] = None
+    ) -> Dict[str, Tuple[str, str]]:
+        """
+        What each dataset published, from the endpoint that costs nothing.
+
+        The same `_available_range` every fetch already clamps itself
+        against, made askable. It is memoized per dataset per provider, so
+        a caller that asks about six feeds pays six lookups once and none
+        afterwards.
+
+        A dataset that answers nothing -- not entitled, unknown, or a
+        range the vendor returns unreadable -- is LEFT OUT of the mapping.
+        Returning a window for it would be inventing the one number a
+        caller plans around.
+        """
+        names = (
+            [str(d).strip() for d in datasets]
+            if datasets is not None
+            else self._known_datasets()
+        )
+        coverage: Dict[str, Tuple[str, str]] = {}
+        for name in names:
+            if not name or name in coverage:
+                continue
+            span = self._available_range(name)
+            if span is None:
+                continue
+            first, last = span
+            coverage[name] = (first.isoformat(), last.isoformat())
+        return coverage
+
+    def get_billable_size(
+        self,
+        symbol: str,
+        start_date: Union[str, datetime],
+        end_date: Union[str, datetime],
+        schema: str,
+        *,
+        dataset: Optional[str] = None,
+    ) -> int:
+        """
+        Bytes this exact request would bill, asked before it is made.
+
+        Routed exactly as the matching fetch would route it and clamped to
+        the same published window, so the number describes the request the
+        caller is about to make rather than a nearby one. Each candidate is
+        tried in preference order; a dataset the subscription declines is
+        remembered as denied, the way a declined fetch is.
+
+        The vendor's own cost endpoint reports `0.00` on a subscription
+        that already includes the feed, which is why this returns BYTES.
+        """
+        start = _to_utc(start_date, end_of_day=False)
+        end = _to_utc(end_date, end_of_day=True)
+        if end <= start:
+            raise ValidationError(
+                f"empty window: start {start_date!r} is not before end "
+                f"{end_date!r} (the end date is INCLUSIVE, so a same-day "
+                "request is valid and this is not one)."
+            )
+        route = self.resolve_symbol(symbol)
+        candidates = (
+            [str(dataset)]
+            if dataset
+            else self.datasets_for_schema(symbol, schema, start_date)
+        )
+        client = self._get_client()
+        fmt = "%Y-%m-%d" if schema == "ohlcv-1d" else "%Y-%m-%dT%H:%M:%S"
+        refused: List[str] = []
+        for name in candidates:
+            if not name or name in self._denied:
+                continue
+            window = self._range(name, start, end) or (start, end)
+            try:
+                size = client.metadata.get_billable_size(
+                    dataset=name,
+                    schema=schema,
+                    symbols=[route.raw],
+                    stype_in=route.stype_in,
+                    start=window[0].strftime(fmt),
+                    end=window[1].strftime(fmt),
+                )
+            except Exception as exc:  # noqa: BLE001 - one refusal, not a trace
+                logger.warning(
+                    "databento billable size for %s (%s) on %s failed: %s",
+                    symbol,
+                    schema,
+                    name,
+                    exc,
+                )
+                if self._is_denial(exc):
+                    with self._lock:
+                        self._denied.add(name)
+                refused.append(f"{name}: {exc}")
+                continue
+            return int(size)
+        raise APIError(
+            f"Databento would not price {schema} for {symbol} between "
+            f"{start:%Y-%m-%d} and {end:%Y-%m-%d}. "
+            + (
+                f"Datasets tried: {refused}."
+                if refused
+                else "No dataset in this entitlement routes that schema."
+            )
         )
 
     def get_ticker_info(self, symbol: str) -> TickerInfo:

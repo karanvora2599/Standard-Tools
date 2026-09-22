@@ -67,6 +67,13 @@ def _seeded_tools() -> List[Tuple[str, str, Dict[str, Any]]]:
 #: it: it pins the DATA as well as the arguments.
 FETCHES_DATA = {"symbol", "symbols", "ticker", "tickers", "benchmark", "universe"}
 
+#: Tools whose other input is the audit trail itself. Every dispatch --
+#: including the one that runs the tool -- appends a record to today's
+#: day file, so two identical calls honestly count different records.
+#: That is the log changing, not the code; `tests/agent/test_audit_inventory.py`
+#: pins what these return for a trail it controls.
+READS_THE_TRAIL = {"describe_audit_log", "find_decisions"}
+
 #: Pinned for any offline tool that advertises a seed, so "call it twice"
 #: asks about the code rather than about the generator.
 OFFLINE_SEED = 20260902
@@ -120,7 +127,7 @@ def _offline_tools() -> List[Tuple[str, str, Dict[str, Any]]]:
         for tool_name, _description, model in runtime.tool_defs:
             if FETCHES_DATA & set(model.model_fields):
                 continue
-            if names_a_path(model):
+            if names_a_path(model) or tool_name in READS_THE_TRAIL:
                 continue
             arguments, _reason = synthesize(model)
             if arguments is None:

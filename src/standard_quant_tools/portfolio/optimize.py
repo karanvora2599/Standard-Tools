@@ -299,14 +299,20 @@ def _require_scipy(context: str) -> None:
         )
 
 
-def _frontier_stats(
+def frontier_stats(
     mu: np.ndarray, cov: np.ndarray
 ) -> Tuple[np.ndarray, np.ndarray, float, float, float, float]:
     """
     Merton (1972) two-fund efficient-frontier constants for an unconstrained
     (sum(w)=1, no bounds) portfolio: A = 1'Sigma^-1 1, B = 1'Sigma^-1 mu,
     C = mu'Sigma^-1 mu, D = A*C - B^2. Any point on the frontier is fully
-    determined by these plus a target return — see _frontier_weights.
+    determined by these plus a target return — see frontier_weights.
+
+    PUBLIC FOR THE SAME REASON `annualized_mean_cov` IS. These two
+    functions are the whole efficient frontier, and for as long as they
+    were private the only way to obtain a frontier was to re-solve the
+    same closed form numerically once per point. Exposed so a caller that
+    wants the curve rather than one portfolio can have it in one pass.
     """
     try:
         sigma_inv = np.linalg.inv(cov)
@@ -328,7 +334,7 @@ def _frontier_stats(
     return sigma_inv, ones, A, B, C, D
 
 
-def _frontier_weights(
+def frontier_weights(
     sigma_inv: np.ndarray,
     ones: np.ndarray,
     mu: np.ndarray,
@@ -343,6 +349,11 @@ def _frontier_weights(
     lam = (C - B * target_return) / D
     gam = (A * target_return - B) / D
     return sigma_inv @ (lam * ones + gam * mu)
+
+
+#: The names these two had while they were private; still used below.
+_frontier_stats = frontier_stats
+_frontier_weights = frontier_weights
 
 
 def _solve_unconstrained(

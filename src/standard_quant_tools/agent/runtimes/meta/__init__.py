@@ -29,6 +29,15 @@ from standard_quant_tools.agent.models import (
     VerifyAuditIntegrityInput,
 )
 
+from .artifact_tools import ListArtifactsInput, list_artifacts
+from .audit_tools import (
+    AuditLogInput,
+    FindDecisionsInput,
+    describe_audit_log,
+    find_decisions,
+)
+from .config_tools import EffectiveConfigInput, describe_effective_config
+from .contract_tools import NumericContractInput, describe_numeric_contract
 from .scope_tools import (  # noqa: F401
     SCOPE_TOOL_DEFS,
     SCOPE_TOOL_DISPATCH,
@@ -126,8 +135,33 @@ TOOL_DEFS = [
     ),
     (
         "describe_artifact",
-        "Shape, date span, per-column statistics and both ends of a persisted Parquet artifact, by URI. Read what a run produced instead of re-running it.",
+        "Shape, date span, per-column statistics and both ends of a persisted Parquet artifact, by URI or by the store key list_artifacts reports. Read what a run produced instead of re-running it.",
         DescribeArtifactInput,
+    ),
+    (
+        "list_artifacts",
+        "Every artifact this library has persisted, or one run's: key, absolute URI, size, last-modified time and -- on request -- the content hash. Tools hand back a URI once, in one response, and after that the file existed with no way to find it. The hash is opt-in because it is the only part that opens the files rather than their directory entries; it is the same digest describe_artifact reports, so the two compare directly. Read-only.",
+        ListArtifactsInput,
+    ),
+    (
+        "describe_audit_log",
+        "What the decision log holds and what it is configured to do: which dates, how many records, how large, and the recording, redaction, retention and signing settings that decide what a count of zero means. Per day, on request, whether it is held, sealed or carries a signed checkpoint. The retention window is reported as a PREVIEW of what a policy would make eligible -- nothing here deletes, seals, holds or releases anything, because the chain cannot tell a policy-driven deletion from the tampering it exists to detect. The redaction salt is reported as set or unset, never as a value.",
+        AuditLogInput,
+    ),
+    (
+        "find_decisions",
+        "Search the decision log by tool, status and date, and get back the request ids explain_decision, replay_decision and compare_decisions take. dispatch() returns the payload alone, so an in-process caller otherwise has no way to obtain one and those three tools are unreachable. It is also the only way to read a FAILED call: an error record is written like any other and nothing else surfaces one. Reads only; nothing is re-run.",
+        FindDecisionsInput,
+    ),
+    (
+        "describe_numeric_contract",
+        "The numerical rules every public boundary in this library enforces -- an infinity refused, an all-NaN series refused, prices strictly positive, an equity curve's START positive, an annualization ceiling, a covariance symmetric to 1e-9, a bool refused as a count -- with the threshold each bites at, an excerpt of the message it raises, and why the line is where it is. These ran on every call and were reported nowhere, so the only way to learn one was to trigger it after paying for the fetch. Offline and static.",
+        NumericContractInput,
+    ),
+    (
+        "describe_effective_config",
+        "Every SQT_* setting this process reads, resolved through the functions that read it rather than echoed from the environment -- so an unset variable still reports the value in force. Covers recording, redaction, retention and signing of the decision log, the artifact and cache roots, the native-extension switch, provider credentials and the model registry. A secret reports only whether it is set: disclosing the redaction salt would undo the redaction it configures. Reads configuration and cannot change it.",
+        EffectiveConfigInput,
     ),
     (
         "list_strategies",
@@ -166,7 +200,12 @@ TOOL_CATEGORY = {
     "compare_decisions": "provenance",
     "verify_audit_integrity": "provenance",
     "export_audit_bundle": "provenance",
+    "describe_audit_log": "provenance",
+    "find_decisions": "provenance",
     "describe_artifact": "provenance",
+    "list_artifacts": "discovery",
+    "describe_numeric_contract": "discovery",
+    "describe_effective_config": "discovery",
     "list_strategies": "discovery",
     "list_stress_scenarios": "discovery",
     "describe_data_capabilities": "discovery",
@@ -191,9 +230,14 @@ __all__ = [
     "TOOL_DISPATCH",
     "compare_decisions",
     "describe_artifact",
+    "describe_audit_log",
     "describe_data_capabilities",
+    "describe_effective_config",
+    "describe_numeric_contract",
     "explain_decision",
     "export_audit_bundle",
+    "find_decisions",
+    "list_artifacts",
     "list_strategies",
     "list_stress_scenarios",
     "replay_decision",

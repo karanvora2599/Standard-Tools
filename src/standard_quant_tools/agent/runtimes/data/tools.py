@@ -19,12 +19,26 @@ then carries them on every subsequent turn.
 WHAT IT IS NOT. It is not a second home for data QUALITY checks --
 `get_data_quality_report` in `research` already reports missing bars, stale
 prices and price jumps, and a second name for those would be exactly the
-confusable duplication the runtime split exists to avoid. It also does not
-fetch order books, though one provider now serves them:
-`DatabentoProvider.get_order_book` is the only implementation, and a fetch
-tool here would have to answer for every provider. Depth comes in through
-`register_external_dataset`, which takes a book from wherever it was
-captured -- a Databento pull the caller made themselves included.
+confusable duplication the runtime split exists to avoid.
+
+IT DOES FETCH DEPTH NOW, and the argument that it should not was answerable
+all along. The objection was that a fetch tool "would have to answer for
+every provider" and nine of ten do not serve a book -- but `fetch_tick_tape`
+and `fetch_quote_panel` have always answered for every provider through the
+same mechanism, refusing BY NAME on one that does not serve and pointing at
+`describe_data_capabilities`. What was really missing was the second half:
+the analysis side had 872 lines that could only be fed by a book the caller
+had already captured somewhere else, so the only door in was
+`register_external_dataset` and there was no way to obtain what it wanted.
+
+So `fetch_order_book` and `fetch_order_events` fetch, write ONE Parquet
+under the run, and register that file rather than publishing the frame.
+That is not a detour: both kinds are external-only by design -- a session of
+depth is not something to hold in memory, and both consumers stream it in
+batches -- so the fetch ends where a registration ends, and the reference it
+returns is the one those tools already read. `preflight_vendor_request`
+prices the window first, because the feed is metered and the window, not the
+row cap, is what the vendor bills.
 """
 
 from __future__ import annotations
@@ -37,9 +51,11 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
+from standard_quant_tools.backtest.artifacts import save_artifact
 from standard_quant_tools.data.bundle import DataBundle, validate_bundle
 from standard_quant_tools.data.comparison import compare_ratio_sources
 from standard_quant_tools.data.continuous import build_continuous_futures
+from standard_quant_tools.data.databento import SCHEMA_KINDS
 from standard_quant_tools.data.external import book_levels
 from standard_quant_tools.data.external_validation import validate_external
 from standard_quant_tools.data.factory import DataFactory
@@ -65,10 +81,13 @@ from .models import (
     FetchFinancialRatiosInput,
     FetchOhlcvInput,
     FetchOhlcvPanelInput,
+    FetchOrderBookInput,
+    FetchOrderEventsInput,
     FetchQuotePanelInput,
     FetchReturnsPanelInput,
     FetchTickTapeInput,
     InferTemporalContractInput,
+    PreflightVendorRequestInput,
     PrepareVendorExtractInput,
     RegisterExternalDatasetInput,
     ValidateDataBundleInput,
@@ -81,6 +100,7 @@ from .results import (
     ContinuousFuturesResult,
     DataBundleResult,
     DatasetMetadataResult,
+    DepthFetchResult,
     ExternalDatasetResult,
     ExternalValidationResult,
     FetchResult,
@@ -89,6 +109,7 @@ from .results import (
     RatioFieldComparison,
     TemporalContractResult,
     VendorExtractResult,
+    VendorPreflightResult,
 )
 
 logger = logging.getLogger(__name__)
@@ -445,6 +466,406 @@ def fetch_quote_panel(input_data: FetchQuotePanelInput) -> FetchResult:
         input_data.name,
         "fetch_quote_panel",
         entities=[input_data.symbol],
+        warnings=warnings,
+    )
+
+
+# ── depth and order-by-order: written once, registered where they land ──
+#
+# WHY THESE TWO DO NOT GO THROUGH `_published`. A depth panel and an order
+# tape are EXTERNAL reference kinds: they are registered by path and read
+# in batches, never loaded whole, because the tools that consume them are
+# built for a session that does not fit in memory. `publish()` refuses
+# them for that reason, and both consumers refuse an in-memory frame. So
+# the fetch writes one Parquet under the runs directory and registers that
+# file -- the same door `register_external_dataset` opens for a book the
+# caller already holds, reached without having to hold one first.
+
+
+def _column_span(frame: pd.DataFrame) -> tuple[Optional[str], Optional[str]]:
+    """First and last `timestamp` VALUE, for a frame that stamps in a column.
+
+    `_span` reads the INDEX, which is right for every bar panel here and
+    wrong for these two: a book update and an order event are not unique
+    in time, so both feeds carry `timestamp` as a column and index by
+    position. Reading the index would report `0` and `n-1` as the window.
+
+    Instants rather than dates, because the whole window is usually inside
+    one session and a pair of identical dates says nothing about it.
+    """
+    if frame is None or len(frame) == 0 or "timestamp" not in frame.columns:
+        return None, None
+    try:
+        stamps = pd.to_datetime(frame["timestamp"], errors="coerce").dropna()
+    except Exception:  # noqa: BLE001 -- an unreadable stamp is not an error
+        return None, None
+    if len(stamps) == 0:
+        return None, None
+    return str(stamps.min().isoformat()), str(stamps.max().isoformat())
+
+
+def _registered(
+    frame: pd.DataFrame,
+    kind: str,
+    run_id: str,
+    name: str,
+    producer: str,
+):
+    """Write one Parquet under the run, and register it as an external ref.
+
+    The write goes through the same containment-checked, atomic path every
+    artifact in this library takes, so a run_id or a name that tries to
+    escape the runs directory is refused there rather than here. What is
+    different is the second step: the file is REGISTERED rather than
+    published, which records a pointer and a schema and leaves the bytes
+    in exactly one place.
+    """
+    if frame is None or len(frame) == 0:
+        raise ValidationError(
+            f"{producer} fetched no rows for that window. An empty panel "
+            "registered as a reference would be indistinguishable "
+            "downstream from one whose data had simply not arrived -- widen "
+            "the window, or check the coverage with "
+            "preflight_vendor_request before spending another request."
+        )
+    path = save_artifact(frame, run_id, name)
+    try:
+        return publish_external(
+            path,
+            kind=kind,
+            run_id=run_id,
+            name=name,
+            producer=producer,
+            fmt="parquet",
+        )
+    except Exception:
+        # A file with no sidecar is unreachable and unexplained: nothing
+        # can resolve it and the next run under the same name would be
+        # refused by a collision the caller never caused.
+        try:
+            Path(path).unlink()
+        except OSError:  # pragma: no cover - a locked file is not the story
+            pass
+        raise
+
+
+def fetch_order_book(input_data: FetchOrderBookInput) -> DepthFetchResult:
+    """L2 depth snapshots, registered as an `order_book_panel` reference."""
+    provider = _provider(input_data)
+    frame = _fetched(
+        "an L2 depth feed",
+        lambda: provider.get_order_book(
+            input_data.symbol,
+            input_data.start_date,
+            input_data.end_date,
+            input_data.levels,
+            input_data.limit,
+        ),
+        "fetch_order_book",
+    )
+    provenance = _vendor_provenance(frame)
+    truncated = len(frame) >= input_data.limit
+    warnings = [
+        "ONE VENUE'S BOOK, not a national one. Depth is published per "
+        "venue and consolidating it is not a thing a vendor does, so the "
+        "sizes here are what rested on this venue -- an imbalance computed "
+        "from them is that venue's imbalance."
+    ]
+    if truncated:
+        warnings.append(
+            f"the book hit the {input_data.limit:,} snapshot cap, so what "
+            "was registered is a PREFIX of the window rather than all of "
+            "it. Every mean and rate computed from it describes the "
+            "opening, which is the least typical part of a session."
+        )
+    start, end = _column_span(frame)
+    ref, handle = _registered(
+        frame,
+        "order_book_panel",
+        input_data.run_id,
+        input_data.name,
+        "fetch_order_book",
+    )
+    levels = book_levels(handle.columns)
+    if levels and levels < input_data.levels:
+        warnings.append(
+            f"{input_data.levels} levels were asked for and {levels} came "
+            "back complete. A level counts only with all four of its "
+            "columns, and a trailing level empty in every snapshot is "
+            "dropped rather than left to look like depth holding nothing."
+        )
+    return DepthFetchResult(
+        ref=ref,
+        kind="order_book_panel",
+        rows=int(handle.rows if handle.rows is not None else len(frame)),
+        columns=[str(c) for c in handle.columns],
+        entities=[input_data.symbol],
+        start=start,
+        end=end,
+        truncated=truncated,
+        levels=levels or None,
+        path=str(handle.path),
+        size_bytes=int(handle.size_bytes or 0),
+        dataset=provenance["dataset"],
+        provider=provenance["provider"],
+        warnings=warnings,
+    )
+
+
+def fetch_order_events(input_data: FetchOrderEventsInput) -> DepthFetchResult:
+    """Order-by-order events, registered as an `order_event_panel` reference."""
+    provider = _provider(input_data)
+    frame = _fetched(
+        "an order-by-order feed",
+        lambda: provider.get_order_events(
+            input_data.symbol,
+            input_data.start_date,
+            input_data.end_date,
+            input_data.limit,
+        ),
+        "fetch_order_events",
+    )
+    provenance = _vendor_provenance(frame)
+    truncated = len(frame) >= input_data.limit
+    warnings = [
+        "A WINDOW THAT OPENS MID-SESSION SEES ORDERS IT NEVER SAW ADDED. "
+        "Their true lifetime is longer than anything this window can "
+        "measure, and get_order_event_metrics counts them separately "
+        "rather than averaging them in."
+    ]
+    if truncated:
+        warnings.append(
+            f"the feed hit the {input_data.limit:,} event cap, so what was "
+            "registered is a PREFIX of the window. A cancellation rate or "
+            "an order lifetime computed from it is the opening's, and the "
+            "orders still resting at the cut are right-censored."
+        )
+    start, end = _column_span(frame)
+    ref, handle = _registered(
+        frame,
+        "order_event_panel",
+        input_data.run_id,
+        input_data.name,
+        "fetch_order_events",
+    )
+    return DepthFetchResult(
+        ref=ref,
+        kind="order_event_panel",
+        rows=int(handle.rows if handle.rows is not None else len(frame)),
+        columns=[str(c) for c in handle.columns],
+        entities=[input_data.symbol],
+        start=start,
+        end=end,
+        truncated=truncated,
+        levels=None,
+        path=str(handle.path),
+        size_bytes=int(handle.size_bytes or 0),
+        dataset=provenance["dataset"],
+        provider=provenance["provider"],
+        warnings=warnings,
+    )
+
+
+def _utc_bound(text: str, what: str) -> pd.Timestamp:
+    """A request bound as UTC, or a refusal naming the argument."""
+    try:
+        stamp = pd.Timestamp(str(text))
+    except Exception as exc:  # noqa: BLE001 -- one refusal, not a traceback
+        raise ValidationError(
+            f"{what}={text!r} is not a date this library can read. Dates "
+            "here are YYYY-MM-DD, and the end date is INCLUSIVE."
+        ) from exc
+    if stamp is pd.NaT or pd.isna(stamp):
+        raise ValidationError(
+            f"{what}={text!r} is not a date this library can read. Dates "
+            "here are YYYY-MM-DD, and the end date is INCLUSIVE."
+        )
+    return stamp.tz_localize("UTC") if stamp.tzinfo is None else stamp.tz_convert("UTC")
+
+
+def _reported_window(window: Any) -> tuple:
+    """A provider's (first, last) coverage pair as UTC stamps, or (None, None).
+
+    A window that cannot be read is UNKNOWN, never a partial one: half a
+    pair would be a coverage claim the provider did not make.
+    """
+    try:
+        first, last = window
+        first_stamp = pd.Timestamp(str(first))
+        last_stamp = pd.Timestamp(str(last))
+    except Exception:  # noqa: BLE001 -- an unreadable window is simply unknown
+        return None, None
+    if pd.isna(first_stamp) or pd.isna(last_stamp):
+        return None, None
+    if first_stamp.tzinfo is None:
+        first_stamp = first_stamp.tz_localize("UTC")
+    if last_stamp.tzinfo is None:
+        last_stamp = last_stamp.tz_localize("UTC")
+    return first_stamp.tz_convert("UTC"), last_stamp.tz_convert("UTC")
+
+
+def preflight_vendor_request(
+    input_data: PreflightVendorRequestInput,
+) -> VendorPreflightResult:
+    """What a vendor request would cost, and whether the data is there."""
+    provider = _provider(input_data)
+    router = getattr(provider, "datasets_for_schema", None)
+    if not callable(router):
+        raise ValidationError(
+            f"{type(provider).__name__} cannot preflight a request: it "
+            "routes no named vendor datasets, publishes no coverage "
+            "windows and prices nothing before it is asked, so every field "
+            "here would be invented rather than reported. Pass "
+            "source='databento', which answers all three from free "
+            "metadata endpoints, or call describe_data_capabilities to see "
+            "what this environment can reach."
+        )
+
+    schema = input_data.vendor_schema
+    start = _utc_bound(input_data.start_date, "start_date")
+    end = _utc_bound(input_data.end_date, "end_date")
+    if end < start:
+        raise ValidationError(
+            f"empty window: start_date={input_data.start_date!r} is after "
+            f"end_date={input_data.end_date!r}. The end date is INCLUSIVE, "
+            "so a same-day request is a valid one and this is not."
+        )
+    # The end date is inclusive here and half-open at the vendor, so the
+    # window a dataset has to cover runs to the following midnight.
+    end_exclusive = end + pd.Timedelta(days=1)
+
+    warnings = [
+        "BYTES, NOT MONEY. The vendor's own cost endpoint reports $0.00 "
+        "for any request an account's subscription already includes, which "
+        "is silent about exactly the thing it is consulted for. The byte "
+        "count is the quantity that is true for every account, and it is "
+        "what a limit should be chosen against."
+    ]
+
+    try:
+        candidates = [
+            str(name)
+            for name in router(input_data.symbol, schema, input_data.start_date)
+            if name
+        ]
+    except (ValidationError, ValueError):
+        raise
+    except Exception as exc:  # noqa: BLE001 -- one refusal, not a traceback
+        raise ValidationError(
+            f"{type(provider).__name__} could not route {schema!r} for "
+            f"{input_data.symbol!r}: {exc}. Check the symbol spelling -- a "
+            "futures root that is also an equity ticker is refused as "
+            "ambiguous rather than resolved to one of them."
+        ) from exc
+
+    coverage: Dict[str, Any] = {}
+    try:
+        coverage = dict(provider.get_dataset_coverage(candidates) or {})
+    except NotImplementedError as exc:
+        raise ValidationError(
+            f"{type(provider).__name__} publishes no coverage windows: "
+            f"{exc} Pass source='databento'."
+        ) from exc
+    except (ValidationError, ValueError):
+        raise
+    except Exception as exc:  # noqa: BLE001 -- unreachable metadata is a fact
+        warnings.append(
+            f"coverage windows could not be read ({exc}), so "
+            "coverage_start and coverage_end are null rather than guessed. "
+            "A window invented here is the one a caller would plan the "
+            "request around."
+        )
+
+    # THE SAME RULE THE FETCH APPLIES. A dataset answers when it reaches
+    # back to the start of the window and has not ended before it; the
+    # first one that does is the one that serves, which is why the chosen
+    # dataset is not always the first candidate.
+    chosen: Optional[str] = None
+    for name in candidates:
+        window = coverage.get(name)
+        if not window:
+            continue
+        first, last = _reported_window(window)
+        if first is None or last is None:
+            continue
+        if first <= start < last:
+            chosen = name
+            break
+    if chosen is None:
+        chosen = next(
+            (name for name in candidates if coverage.get(name)),
+            candidates[0] if candidates else None,
+        )
+    if not candidates:
+        warnings.append(
+            f"{type(provider).__name__} routes no dataset for schema "
+            f"{schema!r} and {input_data.symbol!r}, so there is nothing to "
+            "price. The request would be refused rather than served."
+        )
+
+    coverage_start: Optional[str] = None
+    coverage_end: Optional[str] = None
+    covers: Optional[bool] = None
+    window = coverage.get(chosen) if chosen else None
+    if window:
+        coverage_start, coverage_end = str(window[0]), str(window[1])
+        first, last = _reported_window(window)
+        if first is not None and last is not None:
+            covers = bool(first <= start and last >= end_exclusive)
+            if not covers:
+                warnings.append(
+                    f"{chosen} published {coverage_start} to "
+                    f"{coverage_end}, which does not contain the window "
+                    "asked for. The fetch would return the overlap, or "
+                    "fall through to the next dataset -- a shorter answer "
+                    "than the dates suggest."
+                )
+    elif chosen is not None:
+        warnings.append(
+            f"{chosen} reports no coverage window -- unentitled, unknown, "
+            "or declined -- so whether it holds this period is UNKNOWN "
+            "rather than false."
+        )
+
+    billable: Optional[int] = None
+    if chosen is not None:
+        try:
+            billable = int(
+                provider.get_billable_size(
+                    input_data.symbol,
+                    input_data.start_date,
+                    input_data.end_date,
+                    schema,
+                    dataset=chosen,
+                )
+            )
+        except NotImplementedError as exc:
+            raise ValidationError(
+                f"{type(provider).__name__} does not price a request "
+                f"before it is made: {exc} Pass source='databento'."
+            ) from exc
+        except (ValidationError, ValueError):
+            raise
+        except Exception as exc:  # noqa: BLE001 -- a declined quote is a fact
+            warnings.append(
+                f"the vendor would not price this request ({exc}), so "
+                "billable_bytes is null rather than zero -- a question "
+                "nobody answered is not an answer of 'free'."
+            )
+
+    return VendorPreflightResult(
+        symbol=input_data.symbol,
+        vendor_schema=schema,
+        start_date=input_data.start_date,
+        end_date=input_data.end_date,
+        dataset=chosen,
+        datasets_considered=candidates,
+        coverage_start=coverage_start,
+        coverage_end=coverage_end,
+        covers_request=covers,
+        billable_bytes=billable,
+        kind=SCHEMA_KINDS.get(schema),
+        provider=type(provider).__name__,
         warnings=warnings,
     )
 

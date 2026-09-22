@@ -145,12 +145,12 @@ that most often causes the disconnect.
 
 ## Choosing what to serve
 
-The 228 tools cost about **358 KB of schema, ~92,000 tokens**, held for the
+The 237 tools cost about **358 KB of schema, ~92,000 tokens**, held for the
 whole session. That is the constraint the whole design manages, so this is
 the first decision, not a tuning knob.
 
 That wall has already been hit and passed. Over the wire a tool averages
-1,730 bytes and the session ceiling that used to be 180,000 would buy about 104 tools.
+1,730 bytes and the session ceiling that used to be 189,000 would buy about 104 tools.
 There are 207. **The whole surface has not fitted in one session since the
 83rd tool**, and no amount of schema-shrinking brings it back — which is why
 scoping stopped being an optimization and became the way the server is
@@ -435,7 +435,7 @@ own decisions is not audited by it.
 
 ### Why `--output-schemas` is off
 
-Every one of the 228 tools has a typed Pydantic return, so the server can
+Every one of the 237 tools has a typed Pydantic return, so the server can
 declare an output schema for all of them — and does return
 `structuredContent` on every call regardless. Declaring the schemas as well
 roughly doubles the surface. The plan assumed that was free; measured, it
@@ -575,7 +575,7 @@ establish. Set `SQT_AUDIT_ENABLED=0` to turn record writing off.
 
 ## Safety
 
-Every one of the 228 tools declares `readOnlyHint: true` and
+Every one of the 237 tools declares `readOnlyHint: true` and
 `destructiveHint: false`, and a test asserts it. This library does not place
 orders, hold positions, or mutate anything outside its own artifact store.
 
@@ -597,8 +597,8 @@ rate limit whether or not anything is mutated. See
 ## Architecture notes
 
 **Ten runtimes, one server.** Thirteen of the fifteen categories come from
-the 180-tool analysis surface, spread across eight runtimes; the other two
-are the separate 20-tool `modeling` and 11-tool `feature_lab` runtimes. They
+the 189-tool analysis surface, spread across eight runtimes; the other two
+are the separate 25-tool `modeling` and 11-tool `feature_lab` runtimes. They
 stay apart inside — `dispatch_for(entry)` returns that tool's own RUNTIME's
 dispatcher, so schemas and executor are never chosen separately, and a tool
 served from `research` is executed by a table holding only research tools —

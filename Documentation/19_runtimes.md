@@ -41,10 +41,10 @@ shipped, generalized to the rest of the surface.
 | Runtime | Tools | Categories | What it is for |
 |---|---|---|---|
 | `research` | 42 | `screener`, `analysis`, `quant_research` | Describe an asset or a universe, and its statistical structure. Does not run strategies. |
-| `data` | 18 | `data` | Get the bytes — from any configured provider, chosen per call with `source` — and publish them as references every other runtime reads, plus what the source can promise about them. Fetches; does not analyze. |
+| `data` | 21 | `data` | Get the bytes — from any configured provider, chosen per call with `source` — and publish them as references every other runtime reads, plus what the source can promise about them. Fetches; does not analyze. |
 | `backtest` | 35 | `backtest_execution`, `backtest_validation`, `custom_signal` | Run a strategy, and establish how much of the result is real. Does not build portfolios. |
-| `meta` | 20 | `discovery`, `provenance` | Questions about the library, the session and what a data source can promise — never about a market. |
-| `portfolio` | 18 | `portfolio_risk` | Turn a view into a position and price what it costs. |
+| `meta` | 25 | `discovery`, `provenance` | Questions about the library, the session and what a data source can promise — never about a market. |
+| `portfolio` | 19 | `portfolio_risk` | Turn a view into a position and price what it costs. |
 | `modeling` | 37 | (one ordered pipeline) | Build, validate and score a model, and join point-in-time records onto its panel. Lives in `modeling/agent`. |
 | `microstructure` | 17 | `microstructure` | What the market will charge you to trade — measured from ticks, or estimated from bars. |
 | `derivatives` | 12 | `derivatives` | What an option is worth and what holding it does to you. Takes quotes as arguments; there is no options provider. |

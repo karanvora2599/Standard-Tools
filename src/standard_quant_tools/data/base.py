@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import Dict, FrozenSet, Optional, Sequence, Union
+from typing import Dict, FrozenSet, Optional, Sequence, Tuple, Union
 
 import pandas as pd
 from pydantic import BaseModel, Field
@@ -404,4 +404,81 @@ class DataProvider(ABC):
             "Corwin-Schultz and Amihud estimators in "
             "`analysis`/`get_liquidity_metrics` exist precisely because this "
             "data is usually absent -- they are proxies, and they say so."
+        )
+
+    # ── what a request would cost before it is made ──────────────────
+    #
+    # THESE TWO ARE FREE AND THE FETCHES THEY DESCRIBE ARE NOT. A metered
+    # feed prices a window by the bytes it would transfer, and the only
+    # honest way to find out is to ask before asking -- five minutes of one
+    # active name at ten depth levels is tens of megabytes, and a caller
+    # who learns that from the invoice learned it too late. Declared on the
+    # contract rather than on one provider so a tool can ask the question
+    # without knowing which provider answers it, the same way the depth
+    # contract was declared before anything served it.
+
+    def get_dataset_coverage(
+        self, datasets: Optional[Sequence[str]] = None
+    ) -> Dict[str, Tuple[str, str]]:
+        """
+        Which window each vendor dataset actually published.
+
+        Returns `{dataset: (first, last)}` with both bounds as ISO-8601
+        UTC strings, for the datasets named or for every dataset this
+        provider would route a request to.
+
+        A dataset the subscription cannot see, or whose range the vendor
+        declines to report, is ABSENT from the mapping rather than present
+        with a guessed window. That asymmetry is the point: a fabricated
+        coverage window is worse than no window at all, because it is
+        exactly the thing a caller would plan a request around, and the
+        request would then fail with a vendor error naming no dataset.
+
+        Raises:
+            NotImplementedError: this provider publishes no coverage
+                metadata. DatabentoProvider does, from the same endpoint it
+                clamps its own requests against.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not report dataset coverage. "
+            "DatabentoProvider does, from the vendor's free metadata "
+            "endpoint -- use source='databento'. There is no coverage "
+            "window to infer from a provider that serves one feed: "
+            "'whatever get_ohlcv returned' is a fact about the request, "
+            "not about what the vendor holds."
+        )
+
+    def get_billable_size(
+        self,
+        symbol: str,
+        start_date: Union[str, datetime],
+        end_date: Union[str, datetime],
+        schema: str,
+        *,
+        dataset: Optional[str] = None,
+    ) -> int:
+        """
+        Bytes the vendor would bill for this exact request, without making it.
+
+        BYTES RATHER THAN MONEY, deliberately. A subscription that includes
+        a feed prices every request on it at zero, so a cost in dollars is
+        `0.00` for the one caller who most needs to know that the request
+        is forty megabytes. The byte count is the quantity that is true for
+        every account.
+
+        `schema` names the vendor's own product -- daily bars, trades, top
+        of book, depth, order-by-order -- and `dataset` pins the feed when
+        the caller has one in mind; left None, the provider routes the
+        request exactly as the matching fetch would.
+
+        Raises:
+            NotImplementedError: this provider does not price requests.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not price a request before it is "
+            "made. DatabentoProvider does, from the vendor's free metadata "
+            "endpoint -- use source='databento'. A provider with a flat "
+            "subscription and no metered feed has no per-request size to "
+            "report, and returning zero would read as 'this is free' "
+            "rather than as 'nobody asked'."
         )

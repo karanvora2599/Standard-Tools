@@ -1916,11 +1916,11 @@ class TestUserVisibleCountsAreReal:
 
         runtimes = _build()
         assert len(runtimes) == 10
-        assert sum(len(r.tool_names) for r in runtimes.values()) == 228
-        assert len(build_catalog()) == 228
-        # 228 minus the 37 modeling and 11 feature_lab tools, which are
+        assert sum(len(r.tool_names) for r in runtimes.values()) == 237
+        assert len(build_catalog()) == 237
+        # 237 minus the 37 modeling and 11 feature_lab tools, which are
         # deliberately outside the analysis facade.
-        assert len(TOOL_CATEGORY) == 180
+        assert len(TOOL_CATEGORY) == 189
 
     def test_every_long_running_name_is_a_real_tool(self):
         """The help text named one that is not."""

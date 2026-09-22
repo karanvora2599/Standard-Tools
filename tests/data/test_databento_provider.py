@@ -55,14 +55,31 @@ def _isolated_cache(tmp_path, monkeypatch):
 
 
 class _Metadata:
-    def __init__(self, ranges) -> None:
+    """The vendor's free endpoints: what a dataset covers, and what a
+    request would bill. Both are metadata calls that transfer no data, and
+    both are answered here so the preflight path can be exercised without
+    a key."""
+
+    def __init__(self, ranges, billable=None) -> None:
         self._ranges = ranges
+        self._billable = billable
+        self.billable_calls: list = []
 
     def get_dataset_range(self, dataset: str):
         if dataset not in self._ranges:
             raise RuntimeError(f"403 not_entitled for {dataset}")
         first, last = self._ranges[dataset]
         return {"start": first, "end": last}
+
+    def get_billable_size(self, **kwargs):
+        self.billable_calls.append(kwargs)
+        if self._billable is None:
+            # A vendor that will not quote is the normal case for an
+            # unentitled schema, and it is not the same answer as "free".
+            raise RuntimeError("422 no_billable_size_for_this_request")
+        if callable(self._billable):
+            return self._billable(**kwargs)
+        return int(self._billable)
 
 
 def _bound(text: str) -> pd.Timestamp:
@@ -132,9 +149,9 @@ class StubClient:
     """A Databento client that answers from rules, and records every call."""
 
     def __init__(
-        self, ranges, rules=None, default=None, finalized_through=None
+        self, ranges, rules=None, default=None, finalized_through=None, billable=None
     ) -> None:
-        self.metadata = _Metadata(ranges)
+        self.metadata = _Metadata(ranges, billable)
         self.timeseries = _Timeseries(self)
         self.rules = list(rules or [])
         # None means "generate bars for the window asked"; a frame is

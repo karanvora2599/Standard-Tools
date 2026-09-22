@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import Annotated, Any, Dict, List, Literal, Optional
+from typing import Annotated, Any, Dict, List, Literal, Optional, Tuple
 
 from pydantic import (
     BaseModel,
@@ -619,6 +619,134 @@ class PortfolioOptimizationResult(BaseModel):
         "tau and the confidence damped to nothing.",
     )
     warnings: List[str] = []
+
+
+# ──────────────────────────────────────────────
+# Efficient frontier
+# ──────────────────────────────────────────────
+
+
+class EfficientFrontierInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    # Pydantic's default would drop it silently, so a typo or a
+    # hallucinated name ran on defaults while the caller believed it
+    # had configured something.
+    model_config = ConfigDict(extra="forbid")
+
+    tickers: List[str] = Field(
+        ...,
+        min_length=2,
+        description="Universe to trace the frontier over. A frontier needs "
+        "at least two assets: with one there is no trade-off to draw.",
+    )
+    start_date: str = Field(..., description="Start date YYYY-MM-DD.")
+    end_date: str = Field(..., description="End date YYYY-MM-DD.")
+    n_points: int = Field(
+        25,
+        ge=2,
+        le=200,
+        description="How many portfolios to solve along the frontier. Each "
+        "is a closed form rather than an optimizer run, so a fine curve "
+        "costs no more turns than a coarse one.",
+    )
+    risk_free_rate: float = Field(
+        0.0,
+        description="ANNUAL rate, used only to locate the tangency "
+        "portfolio. The frontier itself does not depend on it.",
+    )
+    periods_per_year: int = Field(
+        252,
+        gt=0,
+        le=31_536_000,
+        description="Annualization factor for the fetched return series.",
+    )
+    return_range: Optional[Tuple[float, float]] = Field(
+        None,
+        description="ANNUALIZED (low, high) target returns to span. The "
+        "default runs from the global minimum-variance portfolio's own "
+        "return to the highest single-asset mean, which is the stretch of "
+        "the curve anybody is choosing among; a wider range is allowed and "
+        "extrapolates the same closed form.",
+    )
+
+    @model_validator(mode="after")
+    def _check_universe_and_range(self) -> "EfficientFrontierInput":
+        duplicates = sorted({t for t in self.tickers if self.tickers.count(t) > 1})
+        if duplicates:
+            raise ValueError(
+                f"tickers contains duplicate symbols: {duplicates}. Each asset "
+                "must appear once — a repeated ticker collapses to a single "
+                "column, and two identical columns make the covariance "
+                "singular by construction, which has no frontier at all."
+            )
+        if self.return_range is not None:
+            low, high = self.return_range
+            if not (high > low):
+                raise ValueError(
+                    f"return_range={self.return_range} must be (low, high) "
+                    "with high strictly greater than low; the points are "
+                    "spaced between them, and a reversed or degenerate pair "
+                    "would return n_points copies of one portfolio."
+                )
+        return self
+
+
+class FrontierPoint(BaseModel):
+    """One portfolio on the frontier: where it sits, and what holds it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    expected_return: float = Field(
+        ..., description="Annualized expected return of these weights."
+    )
+    volatility: float = Field(
+        ..., description="Annualized volatility of these weights."
+    )
+    weights: Dict[str, float] = Field(
+        ...,
+        description="ticker -> weight, summing to 1. UNBOUNDED: the closed "
+        "form imposes sum(w)=1 and nothing else, so a weight may be "
+        "negative (a short) or above 1 (levered by the short). That is what "
+        "makes it exact rather than an approximation.",
+    )
+
+
+class EfficientFrontierResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    tickers: List[str] = Field(
+        default_factory=list,
+        description="The columns the covariance was actually built from.",
+    )
+    points: List[FrontierPoint] = Field(
+        default_factory=list,
+        description="The frontier, from the lowest target return to the "
+        "highest, each an exact solution of the same algebra "
+        "run_portfolio_optimization approximates one point at a time.",
+    )
+    tangency: Optional[FrontierPoint] = Field(
+        None,
+        description="The maximum-Sharpe portfolio at `risk_free_rate`, or "
+        "null with a warning when the closed form has no solution — which "
+        "happens when the rate sits at or above the minimum-variance "
+        "portfolio's own return, so every fully-invested efficient "
+        "portfolio has negative excess return.",
+    )
+    min_variance: FrontierPoint = Field(
+        ...,
+        description="The global minimum-variance portfolio: the leftmost "
+        "point of the curve, and the one that needs no return forecast.",
+    )
+    condition_number: Stat = Field(
+        None,
+        description="Condition number of the annualized covariance that was "
+        "inverted. The frontier inverts it once for every point, so a large "
+        "value means the whole curve is the amplification of a difference "
+        "close to noise.",
+    )
+    periods_per_year: int = 252
+    n_observations: int = 0
+    warnings: List[str] = Field(default_factory=list)
 
 
 # ──────────────────────────────────────────────
@@ -4897,22 +5025,78 @@ class TechnicalPanelInput(BaseModel):
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
     indicators: List[
-        Literal["rsi", "adx", "atr", "bollinger_bands", "stochastic_oscillator"]
+        Literal[
+            "rsi",
+            "adx",
+            "atr",
+            "atr_simple",
+            "bollinger_bands",
+            "stochastic_oscillator",
+            "macd",
+            "sma",
+            "ema",
+            "williams_r",
+            "obv",
+            "vwap",
+            "parabolic_sar",
+            "mfi",
+        ]
     ] = Field(
         ["rsi"],
         min_length=1,
         description=(
-            "Any of rsi, adx, atr, bollinger_bands, stochastic_oscillator — "
-            "the set indicators/panel.py computes natively."
+            "Any of rsi, adx, atr, atr_simple, bollinger_bands, "
+            "stochastic_oscillator, macd, sma, ema, williams_r, obv, vwap, "
+            "parabolic_sar, mfi. `atr` is WILDER's average true range and "
+            "`atr_simple` the simple rolling mean of true range -- two "
+            "different numbers, named apart so neither silently becomes the "
+            "other. obv, vwap and mfi read Volume and are refused on a panel "
+            "without it."
         ),
     )
     rsi_period: int = Field(14, gt=0, le=1000)
     adx_period: int = Field(14, gt=0, le=1000)
-    atr_period: int = Field(14, gt=0, le=1000)
+    atr_period: int = Field(14, gt=0, le=1000, description="Wilder ATR lookback.")
+    atr_simple_period: int = Field(
+        14, gt=0, le=1000, description="Simple-mean ATR lookback."
+    )
     bollinger_period: int = Field(20, gt=0, le=1000)
     bollinger_num_std: float = Field(2.0, gt=0, le=100)
     stoch_k_period: int = Field(14, gt=0, le=1000)
     stoch_d_period: int = Field(3, gt=0, le=1000)
+    macd_fast: int = Field(12, gt=0, le=1000, description="MACD fast EMA span.")
+    macd_slow: int = Field(
+        26,
+        gt=0,
+        le=1000,
+        description="MACD slow EMA span. Must exceed macd_fast: an inverted "
+        "pair is a sign-flipped indicator, not an error, so it is refused.",
+    )
+    macd_signal: int = Field(9, gt=0, le=1000, description="MACD signal EMA span.")
+    sma_period: int = Field(14, gt=0, le=1000)
+    ema_period: int = Field(14, gt=0, le=1000)
+    williams_period: int = Field(14, gt=0, le=1000)
+    vwap_period: Optional[int] = Field(
+        None,
+        gt=0,
+        le=1000,
+        description="Rolling VWAP window. Null means the cumulative VWAP "
+        "from the first shared bar, which is what the per-ticker function "
+        "does with no period.",
+    )
+    mfi_period: int = Field(14, gt=0, le=1000)
+    sar_af_start: float = Field(
+        0.02, gt=0, le=1, description="Parabolic SAR starting acceleration."
+    )
+    sar_af_step: float = Field(
+        0.02, ge=0, le=1, description="Parabolic SAR acceleration increment."
+    )
+    sar_af_max: float = Field(
+        0.2,
+        gt=0,
+        le=1,
+        description="Parabolic SAR acceleration ceiling; must be >= " "sar_af_start.",
+    )
     persist_run_id: Optional[str] = Field(
         None,
         description=(
@@ -5002,7 +5186,9 @@ class DescribeArtifactInput(BaseModel):
         ...,
         description=(
             "An artifact URI returned by a tool (equity_curve_uri, "
-            "trades_uri, ...). Must resolve inside SQT_RUNS_DIR."
+            "trades_uri, ...), or the '<run_id>/<filename>' key "
+            "list_artifacts reports — both name the same file. Must resolve "
+            "inside SQT_RUNS_DIR."
         ),
     )
     preview_rows: int = Field(
@@ -5027,9 +5213,12 @@ class DescribeArtifactResult(BaseModel):
     content_hash: str = Field(
         ...,
         description=(
-            "SHA-256 of the file's bytes. Two tools reading the same URI "
-            "can confirm they saw the same artifact, and a re-run that "
-            "changed it is visible without diffing the contents."
+            "The store's digest of the file's bytes: SHA-256 truncated to "
+            "16 hexadecimal characters, the same value list_artifacts "
+            "reports, so a listing and a description of one artifact "
+            "compare directly. Two tools reading the same artifact can "
+            "confirm they saw the same one, and a re-run that changed it "
+            "is visible without diffing the contents."
         ),
     )
     head: List[Dict[str, Any]] = Field(default_factory=list)
@@ -6128,6 +6317,18 @@ class ValidateToolCallResult(BaseModel):
             "That layer is invisible to the JSON schema — `parameters` is "
             "an open dict — so a bad window would otherwise pass here and "
             "fail only after the data had been fetched."
+        ),
+    )
+    checked_numeric_contract: bool = Field(
+        False,
+        description=(
+            "True when the call carried numbers the shared numerical "
+            "contract could be run on without fetching anything — a data "
+            "source with literal values, an annualization factor. False "
+            "means there were none to check, not that they passed: a "
+            "source naming a symbol or a reference is left alone, because "
+            "checking it would mean the fetch this tool exists to avoid. "
+            "describe_numeric_contract states the rules."
         ),
     )
     notes: List[str] = Field(default_factory=list)

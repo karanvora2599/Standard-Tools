@@ -11,7 +11,6 @@ audit record are deliberately absent -- see the provenance tools' own notes.
 """
 
 import datetime
-import hashlib
 import json
 import logging
 import math
@@ -742,6 +741,37 @@ def export_audit_bundle(
     )
 
 
+def _artifact_location(uri: str) -> str:
+    """
+    A store KEY or a path, resolved to something `load_artifact` can open.
+
+    `list_artifacts` hands back `<run_id>/<filename>`, which is how the
+    artifact store addresses its own contents, and this tool resolved it
+    with `Path(uri).resolve()` -- against the PROCESS WORKING DIRECTORY.
+    The key then pointed outside the runs root, containment refused it, and
+    the two tools that describe the same file could not exchange a name for
+    it. A relative key is resolved against the store root first, which is
+    where the file actually is.
+
+    A key that tries to traverse is still refused: the store's own key rule
+    rejects it before any path is built, and a relative path that is not a
+    key falls through to the containment check unchanged.
+    """
+    if Path(uri).is_absolute():
+        return uri
+    from standard_quant_tools.artifact_store import LocalArtifactStore, validate_key
+
+    try:
+        key = validate_key(uri)
+    except ValidationError:
+        return uri
+    if "/" not in key:
+        # A bare run id is a PREFIX, not an artifact. Left alone so the
+        # refusal names the missing file rather than a directory.
+        return uri
+    return LocalArtifactStore().uri(key)
+
+
 def describe_artifact(input_data: DescribeArtifactInput) -> DescribeArtifactResult:
     """
     What is in a persisted artifact, without moving it into the conversation.
@@ -751,17 +781,29 @@ def describe_artifact(input_data: DescribeArtifactInput) -> DescribeArtifactResu
     This reports the shape, the date span, per-column summary statistics and
     the two ends of the frame — enough to decide what to do next.
 
+    Takes either spelling of the same file: an absolute URI as a tool
+    returned it, or the `<run_id>/<filename>` key `list_artifacts` reports.
+    A relative key used to be resolved against the process working
+    directory, so the store's own key format failed containment and the
+    listing and the description had no name in common.
+
     The middle is never returned. `preview_rows` caps each end because the
     failure mode this tool exists to avoid is a five-year equity curve
     entering a client's context and taxing every turn after it.
 
-    `content_hash` is over the file's bytes, so two tools reading the same
-    URI can confirm they saw the same artifact and a re-run that changed it
-    is visible without diffing anything.
+    `content_hash` is the store's digest over the file's bytes, so two
+    tools reading the same artifact can confirm they saw the same one and a
+    re-run that changed it is visible without diffing anything.
     """
-    frame = load_artifact(input_data.uri)
-    path = Path(input_data.uri)
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    from standard_quant_tools.artifact_store import hash_bytes
+
+    location = _artifact_location(input_data.uri)
+    frame = load_artifact(location)
+    path = Path(location)
+    # The store's digest, not a bare SHA-256: `list_artifacts` reports the
+    # same 16 characters over the same bytes, and two hashes of one file
+    # that never compare equal are worse than one.
+    digest = hash_bytes(path.read_bytes())
 
     def _edge(rows: pd.DataFrame) -> List[Dict[str, Any]]:
         records = rows.reset_index().to_dict(orient="records")
@@ -1357,6 +1399,44 @@ def describe_tool(input_data: DescribeToolInput) -> DescribeToolResult:
 #: been fetched -- which is the round trip this tool exists to save.
 _STRATEGY_PARAM_TOOLS = ("strategy_type", "parameters")
 
+#: The three keys a polymorphic data source dumps to. A dict carrying all
+#: of them is one wherever it appears, which is what lets the numeric
+#: contract be applied without the tool's own field types being consulted.
+_DATA_SOURCE_KEYS = frozenset({"symbol", "ref", "values"})
+
+#: Field-name fragments that mean the inline numbers are PRICES or LEVELS
+#: rather than returns, and so get the stronger rule: strictly positive
+#: rather than merely finite. Matched on the name because the contract is a
+#: property of what the numbers MEAN, and the annotation says only that a
+#: source was passed.
+_PRICE_LIKE_FIELDS = ("price", "close", "equity", "level")
+
+
+def _inline_numeric_payloads(node: Any, field: str = "(tool)") -> List[tuple]:
+    """
+    Every number already present in a proposed call that the numeric
+    contract has something to say about.
+
+    Two shapes only, and deliberately so: a data source carrying literal
+    `values`, and an annualization factor. A source naming a symbol or a
+    reference is NOT checked here, because checking it would mean fetching
+    or resolving -- and a validator that fetched would defeat its own
+    purpose. What can be checked without touching anything is checked.
+    """
+    found: List[tuple] = []
+    if isinstance(node, dict):
+        if _DATA_SOURCE_KEYS <= set(node) and node.get("values") is not None:
+            found.append(("series", field, node["values"]))
+        for key, value in node.items():
+            if key == "periods_per_year" and value is not None:
+                found.append(("periods_per_year", key, value))
+            else:
+                found.extend(_inline_numeric_payloads(value, key))
+    elif isinstance(node, list):
+        for item in node:
+            found.extend(_inline_numeric_payloads(item, field))
+    return found
+
 
 def validate_tool_call(input_data: ValidateToolCallInput) -> ValidateToolCallResult:
     """
@@ -1368,14 +1448,22 @@ def validate_tool_call(input_data: ValidateToolCallInput) -> ValidateToolCallRes
     name — the usual shape of a hallucinated one — is the cheapest mistake
     to make and among the more expensive to diagnose from a stack trace.
 
-    Two layers are checked, because the library has two. The Pydantic
+    Three layers are checked, because the library has three. The Pydantic
     schema catches missing, unknown and out-of-range arguments. Then, for
     tools that carry a strategy `parameters` dict, the strategy's own
     contract is checked as well — that layer is invisible to the JSON
     schema, which types `parameters` as an open dict, so `lookback=-20`
     would pass a schema check and still be look-ahead by construction.
 
-    Nothing here fetches, runs or writes.
+    The third is the numerical contract every boundary enforces, run
+    against numbers ALREADY PRESENT in the call: a data source carrying
+    literal values, an annualization factor. An all-NaN series passed a
+    schema check cleanly and then failed at execution with "contains no
+    observations", after the rest of the call had been paid for.
+    `describe_numeric_contract` states the rules this layer applies.
+
+    Nothing here fetches, runs or writes — which is why a source naming a
+    symbol or a reference is left unchecked rather than resolved.
     """
     from pydantic import ValidationError as PydanticValidationError
 
@@ -1449,6 +1537,50 @@ def validate_tool_call(input_data: ValidateToolCallInput) -> ValidateToolCallRes
                 "`parameters` dict was not checked against a contract."
             )
 
+    # Third layer: the numerical contract, on the numbers that are already
+    # here. Nothing is fetched and nothing is resolved to get them.
+    checked_numeric = False
+    if normalized:
+        from standard_quant_tools.numeric_contract import (
+            require_finite_series,
+            require_periods_per_year,
+            require_positive_price_series,
+        )
+
+        for kind, field, value in _inline_numeric_payloads(normalized):
+            checked_numeric = True
+            try:
+                if kind == "periods_per_year":
+                    require_periods_per_year(value, input_data.tool_name)
+                    continue
+                try:
+                    series = pd.Series(value, dtype="float64")
+                except (TypeError, ValueError):
+                    # Not numbers at all. The schema layer above owns that
+                    # verdict; the contract has nothing to say about it and
+                    # must not report its own confusion as a second fault.
+                    checked_numeric = False
+                    continue
+                if any(token in field.lower() for token in _PRICE_LIKE_FIELDS):
+                    require_positive_price_series(series, field, input_data.tool_name)
+                else:
+                    require_finite_series(series, field, input_data.tool_name)
+            except ValidationError as exc:
+                # Only the contract's own refusal is the caller's problem.
+                # Anything else here would be this validator failing, and
+                # reporting that as a bad argument is the worst advice a
+                # validator can give.
+                problems.append(
+                    ArgumentProblem(field=field, problem=str(exc), kind="invalid")
+                )
+        if checked_numeric:
+            notes.append(
+                "The numerical contract was run on the values written into "
+                "this call. A source naming a symbol or a reference was not "
+                "checked, because checking it would mean fetching or "
+                "resolving it — see describe_numeric_contract for the rules."
+            )
+
     if not problems:
         notes.append(
             "Valid. normalized_arguments shows what the tool would actually "
@@ -1468,6 +1600,7 @@ def validate_tool_call(input_data: ValidateToolCallInput) -> ValidateToolCallRes
         problems=problems,
         normalized_arguments=normalized if not problems else {},
         checked_strategy_parameters=checked_strategy,
+        checked_numeric_contract=checked_numeric,
         notes=notes,
     )
 

@@ -26,24 +26,24 @@ scoping an MCP session -- see [18_mcp.md](18_mcp.md).
 
 Two tools (`run_backtest_optimization`, `scan_pairs`) are long-running and
 are served only with `--enable-long-running`, so a default MCP session
-advertises 155 of the 228 below.
+advertises 155 of the 237 below.
 
 
 ## The runtimes
 
 | Runtime | Tools | Schema cost | Categories | Deep documentation |
 |---|---:|---:|---|---|
-| `research` | 42 | 53 KB | `screener`, `analysis`, `quant_research` | [08_analysis.md](08_analysis.md), [23_inference.md](23_inference.md) |
+| `research` | 42 | 61 KB | `screener`, `analysis`, `quant_research` | [08_analysis.md](08_analysis.md), [23_inference.md](23_inference.md) |
 | `modeling` | 37 | 171 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
 | `backtest` | 35 | 86 KB | `backtest_execution`, `backtest_validation`, `custom_signal` | [04_backtesting.md](04_backtesting.md), [24_overfitting.md](24_overfitting.md) |
-| `meta` | 20 | 18 KB | `discovery`, `provenance` | [27_meta.md](27_meta.md), [10_auditability.md](10_auditability.md) |
-| `data` | 18 | 25 KB | *(one surface)* | [26_data.md](26_data.md) |
-| `portfolio` | 18 | 33 KB | `portfolio_risk` | [05_portfolio.md](05_portfolio.md) |
+| `meta` | 25 | 24 KB | `discovery`, `provenance` | [27_meta.md](27_meta.md), [10_auditability.md](10_auditability.md) |
+| `data` | 21 | 33 KB | *(one surface)* | [26_data.md](26_data.md) |
+| `portfolio` | 19 | 35 KB | `portfolio_risk` | [05_portfolio.md](05_portfolio.md) |
 | `delta_one` | 18 | 43 KB | *(one surface)* | [28_delta_one.md](28_delta_one.md) |
-| `microstructure` | 17 | 27 KB | *(one surface)* | [22_microstructure.md](22_microstructure.md) |
+| `microstructure` | 17 | 30 KB | *(one surface)* | [22_microstructure.md](22_microstructure.md) |
 | `derivatives` | 12 | 21 KB | *(one surface)* | [21_derivatives.md](21_derivatives.md) |
 | `feature_lab` | 11 | 38 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
-| **Total** | **228** | | | |
+| **Total** | **237** | | | |
 
 ---
 
@@ -62,17 +62,17 @@ Full risk profile of one asset against a benchmark: alpha, beta, Sharpe, VaR and
 
 #### `calculate_series_metrics`
 
-Risk and return metrics for ANY return series -- a symbol, an `sqt://` reference from another runtime, or values passed inline. The same arithmetic analyze_stock_risk applies to a ticker, available for a model's out-of-sample returns, an external fund's series, or a panel another agent already computed. The metric set is closed rather than open, because this surface is reachable from an agent and an arbitrary-expression argument would be a code path wearing a statistics costume.
+Risk and return metrics for ANY return series -- a symbol, an `sqt://` reference from another runtime, or values passed inline. The same arithmetic analyze_stock_risk applies to a ticker, available for a model's out-of-sample returns, an external fund's series, or a panel another agent already computed. Takes an optional `benchmark` in the same three shapes, which is what information_ratio and treynor_ratio are measured against; also serves the drawdown series (published as a reference) and an extreme-value fit of the loss tail. The metric set is closed rather than open, because this surface is reachable from an agent and an arbitrary-expression argument would be a code path wearing a statistics costume.
 
 **Required:** `series`  
-**Optional:** `metrics`, `risk_free_rate`, `periods_per_year`
+**Optional:** `benchmark`, `metrics`, `risk_free_rate`, `periods_per_year`, `run_id`, `name`
 
 #### `compute_indicator_panel`
 
-Indicator HISTORY for a whole universe, published one `sqt://` reference per indicator. get_technical_panel answers what the indicators are NOW; this answers what they have been, which is what a signal, a feature or a custom backtest actually consumes. Pass a price_panel_ref from the data runtime and nothing is refetched -- the same bars are reused.
+Indicator HISTORY for a whole universe, published one `sqt://` reference per indicator. get_technical_panel answers what the indicators are NOW; this answers what they have been, which is what a signal, a feature or a custom backtest actually consumes. Fourteen indicators, every one of them parameterized here rather than fixed at its default. Pass a price_panel_ref from the data runtime and nothing is refetched -- the same bars are reused.
 
 **Required:** `tickers`, `start_date`, `end_date`, `indicators`, `run_id`, `name`  
-**Optional:** `price_panel_ref`
+**Optional:** `rsi_period`, `adx_period`, `atr_period`, `atr_simple_period`, `bollinger_period`, `bollinger_num_std`, `stoch_k_period`, `stoch_d_period`, `macd_fast`, `macd_slow`, `macd_signal`, `sma_period`, `ema_period`, `williams_period`, `vwap_period`, `mfi_period`, `sar_af_start`, `sar_af_step`, `sar_af_max`, `price_panel_ref`
 
 #### `get_advanced_indicators`
 
@@ -135,7 +135,7 @@ Technical indicators for ONE ticker, with the parameters you choose -- RSI, MACD
 Indicators (RSI/ADX/ATR/Bollinger/Stochastic) for a whole ticker universe in one native call, reported at the latest bar. Use instead of one get_technical_analysis call per ticker when screening.
 
 **Required:** `tickers`, `start_date`, `end_date`  
-**Optional:** `indicators`, `rsi_period`, `adx_period`, `atr_period`, `bollinger_period`, `bollinger_num_std`, `stoch_k_period`, `stoch_d_period`, `persist_run_id`
+**Optional:** `indicators`, `rsi_period`, `adx_period`, `atr_period`, `atr_simple_period`, `bollinger_period`, `bollinger_num_std`, `stoch_k_period`, `stoch_d_period`, `macd_fast`, `macd_slow`, `macd_signal`, `sma_period`, `ema_period`, `williams_period`, `vwap_period`, `mfi_period`, `sar_af_start`, `sar_af_step`, `sar_af_max`, `persist_run_id`
 
 #### `get_volatility_estimators`
 
@@ -905,6 +905,19 @@ What a data provider can serve — tick trades, top-of-book quotes, L2 depth, or
 *No required arguments.*  
 **Optional:** `source`
 
+#### `describe_effective_config`
+
+Every SQT_* setting this process reads, resolved through the functions that read it rather than echoed from the environment -- so an unset variable still reports the value in force. Covers recording, redaction, retention and signing of the decision log, the artifact and cache roots, the native-extension switch, provider credentials and the model registry. A secret reports only whether it is set: disclosing the redaction salt would undo the redaction it configures. Reads configuration and cannot change it.
+
+*No required arguments.*  
+**Optional:** `include_paths`
+
+#### `describe_numeric_contract`
+
+The numerical rules every public boundary in this library enforces -- an infinity refused, an all-NaN series refused, prices strictly positive, an equity curve's START positive, an annualization ceiling, a covariance symmetric to 1e-9, a bool refused as a count -- with the threshold each bites at, an excerpt of the message it raises, and why the line is where it is. These ran on every call and were reported nowhere, so the only way to learn one was to trigger it after paying for the fetch. Offline and static.
+
+*No required arguments.*
+
 #### `describe_reference`
 
 What a handoff reference points at — its content kind, shape, date span and which runtime published it. References are how bulk values cross runtimes without passing through the conversation.
@@ -938,6 +951,13 @@ What each runtime costs a client's context, in bytes and approximate tokens, bef
 
 *No required arguments.*  
 **Optional:** `runtimes`, `include_output_schemas`
+
+#### `list_artifacts`
+
+Every artifact this library has persisted, or one run's: key, absolute URI, size, last-modified time and -- on request -- the content hash. Tools hand back a URI once, in one response, and after that the file existed with no way to find it. The hash is opt-in because it is the only part that opens the files rather than their directory entries; it is the same digest describe_artifact reports, so the two compare directly. Read-only.
+
+*No required arguments.*  
+**Optional:** `run_id`, `include_hash`, `limit`
 
 #### `list_reference_kinds`
 
@@ -982,10 +1002,17 @@ Diff two recorded calls — tool, inputs, output hash, git commit — and say wh
 
 #### `describe_artifact`
 
-Shape, date span, per-column statistics and both ends of a persisted Parquet artifact, by URI. Read what a run produced instead of re-running it.
+Shape, date span, per-column statistics and both ends of a persisted Parquet artifact, by URI or by the store key list_artifacts reports. Read what a run produced instead of re-running it.
 
 **Required:** `uri`  
 **Optional:** `preview_rows`
+
+#### `describe_audit_log`
+
+What the decision log holds and what it is configured to do: which dates, how many records, how large, and the recording, redaction, retention and signing settings that decide what a count of zero means. Per day, on request, whether it is held, sealed or carries a signed checkpoint. The retention window is reported as a PREVIEW of what a policy would make eligible -- nothing here deletes, seals, holds or releases anything, because the chain cannot tell a policy-driven deletion from the tampering it exists to detect. The redaction salt is reported as set or unset, never as a value.
+
+*No required arguments.*  
+**Optional:** `include_days`, `max_days`
 
 #### `explain_decision`
 
@@ -998,6 +1025,13 @@ What one recorded tool call did: inputs, the market data it read with the conten
 Package a date range of the audit log plus its chain index, any checkpoint sidecars and a manifest into one zip; a range covering no day file is refused rather than exported as a bundle of nothing. Writes a new file; modifies no existing record.
 
 **Required:** `start_date`, `end_date`, `out_path`
+
+#### `find_decisions`
+
+Search the decision log by tool, status and date, and get back the request ids explain_decision, replay_decision and compare_decisions take. dispatch() returns the payload alone, so an in-process caller otherwise has no way to obtain one and those three tools are unreachable. It is also the only way to read a FAILED call: an error record is written like any other and nothing else surfaces one. Reads only; nothing is re-run.
+
+*No required arguments.*  
+**Optional:** `tool_name`, `status`, `start_date`, `end_date`, `limit`, `newest_first`
 
 #### `replay_decision`
 
@@ -1072,6 +1106,20 @@ Fetch a whole universe's OHLCV in one call and publish it stacked long, with an 
 **Required:** `start_date`, `end_date`, `run_id`, `name`, `tickers`  
 **Optional:** `source`, `interval`
 
+#### `fetch_order_book`
+
+Fetch L2 depth snapshots -- price and resting size at each level, level 1 the touch -- write them once under the run and return an order_book_panel reference. THIS IS THE ONLY WAY TO OBTAIN A BOOK in this library other than already having one: the analysis that reads depth could previously be fed only by register_external_dataset, which wants a file you captured elsewhere. The reference is external, so resolving it streams the file in batches rather than loading a session into memory; hand it to get_order_book_metrics as `ref`, and to detect_liquidity_events' depth channels once that detector grows the per-snapshot series step they name. THE FEED IS METERED AND DEPTH IS THE EXPENSIVE SCHEMA: five minutes of one active name at ten levels measured about 42 MB. The WINDOW is what the vendor bills -- `limit` (20,000 snapshots by default, roughly half an hour of an active name) caps only what is written, and the result says when it bound. Price the window with preflight_vendor_request before widening it. Needs a provider that serves depth; one that does not refuses by name and points at describe_data_capabilities.
+
+**Required:** `start_date`, `end_date`, `run_id`, `name`, `symbol`  
+**Optional:** `source`, `levels`, `limit`
+
+#### `fetch_order_events`
+
+Fetch order-by-order events -- every add, cancel, modify and fill with its own id -- write them once under the run and return an order_event_panel reference for get_order_event_metrics to read as `ref`. A STRICTLY DEEPER FEED THAN DEPTH, and the difference is identity rather than levels: a book snapshot aggregates size per price, and that aggregation is what makes queue position, order lifetime and a true cancellation rate impossible to recover. It is also far denser -- the window that yields thousands of book snapshots yields millions of events -- though cheaper per unit time than depth: the same five minutes of one name measured about 14 MB. `limit` defaults to 100,000 events, a few minutes of an active name, and caps what is WRITTEN rather than what the vendor bills; the window does that. Needs a provider with an order-level feed; one without refuses by name pointing at describe_data_capabilities.
+
+**Required:** `start_date`, `end_date`, `run_id`, `name`, `symbol`  
+**Optional:** `source`, `limit`
+
 #### `fetch_quote_panel`
 
 Fetch top-of-book quotes and publish them as a quote_panel reference, which is what signing trades by the Lee-Ready rule needs alongside a tape. Top of book ONLY -- depth is a different call, and provider='databento' serves it through get_order_book. Queue position is in neither: it needs an order-level feed and cannot be inferred from aggregated size at a level.
@@ -1106,6 +1154,13 @@ Read a published frame's own columns and report what they imply about when each 
 
 **Required:** `ref`  
 **Optional:** `source`, `frame_kind`, `entity_scoped`
+
+#### `preflight_vendor_request`
+
+What a vendor request would cost and whether the data is even there -- asked for free, before the request is made. Returns the DATASET that would answer (the routing is date-dependent and feed-dependent: daily bars prefer a consolidated summary where it reaches and fall back to a sample feed carrying a few percent of volume, while depth comes from one venue), that dataset's coverage window, the BYTES the vendor would bill, and the reference kind the schema produces. Bytes rather than money on purpose: an account whose subscription already includes the feed is quoted $0.00 for a request of any size, so the price is silent about exactly the thing it is consulted for. A window the dataset does not cover is said so rather than fabricated, and a dataset that reports nothing comes back null rather than as a guess. Call it before fetch_order_book or fetch_order_events, which are the metered ones. Needs a provider that routes named vendor datasets; one without refuses naming source='databento'.
+
+**Required:** `symbol`, `start_date`, `end_date`, `vendor_schema`  
+**Optional:** `source`
 
 #### `prepare_vendor_extract`
 
@@ -1180,6 +1235,13 @@ How much account size a target-weight portfolio can support before positions bec
 
 **Required:** `tickers`, `start_date`, `end_date`, `target_weights`  
 **Optional:** `max_participation`, `adv_lookback`, `include_sector_exposure`
+
+#### `get_efficient_frontier`
+
+The WHOLE efficient frontier in one call, exactly, from the closed form. run_portfolio_optimization(method='target_return') answers for ONE target return, so tracing a curve through it costs a tool call and an agent turn per point, and leaves the caller to guess which target returns are worth asking about. This returns the span, the points on it, the global minimum-variance portfolio, the condition number of the covariance it inverted, and the tangency portfolio at a given rate -- null with a warning when no such portfolio exists rather than a normalization onto the inefficient branch. Weights are unbounded and sum to one, which is the condition the algebra describes; a long-only or capped frontier is a different curve with no closed form and is still run_portfolio_optimization point by point.
+
+**Required:** `tickers`, `start_date`, `end_date`  
+**Optional:** `n_points`, `risk_free_rate`, `periods_per_year`, `return_range`
 
 #### `get_factor_exposure_budget`
 
@@ -1437,10 +1499,10 @@ The spread implied by the HIGH-LOW RANGE (Corwin-Schultz 2012). A day's range co
 
 #### `estimate_kyle_lambda`
 
-Market DEPTH: the price impact of a unit of signed order flow, from a regression of price change on signed volume. The one measure here with a direct trading interpretation -- multiply by the size you intend to trade for an estimate of the impact you will cause. The signing comes from the TICK RULE rather than from matching trades against quotes, which is right about 85% of the time on liquid names and worse on illiquid ones; misclassification attenuates the slope toward zero, so this understates impact and understates it most exactly where impact is largest. Check r_squared before sizing anything off it.
+Market DEPTH: the price impact of a unit of signed order flow, from a regression of price change on signed volume. The one measure here with a direct trading interpretation -- multiply by the size you intend to trade for an estimate of the impact you will cause. IT MATTERS ENORMOUSLY WHICH WAY YOU CALL IT. From BARS (`close`, `volume`) the only sign available is the bar's own return, so sign(y) * volume is regressed on y: lambda is positive by construction, r_squared measures nothing, and the result says `circular=True`. From a TAPE (`trades_ref` from fetch_tick_tape, with `quotes_ref` from fetch_quote_panel) each print is signed Lee-Ready against the quote before it and bucketed at `freq`, and the sign is then evidence rather than a restatement of the answer. Measured side by side on the same live tape, the circular estimate was 3.2x the signed one while its r_squared looked 2.7x better. PREFER THE TAPE WHENEVER ONE EXISTS; use bars only when it does not, and read `circular`, `sign_source` and r_squared before sizing anything off the number.
 
-**Required:** `close`, `volume`  
-**Optional:** `window`
+*No required arguments.*  
+**Optional:** `close`, `volume`, `trades_ref`, `quotes_ref`, `freq`, `window`
 
 #### `estimate_roll_spread`
 

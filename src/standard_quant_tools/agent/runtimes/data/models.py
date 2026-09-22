@@ -136,6 +136,99 @@ class FetchQuotePanelInput(_Fetch):
     limit: Optional[int] = Field(None, gt=0, description="Cap on quotes returned.")
 
 
+class FetchOrderBookInput(_Fetch):
+    """L2 depth: a window, a depth, and a cap on what gets written."""
+
+    symbol: str = Field(..., description="One ticker.")
+    levels: int = Field(
+        5,
+        ge=1,
+        le=10,
+        description=(
+            "Depth levels to keep, level 1 being the touch. The deepest "
+            "feed here carries ten. Fewer levels is a smaller frame and a "
+            "cheaper read, but it is not a cheaper REQUEST: the vendor "
+            "bills the schema, and the schema is the ten-level one whatever "
+            "is kept from it."
+        ),
+    )
+    limit: int = Field(
+        20_000,
+        gt=0,
+        le=5_000_000,
+        description=(
+            "Cap on snapshots WRITTEN, applied after the window is served. "
+            "It bounds the artifact and the reads that follow; it does not "
+            "bound what the vendor transfers or bills -- the window does "
+            "that, and preflight_vendor_request prices the window before "
+            "this tool spends it. The default is about half an hour of an "
+            "active name. The result says when the cap bound, because a "
+            "capped book is a PREFIX of the session rather than a shorter "
+            "session, and the open is its least typical part."
+        ),
+    )
+
+
+class FetchOrderEventsInput(_Fetch):
+    """Market-by-order: every add, cancel, modify and fill, with its id."""
+
+    symbol: str = Field(..., description="One ticker.")
+    limit: int = Field(
+        100_000,
+        gt=0,
+        le=20_000_000,
+        description=(
+            "Cap on events WRITTEN, applied after the window is served. An "
+            "order feed runs one to two orders of magnitude denser than "
+            "depth -- the same window that yields thousands of book "
+            "snapshots yields millions of events -- so the default is a few "
+            "minutes of an active name rather than a session. It does not "
+            "bound what the vendor bills; the window does, and "
+            "preflight_vendor_request prices it first."
+        ),
+    )
+
+
+class PreflightVendorRequestInput(BaseModel):
+    """What a vendor request would cost and whether the data is even there."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    symbol: str = Field(..., description="One ticker, as the fetch would spell it.")
+    start_date: str = Field(..., description="Inclusive, YYYY-MM-DD.")
+    end_date: str = Field(..., description="Inclusive, YYYY-MM-DD.")
+    # Spelled `vendor_schema` rather than `schema`, which shadows an
+    # attribute every pydantic model inherits and warns about it at import.
+    vendor_schema: Literal[
+        "ohlcv-1d",
+        "ohlcv-1h",
+        "ohlcv-1m",
+        "trades",
+        "tbbo",
+        "mbp-10",
+        "mbo",
+    ] = Field(
+        ...,
+        description=(
+            "The vendor's own product, not this library's kind: daily, "
+            "hourly or minute bars; 'trades' for the tape; 'tbbo' for "
+            "trades carrying the quote that stood at them; 'mbp-10' for "
+            "ten-level depth; 'mbo' for order-by-order. The routing that "
+            "answers each of these differs -- depth comes from one venue "
+            "while daily bars prefer the consolidated summary -- which is "
+            "why the dataset that would answer is worth asking for."
+        ),
+    )
+    source: Optional[str] = Field(
+        None,
+        description=(
+            "Data provider to price the request against. None uses the "
+            "default provider, which usually has no metered feed and no "
+            "preflight to give."
+        ),
+    )
+
+
 class FetchFinancialRatiosInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     symbol: str = Field(..., description="One ticker.")
@@ -409,10 +502,13 @@ __all__ = [
     "FetchFinancialRatiosInput",
     "FetchOhlcvInput",
     "FetchOhlcvPanelInput",
+    "FetchOrderBookInput",
+    "FetchOrderEventsInput",
     "FetchQuotePanelInput",
     "FetchReturnsPanelInput",
     "FetchTickTapeInput",
     "InferTemporalContractInput",
+    "PreflightVendorRequestInput",
     "RegisterExternalDatasetInput",
     "ValidateDataBundleInput",
     "ValidateExternalDatasetInput",

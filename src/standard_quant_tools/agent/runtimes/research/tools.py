@@ -1743,6 +1743,18 @@ def get_technical_panel(input_data: TechnicalPanelInput) -> TechnicalPanelResult
         bollinger_num_std=input_data.bollinger_num_std,
         stoch_k_period=input_data.stoch_k_period,
         stoch_d_period=input_data.stoch_d_period,
+        macd_fast=input_data.macd_fast,
+        macd_slow=input_data.macd_slow,
+        macd_signal=input_data.macd_signal,
+        sma_period=input_data.sma_period,
+        ema_period=input_data.ema_period,
+        williams_period=input_data.williams_period,
+        vwap_period=input_data.vwap_period,
+        mfi_period=input_data.mfi_period,
+        sar_af_start=input_data.sar_af_start,
+        sar_af_step=input_data.sar_af_step,
+        sar_af_max=input_data.sar_af_max,
+        atr_simple_period=input_data.atr_simple_period,
     )
 
     # The panel is computed on the bars every ticker SHARES, so one young
@@ -1816,6 +1828,11 @@ def get_technical_panel(input_data: TechnicalPanelInput) -> TechnicalPanelResult
             input_data.adx_period if "adx" in input_data.indicators else 0,
             input_data.atr_period if "atr" in input_data.indicators else 0,
             (
+                input_data.atr_simple_period
+                if "atr_simple" in input_data.indicators
+                else 0
+            ),
+            (
                 input_data.bollinger_period
                 if "bollinger_bands" in input_data.indicators
                 else 0
@@ -1825,6 +1842,20 @@ def get_technical_panel(input_data: TechnicalPanelInput) -> TechnicalPanelResult
                 if "stochastic_oscillator" in input_data.indicators
                 else 0
             ),
+            (
+                input_data.macd_slow + input_data.macd_signal
+                if "macd" in input_data.indicators
+                else 0
+            ),
+            input_data.sma_period if "sma" in input_data.indicators else 0,
+            input_data.ema_period if "ema" in input_data.indicators else 0,
+            (
+                input_data.williams_period
+                if "williams_r" in input_data.indicators
+                else 0
+            ),
+            input_data.mfi_period if "mfi" in input_data.indicators else 0,
+            ((input_data.vwap_period or 0) if "vwap" in input_data.indicators else 0),
         )
     )
     if limited_by:

@@ -16,6 +16,13 @@ an order depends on the book at that moment, and no daily bar contains it.
 INPUTS ARE INLINE -- prices and volumes as lists, not a ticker. The same
 tools then work on a series the caller built, resampled, or simulated, which
 is most of how a liquidity proxy actually gets used.
+
+ONE EXCEPTION, AND IT IS THE POINT OF THE EXCEPTION. `estimate_kyle_lambda`
+also takes a tick tape and a quote panel by reference, because its bars
+estimate is circular by construction -- the bar's own return signs the
+volume that return is then regressed on. A tape signs the flow from the
+prints instead, and it is a tape rather than a list because a session of
+them does not belong in a payload. See the CHANGELOG entry of 2026-09-22.
 """
 
 from __future__ import annotations
@@ -42,6 +49,7 @@ from standard_quant_tools.analysis import microstructure_estimators as lib
 from standard_quant_tools.error import ValidationError
 
 from .._optional_ref import publish_if_requested as _publish_if_requested
+from ..handoff import resolve as _resolve
 
 logger = logging.getLogger(__name__)
 Stat = Annotated[Optional[float], BeforeValidator(_finite_or_none)]
@@ -55,6 +63,33 @@ class _Result(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     warnings: List[str] = Field(default_factory=list)
+
+
+def _referenced(ref: str, expect: str, who: str) -> pd.DataFrame:
+    """
+    Resolve a tape or a book, refusing by name and naming what produces one.
+
+    Every failure here -- a malformed reference, the wrong kind, a run
+    directory that was cleared -- becomes ONE refusal that ends with the
+    tool a caller would run to get a good reference. The underlying
+    messages say what is wrong with the string; none of them says where a
+    tick tape comes from, and a caller holding a bad ref needs both.
+    """
+    try:
+        data = _resolve(ref, expect=expect)
+    except Exception as exc:  # noqa: BLE001 -- one refusal, not a traceback
+        raise ValidationError(
+            f"{who}: {ref!r} could not be resolved as a {expect!r} "
+            f"reference -- {exc} fetch_tick_tape and fetch_quote_panel in "
+            "the `data` runtime are what produce these."
+        ) from exc
+    if not isinstance(data, pd.DataFrame) or data.empty:
+        raise ValidationError(
+            f"{who}: {ref!r} resolved to nothing usable. fetch_tick_tape "
+            "and fetch_quote_panel in the `data` runtime are what produce "
+            "these."
+        )
+    return data
 
 
 def _ohlcv(
@@ -150,13 +185,93 @@ class AmihudInput(BaseModel):
 
 
 class KyleLambdaInput(BaseModel):
+    """
+    Two ways in, and they do not measure the same thing.
+
+    A TAPE (`trades_ref`, ideally with `quotes_ref`) signs each print
+    against the quote that preceded it, so the sign is evidence rather than
+    a restatement of the answer. BARS (`close`, `volume`) have no sign in
+    them: the only one available is the bar's own return, which is the very
+    thing the regression explains, and the result says `circular=True`.
+    Prefer the tape wherever one exists. See the CHANGELOG entry of
+    2026-09-22.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
-    close: List[float] = Field(..., min_length=30)
-    volume: List[float] = Field(..., min_length=30)
+    close: Optional[List[float]] = Field(
+        None,
+        min_length=30,
+        description="Bar closes, oldest first. With `volume`, the CIRCULAR "
+        "path -- give `trades_ref` instead when a tape exists.",
+    )
+    volume: Optional[List[float]] = Field(
+        None, min_length=30, description="Bar volumes, aligned with `close`."
+    )
+    trades_ref: Optional[str] = Field(
+        None,
+        description="An `sqt://tick_tape/...` from fetch_tick_tape. THE "
+        "PATH TO PREFER: the tape is signed print by print and bucketed at "
+        "`freq`, so lambda is estimated from a sign the regression does not "
+        "already know. Mutually exclusive with `close`/`volume`.",
+    )
+    quotes_ref: Optional[str] = Field(
+        None,
+        description="An `sqt://quote_panel/...` from fetch_quote_panel, "
+        "alongside `trades_ref`. WITH quotes the sign is Lee-Ready and the "
+        "price that moves is the MIDPOINT, which keeps the bid-ask bounce "
+        "out of the slope; without them the tape falls back to the tick "
+        "rule on trade prices, which is materially worse. Requires "
+        "`trades_ref`.",
+    )
+    freq: Literal["1s", "5s", "10s", "30s", "1min", "5min"] = Field(
+        "1min",
+        description="Bucket width for the tape path -- signed volume is "
+        "summed and the price change taken over each bucket. Shorter "
+        "buckets give more observations and a noisier price change; longer "
+        "ones net opposing flow inside the bucket away. Ignored on the bars "
+        "path, where the bars are the buckets.",
+    )
     window: Optional[int] = Field(
         None, ge=20, description="Rolling window, for a spread of estimates."
     )
+
+    @model_validator(mode="after")
+    def _one_source_of_flow(self) -> "KyleLambdaInput":
+        bars = self.close is not None or self.volume is not None
+        if bars and self.trades_ref is not None:
+            raise ValueError(
+                "estimate_kyle_lambda: pass a tape (`trades_ref`) or bars "
+                "(`close` and `volume`), not both. They are different "
+                "estimates -- the tape's sign comes from the prints, the "
+                "bars' from the return being explained -- and silently "
+                "preferring one would hide which was measured. Drop "
+                "`close`/`volume` to use the tape."
+            )
+        if self.trades_ref is None:
+            if not bars:
+                raise ValueError(
+                    "estimate_kyle_lambda: nothing to measure. Pass "
+                    "`trades_ref` (an `sqt://tick_tape/...` from "
+                    "fetch_tick_tape, with `quotes_ref` from "
+                    "fetch_quote_panel for a Lee-Ready sign), or `close` "
+                    "and `volume` for the circular bars estimate."
+                )
+            if self.close is None or self.volume is None:
+                missing = "close" if self.close is None else "volume"
+                raise ValueError(
+                    f"estimate_kyle_lambda: the bars path needs both "
+                    f"`close` and `volume`; `{missing}` is missing. The "
+                    "regression is a price change on a signed volume, so "
+                    "neither side can be inferred from the other."
+                )
+            if self.quotes_ref is not None:
+                raise ValueError(
+                    "estimate_kyle_lambda: `quotes_ref` signs a trade tape "
+                    "and does nothing to bars. Pass `trades_ref` as well, "
+                    "or drop `quotes_ref`."
+                )
+        return self
 
 
 class OrderFlowInput(BaseModel):
@@ -374,6 +489,26 @@ class KyleLambdaResult(_Result):
     impact_of_1pct_adv_bps: Stat = None
     mean_price: Stat = None
     mean_volume: Stat = None
+    circular: bool = Field(
+        True,
+        description="True when the flow was signed by the bar's own return, "
+        "which is the variable the regression explains: lambda is positive "
+        "by construction and r_squared measures nothing. READ THIS FIRST. "
+        "Only a tape (`trades_ref`) makes it False.",
+    )
+    sign_source: str = Field(
+        "return_sign",
+        description="What signed the flow: 'lee_ready' (tape and quotes, "
+        "each print matched against the quote preceding it), 'tick_rule' "
+        "(tape without quotes, signed off the previous print's price) or "
+        "'return_sign' (bars, the circular case).",
+    )
+    freq: Optional[str] = Field(
+        None,
+        description="The bucket the tape was summed into before the "
+        "regression. Null on the bars path, where the bars are the buckets "
+        "and their width is whatever the caller sampled.",
+    )
     rolling: Optional[KyleRolling] = None
 
 
@@ -482,10 +617,26 @@ def get_amihud_illiquidity(input_data: AmihudInput) -> AmihudResult:
 
 
 def estimate_kyle_lambda(input_data: KyleLambdaInput) -> KyleLambdaResult:
-    frame = _ohlcv(
-        "estimate_kyle_lambda", close=input_data.close, volume=input_data.volume
-    )
-    return KyleLambdaResult(**lib.kyle_lambda(frame, window=input_data.window))
+    """Market depth from a signed tape, or -- circularly -- from bars."""
+    if input_data.trades_ref is not None:
+        trades = _referenced(input_data.trades_ref, "tick_tape", "estimate_kyle_lambda")
+        quotes = (
+            _referenced(input_data.quotes_ref, "quote_panel", "estimate_kyle_lambda")
+            if input_data.quotes_ref is not None
+            else None
+        )
+        computed = lib.kyle_lambda(
+            trades=trades,
+            quotes=quotes,
+            freq=input_data.freq,
+            window=input_data.window,
+        )
+    else:
+        frame = _ohlcv(
+            "estimate_kyle_lambda", close=input_data.close, volume=input_data.volume
+        )
+        computed = lib.kyle_lambda(frame, window=input_data.window)
+    return KyleLambdaResult(**computed)
 
 
 def get_order_flow_imbalance(input_data: OrderFlowInput) -> OrderFlowResult:
@@ -572,13 +723,20 @@ ESTIMATOR_TOOL_DEFS = [
         "Market DEPTH: the price impact of a unit of signed order flow, from "
         "a regression of price change on signed volume. The one measure here "
         "with a direct trading interpretation -- multiply by the size you "
-        "intend to trade for an estimate of the impact you will cause. The "
-        "signing comes from the TICK RULE rather than from matching trades "
-        "against quotes, which is right about 85% of the time on liquid names "
-        "and worse on illiquid ones; misclassification attenuates the slope "
-        "toward zero, so this understates impact and understates it most "
-        "exactly where impact is largest. Check r_squared before sizing "
-        "anything off it.",
+        "intend to trade for an estimate of the impact you will cause. IT "
+        "MATTERS ENORMOUSLY WHICH WAY YOU CALL IT. From BARS (`close`, "
+        "`volume`) the only sign available is the bar's own return, so "
+        "sign(y) * volume is regressed on y: lambda is positive by "
+        "construction, r_squared measures nothing, and the result says "
+        "`circular=True`. From a TAPE (`trades_ref` from fetch_tick_tape, "
+        "with `quotes_ref` from fetch_quote_panel) each print is signed "
+        "Lee-Ready against the quote before it and bucketed at `freq`, and "
+        "the sign is then evidence rather than a restatement of the answer. "
+        "Measured side by side on the same live tape, the circular estimate "
+        "was 3.2x the signed one while its r_squared looked 2.7x better. "
+        "PREFER THE TAPE WHENEVER ONE EXISTS; use bars only when it does "
+        "not, and read `circular`, `sign_source` and r_squared before sizing "
+        "anything off the number.",
         KyleLambdaInput,
     ),
     (
