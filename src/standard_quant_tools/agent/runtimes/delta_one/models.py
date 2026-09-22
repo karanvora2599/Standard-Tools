@@ -30,6 +30,31 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from standard_quant_tools.delta_one.daycount import CONVENTIONS as _CONVENTIONS
+from standard_quant_tools.delta_one.streaming import (
+    STREAMING_THRESHOLD as _STREAMING_THRESHOLD,
+)
+
+#: What a `day_count` field tells the caller, assembled ONCE from
+#: `daycount.CONVENTIONS` rather than retyped into two schemas. The
+#: rationales are the reason a convention gets chosen -- that ACT/360
+#: accrues about 1.4% more than ACT/365F over the same period is the single
+#: fact that decides a financing leg -- and before the CHANGELOG entry of
+#: 2026-09-22 only one of the four reached the surface, in one tool.
+#:
+#: The closing caveat is not in that mapping because it is true of all
+#: four: this library ships no holiday calendar, so there are no
+#: business-day conventions anywhere in it.
+_DAY_COUNT_DESCRIPTION = (
+    "Day-count convention for the accrual. "
+    + " ".join(f"{name} -- {why}" for name, why in _CONVENTIONS.items())
+    + " None of the four adjusts for business days: this library has no "
+    "holiday calendar, so every convention counts CALENDAR days and a date "
+    "landing on a weekend is used as given. An instrument that needs a "
+    "Following or Modified Following adjustment should have it applied "
+    "upstream, by something that knows the holidays."
+)
+
 __all__ = [
     "BasisHistoryInput",
     "CashFuturesBasisInput",
@@ -200,6 +225,21 @@ class RollAnalysisInput(BaseModel):
     )
     spread_ticks: float = Field(0.0, ge=0, description="Ticks crossed per leg.")
     tick_value: float = Field(0.0, ge=0, description="Currency per tick.")
+    day_count: Literal["ACT/365F", "ACT/360", "30/360", "ACT/ACT"] = Field(
+        "ACT/365F",
+        description=(
+            "Convention behind BOTH annualized numbers here -- roll_yield "
+            "and breakeven_annualized_rate -- and echoed on the result. The "
+            "same 91-day quarterly roll is 160.376 bp under ACT/365F and "
+            "158.179 under ACT/360, because 91 days is a larger slice of a "
+            "360-day year and the same price step spread over more of a "
+            "year is a lower rate. Compare a repo quoted ACT/360 against "
+            "the ACT/360 number, not the default. A roll is given in DAYS "
+            "rather than dates, so ACT/ACT cannot split the period at a "
+            "year boundary and divides by an ordinary 365-day year. "
+            + _DAY_COUNT_DESCRIPTION
+        ),
+    )
 
 
 class FuturesHedgeInput(BaseModel):
@@ -465,7 +505,11 @@ class TotalReturnSwapInput(BaseModel):
     )
     day_count: Literal["ACT/365F", "ACT/360", "30/360", "ACT/ACT"] = Field(
         "ACT/365F",
-        description="ACT/360 accrues about 1.4% more financing than ACT/365F.",
+        description=(
+            "Convention the financing leg accrues under, echoed on the "
+            "result. On $100m financed at 4% the gap between two of these "
+            "over six months is about $27,500. " + _DAY_COUNT_DESCRIPTION
+        ),
     )
     direction: Literal["receive", "pay"] = Field(
         "receive", description="Receive the total return, or pay it."
@@ -675,11 +719,24 @@ class SpreadMonitorInput(BaseModel):
         "error, and a detector standardized against it fires on that.",
     )
     threshold: float = Field(
-        9.0,
+        _STREAMING_THRESHOLD,
         gt=0,
         le=1000,
-        description="CUSUM decision threshold. 9.0 is calibrated; the "
-        "textbook 5.0 measures 51% false alarms over 300 observations.",
+        description="CUSUM decision threshold for a STREAM, which is not the "
+        "number the batch detector uses. A stream has no known length and "
+        "its baseline is frozen at `warmup`, so the statistic keeps "
+        "accumulating against a fixed scale and the false-alarm rate climbs "
+        "with the length of the feed. Measured on pure noise over 200 "
+        "trials, a monitor left running to 5,000 observations fires on "
+        "nothing 45% of the time at 9.0 and 7% at 15.0 (at 1,500 "
+        "observations, 31% against 2%), while detection power pays almost "
+        "nothing for the move: 100% at a 1 sd shift either way. The default "
+        "is the library's streaming constant. detect_basis_dislocation's "
+        "`threshold` keeps 9.0 and is right to -- it is a BATCH detector "
+        "over a series of known length whose reference window sharpens as "
+        "the series grows. Even at 15.0 the rate grows without bound on an "
+        "endless feed; reset the monitor periodically if the horizon is "
+        "long.",
     )
     slack: float = Field(
         0.5, ge=0, le=100, description="Standardized deviations absorbed per step."
@@ -739,3 +796,36 @@ class BasisScanInput(BaseModel):
         "rather than ranked on a z-score built from a handful of points.",
     )
     top_n: int = Field(10, ge=1, le=100, description="How many ranked rows to return.")
+    reference_fraction: float = Field(
+        0.3,
+        gt=0,
+        lt=1,
+        description="Fraction of the START of each pair used to learn "
+        "normal, for the shift detector. A baseline drawn from the whole "
+        "series hides the shift inside it. Ignored when detect_shifts is "
+        "false.",
+    )
+    threshold: float = Field(
+        9.0,
+        gt=0,
+        le=1000,
+        description="CUSUM decision threshold for the shift detector, the "
+        "same knob detect_basis_dislocation takes and calibrated the same "
+        "way: 9.0 against the textbook 5.0, which measures 51% false alarms "
+        "over 300 observations when asking whether anything happened "
+        "anywhere. Raise it to rank only the unmistakable shifts; it cannot "
+        "change the z-score ordering, which is what the scan ranks on.",
+    )
+    slack: float = Field(
+        0.5,
+        ge=0,
+        le=100,
+        description="Standardized deviations absorbed per step by the shift "
+        "detector, before anything accumulates.",
+    )
+    max_breaks: int = Field(
+        3,
+        ge=1,
+        le=20,
+        description="Most segment boundaries the shift detector looks for " "per pair.",
+    )

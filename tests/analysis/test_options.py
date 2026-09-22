@@ -12,6 +12,7 @@ import math
 
 import pytest
 
+from standard_quant_tools.analysis import options
 from standard_quant_tools.analysis.options import (
     black_scholes_greeks,
     black_scholes_price,
@@ -82,11 +83,38 @@ class TestBlackScholesPriceValidation:
         with pytest.raises(ValidationError, match="option_type"):
             black_scholes_price(HULL_S, HULL_K, HULL_T, HULL_R, HULL_SIGMA, "straddle")
 
-    def test_negative_dividend_yield_raises(self):
+    def test_a_dividend_yield_past_the_magnitude_bound_raises(self):
+        """The bound is on MAGNITUDE, never on sign.
+
+        A `>= 0` guard here refused an FX option's foreign rate and a
+        commodity whose convenience yield exceeds its storage cost -- the
+        two cases a continuous yield is most often negative for -- while
+        the pricing formulas themselves handle either sign. What is refused
+        is a magnitude past MAX_RATE, which is a unit error rather than an
+        extreme case. See the CHANGELOG entry of 2026-09-22.
+        """
         with pytest.raises(ValidationError, match="dividend_yield"):
             black_scholes_price(
-                HULL_S, HULL_K, HULL_T, HULL_R, HULL_SIGMA, "call", dividend_yield=-0.01
+                HULL_S, HULL_K, HULL_T, HULL_R, HULL_SIGMA, "call", dividend_yield=-11.0
             )
+
+    def test_a_negative_dividend_yield_prices_and_moves_the_answer(self):
+        priced = black_scholes_price(
+            HULL_S, HULL_K, HULL_T, HULL_R, HULL_SIGMA, "call", dividend_yield=-0.005
+        )
+        flat = black_scholes_price(
+            HULL_S, HULL_K, HULL_T, HULL_R, HULL_SIGMA, "call", dividend_yield=0.0
+        )
+        # A negative yield is a carry ADDED to the forward, so the call is
+        # worth more -- not merely accepted.
+        assert priced > flat
+
+    def test_the_yield_bound_is_the_one_the_rest_of_the_library_uses(self):
+        """Restated in `options` to keep its import graph stdlib-only, so
+        the two definitions are pinned together rather than left to drift."""
+        from standard_quant_tools.analysis.derivatives import MAX_RATE as SHARED
+
+        assert options.MAX_RATE == SHARED
 
 
 class TestBlackScholesGreeks:

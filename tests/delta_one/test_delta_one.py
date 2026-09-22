@@ -32,7 +32,6 @@ import pytest
 from standard_quant_tools.analysis.derivatives import implied_forward_price
 from standard_quant_tools.delta_one.basis import basis_history, cash_futures_basis
 from standard_quant_tools.delta_one.carry import observed_carry_rate, solve_carry
-from standard_quant_tools.delta_one.contracts import ContractSpec
 from standard_quant_tools.delta_one.daycount import day_count, year_fraction
 from standard_quant_tools.delta_one.expressions import compare_expressions
 from standard_quant_tools.delta_one.futures import futures_curve, roll_analysis
@@ -80,30 +79,6 @@ class TestDayCount:
     def test_an_unsupported_convention_names_the_alternatives(self):
         with pytest.raises(ValidationError, match="30E/360"):
             year_fraction("2026-01-01", "2026-02-01", convention="30E/360")
-
-
-class TestContractSpec:
-    def test_tick_value_is_derived_and_cannot_disagree(self):
-        spec = ContractSpec(symbol="ESZ5", multiplier=50, tick_size=0.25)
-        assert spec.tick_value == 12.5
-        # Supplying one from a different contract cannot corrupt it.
-        pasted = ContractSpec.from_mapping(
-            {"symbol": "ESZ5", "multiplier": 50, "tick_size": 0.25, "tick_value": 999.0}
-        )
-        assert pasted.tick_value == 12.5
-
-    def test_contracts_for_inverts_notional(self):
-        spec = ContractSpec(symbol="ESZ5", multiplier=50)
-        exposure = 280_000_000.0
-        n = spec.contracts_for(exposure, price=6200)
-        assert n * spec.notional(6200) == pytest.approx(exposure)
-
-    def test_a_missing_tick_size_gives_no_tick_value_rather_than_zero(self):
-        assert ContractSpec(symbol="X", multiplier=10).tick_value is None
-
-    def test_settlement_is_not_defaulted_to_something_wrong(self):
-        with pytest.raises(ValidationError, match="physical"):
-            ContractSpec(symbol="X", multiplier=10, settlement="cash-ish")
 
 
 class TestCarryIsInvertible:

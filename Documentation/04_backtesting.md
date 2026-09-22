@@ -646,7 +646,8 @@ results = backtest_grid(
     },
     initial_capital=10_000,
     commission_pct=0.001,
-    sort_by="sharpe_ratio",            # default: best Sharpe first
+    sort_by="sharpe_ratio",            # default: best Sharpe first;
+                                       # annualized_volatility sorts ascending
     n_workers=4,                       # only matters without the C++ extension
 )
 
@@ -989,7 +990,11 @@ as everywhere else in this library):**
   dates/tickers listed) or infinite.
 - `sum(|weight|)` per rebalance date can't exceed `max_gross_leverage`
   (default `1.0` = fully invested, no leverage); no single `|weight|` can
-  exceed `max_position_pct` (default `1.0`). See "Post-trade enforcement"
+  exceed `max_position_pct` (default `1.0`). On the score path the tool
+  clips a converted weight to the cap, renormalizes to the requested
+  gross leverage and names the tickers it clipped; a caller's own target
+  weights over the cap are still refused, because clipping those would
+  restate a request. See "Post-trade enforcement"
   below for what these two limits do and do not guarantee once costs are
   applied.
 - Every rebalance date must fall on a day all tickers have price data for

@@ -991,7 +991,7 @@ The `run_regime_adaptive_backtest` agent tool automates this entire flow — it 
 
 ## Realized Volatility Estimators
 
-`standard_quant_tools.metrics.volatility_estimators` — Parkinson, Garman-Klass, and Yang-Zhang OHLC-based realized volatility, complementing `metrics.return_metrics.annualized_volatility`'s plain close-to-close measure. See [09_advanced_agent_tools.md, Tool 21](09_advanced_agent_tools.md) for the agent-tool wrapper (`get_volatility_estimators`) with worked examples and interpretation guidance.
+`standard_quant_tools.metrics.volatility_estimators` — Parkinson, Garman-Klass, and Yang-Zhang OHLC-based realized volatility, complementing `metrics.return_metrics.annualized_volatility`'s plain close-to-close measure. See [09_advanced_agent_tools.md, Tool 21](09_advanced_agent_tools.md) for the agent-tool wrapper (`get_volatility_estimators`) with worked examples and interpretation guidance. Every estimator takes `periods_per_year`, and so does the tool that runs all four.
 
 ```python
 from standard_quant_tools.metrics.volatility_estimators import (
@@ -1082,7 +1082,7 @@ Both refuse a bar whose low is non-positive or whose high sits below its low, wi
 
 ## GARCH(1,1) Conditional Volatility
 
-`standard_quant_tools.analysis.garch` — fits a GARCH(1,1) model (today's variance depends on yesterday's shock and yesterday's variance) and forecasts it forward, unlike the realized-volatility estimators above which only describe past variance. The variance recursion is inherently sequential and numba-`@njit`'d (same tool `backtest.strategies`' state machines use — no native build step required); fitting is MLE via `scipy.optimize` (required — there's no meaningful scipy-free fallback for a maximum-likelihood fit). See [09_advanced_agent_tools.md, Tool 26](09_advanced_agent_tools.md) for the agent-tool wrapper (`run_garch_volatility_forecast`).
+`standard_quant_tools.analysis.garch` — fits a GARCH(1,1) model (today's variance depends on yesterday's shock and yesterday's variance) and forecasts it forward, unlike the realized-volatility estimators above which only describe past variance. The variance recursion is inherently sequential and numba-`@njit`'d (same tool `backtest.strategies`' state machines use — no native build step required); fitting is MLE via `scipy.optimize` (required — there's no meaningful scipy-free fallback for a maximum-likelihood fit). See [09_advanced_agent_tools.md, Tool 26](09_advanced_agent_tools.md) for the agent-tool wrapper (`run_garch_volatility_forecast`). The fit reports whether it removed the clustering it was fitted to remove: the standardized residuals' Ljung-Box statistics (raw and squared), their skew and excess kurtosis, and a `misspecified` verdict with a warning that `converged` is about the optimizer, not the model.
 
 ```python
 from standard_quant_tools.analysis.garch import garch_volatility_forecast

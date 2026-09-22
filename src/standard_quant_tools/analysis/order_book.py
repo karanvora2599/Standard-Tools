@@ -104,12 +104,42 @@ def microprice(bid_price: Any, bid_size: Any, ask_price: Any, ask_size: Any) -> 
     return out if out.ndim else float(out)
 
 
-def book_metrics(book: pd.DataFrame, *, levels: Optional[int] = None) -> Dict[str, Any]:
+def _level_count_means(book: pd.DataFrame, level: int) -> Dict[str, Optional[float]]:
+    """
+    Mean resting ORDER COUNT on each side of one level, or None.
+
+    `bid_count_{i}` / `ask_count_{i}` are outside `DataProvider.
+    get_order_book`'s four-column contract and are the one queue-shaped
+    quantity an MBP-10 feed carries: size says how much is resting, the
+    count says how many orders it is spread over, and 5,000 shares in one
+    order is a different queue from 5,000 in fifty. A feed that does not
+    carry them reports None rather than raising, because the columns being
+    absent is the ordinary case and not an error.
+    """
+    out: Dict[str, Optional[float]] = {}
+    for side in ("bid", "ask"):
+        column = f"{side}_count_{level}"
+        out[f"mean_{side}_count"] = (
+            _mean(pd.to_numeric(book[column], errors="coerce").to_numpy(dtype=float))
+            if column in book.columns
+            else None
+        )
+    return out
+
+
+def book_metrics(
+    book: pd.DataFrame,
+    *,
+    levels: Optional[int] = None,
+    include_order_counts: bool = False,
+) -> Dict[str, Any]:
     """
     Per-snapshot book statistics, averaged over the window.
 
     `book` follows `DataProvider.get_order_book`'s column contract. `levels`
     caps how deep to read; omitted, it reads every complete level present.
+    `include_order_counts` adds the mean number of orders resting at the
+    touch, when the feed carries `bid_count_0` / `ask_count_0`.
 
     The imbalance is reported at the TOUCH and CUMULATIVELY, because they
     answer different questions and routinely disagree. Touch imbalance
@@ -238,11 +268,13 @@ def book_metrics(book: pd.DataFrame, *, levels: Optional[int] = None) -> Dict[st
         "balanced book it equals the mid exactly."
     )
 
+    counts = _level_count_means(book, 0) if include_order_counts else {}
     return {
         "n_snapshots": int(len(book)),
         "levels_available": int(available),
         "levels_read": int(depth),
         "n_crossed": int(crossed.sum()),
+        **counts,
         "mean_spread": _mean(spread[usable]),
         "mean_spread_bps": _mean(spread_bps[usable]),
         "mean_mid": _mean(mid[usable]),
@@ -386,7 +418,10 @@ def book_dynamics(book: pd.DataFrame) -> Dict[str, Any]:
 
 
 def depth_profile(
-    book: pd.DataFrame, *, levels: Optional[int] = None
+    book: pd.DataFrame,
+    *,
+    levels: Optional[int] = None,
+    include_order_counts: bool = False,
 ) -> Dict[str, Any]:
     """
     Resting size and distance from the mid, level by level.
@@ -395,6 +430,11 @@ def depth_profile(
     than summed, because the sum is what makes an illiquid book look deep:
     ten levels of a hundred shares each is a thousand shares and is not the
     same market as one level of a thousand.
+
+    `include_order_counts` adds the mean number of orders resting at each
+    level where the feed carries `bid_count_{i}` / `ask_count_{i}`, which is
+    how many orders the size is spread over -- and therefore how far back a
+    new order joining that level would sit.
     """
     available = _levels_present(book)
     if available == 0:
@@ -423,6 +463,7 @@ def depth_profile(
                 "mean_ask_size": _mean(book[f"ask_size_{i}"].to_numpy(dtype=float)),
                 "mean_bid_distance_bps": _mean(bid_distance),
                 "mean_ask_distance_bps": _mean(ask_distance),
+                **(_level_count_means(book, i) if include_order_counts else {}),
             }
         )
 

@@ -544,8 +544,13 @@ def rolling_sharpe_stability(
     Lo (2002) -- the halves are independent by construction, and the
     difference is a clean two-sample test.
 
-    The rolling series is still computed and returned, because looking at it
-    is genuinely informative. It is just not what the p-value comes from.
+    The rolling series itself comes back under the key `rolling_sharpe`, a
+    date-indexed Series of one annualized Sharpe per window, because looking
+    at it is genuinely informative. It is just not what the p-value comes
+    from. It carries `n_windows` values, which is one per window that had
+    any dispersion -- the non-overlapping block Sharpes behind
+    `trend_per_year` are a different and much shorter sequence and are
+    summarized by `n_blocks`, not returned.
 
     MEASURED CALIBRATION, over 200 replications each: on a strategy whose
     edge is genuinely constant the test calls decay 3.0% of the time, which
@@ -578,14 +583,17 @@ def rolling_sharpe_stability(
     rolling_mean = values.rolling(window).mean()
     rolling_std = values.rolling(window).std(ddof=1)
     rolling = (rolling_mean / rolling_std * math.sqrt(periods_per_year)).dropna()
-    array = rolling.to_numpy()
 
     # A window that is constant divides by a std of ~1e-19 and returns inf,
     # which then makes mean_rolling_sharpe inf and std_rolling_sharpe NaN
     # while full_sample_sharpe alongside them stays a plausible 1.34. The
     # ratio is undefined on a flat window, not enormous. This file fixes
     # the same fault for its own Sharpe 80 lines below and missed this one.
-    array = array[np.isfinite(array)]
+    # Filtered on the SERIES rather than on a detached array so the dates
+    # travel with the values -- `rolling_sharpe` is returned, and a window's
+    # Sharpe without the date it ends on is not much use.
+    rolling = rolling[np.isfinite(rolling)]
+    array = rolling.to_numpy()
     if array.size < 2:
         raise ValidationError(
             "rolling_sharpe_stability: fewer than two windows have any "
@@ -651,9 +659,10 @@ def rolling_sharpe_stability(
         f"The p-value comes from comparing two NON-OVERLAPPING halves of "
         f"the raw returns, not from a regression on the {array.size} "
         "rolling windows -- consecutive windows share all but one of their "
-        "observations and cannot support inference. The rolling series is "
-        "returned because looking at it is informative; it is not what was "
-        "tested."
+        "observations and cannot support inference. The rolling series "
+        "itself comes back under `rolling_sharpe`, one annualized Sharpe "
+        "per window, because looking at it is informative; it is not what "
+        "was tested."
     )
     if len(block_sharpes) < 4:
         warnings.append(
@@ -688,6 +697,10 @@ def rolling_sharpe_stability(
         "decay_p_value": float(p_value) if math.isfinite(p_value) else None,
         "decaying": decaying,
         "fraction_of_windows_positive": float((array > 0).mean()),
+        # The series every scalar above is a summary of. Twenty-one
+        # statistics described it and the docstring twice promised it, and
+        # it was the one thing not returned.
+        "rolling_sharpe": rolling.rename("rolling_sharpe"),
         "warnings": warnings,
     }
 

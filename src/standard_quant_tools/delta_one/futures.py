@@ -32,11 +32,35 @@ as "yield" without that sentence is how the term became misleading.
 
 from __future__ import annotations
 
+import datetime as _dt
 import math
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from standard_quant_tools.analysis.derivatives import _positive
+from standard_quant_tools.delta_one.daycount import (
+    CONVENTIONS,
+    DEFAULT_CONVENTION,
+)
+from standard_quant_tools.delta_one.daycount import _convention as _canonical_convention
+from standard_quant_tools.delta_one.daycount import day_count as _day_count_parts
 from standard_quant_tools.error import ValidationError
+
+#: One ordinary (non-leap) calendar year, used once at import to ASK
+#: `daycount` what each convention divides by rather than restating four
+#: denominators here. The five inline `/ 365.0` sites that module exists to
+#: remove included two in this file.
+_ONE_YEAR = (_dt.date(2026, 1, 1), _dt.date(2027, 1, 1))
+
+#: What a day count is divided by, per convention, from `daycount` itself.
+#: A ROLL IS MEASURED IN DAYS, NOT DATES -- the caller passes "91 days
+#: between the expiries", never the two expiry dates -- so ACT/ACT cannot
+#: split the period at a year boundary here and divides by an ordinary
+#: 365-day year. A roll whose period contains 29 February accrues
+#: marginally less than a date-aware ACT/ACT would say; the other three
+#: conventions have constant denominators and are exact.
+DAY_COUNT_DENOMINATORS: Dict[str, float] = {
+    name: _day_count_parts(*_ONE_YEAR, convention=name)[1] for name in CONVENTIONS
+}
 
 from ._numbers import positive
 from .carry import observed_carry_rate
@@ -204,6 +228,7 @@ def roll_analysis(
     cost_per_contract: float = 0.0,
     spread_ticks: float = 0.0,
     tick_value: float = 0.0,
+    day_count: str = DEFAULT_CONVENTION,
 ) -> Dict[str, Any]:
     """
     What moving a position from the front contract into the next one costs.
@@ -217,7 +242,22 @@ def roll_analysis(
     a loss either; it is a cost that the position has to out-earn before
     the next expiry, and `breakeven_annualized_rate` is the rate of return
     on the position's notional that exactly repays it.
+
+    BOTH ANNUALIZED NUMBERS DEPEND ON `day_count`, and it is reported back
+    rather than assumed. The roll yield and the break-even are a price step
+    and a cost turned into RATES, so the convention moves each by a factor
+    of 360/365: the same 91-day quarterly roll is 160.376 bp under ACT/365F
+    and 158.179 under ACT/360, because those 91 days are a larger slice of
+    a 360-day year and the same step spread over more of a year is a lower
+    rate. (The familiar "ACT/360 accrues about 1.4% more" runs the other
+    way and is about an accrual at a GIVEN rate, which is what
+    `swaps.price_total_return_swap` computes.) This function divided by a
+    hard-coded 365 and named the convention nowhere -- not in the result,
+    not in a warning, not in its own signature -- so a book financing
+    ACT/360 compared its repo against someone else's convention.
     """
+    convention = _canonical_convention(day_count)
+    denominator = DAY_COUNT_DENOMINATORS[convention]
     f0 = positive(front_price, "front_price")
     f1 = positive(next_price, "next_price")
     m0 = positive(multiplier, "multiplier")
@@ -274,7 +314,7 @@ def roll_analysis(
     # annualized break-even on an unchanged $7,540 cost. `futures_curve`
     # 140 lines above uses the expiry gap and always did.
     carry_years = (
-        float(days_between_expiries) / 365.0
+        float(days_between_expiries) / denominator
         if days_between_expiries is not None
         else None
     )
@@ -287,8 +327,10 @@ def roll_analysis(
     roll_yield = math.log(f1 / f0) / carry_years if carry_years else None
 
     # The break-even is a cost over the HOLDING period, so this one really
-    # is the front's remaining life.
-    years = days / 365.0
+    # is the front's remaining life. Same convention as the roll yield
+    # above: two rates out of one function under two different day counts
+    # would be a worse answer than either.
+    years = days / denominator
     breakeven = (
         net_cost / front_notional / years if front_notional and years else float("nan")
     )
@@ -318,6 +360,7 @@ def roll_analysis(
     )
 
     return {
+        "day_count": convention,
         "front_price": float(f0),
         "next_price": float(f1),
         "roll_spread_points": float(roll_spread),

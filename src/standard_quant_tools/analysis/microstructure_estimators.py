@@ -681,7 +681,7 @@ def _kyle_data_from_trades(
     signed by Lee-Ready (quotes) or the tick rule (no quotes), summed per
     `freq` bucket beside the bucket's last price.
     """
-    from standard_quant_tools.analysis.microstructure import _signs_positional
+    from standard_quant_tools.analysis.microstructure import signs_positional
 
     tape = trades.set_index("timestamp") if "timestamp" in trades.columns else trades
     book = (
@@ -694,7 +694,7 @@ def _kyle_data_from_trades(
             "kyle_lambda: trades need a datetime index or a `timestamp` column "
             "to be bucketed in time."
         )
-    signs = _signs_positional(tape, book)
+    signs = signs_positional(tape, book)
     keep = np.isfinite(signs) & (signs != 0)
     size = tape["size"].astype(float).to_numpy()
     price = tape["price"].astype(float).to_numpy()
@@ -1045,11 +1045,21 @@ def intraday_volume_profile(
             if total_all > 0
             else None
         )
-        if not regular.any():
+        kept = int(regular.sum())
+        if kept < MIN_OBSERVATIONS:
+            # NAMING THE SESSION, NOT THE SAMPLE. A London tape under the
+            # New York default keeps the two hours where the two sessions
+            # overlap, and the generic "not enough observations" sends
+            # someone looking for more bars when what is wrong is the
+            # session they were measured against.
             raise ValidationError(
-                f"intraday_volume_profile: no bar inside the {session[0]}-"
-                f"{session[1]} session in {exchange_timezone}; every bar is "
-                "extended hours."
+                f"intraday_volume_profile: {kept} of {len(volume)} bars fall "
+                f"inside the {session[0]}-{session[1]} session in "
+                f"{exchange_timezone}, and this estimator needs at least "
+                f"{MIN_OBSERVATIONS}. If these bars are not from that venue, "
+                "pass the exchange_timezone and session_start/session_end "
+                "the tape was traded on -- a profile bucketed over somebody "
+                "else's session measures the wrong end of the day."
             )
         volume = pd.Series(volume.to_numpy()[regular], index=stamps[regular])
     _enough(len(volume), "intraday_volume_profile")

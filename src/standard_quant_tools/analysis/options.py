@@ -38,6 +38,15 @@ VEGA_FLOOR = 1e-8
 BOUND_TOLERANCE = 1e-9
 #: The volatility bracket the bisection searches.
 SIGMA_LOW, SIGMA_HIGH = 1e-6, 5.0
+#: Largest yield magnitude these formulas will price. A yield is bounded on
+#: MAGNITUDE and never on sign: a negative continuous yield is the ordinary
+#: case for an FX option's foreign rate and for a commodity whose
+#: convenience yield exceeds its storage cost, and a `>= 0` guard refused
+#: exactly those. The number matches `analysis.derivatives.MAX_RATE`,
+#: restated rather than imported so this module keeps the stdlib-only
+#: import graph its header promises; `tests/analysis/test_options.py`
+#: pins the two together.
+MAX_RATE = 10.0  # 1,000% continuously compounded
 _SQRT_2PI = math.sqrt(2.0 * math.pi)
 
 
@@ -138,8 +147,9 @@ def black_scholes_price(
 ) -> float:
     """
     Black-Scholes-Merton European option price. dividend_yield=0.0 (default)
-    is plain Black-Scholes; dividend_yield>0 is the Merton (1973) continuous-
-    dividend-yield extension.
+    is plain Black-Scholes; a non-zero dividend_yield is the Merton (1973)
+    continuous-yield extension, and it may be NEGATIVE -- an FX option's
+    foreign rate and a commodity's net convenience yield both are.
 
     Args:
         spot: Current underlying price. Must be > 0.
@@ -148,18 +158,26 @@ def black_scholes_price(
         risk_free_rate: Annualized continuously-compounded risk-free rate.
         volatility: Annualized volatility (e.g. 0.20 = 20%). Must be > 0.
         option_type: "call" or "put".
-        dividend_yield: Continuous dividend yield. Must be >= 0.
+        dividend_yield: Continuous dividend yield, of either sign. Bounded
+            on magnitude by MAX_RATE.
 
     Returns:
         Option price (same currency units as spot/strike).
 
     Raises:
         ValidationError: spot/strike/time_to_expiry/volatility <= 0,
-            dividend_yield < 0, or an unknown option_type.
+            abs(dividend_yield) > MAX_RATE, or an unknown option_type.
     """
     _validate_option_inputs(spot, strike, time_to_expiry, volatility, option_type)
-    if dividend_yield < 0:
-        raise ValidationError(f"dividend_yield must be >= 0, got {dividend_yield}")
+    if abs(dividend_yield) > MAX_RATE:
+        raise ValidationError(
+            f"dividend_yield={dividend_yield} is outside +/-{MAX_RATE:g}. The "
+            "bound is on MAGNITUDE and never on sign: a NEGATIVE continuous "
+            "yield is the ordinary case for an FX option's foreign rate and "
+            "for a commodity whose convenience yield exceeds its storage "
+            "cost, and both price normally here. A magnitude beyond this is "
+            "a unit error rather than an extreme case."
+        )
 
     d1, d2 = _d1_d2(
         spot, strike, time_to_expiry, risk_free_rate, volatility, dividend_yield
@@ -211,8 +229,15 @@ def black_scholes_greeks(
     with keys "delta", "gamma", "vega", "theta", "rho", "d1", "d2".
     """
     _validate_option_inputs(spot, strike, time_to_expiry, volatility, option_type)
-    if dividend_yield < 0:
-        raise ValidationError(f"dividend_yield must be >= 0, got {dividend_yield}")
+    if abs(dividend_yield) > MAX_RATE:
+        raise ValidationError(
+            f"dividend_yield={dividend_yield} is outside +/-{MAX_RATE:g}. The "
+            "bound is on MAGNITUDE and never on sign: a NEGATIVE continuous "
+            "yield is the ordinary case for an FX option's foreign rate and "
+            "for a commodity whose convenience yield exceeds its storage "
+            "cost, and both price normally here. A magnitude beyond this is "
+            "a unit error rather than an extreme case."
+        )
 
     d1, d2 = _d1_d2(
         spot, strike, time_to_expiry, risk_free_rate, volatility, dividend_yield
@@ -319,8 +344,9 @@ def implied_volatility(
 
     Raises:
         ValidationError: option_price <= 0, spot/strike/time_to_expiry <= 0,
-            an unknown option_type, dividend_yield < 0, or option_price is
-            outside the no-arbitrage bounds achievable at any volatility.
+            an unknown option_type, abs(dividend_yield) > MAX_RATE, or
+            option_price is outside the no-arbitrage bounds achievable at
+            any volatility.
     """
     if option_price <= 0:
         raise ValidationError(
@@ -339,8 +365,15 @@ def implied_volatility(
         raise ValidationError(
             f"option_type must be one of {sorted(_OPTION_TYPES)}, got {option_type!r}"
         )
-    if dividend_yield < 0:
-        raise ValidationError(f"dividend_yield must be >= 0, got {dividend_yield}")
+    if abs(dividend_yield) > MAX_RATE:
+        raise ValidationError(
+            f"dividend_yield={dividend_yield} is outside +/-{MAX_RATE:g}. The "
+            "bound is on MAGNITUDE and never on sign: a NEGATIVE continuous "
+            "yield is the ordinary case for an FX option's foreign rate and "
+            "for a commodity whose convenience yield exceeds its storage "
+            "cost, and both price normally here. A magnitude beyond this is "
+            "a unit error rather than an extreme case."
+        )
 
     disc_q = math.exp(-dividend_yield * time_to_expiry)
     disc_r = math.exp(-risk_free_rate * time_to_expiry)

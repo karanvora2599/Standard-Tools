@@ -1366,6 +1366,7 @@ def option_risk_scenarios(
     time_to_expiry: float,
     volatility: float,
     risk_free_rate: float = 0.0,
+    dividend_yield: float = 0.0,
     option_type: str = "call",
     quantity: float = 1.0,
     spot_shocks: Sequence[float] = (-0.20, -0.10, -0.05, 0.0, 0.05, 0.10, 0.20),
@@ -1392,6 +1393,13 @@ def option_risk_scenarios(
 
     `days_forward` decays the position before revaluing, which is how a
     weekend or an overnight gap should actually be stressed.
+
+    `dividend_yield` carries into the base price and into every cell. At
+    its default of zero the whole grid prices a NON-PAYER, which on a
+    one-year at-the-money call against a 4% yielder overstates the option
+    by about 23% and every P&L in the table with it. It is signed, because
+    an FX option's foreign rate and a commodity's net convenience yield
+    routinely are.
     """
     spot = _positive(spot, "spot")
     strike = _positive(strike, "strike")
@@ -1403,6 +1411,7 @@ def option_risk_scenarios(
         time_to_expiry=t,
         volatility=vol,
         risk_free_rate=risk_free_rate,
+        dividend_yield=dividend_yield,
     )
     quantity = float(quantity)
     remaining = t - float(days_forward) / 365.0
@@ -1420,6 +1429,7 @@ def option_risk_scenarios(
         volatility=vol,
         risk_free_rate=risk_free_rate,
         option_type=option_type,
+        dividend_yield=dividend_yield,
     )["price"]
     base_value = quantity * base
 
@@ -1443,6 +1453,7 @@ def option_risk_scenarios(
                     volatility=shocked_vol,
                     risk_free_rate=risk_free_rate,
                     option_type=option_type,
+                    dividend_yield=dividend_yield,
                 )["price"]
             )
             pnl = value - base_value
@@ -1466,6 +1477,7 @@ def option_risk_scenarios(
     return {
         "base_value": float(base_value),
         "quantity": quantity,
+        "dividend_yield": float(dividend_yield),
         "days_forward": float(days_forward),
         "grid": grid,
         "worst_case": worst,

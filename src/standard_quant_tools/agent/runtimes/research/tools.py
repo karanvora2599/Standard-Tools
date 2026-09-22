@@ -499,7 +499,25 @@ def run_screener(input_data: ScreenerInput) -> ScreenerResult:
     failed_tickers = dict(result_df.attrs.get("failed_tickers", {}))
     failed_batches = list(result_df.attrs.get("failed_batches", []))
 
-    if result_df.empty:
+    warnings: List[str] = []
+    # `.index.empty`, not `.empty`: a screen with no filters passes every
+    # ticker and produces a frame with rows and NO columns, which `.empty`
+    # calls empty. That reported num_passed=0 for a universe where
+    # everything passed.
+    if result_df.index.empty:
+        if input_data.sort_by:
+            # The columns a screen produces depend on which filters ran, so
+            # an unknown sort_by can only be recognised against a real
+            # result. With no rows there is nothing to check it against and
+            # nothing to sort, which is worth saying out loud rather than
+            # returning an empty list that looks sorted.
+            warnings.append(
+                "No ticker passed every filter, so "
+                f"sort_by={input_data.sort_by!r} sorted nothing and was "
+                "never checked against the columns a passing row would "
+                "have carried. Loosen a filter before reading anything "
+                "into the ordering."
+            )
         return ScreenerResult(
             num_passed=0,
             tickers_passed=[],
@@ -507,6 +525,23 @@ def run_screener(input_data: ScreenerInput) -> ScreenerResult:
             failed_filters=failed_filters,
             failed_tickers=failed_tickers,
             failed_batches=failed_batches,
+            warnings=warnings,
+        )
+
+    # An unknown column used to be a silent no-op: the library sorts only
+    # `if sort_by in df.columns`, so a typo or a metric this screen does not
+    # compute returned INPUT ORDER wearing the appearance of a ranking. The
+    # screen has to run before the real columns are known, so the refusal
+    # lands here rather than in the input model.
+    if input_data.sort_by and input_data.sort_by not in result_df.columns:
+        available = ["ticker"] + [str(c) for c in result_df.columns]
+        raise ValidationError(
+            f"run_screener: sort_by='{input_data.sort_by}' is not a column "
+            f"this screen produced. The rows carry: {', '.join(available)}. "
+            "Which columns exist depends on which filters ran -- a "
+            "fundamental column is only there when a fundamental filter "
+            "asked for it. Sort by one of the names above, or pass "
+            "sort_by=None to get the tickers in input order."
         )
 
     records = result_df.reset_index().to_dict(orient="records")
@@ -517,6 +552,7 @@ def run_screener(input_data: ScreenerInput) -> ScreenerResult:
         failed_filters=failed_filters,
         failed_tickers=failed_tickers,
         failed_batches=failed_batches,
+        warnings=warnings,
     )
 
 
@@ -723,7 +759,15 @@ def run_pca_analysis(input_data: PCAInput) -> PCAResult:
         standardize=input_data.standardize,
         method=input_data.method,
     )
-    contrib = factor_contributions(returns, n_components=input_data.n_components)
+    # pca_result=result, not a bare call: without it `factor_contributions`
+    # runs its OWN decomposition on its own defaults, which standardize by
+    # default. At standardize=False that made the loadings above and the
+    # contributions below describe two different decompositions in one
+    # response -- the contributions were byte-identical to the standardized
+    # run while the loadings were not.
+    contrib = factor_contributions(
+        returns, n_components=input_data.n_components, pca_result=result
+    )
 
     evr = {k: round(float(v), 4) for k, v in result["explained_variance_ratio"].items()}
     cumvar = {
@@ -930,16 +974,31 @@ def get_volatility_estimators(
         input_data.symbol, input_data.start_date, input_data.end_date
     )
     period = input_data.period
+    # All four estimators take this and none of them was given it, so every
+    # answer assumed daily bars regardless of what was fetched.
+    per_year = input_data.periods_per_year
 
     close_returns = df["Close"].pct_change(fill_method=None).dropna()
-    close_to_close = annualized_volatility(close_returns)
+    close_to_close = annualized_volatility(close_returns, periods_per_year=per_year)
 
-    parkinson = parkinson_volatility(df["High"], df["Low"], period=period)
+    parkinson = parkinson_volatility(
+        df["High"], df["Low"], period=period, periods_per_year=per_year
+    )
     garman_klass = garman_klass_volatility(
-        df["Open"], df["High"], df["Low"], df["Close"], period=period
+        df["Open"],
+        df["High"],
+        df["Low"],
+        df["Close"],
+        period=period,
+        periods_per_year=per_year,
     )
     yang_zhang = yang_zhang_volatility(
-        df["Open"], df["High"], df["Low"], df["Close"], period=period
+        df["Open"],
+        df["High"],
+        df["Low"],
+        df["Close"],
+        period=period,
+        periods_per_year=per_year,
     )
 
     def _latest(series: pd.Series) -> float:
@@ -953,6 +1012,7 @@ def get_volatility_estimators(
     return VolatilityEstimatorsResult(
         symbol=input_data.symbol,
         period=period,
+        periods_per_year=per_year,
         close_to_close_annualized=round(ctc_val, 6),
         parkinson_annualized=round(_latest(parkinson), 6),
         garman_klass_annualized=round(_latest(garman_klass), 6),
@@ -987,6 +1047,33 @@ def run_garch_volatility_forecast(
         returns, forecast_horizon=input_data.forecast_horizon
     )
 
+    warnings: List[str] = []
+    if result["misspecified"]:
+        warnings.append(
+            "MISSPECIFIED: the Ljung-Box test on the squared standardized "
+            f"residuals returns p = {result['ljung_box_squared_p']:.4f}, so "
+            "the fitted model did not remove the volatility clustering it "
+            "was fitted to remove. `converged` is about the OPTIMIZER -- it "
+            "says L-BFGS-B reached a stationary point inside the bounds, not "
+            "that GARCH(1,1) with normal innovations and a constant mean "
+            "describes this series. The forecast is the model's, and this is "
+            "the sample saying the model is the wrong one. The usual next "
+            "step is an asymmetric variance equation (EGARCH or GJR-GARCH) "
+            "or Student-t innovations; neither is built here, so this tool "
+            "reports the failure rather than silently approximating past it."
+        )
+    if (
+        result["standardized_kurtosis"] is not None
+        and result["standardized_kurtosis"] > 1.0
+    ):
+        warnings.append(
+            "The standardized residuals have excess kurtosis "
+            f"{result['standardized_kurtosis']:.2f} against 0 under the "
+            "normal innovations this fit assumes, so the tails are fatter "
+            "than the model prices. Interval forecasts built on normality "
+            "will be too narrow; the point forecast is unaffected."
+        )
+
     return GarchVolatilityForecastResult(
         symbol=input_data.symbol,
         omega=result["omega"],
@@ -1003,6 +1090,12 @@ def run_garch_volatility_forecast(
         aic=round(result["aic"], 4),
         bic=round(result["bic"], 4),
         n_obs=result["n_obs"],
+        ljung_box_p=result["ljung_box_p"],
+        ljung_box_squared_p=result["ljung_box_squared_p"],
+        standardized_skew=result["standardized_skew"],
+        standardized_kurtosis=result["standardized_kurtosis"],
+        misspecified=result["misspecified"],
+        warnings=warnings,
     )
 
 

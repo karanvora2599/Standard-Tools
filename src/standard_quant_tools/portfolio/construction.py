@@ -44,7 +44,10 @@ import pandas as pd
 from standard_quant_tools.backtest.costs import impact_cost
 from standard_quant_tools.constants import TRADING_DAYS_PER_YEAR
 from standard_quant_tools.error import ValidationError
-from standard_quant_tools.numeric_contract import require_periods_per_year
+from standard_quant_tools.numeric_contract import (
+    require_finite_covariance,
+    require_periods_per_year,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -104,17 +107,18 @@ def _covariance_frame_with_notes(
     covariance: Any, who: str
 ) -> "tuple[pd.DataFrame, List[str]]":
     frame = pd.DataFrame(covariance).astype(float)
-    if frame.shape[0] != frame.shape[1]:
-        raise ValidationError(f"{who}: covariance must be square, got {frame.shape}.")
-    if frame.isna().any().any():
-        raise ValidationError(f"{who}: the covariance matrix contains NaN.")
-    array = frame.to_numpy()
-    if not np.allclose(array, array.T, rtol=1e-8, atol=1e-12):
-        raise ValidationError(
-            f"{who}: the covariance matrix is not symmetric. That is a "
-            "construction bug rather than a data problem -- a covariance "
-            "matrix is symmetric by definition."
-        )
+    # Squareness, finiteness and symmetry are the numeric contract's rules,
+    # and this module had its own second implementation of all three: the
+    # same three refusals, worded differently, at a looser tolerance
+    # (rtol 1e-8 against the contract's 1e-9), and with a NaN check that let
+    # an inf through -- two doors onto one rule, agreeing by inspection
+    # rather than by construction. Two behaviours change with this call: the
+    # symmetry tolerance tightens by an order of magnitude, and an infinite
+    # entry is refused as non-finite instead of passing the NaN check and
+    # emerging as inf weights.
+    array = require_finite_covariance(frame.to_numpy(), "covariance", who)
+    # Not the contract's: it has no rule about the diagonal, and a
+    # zero-variance asset is specific to a portfolio construction problem.
     if (np.diag(array) <= 0).any():
         raise ValidationError(
             f"{who}: a diagonal entry is non-positive, so some asset has "

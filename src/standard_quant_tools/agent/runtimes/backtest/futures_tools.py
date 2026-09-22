@@ -106,7 +106,22 @@ class FuturesBacktestResult(BaseModel):
     initial_capital: Optional[float] = None
     final_equity: Optional[float] = None
     total_return_pct: Optional[float] = None
-    max_drawdown_pct: Optional[float] = None
+    max_drawdown: Optional[float] = Field(
+        None,
+        description="Worst peak-to-trough decline as a SIGNED FRACTION at "
+        "most zero (-0.20 is a 20% drawdown) -- the spelling every other "
+        "drawdown on this surface uses, including the stress test's "
+        "max_drawdown_pct, which despite its name is also a fraction. Read "
+        "this one.",
+    )
+    max_drawdown_pct: Optional[float] = Field(
+        None,
+        description="The same number as a PERCENTAGE (-20.0 for a 20% "
+        "drawdown). DEPRECATED in favour of max_drawdown: the identically "
+        "named field on the stress test returns a fraction, so one name "
+        "meant two things 100x apart across one boundary. Kept so existing "
+        "callers do not break.",
+    )
     max_leverage: Optional[float] = Field(
         None,
         description="ECONOMIC EXPOSURE over equity. Not the gross-market-value "
@@ -157,6 +172,9 @@ def run_futures_backtest(input_data: FuturesBacktestInput) -> FuturesBacktestRes
         initial_capital=out["initial_capital"],
         final_equity=out["final_equity"],
         total_return_pct=out["total_return_pct"],
+        # One number, both spellings. The engine reports a percentage; the
+        # fraction is what the rest of the surface means by a drawdown.
+        max_drawdown=out["max_drawdown_pct"] / 100.0,
         max_drawdown_pct=out["max_drawdown_pct"],
         max_leverage=out["max_leverage"],
         peak_exposure=out["peak_exposure"],

@@ -21,10 +21,19 @@ is most of how a liquidity proxy actually gets used.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Annotated, List, Literal, Optional
+from zoneinfo import ZoneInfo
 
 import pandas as pd
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 from standard_quant_tools.agent.runtimes._json_safe import (
     finite_or_none as _finite_or_none,
@@ -34,6 +43,10 @@ from standard_quant_tools.error import ValidationError
 
 logger = logging.getLogger(__name__)
 Stat = Annotated[Optional[float], BeforeValidator(_finite_or_none)]
+
+#: A session boundary, zero-padded on a 24-hour clock. '9:30' is refused
+#: rather than read, because '9:3' parses under a looser pattern as 09:03.
+_HHMM = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d")
 
 
 class _Result(BaseModel):
@@ -159,6 +172,79 @@ class VolumeProfileInput(BaseModel):
         "bars are refused -- there is no intraday profile in daily data.",
     )
     n_buckets: int = Field(13, ge=3, le=100)
+    exchange_timezone: str = Field(
+        "America/New_York",
+        description="IANA zone the session times below are read in. The "
+        "default is US equities; a London tape is Europe/London and a Tokyo "
+        "one Asia/Tokyo, and leaving the default on a non-US tape is refused "
+        "rather than answered -- under the New York session a London day "
+        "either falls outside it or keeps a couple of hours, and the "
+        "open_share that comes back is measured on the wrong end of "
+        "somebody else's afternoon.",
+    )
+    session_start: str = Field(
+        "09:30",
+        description="HH:MM, 24-hour, in exchange_timezone. The regular "
+        "session's open: bars before it are extended hours and are excluded "
+        "from the buckets, with their share reported separately.",
+    )
+    session_end: str = Field(
+        "16:00",
+        description="HH:MM, 24-hour, in exchange_timezone, exclusive. Must "
+        "be later than session_start.",
+    )
+    index_timezone: Optional[str] = Field(
+        None,
+        description="IANA zone the `timestamps` are already in, when they "
+        "carry no offset of their own. 'UTC' is the one to pass for a "
+        "Databento extract. Omitted, a timestamp with an offset is honoured "
+        "and a naive one is taken as already in exchange_timezone -- and a "
+        "naive index that is really UTC is how an extended-hours feed gets "
+        "bucketed from 4am, which reports an open_share of 0.00004.",
+    )
+
+    @field_validator("exchange_timezone", "index_timezone")
+    @classmethod
+    def _a_real_zone(cls, value: Optional[str]) -> Optional[str]:
+        """By name, against the system's own zone database.
+
+        A misspelled zone is not a near miss: `ZoneInfo` raises from inside
+        the session conversion, several frames below this call, with a
+        message naming no tool and no argument.
+        """
+        if value is None:
+            return value
+        try:
+            ZoneInfo(value)
+        except Exception as exc:  # noqa: BLE001 -- any zone failure is one answer
+            raise ValueError(
+                f"{value!r} is not an IANA time zone ({exc}). Use a name from "
+                "the tz database, such as 'America/New_York', "
+                "'Europe/London', 'Asia/Tokyo' or 'UTC'."
+            ) from exc
+        return value
+
+    @field_validator("session_start", "session_end")
+    @classmethod
+    def _a_clock_time(cls, value: str) -> str:
+        if not _HHMM.fullmatch(value.strip()):
+            raise ValueError(
+                f"{value!r} is not a session time. Give HH:MM on a 24-hour "
+                "clock, zero-padded -- '09:30', not '9:3' or '9:30am'."
+            )
+        return value.strip()
+
+    @model_validator(mode="after")
+    def _session_is_forward(self) -> "VolumeProfileInput":
+        start = [int(part) for part in self.session_start.split(":")]
+        end = [int(part) for part in self.session_end.split(":")]
+        if end[0] * 60 + end[1] <= start[0] * 60 + start[1]:
+            raise ValueError(
+                f"session_end {self.session_end!r} must be later in the day "
+                f"than session_start {self.session_start!r}. A session that "
+                "crosses midnight is not something this profile can bucket."
+            )
+        return self
 
 
 # ── results ─────────────────────────────────────────────────────────────
@@ -318,6 +404,20 @@ class VolumeProfileResult(_Result):
     trough_share: Stat = None
     trough_bucket: int = 0
     open_to_trough_ratio: Stat = None
+    session: List[str] = Field(
+        default_factory=list,
+        description="The session the buckets were measured over, as it was "
+        "read: [start, end] in exchange_timezone.",
+    )
+    extended_hours_share: Stat = Field(
+        None,
+        description="Fraction of the tape's volume that fell OUTSIDE the "
+        "session and was excluded from the buckets. Null when no zone was "
+        "known, so no bar could be placed inside or outside a session: that "
+        "is 'not measured', not 'none'. A large share on a feed you thought "
+        "was regular-hours means the extract carries pre- and post-market "
+        "and the profile below is the right one.",
+    )
 
 
 # ── tools ───────────────────────────────────────────────────────────────
@@ -379,7 +479,13 @@ def get_intraday_volume_profile(
         timestamps=input_data.timestamps,
     )
     return VolumeProfileResult(
-        **lib.intraday_volume_profile(frame, n_buckets=input_data.n_buckets)
+        **lib.intraday_volume_profile(
+            frame,
+            n_buckets=input_data.n_buckets,
+            index_timezone=input_data.index_timezone,
+            exchange_timezone=input_data.exchange_timezone,
+            session=(input_data.session_start, input_data.session_end),
+        )
     )
 
 
@@ -477,7 +583,14 @@ ESTIMATOR_TOOL_DEFS = [
         "lunch -- paying impact into a thin book -- and under-participates at "
         "the close, missing the cheapest liquidity of the day. Needs INTRADAY "
         "bars with timestamps; daily bars are refused rather than aggregated "
-        "into a meaningless single bucket.",
+        "into a meaningless single bucket. SET THE SESSION FOR THE VENUE THE "
+        "BARS CAME FROM -- exchange_timezone, session_start, session_end -- "
+        "because the default is US equity regular hours, and a London or "
+        "Tokyo tape measured against it is bucketed over the wrong part of "
+        "the day or refused outright. Pass index_timezone ('UTC' for a "
+        "Databento extract) when the timestamps carry no offset, so "
+        "extended-hours bars can be told from session ones instead of "
+        "stretching the open bucket back to 4am.",
         VolumeProfileInput,
     ),
 ]

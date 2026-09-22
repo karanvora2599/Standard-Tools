@@ -31,6 +31,7 @@ expiry.
 from __future__ import annotations
 
 import logging
+import math
 
 import pandas as pd
 
@@ -47,6 +48,7 @@ from standard_quant_tools.delta_one import replication as _replication
 from standard_quant_tools.delta_one import scan as _scan
 from standard_quant_tools.delta_one import streaming as _streaming
 from standard_quant_tools.delta_one import swaps as _swaps
+from standard_quant_tools.error import ValidationError
 
 from .models import (
     BasisDislocationInput,
@@ -177,6 +179,7 @@ def analyze_roll(input_data: RollAnalysisInput) -> RollAnalysisResult:
             cost_per_contract=input_data.cost_per_contract,
             spread_ticks=input_data.spread_ticks,
             tick_value=input_data.tick_value,
+            day_count=input_data.day_count,
         )
     )
 
@@ -352,6 +355,58 @@ def detect_basis_dislocation(
     )
 
 
+#: The five fields that BUILD a monitor, as opposed to feeding one. They
+#: are read when `state` is omitted and are part of the monitor from then
+#: on: the baseline, the accumulators and the alert history are all learned
+#: under them.
+_MONITOR_CONSTRUCTION = ("channel", "label", "warmup", "threshold", "slack")
+
+
+def _same(requested, stored) -> bool:
+    if isinstance(requested, (int, float)) and isinstance(stored, (int, float)):
+        return math.isclose(float(requested), float(stored), rel_tol=1e-12, abs_tol=0.0)
+    return requested == stored
+
+
+def _refuse_a_rebuilt_monitor(input_data: SpreadMonitorInput, state: dict) -> None:
+    """A resumed call that asks for a DIFFERENT monitor is refused.
+
+    These five arguments were accepted and discarded on every resumed call
+    until the CHANGELOG entry of 2026-09-22: a monitor opened on
+    `relative_bps` and resumed with `channel="absolute_points"` kept
+    computing a ratio in basis points and said nothing. A different formula
+    was requested and a different one was computed, which is the one
+    failure a monitor cannot recover from -- its accumulators carry every
+    tick that came before.
+
+    Silence on a field that was not sent: leaving these at their defaults
+    means "resume what I have", not "rebuild it that way".
+    """
+    changed = [
+        (field, getattr(input_data, field), state.get(field))
+        for field in _MONITOR_CONSTRUCTION
+        if field in input_data.model_fields_set
+        and state.get(field) is not None
+        and not _same(getattr(input_data, field), state.get(field))
+    ]
+    if not changed:
+        return
+    asked = "; ".join(
+        f"{field}={requested!r} against the monitor's {stored!r}"
+        for field, requested, stored in changed
+    )
+    raise ValidationError(
+        f"monitor_spread_stream: a resumed call cannot rebuild the monitor "
+        f"it is resuming ({asked}). The baseline and the CUSUM accumulators "
+        "in `state` were learned under the original values, so applying new "
+        "ones to them would report a statistic no formula ever produced. "
+        "Open a NEW monitor instead: call again WITHOUT `state`, with the "
+        "values you want -- it starts its own warm-up, which is what "
+        "changing the formula means. To carry on with the existing one, "
+        "omit these fields."
+    )
+
+
 def monitor_spread_stream(input_data: SpreadMonitorInput) -> SpreadMonitorResult:
     state = input_data.state
     if state is None:
@@ -362,10 +417,12 @@ def monitor_spread_stream(input_data: SpreadMonitorInput) -> SpreadMonitorResult
             threshold=input_data.threshold,
             slack=input_data.slack,
         )
-    elif input_data.reset:
-        state = _streaming.reset_spread_monitor(
-            state, keep_baseline=input_data.keep_baseline_on_reset
-        )
+    else:
+        _refuse_a_rebuilt_monitor(input_data, state)
+        if input_data.reset:
+            state = _streaming.reset_spread_monitor(
+                state, keep_baseline=input_data.keep_baseline_on_reset
+            )
     return SpreadMonitorResult(
         **_streaming.update_spread_monitor(
             state,
@@ -384,5 +441,9 @@ def scan_basis_dislocations(input_data: BasisScanInput) -> BasisScanResult:
             detect_shifts=input_data.detect_shifts,
             min_observations=input_data.min_observations,
             top_n=input_data.top_n,
+            reference_fraction=input_data.reference_fraction,
+            threshold=input_data.threshold,
+            slack=input_data.slack,
+            max_breaks=input_data.max_breaks,
         )
     )

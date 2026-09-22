@@ -65,6 +65,34 @@ _DEFAULT_PARAMS: Dict[str, Dict[str, Any]] = {
     "bollinger_reversion": {"period": 20, "num_std": 2.0},
 }
 
+#: Sortable grid metrics for which the BEST value is the SMALLEST one.
+#:
+#: Every grid sort used to be hardcoded descending, which is right for a
+#: ratio, a return and a trade count, and exactly backwards for a
+#: volatility: a grid sorted by `annualized_volatility` returned its most
+#: volatile combination as the winner. `max_drawdown` is a signed fraction
+#: at most zero on this path (-0.10 is better than -0.30), so descending is
+#: already right for it and it is deliberately NOT in this set.
+_LOWER_IS_BETTER = frozenset({"annualized_volatility"})
+
+
+def _metric(row: Any, column: str, digits: int) -> Optional[float]:
+    """A grid row's metric, or None when the column is not there.
+
+    Rounded like its neighbours, but absent rather than 0.0 when the grid
+    did not compute it -- a metric the caller sorted by must not come back
+    as a plausible zero.
+    """
+    if column not in row:
+        return None
+    value = row[column]
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    return None if math.isnan(value) else round(value, digits)
+
+
 logger = logging.getLogger(__name__)
 
 import numpy as np
@@ -611,14 +639,28 @@ def run_regime_adaptive_walkforward_backtest(
                 commission_pct=input_data.commission_pct,
                 slippage_pct=input_data.slippage_pct,
                 sort_by=input_data.sort_by,
-                ascending=False,
+                ascending=input_data.sort_by in _LOWER_IS_BETTER,
                 n_workers=1,
                 fill_price=input_data.fill_price,
                 risk_free_rate=input_data.risk_free_rate,
             )
             best_row = grid_df.iloc[0]
-            metric_val = float(best_row.get(input_data.sort_by, float("-inf")))
-            if best_overall is None or metric_val > best_overall["metric_val"]:
+            # The sort above puts each strategy's own best row first; this
+            # comparison picks between the four strategies and has to face
+            # the same direction, or the grid would return the lowest
+            # volatility per strategy and then the highest of those four.
+            lower_is_better = input_data.sort_by in _LOWER_IS_BETTER
+            metric_val = float(
+                best_row.get(
+                    input_data.sort_by,
+                    float("inf") if lower_is_better else -float("inf"),
+                )
+            )
+            if best_overall is None or (
+                metric_val < best_overall["metric_val"]
+                if lower_is_better
+                else metric_val > best_overall["metric_val"]
+            ):
                 param_keys = list(param_grid.keys())
                 best_params: Dict[str, Any] = {
                     k: (
@@ -813,7 +855,7 @@ def run_walk_forward_backtest(input_data: WalkForwardInput) -> WalkForwardResult
             commission_pct=input_data.commission_pct,
             slippage_pct=input_data.slippage_pct,
             sort_by=input_data.sort_by,
-            ascending=False,
+            ascending=input_data.sort_by in _LOWER_IS_BETTER,
             n_workers=1,
             fill_price=input_data.fill_price,
             risk_free_rate=input_data.risk_free_rate,
@@ -961,7 +1003,7 @@ def run_backtest_optimization(input_data: BacktestOptInput) -> BacktestOptResult
         commission_pct=input_data.commission_pct,
         slippage_pct=input_data.slippage_pct,
         sort_by=input_data.sort_by,
-        ascending=False,
+        ascending=input_data.sort_by in _LOWER_IS_BETTER,
         n_workers=input_data.n_workers,
         fill_price=input_data.fill_price,
         risk_free_rate=input_data.risk_free_rate,
@@ -996,6 +1038,14 @@ def run_backtest_optimization(input_data: BacktestOptInput) -> BacktestOptResult
             calmar_ratio=round(float(row.get("calmar_ratio", 0.0)), 4),
             max_drawdown=round(float(row.get("max_drawdown", 0.0)), 6),
             num_trades=int(row.get("num_trades", 0)),
+            # Not defaulted to 0.0 like the six above: a missing metric and
+            # a metric that really is zero are different answers, and
+            # top_results[0][sort_by] returning 0.0 after sorting BY it was
+            # the whole complaint.
+            annualized_volatility=_metric(row, "annualized_volatility", 6),
+            profit_factor=_metric(row, "profit_factor", 4),
+            win_rate=_metric(row, "win_rate", 4),
+            avg_trade_return_pct=_metric(row, "avg_trade_return_pct", 4),
         )
         for rank, (_, row) in enumerate(top_df.iterrows(), start=1)
     ]
@@ -1233,6 +1283,78 @@ def _metrics_with_day0_cost(
     return returns, total_return, annualized_return, equity_with_start
 
 
+def _cap_constructed_weights(
+    weights: pd.DataFrame, max_position_pct: float
+) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """
+    Clip every |weight| to the cap and put the clipped weight back into the
+    names that still have room, so each date keeps the gross it was built
+    with.
+
+    WHY CLIP HERE AND NOT REFUSE. The simulator refuses a position over
+    max_position_pct, which is right when the weights are the caller's own
+    statement. On the score path they are not: the caller supplied a
+    RANKING, and the weight is this module's own arithmetic converting it.
+    A `vol_scaled` conversion of two equally scored names whose trailing
+    volatilities stand 9:1 apart puts 0.9 on the quiet one at gross 1.0,
+    and a long-only `equal_weight_top_bottom` puts the entire gross on a
+    single name -- so a perfectly reasonable score panel met a 0.5 cap and
+    the whole run was refused, a cap on the OUTPUT of a conversion the
+    caller did not write, reported as if the caller had asked for something
+    illegal. It is capped and named instead, the same answer the ADV
+    participation cap gives a trade that is too big for the tape.
+
+    THE REDISTRIBUTION IS A WATERFALL, not a rescale. Clipping alone would
+    quietly reduce the gross below the requested gross_leverage, so the
+    clipped weight is pushed into the names still under the cap, in
+    proportion to what they already hold; names that reach the cap in the
+    process stop absorbing and the remainder goes to the rest. When the cap
+    is tight enough that the whole gross cannot fit (cap * n_assets below
+    it), the row ends under its target and the shortfall is reported.
+    """
+    frame = weights.astype(float)
+    capped_rows: Dict[Any, List[str]] = {}
+    clipped_weight = 0.0
+    shortfall = 0.0
+    rows = []
+    for date, row in frame.iterrows():
+        over = row.abs() > max_position_pct + 1e-12
+        if not bool(over.any()):
+            rows.append(row)
+            continue
+        capped_rows[date] = [str(c) for c in row.index[over]]
+        target_gross = float(row.abs().sum())
+        working = row.clip(-max_position_pct, max_position_pct)
+        clipped_weight += target_gross - float(working.abs().sum())
+        # At most one pass per asset can newly reach the cap, so the loop
+        # terminates in n_assets steps; the bound is explicit anyway.
+        for _ in range(len(row) + 1):
+            deficit = target_gross - float(working.abs().sum())
+            if deficit <= 1e-12:
+                break
+            free = working.abs() < max_position_pct - 1e-12
+            free_gross = float(working[free].abs().sum())
+            if free_gross <= 1e-12:
+                break
+            working = working.where(~free, working * (1.0 + deficit / free_gross)).clip(
+                -max_position_pct, max_position_pct
+            )
+        shortfall += max(target_gross - float(working.abs().sum()), 0.0)
+        rows.append(working)
+
+    if not capped_rows:
+        return frame, {"tickers": [], "n_dates": 0}
+
+    capped = pd.DataFrame(rows, index=frame.index, columns=frame.columns)
+    tickers = sorted({t for names in capped_rows.values() for t in names})
+    return capped, {
+        "tickers": tickers,
+        "n_dates": len(capped_rows),
+        "clipped_weight": clipped_weight,
+        "shortfall": shortfall,
+    }
+
+
 def run_portfolio_simulation(
     input_data: PortfolioSimulationInput,
 ) -> PortfolioSimulationResult:
@@ -1248,7 +1370,13 @@ def run_portfolio_simulation(
     When signal_type='score', target_weights holds arbitrary per-ticker
     alpha scores instead of weights — converted via construction_method
     (backtest/sizing.py: rank_weighted, equal_weight_top_bottom,
-    zscore_normalized, vol_scaled) before simulation.
+    zscore_normalized, vol_scaled) before simulation. On that path
+    max_position_pct is a CAP, not a rejection: a converted weight above it
+    is clipped, the clipped weight is redistributed so the date keeps its
+    requested gross_leverage, and a warning names the tickers. Under
+    signal_type='target_weight' the same excess is refused, because there
+    the weight is the caller's own statement rather than this tool's
+    arithmetic on a ranking.
     """
     # Resolved to the identical shape the inline field carries, so the two
     # entry points stay one code path. The kind is checked against
@@ -1333,6 +1461,9 @@ def run_portfolio_simulation(
             )
         if input_data.make_dollar_neutral:
             target_weights = dollar_neutral(target_weights)
+        target_weights, capped = _cap_constructed_weights(
+            target_weights, input_data.max_position_pct
+        )
         logger.debug(
             "[portfolio_simulation] converted SCORE signals via construction_method=%s  gross_leverage=%.2f",
             method,
@@ -1340,6 +1471,7 @@ def run_portfolio_simulation(
         )
     else:
         target_weights = values_panel
+        capped = {"tickers": [], "n_dates": 0}
 
     raw = _portfolio_engine_run(
         price_data,
@@ -1401,6 +1533,34 @@ def run_portfolio_simulation(
         for r in raw["rebalance_log"].to_dict(orient="records")
     ]
 
+    simulation_warnings = list(raw["warnings"])
+    if capped["n_dates"]:
+        names = ", ".join(capped["tickers"])
+        detail = (
+            f"position cap: {len(capped['tickers'])} ticker(s) over "
+            f"{capped['n_dates']} rebalance date(s) converted to a weight "
+            f"above max_position_pct={input_data.max_position_pct} and were "
+            f"clipped to it, moving {capped['clipped_weight']:.4f} of gross "
+            "weight — "
+            f"{capped['clipped_weight'] * input_data.initial_capital:,.0f} of "
+            "notional at the opening equity — into the names still under the "
+            f"cap so each date keeps its requested "
+            f"gross_leverage={input_data.gross_leverage}. Tickers: {names}. "
+            "The panel was SCORES, so the weight over the cap was this "
+            "tool's own conversion rather than a position you stated; "
+            "signal_type='target_weight' is refused instead, because there "
+            "it is."
+        )
+        if capped["shortfall"] > 1e-9:
+            detail += (
+                f" {capped['shortfall']:.4f} of gross weight could not be "
+                "redistributed and the affected dates ran below the "
+                "requested gross: max_position_pct times the number of "
+                "tickers is less than gross_leverage, so the book cannot "
+                "reach it under the cap."
+            )
+        simulation_warnings.append(detail)
+
     leverage_series = raw["leverage_curve"]
     avg_gross_leverage = (
         round(float(leverage_series.mean()), 4) if not leverage_series.empty else 0.0
@@ -1441,7 +1601,7 @@ def run_portfolio_simulation(
         avg_gross_leverage=avg_gross_leverage,
         max_gross_leverage_used=max_gross_leverage_used,
         equity_curve=equity_curve.tolist(),
-        warnings=list(raw["warnings"]),
+        warnings=simulation_warnings,
     )
 
 
@@ -1588,7 +1748,7 @@ def get_robustness_diagnostics(
         commission_pct=input_data.commission_pct,
         slippage_pct=input_data.slippage_pct,
         sort_by=input_data.sort_by,
-        ascending=False,
+        ascending=input_data.sort_by in _LOWER_IS_BETTER,
         risk_free_rate=input_data.risk_free_rate,
     )
     sensitivity = _parameter_sensitivity(grid_df, metric_col=input_data.sort_by)

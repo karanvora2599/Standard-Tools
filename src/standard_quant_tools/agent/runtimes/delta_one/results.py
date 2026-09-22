@@ -195,6 +195,13 @@ class FuturesCurveResult(_Result):
 
 
 class RollAnalysisResult(_Result):
+    day_count: str = Field(
+        "",
+        description="The convention both annualized numbers below were "
+        "computed under. The same 91-day roll is 160.376 bp under ACT/365F "
+        "and 158.179 under ACT/360, so a rate here means nothing without "
+        "it.",
+    )
     front_price: Stat = None
     next_price: Stat = None
     roll_spread_points: Stat = None
@@ -642,6 +649,16 @@ class BasisScanResult(_Result):
     n_evaluated: int = 0
     n_skipped: int = 0
     window: Optional[int] = None
+    detect_shifts: bool = True
+    reference_fraction: Stat = Field(
+        None,
+        description="The shift detector's settings, echoed. They decide "
+        "which rows carry a shift, never the order of `ranked` -- that is "
+        "the z-score's.",
+    )
+    threshold: Stat = None
+    slack: Stat = None
+    max_breaks: Optional[int] = None
     ranked: List[BasisScanRow] = Field(default_factory=list)
     skipped: List[BasisScanSkip] = Field(
         default_factory=list,

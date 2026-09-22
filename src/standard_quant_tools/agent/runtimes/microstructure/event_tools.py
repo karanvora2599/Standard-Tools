@@ -109,8 +109,29 @@ class QueueSummary(BaseModel):
 class LifetimeSummary(BaseModel):
     model_config = ConfigDict(extra="allow")
     n: int = 0
-    mean_seconds: Optional[float] = None
+    mean_seconds: Optional[float] = Field(
+        None,
+        description="Read this against the median rather than on its own. "
+        "Order lifetimes are heavily skewed -- a cancelled-order median of "
+        "10.1 ms against a mean of 475.7 ms, a 47x ratio -- so the mean "
+        "describes the tail and the median describes the typical order.",
+    )
     median_seconds: Optional[float] = None
+    p25_seconds: Optional[float] = None
+    p75_seconds: Optional[float] = Field(
+        None,
+        description="With p25, how wide the bulk of the distribution is. "
+        "Equal to the median when a quarter or more of the orders share one "
+        "lifetime, which is what a resting quote that is pulled on a timer "
+        "looks like.",
+    )
+    p90_seconds: Optional[float] = None
+    p99_seconds: Optional[float] = Field(
+        None,
+        description="The long-lived tail: how long the orders that actually "
+        "rest survive. The number that decides whether a passive order has "
+        "any chance of reaching the front of a queue.",
+    )
 
 
 class OrderEventResult(BaseModel):

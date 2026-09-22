@@ -32,7 +32,6 @@ import pytest
 from standard_quant_tools.analysis.liquidity_events import (
     CHANNELS,
     DEFAULT_THRESHOLD,
-    available_channels,
     cusum,
     declared_channels,
     detect_liquidity_events,
@@ -80,7 +79,8 @@ class TestTheChannelSetIsData:
         """One tool over a declared set, not one tool per channel -- the
         same rule that keeps STRATEGY_REGISTRY from becoming twelve backtest
         tools."""
-        assert len(declared_channels()) > len(available_channels())
+        computable = [n for n in declared_channels() if CHANNELS[n].available]
+        assert len(declared_channels()) > len(computable)
         for name in declared_channels():
             assert CHANNELS[name].description.strip()
             assert CHANNELS[name].requires
@@ -89,7 +89,7 @@ class TestTheChannelSetIsData:
         """An agent asking for `ofi` should learn the channel exists and
         what it needs, rather than that the name was never heard of."""
         assert "ofi" in declared_channels()
-        assert "ofi" not in available_channels()
+        assert not CHANNELS["ofi"].available
         assert "order book" in CHANNELS["ofi"].why_unavailable()
 
     def test_an_unknown_channel_is_refused_with_a_suggestion(self):

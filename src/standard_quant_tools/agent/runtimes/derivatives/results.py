@@ -322,6 +322,12 @@ class WorstCase(BaseModel):
 class OptionScenariosResult(_Result):
     base_value: Stat = None
     quantity: Stat = None
+    dividend_yield: Stat = Field(
+        None,
+        description="The yield every cell was priced at. Echoed because a "
+        "grid run at the default of zero prices a NON-PAYER, and nothing "
+        "else in the table says so.",
+    )
     days_forward: Stat = None
     grid: List[ScenarioRow] = Field(default_factory=list)
     worst_case: Optional[WorstCase] = None

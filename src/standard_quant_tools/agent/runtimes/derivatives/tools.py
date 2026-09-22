@@ -24,7 +24,7 @@ volatility POINT.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 import pandas as pd
 
@@ -225,6 +225,7 @@ def get_option_risk_scenarios(
         "time_to_expiry": input_data.time_to_expiry,
         "volatility": input_data.volatility,
         "risk_free_rate": input_data.risk_free_rate,
+        "dividend_yield": input_data.dividend_yield,
         "option_type": input_data.option_type,
         "quantity": input_data.quantity,
         "days_forward": input_data.days_forward,
@@ -391,9 +392,24 @@ def get_implied_volatility(
         option_type=input_data.option_type,
         dividend_yield=input_data.dividend_yield,
     )
+    warnings: List[str] = []
+    if result["at_bound"]:
+        warnings.append(
+            f"This price sits AT the no-arbitrage lower bound, so "
+            f"{round(result['implied_volatility'], 6)} is a CEILING, not an "
+            "estimate: every volatility at or below it reproduces the price "
+            "to within the pricer's resolution, and the true one cannot be "
+            "identified from this quote. `converged` is true because the "
+            "bisection converged -- it says the solver finished, not that "
+            "the answer is informative. Read it as an upper bound, or price "
+            "from a quote that is not at intrinsic."
+        )
     return ImpliedVolatilityResult(
         implied_volatility=round(result["implied_volatility"], 6),
         converged=result["converged"],
         iterations=result["iterations"],
         method=result["method"],
+        price_error=result["price_error"],
+        at_bound=result["at_bound"],
+        warnings=warnings,
     )

@@ -149,21 +149,30 @@ def sign_trades(
     return _classified(_sign_series(trades, quotes))
 
 
-def _signs_positional(
+def signs_positional(
     trades: pd.DataFrame, quotes: Optional[pd.DataFrame] = None
 ) -> np.ndarray:
     """
     Every trade's sign in the trades' OWN ROW ORDER: NaN where no rule
     decided, 0 where the rules cancelled, +1/-1 otherwise.
 
-    Real tapes repeat timestamps -- 32% of prints in a live AAPL minute --
-    and a label-based `.loc[signs.index]` on such an index either raises
-    ('cannot reindex on an axis with duplicate labels') or fans rows out
-    by label: `_signed_volume` reported a net imbalance of -229,340 on a
-    tape whose whole volume was 64,780 (findings D7). Positions never
-    collide, so every consumer here aligns by position.
+    PUBLIC, AND THE ONE TO REACH FOR. `sign_trades` returns a labelled
+    Series with the undecided rows dropped, which is the right shape for
+    reporting and the wrong one for alignment: real tapes repeat
+    timestamps -- 32% of prints in a live AAPL minute -- and a label-based
+    `.loc[signs.index]` or a column assignment from such a Series either
+    raises ('cannot reindex on an axis with duplicate labels') or fans rows
+    out by label. `_signed_volume` reported a net imbalance of -229,340 on
+    a tape whose whole volume was 64,780. Positions never collide, so
+    everything that has to line a sign up against a trade row -- inside
+    this module and out -- takes this array instead.
     """
     return _sign_series(trades, quotes).to_numpy(dtype=float)
+
+
+#: The spelling this had while it was private, kept so an importer that
+#: reached for it under the old name still resolves.
+_signs_positional = signs_positional
 
 
 def _sign_series(
@@ -252,7 +261,7 @@ def effective_spread(
 
     # By position, not by label: `.loc[side.index]` raised on any tape
     # with a repeated timestamp (findings D7).
-    signs = _signs_positional(trades, quotes)
+    signs = signs_positional(trades, quotes)
     keep = np.isfinite(signs) & (signs != 0)
     frame = pd.DataFrame(
         {
@@ -342,7 +351,7 @@ def microstructure_summary(
             "which is materially less accurate than Lee-Ready, and no "
             "spread could be measured."
         ]
-        signs = _signs_positional(trades)
+        signs = signs_positional(trades)
         keep = np.isfinite(signs) & (signs != 0)
         sized = size.to_numpy(dtype=float)[keep]
         summary["n_signed"] = int(keep.sum())

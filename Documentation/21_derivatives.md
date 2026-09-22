@@ -209,8 +209,8 @@ down-spot/up-vol diagonal rather than a row.
 
 | Tool | Answers |
 |---|---|
-| `get_option_pricing` | What is this option worth, under four models |
-| `get_implied_volatility` | What volatility reproduces this price |
+| `get_option_pricing` | What is this option worth, under four models. A dividend yield or borrow rate may be negative within plus or minus ten, on every tool here, because a foreign rate or a convenience yield is one |
+| `get_implied_volatility` | What volatility reproduces this price. A price at the no-arbitrage bound has no identifiable volatility: every value at or below the true one reproduces it, so the result carries `at_bound`, `price_error` and a warning that the number is a ceiling |
 | `get_option_greeks` | How does the risk change — vanna, volga, charm, speed |
 | `analyze_option_strategy` | Payoff, breakevens and aggregate greeks of an arbitrary multi-leg position |
 | `fit_volatility_smile` | Level, skew and curvature — and whether the quotes admit a butterfly arbitrage |
@@ -220,7 +220,7 @@ down-spot/up-vol diagonal rather than a row.
 | `get_implied_forward` | The carry forward, with financing, dividend and borrow broken out *(the three sum exactly to `forward − spot`: each is applied to the running forward in the order `components_order` states — financing, then dividend, then borrow. Compounded alone from spot, as they used to be, the cross terms went missing and the three were up to 45% short of the basis they decomposed; `analyze_cash_futures_basis` inherits the same decomposition)* |
 | `get_expected_move` | What move is priced — as one standard deviation, not a bound |
 | `simulate_delta_hedge` | What the hedge earns, and how widely that varies |
-| `get_option_risk_scenarios` | Full revaluation over spot × vol, not a Taylor estimate |
+| `get_option_risk_scenarios` | Full revaluation over spot × vol, not a Taylor estimate; takes `dividend_yield` (every cell used to price a non-payer), and the grid is served as a resource link at the default inline limit |
 
 Full argument lists: [20_tool_index.md](20_tool_index.md#derivatives--derivatives).
 

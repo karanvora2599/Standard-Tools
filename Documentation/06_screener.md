@@ -2,6 +2,8 @@
 
 The screener evaluates a list of tickers concurrently against fundamental and technical filters, returning a `pd.DataFrame` of passing stocks, optionally sorted by a chosen column.
 
+A `sort_by` naming a column the screen did not produce is refused by name, with the columns that exist; it used to be silently ignored.
+
 **Small universes (≤ 20 tickers):** all network calls run in parallel via `asyncio.gather` — screening 20 tickers takes roughly the same wall time as screening 5.
 
 **Large universes (> 20 tickers):** the ticker list is automatically split across multiple `ProcessPoolExecutor` workers. Each worker runs its own asyncio event loop, bypassing the GIL for the full pipeline (fetch + indicator compute). Combined with the Parquet disk cache, repeated runs on the same universe are near-instant.

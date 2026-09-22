@@ -20,7 +20,7 @@ source and refuse every other.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -42,13 +42,19 @@ __all__ = [
 class OrderBookInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    snapshots: Optional[List[Dict[str, float]]] = Field(
+    snapshots: Optional[List[Dict[str, Union[str, float, None]]]] = Field(
         None,
         min_length=1,
         description="One dict per book update, following "
         "DataProvider.get_order_book: bid_price_0/bid_size_0/ask_price_0/"
         "ask_size_0 and upward, level 0 being the touch. For a book small "
-        "enough to pass inline; use `ref` for one that is not.",
+        "enough to pass inline; use `ref` for one that is not. INCLUDE A "
+        "`timestamp` -- an ISO-8601 string such as "
+        "'2026-03-02T09:30:00.100Z' -- on every snapshot when "
+        "include_dynamics is set: it is the only clock here, and without it "
+        "ofi_per_second, updates_per_second and mid_changes_per_second come "
+        "back null rather than zero. A bare epoch number is not a "
+        "substitute; it would be read as nanoseconds.",
     )
     ref: Optional[str] = Field(
         None,
@@ -107,6 +113,18 @@ class OrderBookInput(BaseModel):
         description="Also return size and distance PER LEVEL. A sum is what "
         "makes a thin book look deep.",
     )
+    include_order_counts: bool = Field(
+        False,
+        description="Also return how many ORDERS the resting size is spread "
+        "over, at the touch and per level, from `bid_count_i`/`ask_count_i` "
+        "when the feed carries them (an MBP-10 export does). Size says how "
+        "much is in front of you and the count says how many queue "
+        "positions that is: 5,000 shares in one order is a different queue "
+        "from 5,000 in fifty, and only the second thins as those orders are "
+        "cancelled. Off by default because most feeds have no such column, "
+        "and where there is none the counts come back null rather than "
+        "refusing.",
+    )
 
 
 class DepthLevel(BaseModel):
@@ -117,6 +135,13 @@ class DepthLevel(BaseModel):
     mean_ask_size: Optional[float] = None
     mean_bid_distance_bps: Optional[float] = None
     mean_ask_distance_bps: Optional[float] = None
+    mean_bid_count: Optional[float] = Field(
+        None,
+        description="Mean number of orders resting on the bid at this level. "
+        "Null unless include_order_counts was set and the feed carries the "
+        "column.",
+    )
+    mean_ask_count: Optional[float] = None
 
 
 class OrderBookResult(BaseModel):
@@ -147,6 +172,14 @@ class OrderBookResult(BaseModel):
     )
     mean_touch_size: Optional[float] = None
     mean_cumulative_size: Optional[float] = None
+    mean_bid_count: Optional[float] = Field(
+        None,
+        description="Mean number of orders resting at the TOUCH bid. Null "
+        "unless include_order_counts was set and the feed carries the "
+        "column. Size over count is the average order at the front of the "
+        "queue.",
+    )
+    mean_ask_count: Optional[float] = None
     depth_slope: Optional[float] = Field(
         None,
         description="Resting size per basis point from the mid. Null on a "
@@ -175,15 +208,23 @@ class OrderBookResult(BaseModel):
     warnings: List[str] = Field(default_factory=list)
 
 
-def _book_from_reference(ref: str, cap: int, levels: Optional[int]):
+def _book_from_reference(
+    ref: str,
+    cap: int,
+    levels: Optional[int],
+    include_order_counts: bool = False,
+):
     """
     Read a registered depth panel off disk, bounded, into one frame.
 
     Columns are PROJECTED to the ones the statistics actually read. A real
-    mbp-10 export carries sixty-odd columns -- order counts, flags, actions,
-    sequence numbers -- and pulling all of them to compute a microprice buys
+    mbp-10 export carries sixty-odd columns -- flags, actions, sequence
+    numbers -- and pulling all of them to compute a microprice buys
     nothing. What is kept is exactly the four columns per level that
-    `book_metrics` reads.
+    `book_metrics` reads, plus the two count columns per level when
+    `include_order_counts` asks for them: a projection is the reason a
+    column that IS in the file could not be seen from a reference, so the
+    flag has to widen it rather than only widen the result.
     """
     from ..handoff import resolve as _resolve
 
@@ -205,6 +246,14 @@ def _book_from_reference(ref: str, cap: int, levels: Optional[int]):
             for side in ("bid", "ask")
             for field in ("price", "size")
         ]
+        if include_order_counts:
+            wanted += [
+                name
+                for index in range(deep)
+                for side in ("bid", "ask")
+                for name in (f"{side}_count_{index}",)
+                if name in handle.columns
+            ]
         if "timestamp" in handle.columns:
             wanted.insert(0, "timestamp")
 
@@ -236,7 +285,10 @@ def get_order_book_metrics(input_data: OrderBookInput) -> OrderBookResult:
     notes: List[str] = []
     if input_data.ref is not None:
         book, truncated, handle = _book_from_reference(
-            input_data.ref, input_data.max_snapshots, input_data.levels
+            input_data.ref,
+            input_data.max_snapshots,
+            input_data.levels,
+            input_data.include_order_counts,
         )
         if truncated:
             total = f"{handle.rows:,}" if handle.rows else "an unknown number of"
@@ -248,8 +300,19 @@ def get_order_book_metrics(input_data: OrderBookInput) -> OrderBookResult:
             )
     else:
         book = pd.DataFrame(input_data.snapshots)
+        # `timestamp` is the one text column in this contract; everything
+        # else is a number, and a stray string in a price would otherwise
+        # surface as a numpy conversion error three frames down with no
+        # tool, column or remedy in the message.
+        for column in book.columns:
+            if str(column) != "timestamp":
+                book[column] = pd.to_numeric(book[column], errors="coerce")
 
-    metrics = lib.book_metrics(book, levels=input_data.levels)
+    metrics = lib.book_metrics(
+        book,
+        levels=input_data.levels,
+        include_order_counts=input_data.include_order_counts,
+    )
     if input_data.include_dynamics:
         dynamics = lib.book_dynamics(book)
         notes = notes + list(dynamics.pop("warnings", []))
@@ -259,7 +322,11 @@ def get_order_book_metrics(input_data: OrderBookInput) -> OrderBookResult:
         metrics.update(dynamics)
     profile: List[Dict[str, Any]] = []
     if input_data.include_profile:
-        detail = lib.depth_profile(book, levels=input_data.levels)
+        detail = lib.depth_profile(
+            book,
+            levels=input_data.levels,
+            include_order_counts=input_data.include_order_counts,
+        )
         profile = detail["profile"]
         metrics["warnings"] = list(metrics["warnings"]) + list(detail["warnings"])
     metrics["warnings"] = notes + list(metrics.get("warnings", []))
@@ -279,7 +346,8 @@ BOOK_TOOL_DEFS = [
         "the book inline for a small one, or an `sqt://order_book_panel` "
         "reference for a real session, which is read off disk in batches "
         "because millions of snapshots cannot travel through a tool "
-        "argument.",
+        "argument. An inline snapshot carries an ISO-8601 `timestamp` like "
+        "any other column, and the per-second rates are null without one.",
         OrderBookInput,
     ),
 ]

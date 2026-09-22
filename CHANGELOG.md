@@ -1,5 +1,61 @@
 # Changelog
 
+## Answers that were wrong while looking right say what they are
+
+None of these adds a tool. Each is a field the library computed and the
+boundary dropped, a bound the schema pinned tighter than the pricing
+allows, an argument threaded one layer, or a sentence that was false.
+
+- **A volatility at the no-arbitrage bound is a ceiling, and the tool
+  says so.** A deep-in-the-money price has no identifiable volatility;
+  the solver knew (`at_bound`) and the tool discarded the flag, handing
+  back seven times the truth as converged. `at_bound`, `price_error` and a
+  warning now cross.
+- **A GARCH fit reports whether it removed the clustering it was fitted
+  to remove.** `converged` is about the optimizer; the standardized
+  residuals' Ljung-Box (raw and squared), their skew and kurtosis, and a
+  `misspecified` verdict are now returned, with a warning naming the
+  usual next step.
+- **Yields may be negative.** Seven derivatives inputs pinned the
+  dividend yield and the borrow rate at zero while the library prices a
+  negative foreign rate or a convenience yield within plus or minus ten;
+  the bounds and three library checks now agree with the pricing. The
+  option risk scenarios take a `dividend_yield` at last; every cell used
+  to price a non-payer, overstating a one-year call by a fifth at a four
+  percent yield.
+- **A grid sorted by volatility returns the lowest.** Four backtest tools
+  sorted every metric descending, so `annualized_volatility` returned
+  the worst; the four sortable metrics the row lacked are on it.
+- **The rolling Sharpe series the warning promised is returned**, the
+  PCA contributions come from the same decomposition as the loadings,
+  and a screener sort by a column the screen did not produce is refused
+  by name instead of silently ignored.
+- **A score panel over the position cap is clipped and named, not
+  refused whole**; a caller's own target weights over the cap are still
+  refused, because clipping those would restate a request. The futures
+  backtest's drawdown is a signed fraction like every other drawdown
+  here, with the percentage kept under its old name for one release.
+- **The trade classifier survives a real tape.** A quarter of live
+  timestamps repeat; the tool assigned index-labelled signs and raised
+  on every one. It signs positionally, as the library's other consumers
+  have since the change of 2026-09-20.
+- **A resumed spread monitor refuses a changed formula** instead of
+  silently keeping the old channel and threshold, and its default
+  threshold is the streaming calibration, not the batch one that alarms
+  on half of pure noise.
+- **Small things named:** the roll analysis takes a day-count convention
+  and names it; the four convention rationales reach the schema; the
+  basis scan exposes the four detector parameters it fixed; the
+  liquidity-adjusted VaR exposes the impact coefficient that moves its
+  cost a thousandfold; the volatility estimators and hierarchical risk
+  parity take `periods_per_year`; the volume profile takes the venue's
+  session; inline order-book snapshots may carry a timestamp so the
+  per-second rates are not always null; the effective spread series
+  reports its realized and impact halves, the order lifetimes their tail,
+  the depth levels their order counts on request; one symmetry rule for
+  a covariance, the numeric contract's; and a contract-specification
+  module with no caller is gone.
+
 ## A rewritten day no longer verifies, and the trail says when there is no trail
 
 The audit log is hash-chained per day, and a chain index records each

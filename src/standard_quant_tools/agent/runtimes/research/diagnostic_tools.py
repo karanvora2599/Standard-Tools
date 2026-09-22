@@ -360,13 +360,18 @@ def get_entropy_measures(input_data: EntropyInput) -> EntropyResult:
 
 
 def get_sharpe_stability(input_data: SharpeStabilityInput) -> SharpeStabilityResult:
-    return SharpeStabilityResult(
-        **lib.rolling_sharpe_stability(
-            pd.Series(input_data.returns),
-            window=input_data.window,
-            periods_per_year=input_data.periods_per_year,
-        )
+    computed = lib.rolling_sharpe_stability(
+        pd.Series(input_data.returns),
+        window=input_data.window,
+        periods_per_year=input_data.periods_per_year,
     )
+    # The library returns the rolling series itself. This result model is
+    # extra="allow", so splatting it would put one float per window inline
+    # in the payload -- hundreds of numbers whose summary is already in the
+    # twenty-one scalars beside them. Dropped here rather than in the
+    # library, where the series is the point.
+    computed.pop("rolling_sharpe", None)
+    return SharpeStabilityResult(**computed)
 
 
 def get_drawdown_profile(input_data: DrawdownProfileInput) -> DrawdownProfileResult:

@@ -71,6 +71,9 @@ DELIBERATELY_UNCONSTRAINED = {
     ("describe_temporal_contract", "source"): "refuses: unknown data provider",
     ("describe_temporal_contract", "frame_kind"): "refuses via TemporalContract",
     ("estimate_covariance", "method"): "refuses against covariance.METHODS",
+    ("get_intraday_volume_profile", "exchange_timezone"): (
+        "any IANA zone, refused by name"
+    ),
     ("get_option_pricing", "model"): "refuses: 'unknown pricing model'",
     ("run_portfolio_simulation", "commission_model"): "refuses via _COMMISSION_CODES",
 }

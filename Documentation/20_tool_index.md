@@ -33,15 +33,15 @@ advertises 155 of the 228 below.
 
 | Runtime | Tools | Schema cost | Categories | Deep documentation |
 |---|---:|---:|---|---|
-| `research` | 42 | 48 KB | `screener`, `analysis`, `quant_research` | [08_analysis.md](08_analysis.md), [23_inference.md](23_inference.md) |
+| `research` | 42 | 49 KB | `screener`, `analysis`, `quant_research` | [08_analysis.md](08_analysis.md), [23_inference.md](23_inference.md) |
 | `modeling` | 37 | 171 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
-| `backtest` | 35 | 82 KB | `backtest_execution`, `backtest_validation`, `custom_signal` | [04_backtesting.md](04_backtesting.md), [24_overfitting.md](24_overfitting.md) |
+| `backtest` | 35 | 83 KB | `backtest_execution`, `backtest_validation`, `custom_signal` | [04_backtesting.md](04_backtesting.md), [24_overfitting.md](24_overfitting.md) |
 | `meta` | 20 | 17 KB | `discovery`, `provenance` | [27_meta.md](27_meta.md), [10_auditability.md](10_auditability.md) |
 | `data` | 18 | 25 KB | *(one surface)* | [26_data.md](26_data.md) |
-| `portfolio` | 18 | 31 KB | `portfolio_risk` | [05_portfolio.md](05_portfolio.md) |
-| `delta_one` | 18 | 38 KB | *(one surface)* | [28_delta_one.md](28_delta_one.md) |
-| `microstructure` | 17 | 23 KB | *(one surface)* | [22_microstructure.md](22_microstructure.md) |
-| `derivatives` | 12 | 17 KB | *(one surface)* | [21_derivatives.md](21_derivatives.md) |
+| `portfolio` | 18 | 33 KB | `portfolio_risk` | [05_portfolio.md](05_portfolio.md) |
+| `delta_one` | 18 | 42 KB | *(one surface)* | [28_delta_one.md](28_delta_one.md) |
+| `microstructure` | 17 | 27 KB | *(one surface)* | [22_microstructure.md](22_microstructure.md) |
+| `derivatives` | 12 | 21 KB | *(one surface)* | [21_derivatives.md](21_derivatives.md) |
 | `feature_lab` | 11 | 38 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
 | **Total** | **228** | | | |
 
@@ -142,7 +142,7 @@ Indicators (RSI/ADX/ATR/Bollinger/Stochastic) for a whole ticker universe in one
 Realized volatility via Parkinson, Garman-Klass, and Yang-Zhang estimators vs. plain close-to-close.
 
 **Required:** `symbol`, `start_date`, `end_date`  
-**Optional:** `period`
+**Optional:** `period`, `periods_per_year`
 
 #### `run_garch_volatility_forecast`
 
@@ -1193,7 +1193,7 @@ What the portfolio is actually betting on, once the names collapse into factors.
 VaR that accounts for not being able to exit at the mark. A 1-day 95% VaR describes a position you could close today; one that takes 15 days to liquidate at a sane participation rate is exposed for 15 days and carries roughly sqrt(15) times the risk -- a factor of four, and the part usually missed. The liquidation COST is reported separately from the quantile on purpose: cost is an expectation and VaR is a quantile, and adding them produces a number that is neither.
 
 **Required:** `positions`, `volatilities`, `daily_volumes`  
-**Optional:** `confidence`, `participation_rate`, `correlation`
+**Optional:** `confidence`, `participation_rate`, `correlation`, `impact_coefficient`
 
 #### `get_liquidity_metrics`
 
@@ -1226,7 +1226,8 @@ How large to trade, from a stop distance measured in ATR and an account risk bud
 
 Allocation that never INVERTS the covariance matrix. Inversion is where an ill-conditioned estimate does its damage -- the smallest eigenvalue becomes the largest, so the direction the data says least about becomes the one the portfolio bets most on, and with 50 assets on 500 observations that eigenvalue is noise. HRP clusters by correlation, orders the assets so similar ones sit adjacent, and splits capital down the tree. It has NO optimality property and does not maximize anything; it buys robustness by giving that up.
 
-**Required:** `returns`
+**Required:** `returns`  
+**Optional:** `periods_per_year`
 
 #### `optimize_max_diversification`
 
@@ -1336,7 +1337,7 @@ The buying and selling an index change forces on passive money, sized as DAYS OF
 What moving a position from one contract into the next actually costs, with the break-even rate it then has to out-earn. Distinct from the curve because this one has a size: the position is SIGNED, and a short rolled up a contango curve collects the step a long pays. Roll yield is reported as what it is -- a price step expressed as a rate, not a return, which a long gives up if spot does not move. Different multipliers are resized by money, not contract count.
 
 **Required:** `front_price`, `next_price`, `contracts_held`, `multiplier`, `days_to_front_expiry`  
-**Optional:** `days_between_expiries`, `next_multiplier`, `cost_per_contract`, `spread_ticks`, `tick_value`
+**Optional:** `days_between_expiries`, `next_multiplier`, `cost_per_contract`, `spread_ticks`, `tick_value`, `day_count`
 
 #### `analyze_total_return_future`
 
@@ -1385,7 +1386,7 @@ Mark a total return swap with the equity and financing legs separated. The payof
 Rank many spot/futures pairs by how far each basis sits from its OWN history, not by how wide it is. A name that always trades 40 bps is not news at 40 bps, so the ranking key is the z-score and the level is reported beside it. Optionally runs CUSUM per pair, because a basis sitting 2 sigma wide for months is a level while one that moved there last week is an event and they otherwise rank the same. Pairs it cannot evaluate are returned in `skipped` with a reason each rather than dropped, since a misaligned series is a data problem and not an absence of signal.
 
 **Required:** `pairs`  
-**Optional:** `window`, `detect_shifts`, `min_observations`, `top_n`
+**Optional:** `window`, `detect_shifts`, `min_observations`, `top_n`, `reference_fraction`, `threshold`, `slack`, `max_breaks`
 
 #### `size_futures_hedge`
 
@@ -1478,10 +1479,10 @@ What an execution ACTUALLY cost, decomposed after Perold. Every other cost tool 
 
 #### `get_intraday_volume_profile`
 
-How volume distributes across the trading day, and what that implies for a participation schedule. The U-shape is the fact every execution schedule is built on: volume concentrates at the open and close with a midday trough routinely a third of the opening bucket, so a schedule spread evenly across the CLOCK over-participates at lunch -- paying impact into a thin book -- and under-participates at the close, missing the cheapest liquidity of the day. Needs INTRADAY bars with timestamps; daily bars are refused rather than aggregated into a meaningless single bucket.
+How volume distributes across the trading day, and what that implies for a participation schedule. The U-shape is the fact every execution schedule is built on: volume concentrates at the open and close with a midday trough routinely a third of the opening bucket, so a schedule spread evenly across the CLOCK over-participates at lunch -- paying impact into a thin book -- and under-participates at the close, missing the cheapest liquidity of the day. Needs INTRADAY bars with timestamps; daily bars are refused rather than aggregated into a meaningless single bucket. SET THE SESSION FOR THE VENUE THE BARS CAME FROM -- exchange_timezone, session_start, session_end -- because the default is US equity regular hours, and a London or Tokyo tape measured against it is bucketed over the wrong part of the day or refused outright. Pass index_timezone ('UTC' for a Databento extract) when the timestamps carry no offset, so extended-hours bars can be told from session ones instead of stretching the open bucket back to 4am.
 
 **Required:** `volume`, `timestamps`  
-**Optional:** `n_buckets`
+**Optional:** `n_buckets`, `exchange_timezone`, `session_start`, `session_end`, `index_timezone`
 
 #### `get_microstructure_metrics`
 
@@ -1492,10 +1493,10 @@ Quoted and effective spread MEASURED from trades and quotes, with the effective 
 
 #### `get_order_book_metrics`
 
-Depth-book statistics a top-of-book quote cannot give: the microprice, imbalance at the touch AND cumulatively, and how fast liquidity thins with distance. The midpoint ignores size, so a book with 5,000 bid and 100 offered reads the same as its mirror and the second is about to trade higher. Touch and cumulative imbalance routinely disagree, and a book bid at the touch with weight behind the offer is exactly the one that ticks up and fills badly. Takes the book inline for a small one, or an `sqt://order_book_panel` reference for a real session, which is read off disk in batches because millions of snapshots cannot travel through a tool argument.
+Depth-book statistics a top-of-book quote cannot give: the microprice, imbalance at the touch AND cumulatively, and how fast liquidity thins with distance. The midpoint ignores size, so a book with 5,000 bid and 100 offered reads the same as its mirror and the second is about to trade higher. Touch and cumulative imbalance routinely disagree, and a book bid at the touch with weight behind the offer is exactly the one that ticks up and fills badly. Takes the book inline for a small one, or an `sqt://order_book_panel` reference for a real session, which is read off disk in batches because millions of snapshots cannot travel through a tool argument. An inline snapshot carries an ISO-8601 `timestamp` like any other column, and the per-second rates are null without one.
 
 *No required arguments.*  
-**Optional:** `snapshots`, `ref`, `max_snapshots`, `levels`, `include_dynamics`, `include_profile`
+**Optional:** `snapshots`, `ref`, `max_snapshots`, `levels`, `include_dynamics`, `include_profile`, `include_order_counts`
 
 #### `get_order_event_metrics`
 
@@ -1572,7 +1573,7 @@ The forward implied by carry, with financing, dividend and borrow broken out sep
 
 #### `get_implied_volatility`
 
-The volatility that reproduces an observed option price. Solved by bisection on a monotone function, so it either converges or says it did not -- a price below intrinsic has no implied vol at all, and that is a refusal rather than a number.
+The volatility that reproduces an observed option price. Solved by bisection on a monotone function, so it either converges or says it did not -- a price below intrinsic has no implied vol at all, and that is a refusal rather than a number. A price exactly AT intrinsic is a different case and is answered rather than refused: every volatility at or below the one returned reproduces it, so the number is a CEILING. That case sets `at_bound` and carries a warning, while `converged` stays true because the solver did converge -- reading `converged` alone on a deep in-the-money quote reported roughly seven times the true volatility as a confident answer.
 
 **Required:** `option_price`, `spot`, `strike`, `time_to_expiry`, `risk_free_rate`  
 **Optional:** `option_type`, `dividend_yield`
@@ -1593,10 +1594,10 @@ Price a European option and return its first-order greeks, under Black-Scholes, 
 
 #### `get_option_risk_scenarios`
 
-A full REVALUATION grid over spot and volatility, not a delta-gamma approximation of one. Under a 20% move the Taylor estimate overstates a long call's gain by 5%, and by 11% at 30% -- the error grows with the cube of the move, which is why a stress test built on greeks understates a real gap. The two axes are shocked independently and the market does not move that way: read the down-spot/up-vol diagonal, not a row.
+A full REVALUATION grid over spot and volatility, not a delta-gamma approximation of one. Under a 20% move the Taylor estimate overstates a long call's gain by 5%, and by 11% at 30% -- the error grows with the cube of the move, which is why a stress test built on greeks understates a real gap. The two axes are shocked independently and the market does not move that way: read the down-spot/up-vol diagonal, not a row. `dividend_yield` applies to the base price and to every cell; left at zero the whole grid prices a NON-PAYER, which overstates a one-year at-the-money call on a 4% yielder by about 23%. The `grid` is the payload and it exceeds the MCP inline limit at these defaults, so an MCP client is handed it as a RESOURCE LINK rather than inline -- fetch the link to read the cells; the summary fields arrive inline as usual.
 
 **Required:** `spot`, `strike`, `time_to_expiry`, `volatility`  
-**Optional:** `risk_free_rate`, `option_type`, `quantity`, `spot_shocks`, `vol_shocks`, `days_forward`
+**Optional:** `risk_free_rate`, `dividend_yield`, `option_type`, `quantity`, `spot_shocks`, `vol_shocks`, `days_forward`
 
 #### `get_volatility_cone`
 

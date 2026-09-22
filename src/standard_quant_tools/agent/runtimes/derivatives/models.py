@@ -40,7 +40,12 @@ class OptionGreeksInput(BaseModel):
         0.0, description="Continuously-compounded annual risk-free rate."
     )
     option_type: Literal["call", "put"] = Field("call")
-    dividend_yield: float = Field(0.0, ge=0, description="Continuous dividend yield.")
+    dividend_yield: float = Field(
+        0.0,
+        ge=-10,
+        le=10,
+        description="Continuous dividend yield. SIGNED: the bound is on magnitude, not on sign, because a negative continuous yield is the ordinary case for an FX option (where this field carries the FOREIGN interest rate) and for a commodity whose convenience yield exceeds its storage cost. The library prices both.",
+    )
 
 
 class OptionStrategyLeg(BaseModel):
@@ -73,7 +78,12 @@ class OptionStrategyInput(BaseModel):
     )
     spot: float = Field(..., gt=0, description="Current underlying price.")
     risk_free_rate: float = Field(0.0)
-    dividend_yield: float = Field(0.0, ge=0)
+    dividend_yield: float = Field(
+        0.0,
+        ge=-10,
+        le=10,
+        description="Continuous dividend yield. SIGNED: the bound is on magnitude, not on sign, because a negative continuous yield is the ordinary case for an FX option (where this field carries the FOREIGN interest rate) and for a commodity whose convenience yield exceeds its storage cost. The library prices both.",
+    )
     spot_range: Optional[List[float]] = Field(
         None,
         description="Prices to evaluate the payoff at. Omit for an "
@@ -134,7 +144,12 @@ class PutCallParityInput(BaseModel):
     strike: float = Field(..., gt=0)
     time_to_expiry: float = Field(..., gt=0, description="Years.")
     risk_free_rate: float = Field(...)
-    dividend_yield: float = Field(0.0, ge=0)
+    dividend_yield: float = Field(
+        0.0,
+        ge=-10,
+        le=10,
+        description="Continuous dividend yield. SIGNED: the bound is on magnitude, not on sign, because a negative continuous yield is the ordinary case for an FX option (where this field carries the FOREIGN interest rate) and for a commodity whose convenience yield exceeds its storage cost. The library prices both.",
+    )
     tolerance_bps: float = Field(
         25.0,
         gt=0,
@@ -149,13 +164,21 @@ class ImpliedForwardInput(BaseModel):
     spot: float = Field(..., gt=0)
     time_to_expiry: float = Field(..., gt=0, description="Years.")
     risk_free_rate: float = Field(...)
-    dividend_yield: float = Field(0.0, ge=0)
+    dividend_yield: float = Field(
+        0.0,
+        ge=-10,
+        le=10,
+        description="Continuous dividend yield. SIGNED: the bound is on magnitude, not on sign, because a negative continuous yield is the ordinary case for an FX option (where this field carries the FOREIGN interest rate) and for a commodity whose convenience yield exceeds its storage cost. The library prices both.",
+    )
     borrow_rate: float = Field(
         0.0,
-        ge=0,
+        ge=-10,
+        le=10,
         description="Stock borrow cost, kept SEPARATE from the dividend "
         "because the two behave differently -- borrow floats and can move "
-        "hundreds of basis points in a day.",
+        "hundreds of basis points in a day. SIGNED, like the yield beside "
+        "it: a name on negative rebate lends at a negative rate, and a "
+        "`>= 0` bound priced that as free.",
     )
 
 
@@ -205,6 +228,17 @@ class OptionScenariosInput(BaseModel):
     time_to_expiry: float = Field(..., gt=0, description="Years.")
     volatility: float = Field(..., gt=0)
     risk_free_rate: float = Field(0.0)
+    dividend_yield: float = Field(
+        0.0,
+        ge=-10,
+        le=10,
+        description="Continuous dividend yield, applied to the base price "
+        "and to every cell of the grid. Left at 0.0 the whole grid prices a "
+        "NON-PAYER: a one-year at-the-money call on a 4% yielder is "
+        "overstated by about 23%, and every P&L in the table with it. "
+        "SIGNED, because an FX option's foreign rate and a commodity's net "
+        "convenience yield are routinely negative.",
+    )
     option_type: Literal["call", "put"] = Field("call")
     quantity: float = Field(1.0, description="Signed position size. Negative is short.")
     spot_shocks: Optional[List[float]] = Field(

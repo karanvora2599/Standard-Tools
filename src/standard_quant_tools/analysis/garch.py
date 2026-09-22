@@ -24,7 +24,7 @@ optimizer iteration is a single O(n) pass).
 """
 
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import numpy as np
 import pandas as pd
@@ -162,6 +162,74 @@ def _garch11_neg_loglik_and_grad(
     return float(nll), np.asarray(grad, dtype=float)
 
 
+#: Conventional level for the squared-residual test. A p-value below this is
+#: the sample saying the fitted model left volatility clustering behind.
+_MISSPECIFICATION_ALPHA = 0.05
+
+
+def _residual_diagnostics(resid: np.ndarray, sigma2: np.ndarray) -> Dict[str, Any]:
+    """
+    Whether the fit removed the clustering it was fitted to remove.
+
+    `converged` answers a question about the OPTIMIZER -- that L-BFGS-B
+    reached a stationary point inside the bounds with a stationary
+    persistence. It says nothing about whether GARCH(1,1) with normal
+    innovations and a constant mean is the right model for this series, and
+    a fit can converge cleanly onto a specification the data rejects.
+
+    The standardized residual z_t = e_t / sqrt(sigma2_t) is what answers
+    that. If the model captured the variance dynamics, z is close to iid:
+    z^2 has no autocorrelation left, because every predictable piece of it
+    has been divided out. A Ljung-Box on z^2 that rejects means the variance
+    path the model produced does not explain the variance path the sample
+    had -- the single most direct evidence that the specification is wrong.
+
+    The two tests answer different questions and are both reported. On the
+    raw z, Ljung-Box tests the MEAN: this model assumes a constant mean, so
+    a rejection there points at the mean equation (an AR term), not at the
+    variance one. On z^2 it tests the VARIANCE, and that is the one
+    `misspecified` is read off.
+
+    Skew and excess kurtosis describe what is left: a normal innovation
+    would give roughly 0 and 0, and a large positive excess kurtosis is the
+    standard sign that Student-t innovations are wanted.
+    """
+    from standard_quant_tools.analysis.diagnostics import ljung_box
+
+    standardized = resid / np.sqrt(sigma2)
+    finite = standardized[np.isfinite(standardized)]
+
+    def _p(squared: bool) -> Optional[float]:
+        try:
+            return float(ljung_box(pd.Series(finite), squared=squared)["p_value"])
+        except ValidationError:
+            # A degenerate residual series (no variance left to test) is not
+            # evidence of misspecification; it is the absence of a test.
+            return None
+
+    squared_p = _p(squared=True)
+    if finite.size >= 4:
+        centred = finite - finite.mean()
+        variance = float((centred**2).mean())
+        if variance > 0:
+            skew: Optional[float] = float((centred**3).mean() / variance**1.5)
+            kurtosis: Optional[float] = float((centred**4).mean() / variance**2 - 3.0)
+        else:
+            skew = kurtosis = None
+    else:
+        skew = kurtosis = None
+
+    return {
+        "ljung_box_p": _p(squared=False),
+        "ljung_box_squared_p": squared_p,
+        "standardized_skew": skew,
+        "standardized_kurtosis": kurtosis,
+        "misspecified": bool(
+            squared_p is not None and squared_p < _MISSPECIFICATION_ALPHA
+        ),
+    }
+
+
 def garch_volatility_forecast(
     returns: pd.Series,
     forecast_horizon: int = 10,
@@ -181,7 +249,14 @@ def garch_volatility_forecast(
     dict with keys: omega, alpha, beta, persistence, converged,
     log_likelihood, aic, bic, n_obs, current_annualized_vol,
     long_run_annualized_vol, forecast_annualized_vol (List[float], length
-    forecast_horizon).
+    forecast_horizon), conditional_variance (pd.Series on the returns'
+    index -- the whole variance path, not just its last value), and the
+    residual diagnostics ljung_box_p, ljung_box_squared_p,
+    standardized_skew, standardized_kurtosis (EXCESS) and misspecified.
+
+    `converged` and `misspecified` are independent: the first is about the
+    optimizer, the second about the specification. See
+    `_residual_diagnostics`.
 
     Raises
     ------
@@ -193,7 +268,8 @@ def garch_volatility_forecast(
         raise ValidationError(f"forecast_horizon must be > 0, got {forecast_horizon}")
     _require_scipy("GARCH(1,1) maximum-likelihood fitting")
 
-    arr = returns.dropna().to_numpy(dtype=float)
+    cleaned = returns.dropna()
+    arr = cleaned.to_numpy(dtype=float)
     n = len(arr)
     if n < _MIN_OBS:
         raise ValidationError(
@@ -281,6 +357,8 @@ def garch_volatility_forecast(
     forecast_var = long_run_var + (persistence_safe**h) * (current_var - long_run_var)
     forecast_var = np.clip(forecast_var, _MIN_SIGMA2, None)
 
+    diagnostics = _residual_diagnostics(resid, sigma2)
+
     result = {
         "omega": omega,
         "alpha": alpha,
@@ -296,6 +374,14 @@ def garch_volatility_forecast(
         "forecast_annualized_vol": [
             float(np.sqrt(v * periods_per_year)) for v in forecast_var
         ],
+        # The conditional-variance path, one value per observation, on the
+        # returns' own index. It was computed on every call and only its
+        # last element survived; the recursion is what the fit is FOR, and
+        # the residual diagnostics below are read off it.
+        "conditional_variance": pd.Series(
+            sigma2, index=cleaned.index, name="conditional_variance"
+        ),
+        **diagnostics,
     }
     logger.debug(
         "[garch] omega=%.8f  alpha=%.4f  beta=%.4f  persistence=%.4f  " "converged=%s",

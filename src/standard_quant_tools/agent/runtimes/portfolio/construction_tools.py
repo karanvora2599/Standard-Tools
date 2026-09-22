@@ -91,6 +91,17 @@ class HRPInput(BaseModel):
         "Returns rather than a covariance matrix, because HRP needs the "
         "correlation structure to build its tree.",
     )
+    periods_per_year: int = Field(
+        252,
+        gt=0,
+        le=31_536_000,
+        description="Bars per year for the annualized portfolio_volatility "
+        "and risk_contributions. 252 (the default) is daily; 52 weekly, 12 "
+        "monthly. The library has taken this for some time and this tool "
+        "pinned it at 252, so a monthly panel's volatility came back "
+        "overstated by sqrt(252/12) = 4.6x. Echoed back on the result. The "
+        "WEIGHTS do not depend on it -- only the risk numbers do.",
+    )
 
 
 class FactorExposureInput(BaseModel):
@@ -153,6 +164,22 @@ class LiquidityVarInput(BaseModel):
         "in quadrature; at 1 they add linearly, which is the crisis case -- "
         "and crisis is when liquidation horizons matter.",
     )
+    impact_coefficient: float = Field(
+        0.1,
+        ge=0,
+        le=10,
+        description="Multiplies the square root of participation in the "
+        "impact model behind expected_liquidation_cost: cost = coefficient "
+        "x per-day volatility x sqrt(notional / daily volume) x notional. "
+        "IT IS A MODEL PARAMETER, NOT A MEASUREMENT, and it is the whole "
+        "scale of the answer -- 0.01 and 10 are both inside the range and "
+        "give liquidation costs a thousand times apart on the same book. "
+        "Calibrate it against your own fills if you have them; the default "
+        "0.1 is a common practitioner value and nothing here estimated it. "
+        "expected_liquidation_cost is a model output either way, and it is "
+        "reported beside the VaR rather than added to it because a cost and "
+        "a quantile are different things.",
+    )
 
 
 # ── results ─────────────────────────────────────────────────────────────
@@ -187,6 +214,11 @@ class HRPResult(_Result):
     risk_contributions: Dict[str, float] = Field(default_factory=dict)
     portfolio_volatility: Stat = None
     effective_n: Stat = None
+    periods_per_year: int = Field(
+        252,
+        description="The annualization the risk numbers above were computed "
+        "under, echoed so it never has to be inferred.",
+    )
 
 
 class NamedExposure(BaseModel):
@@ -295,7 +327,12 @@ def optimize_hierarchical_risk_parity(input_data: HRPInput) -> HRPResult:
             "optimize_hierarchical_risk_parity: the return series have "
             f"different lengths ({lengths}). They must be aligned in time."
         )
-    return HRPResult(**lib.hierarchical_risk_parity(pd.DataFrame(input_data.returns)))
+    return HRPResult(
+        **lib.hierarchical_risk_parity(
+            pd.DataFrame(input_data.returns),
+            periods_per_year=input_data.periods_per_year,
+        )
+    )
 
 
 def get_factor_exposure_budget(
@@ -337,6 +374,7 @@ def get_liquidity_adjusted_var(input_data: LiquidityVarInput) -> LiquidityVarRes
             confidence=input_data.confidence,
             participation_rate=input_data.participation_rate,
             correlation=input_data.correlation,
+            impact_coefficient=input_data.impact_coefficient,
         )
     )
 

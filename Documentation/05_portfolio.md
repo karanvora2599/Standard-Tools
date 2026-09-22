@@ -344,7 +344,8 @@ low-Sharpe ones.
 ### `optimize_hierarchical_risk_parity`
 
 Lopez de Prado's HRP: allocation that **never inverts** the covariance
-matrix.
+matrix. Takes `periods_per_year`, which the library always did and the
+tool now passes.
 
 Inversion is where an ill-conditioned estimate does its damage. The smallest
 eigenvalue becomes the largest after inversion, so the direction the data
@@ -463,7 +464,10 @@ The standard number assumes instant exit, and that assumption does more work
 than anyone acknowledges. A 1-day 95% VaR is a statement about a position
 you could close today. A position that takes 15 days to liquidate at a sane
 participation rate is exposed for 15 days, and its risk is larger by roughly
-√15 — a factor of four.
+√15 — a factor of four. The `impact_coefficient` that scales the
+liquidation cost with the square root of participation is an input; it
+moves that cost across three orders of magnitude, so the cost is a model
+output, not a measurement.
 
 Two parts, and they are different things:
 

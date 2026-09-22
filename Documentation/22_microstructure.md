@@ -328,18 +328,18 @@ function) takes the threshold from that null's 95th percentile instead,
 which puts the false-alarm rate back at 5% whatever the channel's memory.
 And a channel that fails for any reason is reported as `unavailable` with
 the exception's name; it used to catch only `ValidationError`, so one
-channel's `ValueError` killed all six — and the failing channel was in
-`available_channels()`, so the obvious call was the one that died.
+channel's `ValueError` killed all six — and the failing channel was one
+the module declared computable, so the obvious call was the one that died.
 
 ## The tools
 
 | Tool | Needs ticks | Answers |
 |---|:--:|---|
-| `classify_trade_direction` | yes | Sign the tape, Lee-Ready or tick rule, published |
+| `classify_trade_direction` | yes | Sign the tape, Lee-Ready or tick rule, published; signs positionally, so a tape whose timestamps repeat (a quarter of a live one) classifies instead of raising |
 | `get_quoted_spread_series` | yes | Spread and imbalance per quote, not averaged |
-| `get_effective_spread_series` | yes | What each trade paid, optionally split |
-| `get_order_book_metrics` | yes | Microprice, imbalance at the touch and cumulatively, and the depth slope -- what a top-of-book quote cannot say |
-| `get_order_event_metrics` | Queue position, order lifetime, cancels per add and event intensity — from an ORDER feed, which a depth snapshot cannot produce |
+| `get_effective_spread_series` | yes | What each trade paid, optionally split, with the realized and impact means beside the effective one |
+| `get_order_book_metrics` | yes | Microprice, imbalance at the touch and cumulatively, and the depth slope -- what a top-of-book quote cannot say; inline snapshots may carry an ISO `timestamp`, which the per-second rates need, and `include_order_counts` returns the orders resting at each level when the feed carries them |
+| `get_order_event_metrics` | Queue position, order lifetime, cancels per add and event intensity — from an ORDER feed, which a depth snapshot cannot produce; the lifetime summaries carry their tail (p25 to p99) beside a mean and median that can differ fifty-fold |
 | `get_microstructure_metrics` | yes | Quoted and effective spread, realized/impact split, Lee-Ready signed flow |
 | `get_trade_profile` | yes | Volume by trade size and time of day |
 | `detect_liquidity_events` | yes | When a liquidity regime *changed*, by CUSUM |
@@ -350,7 +350,7 @@ channel's `ValueError` killed all six — and the failing channel was in
 | `estimate_kyle_lambda` | no | Market depth, and the impact of a given size |
 | `get_order_flow_imbalance` | no | Signed volume imbalance, and whether it predicts anything |
 | `estimate_vpin` | no | Flow one-sidedness in volume time |
-| `get_intraday_volume_profile` | no | The U-shape, for scheduling |
+| `get_intraday_volume_profile` | no | The U-shape, for scheduling; takes the venue's `exchange_timezone` and session, since a London tape under the New York session is refused rather than mis-measured |
 | `get_implementation_shortfall` | no | What an execution actually cost, decomposed |
 
 Full argument lists:

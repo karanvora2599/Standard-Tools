@@ -188,7 +188,7 @@ def _signed_volume(
     Buy volume minus sell volume, signed by the Lee-Ready rule the library
     already implements rather than by a fresh one.
     """
-    from standard_quant_tools.analysis.microstructure import _signs_positional
+    from standard_quant_tools.analysis.microstructure import signs_positional
 
     # sign_trades matches each trade to the quote that preceded it, so it
     # needs a real time INDEX rather than a timestamp column -- and it
@@ -205,7 +205,7 @@ def _signed_volume(
     # By POSITION. `.loc[signs.index]` on a tape with repeated timestamps
     # fanned rows out by label and reported a net imbalance 3.5x larger
     # than everything that traded (findings D7).
-    signs = _signs_positional(indexed, quoted)
+    signs = signs_positional(indexed, quoted)
     keep = np.isfinite(signs) & (signs != 0)
     sized = pd.Series(
         indexed["size"].astype(float).to_numpy()[keep] * signs[keep],
@@ -348,11 +348,17 @@ CHANNELS: Dict[str, Channel] = {
 }
 
 
-def available_channels() -> List[str]:
-    return sorted(name for name, c in CHANNELS.items() if c.available)
-
-
 def declared_channels() -> List[str]:
+    """Every channel this library names, computable or not.
+
+    ONE LIST, DELIBERATELY. There used to be a second function returning
+    only the computable subset, and it was the obvious thing to call -- so
+    a caller reading it learned that `ofi` did not exist rather than that
+    it exists and needs a depth panel. `CHANNELS[name].available` and
+    `why_unavailable()` answer that per channel, at the point where the
+    answer is actually being used, and a detector run reports every
+    channel it could not compute instead of dropping it.
+    """
     return sorted(CHANNELS)
 
 
@@ -670,8 +676,8 @@ def detect_liquidity_events(
         except Exception as exc:  # noqa: BLE001
             # EVERY failure is isolated to its channel. Catching only
             # ValidationError let one channel's ValueError kill all six,
-            # and the failing channel was in available_channels(), so the
-            # obvious call was the one that died (findings D7).
+            # and the failing channel was one this module declared as
+            # computable, so the obvious call was the one that died.
             reason = (
                 str(exc)
                 if isinstance(exc, ValidationError)
@@ -742,7 +748,6 @@ __all__ = [
     "DEFAULT_SLACK",
     "DEFAULT_THRESHOLD",
     "Channel",
-    "available_channels",
     "cusum",
     "declared_channels",
     "detect_liquidity_events",

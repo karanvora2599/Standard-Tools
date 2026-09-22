@@ -38,12 +38,11 @@ What was missing was the layer that connects instruments to each other:
           forward              impact
 ```
 
-Three things genuinely did not exist anywhere and had to be written:
+Two things genuinely did not exist anywhere and had to be written:
 
 | Missing | Now at |
 |---|---|
 | A year fraction. No `year_fraction`, no day-count convention, five inline `/365.0` sites | `delta_one/daycount.py` |
-| Futures contract semantics — multiplier, tick value, expiry, settlement | `delta_one/contracts.py` |
 | `tracking_error` as a function (it was a local variable inside `information_ratio`) | `delta_one/hedging.py` |
 
 ## 2. The tools
@@ -54,7 +53,7 @@ Three things genuinely did not exist anywhere and had to be written:
 | `solve_forward_carry` | What financing / dividend / borrow does this quote imply |
 | `analyze_basis_history` | Is this basis wide *for this name* |
 | `analyze_futures_curve` | What does the term structure look like, and what does a calendar spread price *(`curve_curvature` is null below FOUR contracts: a second difference needs three carries and three contracts give two)* |
-| `analyze_roll` | What does moving this position to the next contract cost | *(roll yield is annualized over the gap BETWEEN the two expiries, so it needs `days_between_expiries`; without it that field is null rather than annualized over the wrong period. `spread_ticks` needs `tick_value` to become a cost and is refused without it — at the old default of zero the bid-ask crossed on both legs was charged as nothing, 83% of the spread cost on a live roll)*
+| `analyze_roll` | What does moving this position to the next contract cost | *(roll yield is annualized over the gap BETWEEN the two expiries, so it needs `days_between_expiries`; without it that field is null rather than annualized over the wrong period. `spread_ticks` needs `tick_value` to become a cost and is refused without it — at the old default of zero the bid-ask crossed on both legs was charged as nothing, 83% of the spread cost on a live roll)* Takes a `day_count` and names it: ACT/360 against ACT/365F moves a quarterly roll yield by about 1.4%
 | `size_futures_hedge` | How many contracts, and what does rounding leave behind |
 | `analyze_hedge_effectiveness` | Did that hedge actually work |
 | `analyze_index_basket` | Is this basket rich to its index, and which name explains it |
@@ -66,8 +65,8 @@ Three things genuinely did not exist anywhere and had to be written:
 | `analyze_dividend_points` | How many index points of dividend before expiry |
 | `analyze_index_rebalance` | What will this index change force people to trade |
 | `detect_basis_dislocation` | Has this basis *structurally shifted*, or just moved |
-| `monitor_spread_stream` | Watch any spread on a live feed, one stateful call at a time |
-| `scan_basis_dislocations` | Which of these pairs is wide *for itself*, ranked |
+| `monitor_spread_stream` | Watch any spread on a live feed, one stateful call at a time; a resumed call that changes the channel, threshold, warm-up or slack is refused (open a new monitor), and the default threshold is the streaming calibration, not the batch one that alarms on half of pure noise |
+| `scan_basis_dislocations` | Which of these pairs is wide *for itself*, ranked; the detector's reference fraction, threshold, slack and break count are inputs, echoed on the result |
 
 The first nine shipped alone, deliberately: the floor for a runtime is
 eight, shipping exactly at it means one tool failing review makes the whole
@@ -151,8 +150,9 @@ label for the temporal contract, not as a source. This runtime's own rule
 covers it -- take the specialised dataset as structured arguments rather
 than pretending it exists -- which is why `analyze_index_basket` and
 `analyze_etf_fair_value` take constituents and a creation basket as
-arguments instead of fetching them. `ContractSpec` is foundational
-metadata, not an agent tool, for the same reason.
+arguments instead of fetching them, and why every multiplier and tick
+value on this surface is an argument: no shipped source serves them, so
+there is nothing here to read one from.
 
 Nothing else on the original roadmap is now deferred. What remains is not a
 missing tool but a missing *source*: no provider shipped here serves L2 or

@@ -1,7 +1,25 @@
 from enum import Enum
-from typing import Any, Dict, List, Literal, Optional
+from typing import Annotated, Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
+
+from standard_quant_tools.agent.runtimes._json_safe import (
+    finite_or_none as _finite_or_none,
+)
+
+#: A float that may legitimately be undefined. Non-finite in, null out --
+#: the same alias every runtime's own result module declares, because a NaN
+#: reaching the serializer produces `NaN` in the payload, which is not valid
+#: JSON and which several MCP clients reject at the transport layer rather
+#: than at the tool.
+Stat = Annotated[Optional[float], BeforeValidator(_finite_or_none)]
 
 # ──────────────────────────────────────────────
 # Backtest
@@ -520,7 +538,16 @@ class ScreenerInput(BaseModel):
         None, description="Historical start for technicals."
     )
     end_date: Optional[str] = Field(None, description="Historical end for technicals.")
-    sort_by: Optional[str] = Field(None, description="Column to sort results by.")
+    sort_by: Optional[str] = Field(
+        None,
+        description=(
+            "Column of the passing rows to sort by, e.g. 'pe_ratio' or "
+            "'rsi'. Which columns exist depends on which filters ran, so a "
+            "name is checked against the real result and a column this "
+            "screen did not produce is REFUSED by name rather than ignored. "
+            "None (the default) returns the tickers in input order."
+        ),
+    )
     ascending: bool = Field(True, description="Sort direction.")
     source: Optional[str] = Field(
         None,
@@ -568,6 +595,13 @@ class ScreenerResult(BaseModel):
             "Error message per worker-process batch that raised before returning "
             "any per-ticker result (n_workers > 1 only) — a crashed batch is never "
             "silently discarded without a trace."
+        ),
+    )
+    warnings: List[str] = Field(
+        default_factory=list,
+        description=(
+            "What this result knows that the numbers do not say — most often "
+            "that nothing passed, so a requested ordering sorted nothing."
         ),
     )
 
@@ -1021,11 +1055,28 @@ class VolatilityEstimatorsInput(BaseModel):
     period: int = Field(
         20, gt=1, description="Rolling window in bars for every estimator."
     )
+    periods_per_year: int = Field(
+        252,
+        gt=0,
+        le=31_536_000,
+        description=(
+            "Bars per year, the factor every estimator here annualizes by. "
+            "252 (the default) is daily trading bars; use 52 for weekly, 12 "
+            "for monthly, 98_280 for 5-minute US equity bars. It was pinned "
+            "at 252 with no way to say otherwise, so a weekly series came "
+            "back overstated by sqrt(252/52) = 2.2x on all four estimators "
+            "at once, with nothing in the result naming the convention "
+            "assumed. Echoed back on the result."
+        ),
+    )
 
 
 class VolatilityEstimatorsResult(BaseModel):
     symbol: str
     period: int
+    periods_per_year: int = Field(
+        252, description="Bars per year every number here was annualized by."
+    )
     close_to_close_annualized: float
     parkinson_annualized: float
     garman_klass_annualized: float
@@ -1061,7 +1112,15 @@ class GarchVolatilityForecastResult(BaseModel):
     alpha: float
     beta: float
     persistence: float
-    converged: bool
+    converged: bool = Field(
+        ...,
+        description=(
+            "The OPTIMIZER reached a stationary point inside the bounds with "
+            "persistence < 1. It is not a verdict on the specification -- for "
+            "that read `misspecified`, which is computed from the fit's own "
+            "residuals and is independent of this flag."
+        ),
+    )
     current_annualized_vol: float
     long_run_annualized_vol: float
     forecast_annualized_vol: List[float]
@@ -1069,6 +1128,46 @@ class GarchVolatilityForecastResult(BaseModel):
     aic: float
     bic: float
     n_obs: int
+    ljung_box_p: Stat = Field(
+        None,
+        description=(
+            "Joint Ljung-Box p-value on the STANDARDIZED residuals, testing "
+            "the mean equation. This model assumes a constant mean, so a low "
+            "value points at an omitted AR term rather than at the variance "
+            "model. Null when the residuals are degenerate enough that no "
+            "test is defined."
+        ),
+    )
+    ljung_box_squared_p: Stat = Field(
+        None,
+        description=(
+            "Joint Ljung-Box p-value on the SQUARED standardized residuals. "
+            "This is the check on the variance model: if the fit captured the "
+            "clustering, dividing it out leaves squared residuals with no "
+            "autocorrelation. Below 0.05 it did not, and `misspecified` is "
+            "True."
+        ),
+    )
+    standardized_skew: Stat = Field(
+        None, description="Skew of the standardized residuals; ~0 under normality."
+    )
+    standardized_kurtosis: Stat = Field(
+        None,
+        description=(
+            "EXCESS kurtosis of the standardized residuals (0 under "
+            "normality, not 3). Large and positive is the standard sign that "
+            "Student-t innovations are wanted."
+        ),
+    )
+    misspecified: bool = Field(
+        False,
+        description=(
+            "The squared-residual Ljung-Box p-value is below 0.05: the fitted "
+            "model did not remove the volatility clustering it was fitted to "
+            "remove. Independent of `converged`."
+        ),
+    )
+    warnings: List[str] = Field(default_factory=list)
 
 
 # ──────────────────────────────────────────────
@@ -1284,7 +1383,15 @@ class WalkForwardInput(BaseModel):
         "num_trades",
     ] = Field(
         "sharpe_ratio",
-        description="Metric to optimise in-sample (default: 'sharpe_ratio').",
+        description=(
+            "Metric to optimise in-sample (default: 'sharpe_ratio'). The "
+            "SORT DIRECTION follows the metric: 'annualized_volatility' "
+            "sorts ASCENDING, so the winner is the quietest combination, "
+            "and every other choice sorts DESCENDING. That includes "
+            "'max_drawdown', which is a signed fraction at most zero here "
+            "(-0.10 ranks above -0.30), and 'num_trades', where the highest "
+            "count wins -- it ranks activity, it does not penalise it."
+        ),
     )
     fill_price: Literal["close", "next_open", "hl2_exploratory"] = Field(
         "close",
@@ -1421,7 +1528,17 @@ class RegimeAdaptiveWalkForwardInput(BaseModel):
         "num_trades",
     ] = Field(
         "sharpe_ratio",
-        description="Metric to optimise in-sample, across all four strategies (default: 'sharpe_ratio').",
+        description=(
+            "Metric to optimise in-sample, across all four strategies "
+            "(default: 'sharpe_ratio'). The SORT DIRECTION follows the "
+            "metric: 'annualized_volatility' sorts ASCENDING, so the winner "
+            "is the quietest combination, and every other choice sorts "
+            "DESCENDING. That includes 'max_drawdown', which is a signed "
+            "fraction at most zero here (-0.10 ranks above -0.30), and "
+            "'num_trades', where the highest count wins -- it ranks "
+            "activity, it does not penalise it. The same direction decides "
+            "which of the four strategies each window selects."
+        ),
     )
     fill_price: Literal["close", "next_open", "hl2_exploratory"] = Field(
         "close",
@@ -1965,8 +2082,15 @@ class BacktestOptInput(BaseModel):
     ] = Field(
         "sharpe_ratio",
         description=(
-            "Metric to optimise. "
-            "Options: 'sharpe_ratio', 'total_return', 'calmar_ratio', 'sortino_ratio', 'max_drawdown'."
+            "Metric to optimise; every listed value is also a field of each "
+            "returned row, so top_results[0] carries the number it was "
+            "ranked on. The SORT DIRECTION follows the metric: "
+            "'annualized_volatility' sorts ASCENDING, so the winner is the "
+            "quietest combination, and every other choice sorts DESCENDING. "
+            "That includes 'max_drawdown', which is a signed fraction at "
+            "most zero here (-0.10 ranks above -0.30), and 'num_trades', "
+            "where the highest count wins -- it ranks activity, it does not "
+            "penalise it."
         ),
     )
     top_n: int = Field(
@@ -2009,6 +2133,19 @@ class OptimizationRun(BaseModel):
     calmar_ratio: float
     max_drawdown: float
     num_trades: int
+    # Every value `sort_by` accepts is a field here. Four of them were not,
+    # so a grid sorted by annualized_volatility ranked its rows on a number
+    # that then appeared nowhere in the rows it returned.
+    annualized_volatility: Stat = Field(
+        None, description="Annualized volatility of this combination's returns."
+    )
+    profit_factor: Stat = Field(
+        None, description="Gross profit over gross loss. Null when there was no loss."
+    )
+    win_rate: Stat = Field(None, description="Fraction of trades that made money.")
+    avg_trade_return_pct: Stat = Field(
+        None, description="Mean per-trade return, in percent."
+    )
 
 
 class BacktestOptResult(BaseModel):
@@ -3053,7 +3190,15 @@ class RobustnessDiagnosticsInput(BaseModel):
         "avg_trade_return_pct",
         "num_trades",
     ] = Field(
-        "sharpe_ratio", description="Metric used to pick the best trial from the grid."
+        "sharpe_ratio",
+        description=(
+            "Metric used to pick the best trial from the grid. The SORT "
+            "DIRECTION follows the metric: 'annualized_volatility' sorts "
+            "ASCENDING, so the best trial is the quietest one, and every "
+            "other choice sorts DESCENDING. That includes 'max_drawdown', "
+            "which is a signed fraction at most zero here (-0.10 ranks "
+            "above -0.30), and 'num_trades', where the highest count wins."
+        ),
     )
     n_bootstrap_iterations: int = Field(
         1000, description="Block-bootstrap resamples for the best trial's Sharpe CI."
@@ -3528,8 +3673,14 @@ class OptionPricingInput(BaseModel):
     option_type: Literal["call", "put"] = Field("call", description="Option type.")
     dividend_yield: float = Field(
         0.0,
-        ge=0,
-        description="Continuous dividend yield (Merton extension); 0.0 = plain Black-Scholes.",
+        ge=-10,
+        le=10,
+        description="Continuous dividend yield (Merton extension); 0.0 = "
+        "plain Black-Scholes. SIGNED: the bound is on magnitude, not on "
+        "sign, because a negative continuous yield is the ordinary case for "
+        "an FX option (where this field carries the FOREIGN interest rate) "
+        "and for a commodity whose convenience yield exceeds its storage "
+        "cost. The library prices both.",
     )
 
     model: str = Field(
@@ -3615,14 +3766,52 @@ class ImpliedVolatilityInput(BaseModel):
         ..., description="Annualized continuously-compounded risk-free rate."
     )
     option_type: Literal["call", "put"] = Field("call", description="Option type.")
-    dividend_yield: float = Field(0.0, ge=0, description="Continuous dividend yield.")
+    dividend_yield: float = Field(
+        0.0,
+        ge=-10,
+        le=10,
+        description="Continuous dividend yield. SIGNED: the bound is on "
+        "magnitude, not on sign, because a negative continuous yield is the "
+        "ordinary case for an FX option (where this field carries the "
+        "FOREIGN interest rate) and for a commodity whose convenience yield "
+        "exceeds its storage cost. The library prices both.",
+    )
 
 
 class ImpliedVolatilityResult(BaseModel):
-    implied_volatility: float
-    converged: bool
+    implied_volatility: float = Field(
+        ...,
+        description="The volatility that reproduces the observed price. When "
+        "`at_bound` is true this is a CEILING rather than an estimate -- read "
+        "it with `at_bound` and the warnings, never on its own.",
+    )
+    converged: bool = Field(
+        ...,
+        description="Whether the SOLVER finished, which is not the same as "
+        "whether the answer is informative. A price at the no-arbitrage "
+        "lower bound converges to a number that is only an upper bound; "
+        "`at_bound` is the field that says so.",
+    )
     iterations: int
     method: str  # "newton" | "bisection"
+    price_error: float = Field(
+        ...,
+        description="Absolute pricing error at the returned volatility, in "
+        "the price's own units. It is what `converged` was decided against, "
+        "and it is a residual rather than an accuracy claim about the "
+        "volatility: at a tiny vega a negligible price error still admits a "
+        "wide range of volatilities.",
+    )
+    at_bound: bool = Field(
+        False,
+        description="True when the observed price sits AT its no-arbitrage "
+        "lower bound, where no volatility is identifiable: every volatility "
+        "at or below the returned one reproduces the price. A deep "
+        "in-the-money call quoted at intrinsic is the usual case, and it "
+        "returned a confident-looking number with nothing marking it before "
+        "the CHANGELOG entry of 2026-09-22.",
+    )
+    warnings: List[str] = Field(default_factory=list)
 
 
 # ──────────────────────────────────────────────
@@ -5678,13 +5867,20 @@ class LiquidityEventsInput(BaseModel):
         ...,
         min_length=1,
         description=(
-            "Which channels to watch. Available from trades and quotes: "
-            "mid_return, spread, effective_spread, signed_volume, "
-            "trade_intensity, realized_vol. Declared but needing an order "
-            "book nobody serves yet: microprice, book_imbalance, "
+            "Which channels to watch. THIS TOOL READS TRADES AND QUOTES, "
+            "and those are the channels it can run: mid_return, spread, "
+            "effective_spread, signed_volume, trade_intensity, "
+            "realized_vol. Also declared, and needing a per-snapshot depth "
+            "panel this tool does not yet read: microprice, book_imbalance, "
             "l5_imbalance, ofi, bid_depth, ask_depth, depth_slope, "
-            "cancel_rate. A channel that cannot run is REPORTED rather than "
-            "dropped."
+            "cancel_rate. Depth itself is no longer the obstacle -- an "
+            "`sqt://order_book_panel` from register_external_dataset holds "
+            "exactly that shape, and get_order_book_metrics reads one "
+            "today; what is missing is the step between, which turns a book "
+            "into the per-snapshot series a detector runs over. A channel "
+            "that cannot run is REPORTED with what it needs rather than "
+            "dropped, because a missing row reads as a channel that was "
+            "quiet."
         ),
     )
     freq: str = Field(

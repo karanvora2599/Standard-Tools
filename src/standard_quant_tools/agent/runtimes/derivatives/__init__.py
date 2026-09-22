@@ -69,7 +69,14 @@ TOOL_DEFS = [
         "The volatility that reproduces an observed option price. Solved by "
         "bisection on a monotone function, so it either converges or says it "
         "did not -- a price below intrinsic has no implied vol at all, and "
-        "that is a refusal rather than a number.",
+        "that is a refusal rather than a number. A price exactly AT "
+        "intrinsic is a different case and is answered rather than refused: "
+        "every volatility at or below the one returned reproduces it, so the "
+        "number is a CEILING. That case sets `at_bound` and carries a "
+        "warning, while `converged` stays true because the solver did "
+        "converge -- reading `converged` alone on a deep in-the-money quote "
+        "reported roughly seven times the true volatility as a confident "
+        "answer.",
         ImpliedVolatilityInput,
     ),
     (
@@ -185,7 +192,14 @@ TOOL_DEFS = [
         "grows with the cube of the move, which is why a stress test built "
         "on greeks understates a real gap. The two axes are shocked "
         "independently and the market does not move that way: read the "
-        "down-spot/up-vol diagonal, not a row.",
+        "down-spot/up-vol diagonal, not a row. `dividend_yield` applies to "
+        "the base price and to every cell; left at zero the whole grid "
+        "prices a NON-PAYER, which overstates a one-year at-the-money call "
+        "on a 4% yielder by about 23%. The `grid` is the payload and it "
+        "exceeds the MCP inline limit at these defaults, so an MCP client "
+        "is handed it as a RESOURCE LINK rather than inline -- fetch the "
+        "link to read the cells; the summary fields arrive inline as "
+        "usual.",
         OptionScenariosInput,
     ),
 ]

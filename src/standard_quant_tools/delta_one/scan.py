@@ -31,6 +31,11 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 import numpy as np
 
+from standard_quant_tools.analysis.liquidity_events import (
+    DEFAULT_REFERENCE_FRACTION,
+    DEFAULT_SLACK,
+    DEFAULT_THRESHOLD,
+)
 from standard_quant_tools.delta_one.basis import basis_history, detect_basis_dislocation
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.numeric_contract import require_positive_int
@@ -47,6 +52,10 @@ def basis_scan(
     detect_shifts: bool = True,
     min_observations: int = 30,
     top_n: int = 10,
+    reference_fraction: float = DEFAULT_REFERENCE_FRACTION,
+    threshold: float = DEFAULT_THRESHOLD,
+    slack: float = DEFAULT_SLACK,
+    max_breaks: int = 3,
 ) -> Dict[str, Any]:
     """
     Rank a set of spot/futures pairs by how far each basis sits from its own
@@ -63,6 +72,15 @@ def basis_scan(
     basis can sit at a 2-sigma z-score having been there for months, which
     is a level, or it can have moved there last week, which is an event --
     and a scan that reported only the level would rank those the same.
+
+    The detector's four settings -- `reference_fraction`, `threshold`,
+    `slack` and `max_breaks` -- are the ones `detect_basis_dislocation`
+    takes and mean exactly what they mean there, applied to every pair.
+    They were fixed at the detector's defaults here until the CHANGELOG
+    entry of 2026-09-22, so a scan could not be made stricter than a
+    single-pair call could. None of them can reorder `ranked`: the ranking
+    is on |z| from `basis_history`, and these decide only which pairs carry
+    a shift beside that level.
 
     Returns every pair it could evaluate in `ranked`, ordered by absolute
     z-score, plus `skipped` for the ones it could not, each with the reason.
@@ -150,6 +168,10 @@ def basis_scan(
                     spot=list(spot),
                     futures=list(futures),
                     time_to_expiry=list(expiry) if expiry is not None else None,
+                    reference_fraction=reference_fraction,
+                    threshold=threshold,
+                    slack=slack,
+                    max_breaks=max_breaks,
                 )
                 row["shift_detected"] = bool(shift.get("triggered"))
                 row["shift_severity"] = shift.get("severity")
@@ -216,6 +238,11 @@ def basis_scan(
         "n_evaluated": int(len(ranked)),
         "n_skipped": int(len(skipped)),
         "window": window,
+        "detect_shifts": bool(detect_shifts),
+        "reference_fraction": float(reference_fraction),
+        "threshold": float(threshold),
+        "slack": float(slack),
+        "max_breaks": int(max_breaks),
         "ranked": ranked[:top_n],
         "skipped": skipped,
         "warnings": warnings,

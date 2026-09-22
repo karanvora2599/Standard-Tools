@@ -103,15 +103,28 @@ def classify_trade_direction(input_data: ClassifyTradesInput) -> SignedTapeResul
         else None
     )
 
-    signs = lib.sign_trades(trades, quotes)
+    # BY POSITION, NOT BY LABEL. `sign_trades` returns a labelled Series
+    # with the undecided rows dropped, and assigning one back onto the tape
+    # aligns on the index: on any tape with a repeated timestamp -- 23.6%
+    # of prints in a live AAPL session, and every real tape has some -- that
+    # raises "cannot reindex on an axis with duplicate labels" from inside
+    # pandas, and where it does not raise it fans rows out by label. The
+    # positional array is one sign per trade row in order, NaN where no rule
+    # decided, which is the honest representation of a trade that could not
+    # be classified. See the CHANGELOG entry of 2026-09-22.
+    try:
+        signs = lib.signs_positional(trades, quotes)
+    except ValidationError:
+        raise
+    except ValueError as exc:  # noqa: BLE001 -- a refusal, not a traceback
+        raise ValidationError(
+            f"classify_trade_direction: the tape and quotes could not be "
+            f"signed -- {exc}. Both need a timestamp index: fetch_tick_tape "
+            "and fetch_quote_panel produce that shape, and a frame that has "
+            "been through a JSON boundary may need its timestamp column set "
+            "as the index again."
+        ) from exc
     signed = trades.copy()
-    # ASSIGN, then read the assigned column. `sign_trades` may return a
-    # Series indexed differently from the tape it was given -- quotes that
-    # do not cover every trade drop rows -- and comparing the raw result
-    # against the tape's own columns raises an unalignable-indexer error
-    # from inside pandas rather than producing a wrong number. Assignment
-    # aligns on index and leaves NaN where no sign was produced, which is
-    # the honest representation of a trade that could not be classified.
     signed["sign"] = signs
     aligned = signed["sign"]
 
@@ -183,6 +196,25 @@ class SpreadSeriesResult(BaseModel):
     mean_bps: Stat = None
     median_bps: Stat = None
     p95_bps: Stat = None
+    realized_mean_bps: Stat = Field(
+        None,
+        description=(
+            "Mean REALIZED spread in bps: what the liquidity provider kept, "
+            "measured against the midpoint one realized horizon after the "
+            "trade. Null without realized_horizon_seconds, because without a "
+            "horizon there is no later midpoint to compare against."
+        ),
+    )
+    impact_mean_bps: Stat = Field(
+        None,
+        description=(
+            "Mean PRICE IMPACT in bps: effective minus realized, what the "
+            "trade moved the market. The two halves imply opposite remedies "
+            "-- impact says trade smaller, realized says trade somewhere "
+            "else -- and they sum to the effective spread. Null without "
+            "realized_horizon_seconds."
+        ),
+    )
     warnings: List[str] = Field(default_factory=list)
 
 
@@ -209,6 +241,20 @@ def _bps_summary(frame: pd.DataFrame, column: str) -> tuple:
         float(series.median()),
         float(series.quantile(0.95)),
     )
+
+
+def _column_mean(frame: pd.DataFrame, column: str) -> Optional[float]:
+    """The mean of one named column, or None when it is not there.
+
+    Absent rather than zero: `realized_spread_bps` and `price_impact_bps`
+    exist only when a realized horizon was given, and a zero there would
+    read as 'the liquidity provider kept nothing' rather than as 'the split
+    was not asked for'.
+    """
+    if column not in frame.columns:
+        return None
+    series = pd.to_numeric(frame[column], errors="coerce").dropna()
+    return float(series.mean()) if len(series) else None
 
 
 def get_quoted_spread_series(input_data: QuotedSpreadInput) -> SpreadSeriesResult:
@@ -312,6 +358,8 @@ def get_effective_spread_series(
         mean_bps=mean,
         median_bps=median,
         p95_bps=p95,
+        realized_mean_bps=_column_mean(series, "realized_spread_bps"),
+        impact_mean_bps=_column_mean(series, "price_impact_bps"),
         warnings=warnings,
     )
 

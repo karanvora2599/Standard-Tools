@@ -226,7 +226,7 @@ that is robust.
 | `estimate_tail_index` | Which moments actually exist |
 | `get_correlation_stability` | Is this correlation a property of the pair or an average over regimes |
 | `decompose_returns` | Where did the compound growth come from |
-| `get_sharpe_stability` | Did the edge decay |
+| `get_sharpe_stability` | Did the edge decay; the rolling series the warning always promised is returned |
 | `get_drawdown_profile` | Every drawdown, not just the worst |
 | `test_autocorrelation` | Is there autocorrelation at all, jointly across lags |
 | `get_entropy_measures` | Is there structure a linear test would miss |
