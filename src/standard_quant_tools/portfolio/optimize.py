@@ -157,7 +157,9 @@ def _check_covariance_estimable(n_obs: int, n_assets: int, cov: np.ndarray) -> N
 _MAX_CONDITION_NUMBER = 1e10
 
 
-def _conditioning_warnings(cov: np.ndarray, tickers: List[str]) -> List[str]:
+def _conditioning_warnings(
+    cov: np.ndarray, tickers: List[str]
+) -> Tuple[List[str], float]:
     """
     Rank alone does not detect a covariance that is *effectively* singular.
 
@@ -177,6 +179,11 @@ def _conditioning_warnings(cov: np.ndarray, tickers: List[str]) -> List[str]:
     covariance is still the caller's data, and there are legitimate reasons to
     optimize over near-duplicates, but nothing about the returned weights says
     so on its own.
+
+    The condition number is RETURNED as well as warned about. It was
+    computed on every call and mentioned only above the threshold, so a
+    caller could not compare two universes that both sat under it, or see
+    a matrix drifting toward the line before it crossed.
     """
     warnings: List[str] = []
     condition = float(np.linalg.cond(cov))
@@ -191,7 +198,7 @@ def _conditioning_warnings(cov: np.ndarray, tickers: List[str]) -> List[str]:
             "convergence. Drop a near-duplicate asset, shrink the covariance, "
             "or impose max_weight."
         )
-    return warnings
+    return warnings, condition
 
 
 def _verify_solution(
@@ -417,6 +424,36 @@ def _solve_unconstrained(
     )  # _OBJECTIVES pre-validated
 
 
+def _objective_value(
+    objective: str,
+    w: np.ndarray,
+    mu: np.ndarray,
+    cov: np.ndarray,
+    risk_free_rate: float,
+) -> float:
+    """
+    The scalar SLSQP minimizes, for whichever objective was asked for.
+
+    One definition, used both as the solver's objective function and to
+    score the closed-form path, so the `objective` a caller reads means the
+    same thing on both. Two copies of these four formulas could disagree,
+    and a solver diagnostic that disagrees with the solver is worse than
+    none.
+    """
+    if objective in ("min_volatility", "target_return"):
+        return float(w @ cov @ w)
+    if objective == "max_sharpe":
+        vol = float(np.sqrt(w @ cov @ w))
+        if vol < 1e-12:
+            return 0.0
+        return -(float(w @ mu) - risk_free_rate) / vol
+    if objective == "target_volatility":
+        return -float(w @ mu)  # maximize return
+    raise AssertionError(
+        f"unreachable objective {objective!r}"
+    )  # _OBJECTIVES pre-validated
+
+
 def _solve_constrained(
     mu: np.ndarray,
     cov: np.ndarray,
@@ -426,7 +463,18 @@ def _solve_constrained(
     target_volatility: Optional[float],
     allow_short: bool,
     max_weight: Optional[float],
-) -> Tuple[np.ndarray, bool]:
+) -> Tuple[np.ndarray, bool, Dict[str, Any]]:
+    """
+    (weights, the solver's own success flag, what the solver reported).
+
+    The third value used to be discarded. scipy's result carries the
+    iteration count, the exit status and message, the objective value, the
+    function-evaluation count and -- on a recent enough scipy -- the
+    Lagrange multipliers, which are the shadow price of each constraint and
+    the only way to see WHICH constraint is binding without inferring it
+    from the weights. All of it was computed and thrown away, so a caller
+    who got a non-converged answer had one boolean and no way to ask why.
+    """
     n = len(mu)
     bound = max_weight if max_weight is not None else 1.0
     bounds = [(-bound, bound)] * n if allow_short else [(0.0, bound)] * n
@@ -435,39 +483,20 @@ def _solve_constrained(
         {"type": "eq", "fun": lambda w: np.sum(w) - 1.0}
     ]
 
-    if objective == "min_volatility":
+    def obj_fn(w: np.ndarray) -> float:
+        return _objective_value(objective, w, mu, cov, risk_free_rate)
 
-        def obj_fn(w: np.ndarray) -> float:
-            return float(w @ cov @ w)
-
-    elif objective == "max_sharpe":
-
-        def obj_fn(w: np.ndarray) -> float:
-            vol = float(np.sqrt(w @ cov @ w))
-            if vol < 1e-12:
-                return 0.0
-            return -(float(w @ mu) - risk_free_rate) / vol
-
-    elif objective == "target_return":
+    if objective == "target_return":
         assert target_return is not None
-
-        def obj_fn(w: np.ndarray) -> float:
-            return float(w @ cov @ w)
-
         constraints.append(
             {"type": "eq", "fun": lambda w: float(w @ mu) - target_return}
         )
-
     elif objective == "target_volatility":
         assert target_volatility is not None
-
-        def obj_fn(w: np.ndarray) -> float:
-            return -float(w @ mu)  # maximize return
-
         constraints.append(
             {"type": "eq", "fun": lambda w: float(w @ cov @ w) - target_volatility**2}
         )
-    else:
+    elif objective not in ("min_volatility", "max_sharpe"):
         raise AssertionError(
             f"unreachable objective {objective!r}"
         )  # _OBJECTIVES pre-validated
@@ -482,7 +511,35 @@ def _solve_constrained(
         constraints=constraints,
         options={"maxiter": 500, "ftol": 1e-12},
     )
-    return result.x, bool(result.success)
+    # `getattr` on every field: which of these a scipy result carries has
+    # changed between versions -- `multipliers` is recent -- and a solver
+    # report that raised AttributeError on an older scipy would take the
+    # whole optimization with it, for a diagnostic.
+    multipliers = getattr(result, "multipliers", None)
+    report: Dict[str, Any] = {
+        "method": "SLSQP",
+        "iterations": int(getattr(result, "nit", 0) or 0),
+        "status": (
+            int(result.status) if getattr(result, "status", None) is not None else None
+        ),
+        "message": (
+            str(result.message)
+            if getattr(result, "message", None) is not None
+            else None
+        ),
+        "objective": (
+            float(result.fun) if getattr(result, "fun", None) is not None else None
+        ),
+        "n_function_evals": (
+            int(result.nfev) if getattr(result, "nfev", None) is not None else None
+        ),
+        "multipliers": (
+            [float(m) for m in np.atleast_1d(multipliers)]
+            if multipliers is not None
+            else None
+        ),
+    }
+    return result.x, bool(result.success), report
 
 
 def mean_variance_optimize(
@@ -519,9 +576,13 @@ def mean_variance_optimize(
         Dict with tickers, weights (dict ticker->float), expected_return,
         expected_volatility, sharpe_ratio, objective, converged (bool —
         always True for the closed-form path; reflects the solver's own
-        success flag for the scipy path), and warnings (list of str —
+        success flag for the scipy path), warnings (list of str —
         currently the small-sample caveat; empty when the window is long
-        enough relative to the asset count).
+        enough relative to the asset count), solver (what the optimizer
+        reported about its own run: method, iterations, status, message,
+        objective, n_function_evals, multipliers) and condition_number (of
+        the annualized covariance, reported at every level rather than only
+        warned about above the threshold).
 
     Raises:
         ValidationError: unknown objective, fewer than 2 assets, fewer than
@@ -629,7 +690,8 @@ def mean_variance_optimize(
     mu, cov = _mean_cov(data, periods_per_year)
     tickers = list(data.columns)
     require_finite_covariance(cov, "covariance", "mean_variance_optimize")
-    warnings.extend(_conditioning_warnings(cov, tickers))
+    conditioning, condition_number = _conditioning_warnings(cov, tickers)
+    warnings.extend(conditioning)
 
     logger.debug(
         "[portfolio_optimize] objective=%s  assets=%d  allow_short=%s  max_weight=%s",
@@ -644,11 +706,29 @@ def mean_variance_optimize(
             mu, cov, objective, risk_free_rate, target_return, target_volatility
         )
         converged = True
+        # No solver ran, and saying so is the point: this path is the exact
+        # frontier algebra, not an approximation of it, so there is no
+        # iteration count or exit status to report and inventing one would
+        # make the two paths look interchangeable. The objective is scored
+        # from the returned weights by the same function SLSQP minimizes,
+        # so the number means the same thing either way.
+        solver: Dict[str, Any] = {
+            "method": "closed_form",
+            "iterations": 0,
+            "status": None,
+            "message": (
+                "solved in closed form from the Merton frontier constants; "
+                "no iterative solver ran"
+            ),
+            "objective": _objective_value(objective, w, mu, cov, risk_free_rate),
+            "n_function_evals": None,
+            "multipliers": None,
+        }
     else:
         _require_scipy(
             "constrained mean-variance optimization (allow_short=False and/or max_weight set)"
         )
-        w, converged = _solve_constrained(
+        w, converged, solver = _solve_constrained(
             mu,
             cov,
             objective,
@@ -701,6 +781,13 @@ def mean_variance_optimize(
         "sharpe_ratio": sharpe,
         "objective": objective,
         "converged": converged,
+        # What the solver said about its own run, and the conditioning of
+        # the matrix it inverted. `converged` above stays the authoritative
+        # answer -- it is `_verify_solution`'s, checked against the
+        # constraints rather than taken from the solver -- and these say
+        # why, which it cannot.
+        "solver": solver,
+        "condition_number": condition_number,
         "warnings": warnings,
     }
 
@@ -935,6 +1022,77 @@ def black_litterman(
         "posterior_cov": posterior_cov,
         "implied_weights": implied_weights,
     }
+
+
+def view_absorption(
+    P: np.ndarray,
+    Q: np.ndarray,
+    implied_equilibrium_returns: np.ndarray,
+    posterior_returns: np.ndarray,
+) -> List[Dict[str, Any]]:
+    """
+    How far the posterior moved toward each view, one row per view.
+
+    THE ONE NUMBER THAT SAYS WHETHER STATING A VIEW DID ANYTHING. A
+    Black-Litterman call returns weights, and weights alone cannot separate
+    a view the posterior took from one that `tau` and the confidence damped
+    to nothing -- both come back as plausible-looking weights. Measured on
+    one relative view stated at +5% against an equilibrium spread of
+    +0.50%: the posterior landed at +2.75%, which is 50% of the distance,
+    not 100%, and nothing in the result said so.
+
+    Each row carries the view's `stated` return, the `prior_spread` the
+    same combination of assets is worth under the equilibrium, the
+    `posterior_spread` after blending, and
+
+        absorbed_fraction = (posterior - prior) / (stated - prior)
+
+    which is 1.0 when the posterior moved the whole way and 0.0 when the
+    view changed nothing. It is NaN -- not zero -- when the view states the
+    equilibrium itself: there is no distance to cover, so no fraction of it
+    was covered, and reporting 0.0 there would read as "the view was
+    ignored".
+
+    Note what the DEFAULT uncertainty implies: with the He-Litterman omega
+    (`tau * P @ cov @ P.T`), a single view enters at exactly half strength
+    however confident the caller says they are, because the view's variance
+    and the prior's are then the same size. Absorption approaches 1 only as
+    omega goes to zero, which is a caller supplying omega directly.
+    """
+    P = np.atleast_2d(np.asarray(P, dtype=float))
+    Q = np.asarray(Q, dtype=float).reshape(-1)
+    pi = np.asarray(implied_equilibrium_returns, dtype=float).reshape(-1)
+    posterior = np.asarray(posterior_returns, dtype=float).reshape(-1)
+    if len(Q) != P.shape[0]:
+        raise ValidationError(
+            f"Q length ({len(Q)}) must match P's row count ({P.shape[0]})"
+        )
+    if P.shape[1] != len(pi) or len(posterior) != len(pi):
+        raise ValidationError(
+            f"P has {P.shape[1]} columns against {len(pi)} equilibrium "
+            f"returns and {len(posterior)} posterior returns; all three "
+            "describe the same assets in the same order."
+        )
+
+    rows: List[Dict[str, Any]] = []
+    for i in range(P.shape[0]):
+        prior_spread = float(P[i] @ pi)
+        posterior_spread = float(P[i] @ posterior)
+        distance = float(Q[i]) - prior_spread
+        rows.append(
+            {
+                "view_index": i,
+                "stated": float(Q[i]),
+                "prior_spread": prior_spread,
+                "posterior_spread": posterior_spread,
+                "absorbed_fraction": (
+                    (posterior_spread - prior_spread) / distance
+                    if distance != 0.0
+                    else float("nan")
+                ),
+            }
+        )
+    return rows
 
 
 def build_bl_views(

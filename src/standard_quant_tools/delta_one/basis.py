@@ -191,6 +191,12 @@ def basis_history(
     to judge the middle of it: fine for describing history, look-ahead in a
     backtest. Defaults to full-sample because the common use is description
     and the warning says which one you got.
+
+    The series themselves come back under `history`, a frame of
+    `basis_points`, `basis_bps` (plus `annualized_bps` when a time to
+    expiry was given) and `zscore`. Every statistic here is a summary of
+    that frame, and a percentile or a half-life with nothing to check it
+    against is a number to take on faith.
     """
     s = _series(spot, "spot")
     f = _series(futures, "futures")
@@ -277,6 +283,25 @@ def basis_history(
         "half_life_observations": float(hl),
         "annualized": annualized_bps is not None,
         "window": window,
+        # The three series the eleven numbers above are computed from,
+        # together in one frame because they are only read together: a
+        # basis in points, the same basis in bps (annualized when a time to
+        # expiry was given), and the z-score of whichever of those the
+        # summary describes. `percentile` and `half_life_observations` are
+        # both statements about this history, and neither can be checked
+        # against anything without it.
+        "history": pd.DataFrame(
+            {
+                "basis_points": basis_points,
+                "basis_bps": basis_bps,
+                **(
+                    {"annualized_bps": annualized_bps}
+                    if annualized_bps is not None
+                    else {}
+                ),
+                "zscore": zscores,
+            }
+        ),
         "warnings": warnings,
     }
 

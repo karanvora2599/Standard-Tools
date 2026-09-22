@@ -160,6 +160,16 @@ class BasisHistoryInput(BaseModel):
         description="Years to expiry on each date. Supply it to annualize "
         "the basis; without it the series steps at every roll.",
     )
+    run_id: Optional[str] = Field(
+        None,
+        description="With `name`, publishes the basis SERIES themselves as "
+        "an `analytic_frame` reference and returns it as `history_ref`. "
+        "Both or neither: one alone is refused, because a reference is "
+        "addressed by both.",
+    )
+    name: Optional[str] = Field(
+        None, description="Names the published frame within the run. See `run_id`."
+    )
 
 
 class FuturesContractQuote(BaseModel):

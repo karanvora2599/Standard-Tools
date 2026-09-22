@@ -147,11 +147,11 @@ point of view — it copies, never edits.
 | `list_reference_kinds` | What a reference can carry, and what converts to what |
 | `list_strategies` | Every built-in strategy's parameter contract |
 | `list_stress_scenarios` | The named historical crash windows |
-| `describe_data_capabilities` | What the active provider can actually serve |
+| `describe_data_capabilities` | What the active provider can actually serve, including depth, order events, point-in-time records and the temporal contract per provider, and the cache's size and dead-generation count |
 | `describe_temporal_contract` | What a source can say about when facts became knowable |
 | `compare_data_sources` | Two providers, one field: unit or definition difference |
 | `describe_artifact` | What a persisted Parquet artifact contains |
-| `describe_reference` | What a handoff reference points at |
+| `describe_reference` | What a handoff reference points at, with the vendor dataset, provider and adjustment the frame carries |
 | `read_reference` | The actual values at chosen rows of one |
 | `convert_reference` | Turn one published kind into another |
 | `compare_artifacts` | Field-by-field diff of two results |

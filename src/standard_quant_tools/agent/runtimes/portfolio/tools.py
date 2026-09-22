@@ -42,6 +42,7 @@ from standard_quant_tools.agent.models import (
     RiskAttributionInput,
     RiskAttributionResult,
     SizeBucket,
+    SolverReport,
     SpreadProxyCheckInput,
     SpreadProxyCheckResult,
     StressTestInput,
@@ -52,6 +53,7 @@ from standard_quant_tools.agent.models import (
     TradeProfileResult,
     UnavailableChannel,
     UnreachableName,
+    ViewAbsorption,
 )
 from standard_quant_tools.analysis.microstructure import (
     intraday_volume_profile as _intraday_volume_profile,
@@ -111,6 +113,7 @@ from standard_quant_tools.portfolio.optimize import (
     build_bl_views,
     mean_variance_optimize,
     risk_parity_weights,
+    view_absorption,
 )
 from standard_quant_tools.portfolio.portfolio import (
     fetch_returns_sync,
@@ -176,6 +179,7 @@ def run_portfolio_optimization(
             if input_data.risk_budget is not None
             else None
         )
+        condition_number = float(np.linalg.cond(cov))
         rp = risk_parity_weights(cov, risk_budget=budget)
         if not rp["converged"]:
             warnings.append(
@@ -200,6 +204,7 @@ def run_portfolio_optimization(
                 t: round(float(c), 6)
                 for t, c in zip(solved_tickers, rp["risk_contributions"])
             },
+            condition_number=condition_number,
             warnings=warnings,
         )
 
@@ -236,6 +241,29 @@ def run_portfolio_optimization(
         sharpe = (
             (exp_ret - input_data.risk_free_rate) / exp_vol if exp_vol > 1e-12 else 0.0
         )
+        # The REASON, not only the weights. The blend computes an
+        # equilibrium prior, a posterior and a posterior covariance, and
+        # every one of them was used for two scalars and dropped -- so a
+        # caller could state a view, get weights back, and have no way to
+        # tell a view the posterior took from one that tau and the
+        # confidence damped to nothing.
+        pi = np.asarray(bl["implied_equilibrium_returns"], dtype=float)
+        posterior = np.asarray(bl["posterior_returns"], dtype=float)
+        posterior_cov = np.asarray(bl["posterior_cov"], dtype=float)
+        # A view that states the equilibrium has no distance to cover, so
+        # its `absorbed_fraction` comes back NaN rather than 0.0 -- which
+        # would read as "the view was ignored" -- and `Stat` turns that
+        # into None on the way out.
+        absorption = [
+            ViewAbsorption(
+                view_index=row["view_index"],
+                stated=round(row["stated"], 6),
+                prior_spread=round(row["prior_spread"], 6),
+                posterior_spread=round(row["posterior_spread"], 6),
+                absorbed_fraction=row["absorbed_fraction"],
+            )
+            for row in view_absorption(P, Q, pi, posterior)
+        ]
         return PortfolioOptimizationResult(
             tickers=input_data.tickers,
             method=input_data.method,
@@ -244,6 +272,18 @@ def run_portfolio_optimization(
             expected_volatility=round(exp_vol, 6),
             sharpe_ratio=round(sharpe, 4),
             converged=True,
+            condition_number=float(np.linalg.cond(cov)),
+            implied_equilibrium_returns={
+                t: round(float(v), 6) for t, v in zip(solved_tickers, pi)
+            },
+            posterior_returns={
+                t: round(float(v), 6) for t, v in zip(solved_tickers, posterior)
+            },
+            posterior_volatilities={
+                t: round(float(np.sqrt(v)), 6)
+                for t, v in zip(solved_tickers, np.diag(posterior_cov))
+            },
+            view_absorption=absorption,
             warnings=warnings,
         )
 
@@ -275,6 +315,12 @@ def run_portfolio_optimization(
         expected_volatility=round(result["expected_volatility"], 6),
         sharpe_ratio=round(result["sharpe_ratio"], 4),
         converged=result["converged"],
+        # `converged` above is `_verify_solution`'s verdict, checked against
+        # the constraints that were requested. This is the solver's account
+        # of its own run, which is a different thing and is why a
+        # non-convergence can now be read rather than only reported.
+        solver=SolverReport(**result["solver"]),
+        condition_number=result["condition_number"],
         warnings=warnings,
     )
 

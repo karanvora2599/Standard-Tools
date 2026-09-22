@@ -346,7 +346,7 @@ the module declared computable, so the obvious call was the one that died.
 | `check_spread_proxy` | yes | How wrong the OHLCV proxy is on this name |
 | `estimate_roll_spread` | no | Effective spread from bid-ask bounce — with its noise floor |
 | `estimate_corwin_schultz_spread` | no | Spread from the high-low range |
-| `get_amihud_illiquidity` | no | Price move per dollar traded, as a percentile |
+| `get_amihud_illiquidity` | no | Price move per dollar traded, as a percentile; with `run_id` and `name` the rolling series is published as an `analytic_series` |
 | `estimate_kyle_lambda` | no | Market depth, and the impact of a given size |
 | `get_order_flow_imbalance` | no | Signed volume imbalance, and whether it predicts anything |
 | `estimate_vpin` | no | Flow one-sidedness in volume time |

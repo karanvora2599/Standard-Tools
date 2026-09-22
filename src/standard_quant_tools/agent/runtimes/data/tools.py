@@ -51,7 +51,9 @@ from standard_quant_tools.portfolio.portfolio import (
     fetch_returns_sync,
 )
 
+from ..handoff import _vendor_provenance
 from ..handoff import describe as _handoff_describe
+from ..handoff import parse as _parse_ref
 from ..handoff import publish, publish_external, resolve
 from .models import (
     BuildDataBundleInput,
@@ -95,6 +97,85 @@ logger = logging.getLogger(__name__)
 #: than inferred, because describe/validate read this frame back and a
 #: column that quietly changed name would surface as a missing frame.
 _BUNDLE_COLUMNS = ("frame_kind", "ref", "source")
+
+#: Reference kind -> the bundle frame kinds it may legitimately be labelled
+#: as.
+#:
+#: WHY THIS IS CHECKED AT ALL. A bundle pairs each frame with a temporal
+#: contract, and the contract is chosen FROM THE LABEL -- so a label is not
+#: a comment, it is the input to the point-in-time verdict. A returns panel
+#: labelled `fundamentals` was accepted and then validated as fundamentals,
+#: producing a confident and entirely wrong answer about whether a
+#: leakage-free join was possible.
+#:
+#: An empty set means the kind is a DERIVED artifact -- a model's output, an
+#: account curve, a state machine -- which is not a data source and has no
+#: honest contract to be validated under. Refusing those by name is better
+#: than choosing a label for them.
+_BUNDLE_KINDS: Dict[str, tuple] = {
+    "price_panel": ("bars",),
+    "returns_panel": ("bars",),
+    "tick_tape": ("bars",),
+    "quote_panel": ("bars",),
+    "order_book_panel": ("bars",),
+    "order_event_panel": ("bars",),
+    "indicator_panel": ("bars",),
+    # Corporate actions are events carrying an availability stamp, and the
+    # event panel is the only kind shaped to hold either.
+    "event_panel": ("events", "corporate_actions"),
+    "equity_curve": (),
+    "trade_log": (),
+    "signal_panel": (),
+    "weight_panel": (),
+    "score_panel": (),
+    "predictions": (),
+    "analytic_series": (),
+    "analytic_frame": (),
+    "data_bundle": (),
+}
+
+
+def _checked_bundle_label(ref: str, frame_kind: str) -> Optional[str]:
+    """
+    Refuse a frame labelled as something it is not; warn when nothing says.
+
+    Returns a warning string, or None. A raw artifact path carries no kind
+    -- that is the documented trade-off of accepting one -- so there is
+    nothing to check it against and the caller is told so rather than given
+    a check that did not happen.
+    """
+    text = str(ref).strip()
+    if not text.startswith("sqt://"):
+        return (
+            f"{ref} is a raw artifact path, which carries no kind, so "
+            f"frame_kind={frame_kind!r} was TAKEN ON TRUST rather than "
+            "checked. The contract this bundle is validated under is chosen "
+            "from that label, so a wrong one produces a confident verdict "
+            "about the wrong thing -- publish the frame with a kind if the "
+            "verdict matters."
+        )
+    kind = _parse_ref(text).kind
+    admissible = _BUNDLE_KINDS.get(kind)
+    if admissible is None or frame_kind in admissible:
+        return None
+    if not admissible:
+        raise ValidationError(
+            f"{ref} is a {kind!r}, which is a DERIVED result rather than a "
+            f"data source, so it cannot be labelled {frame_kind!r} -- or "
+            "anything else -- in a bundle. A bundle pairs each frame with "
+            "what its SOURCE promises about timing, and a "
+            f"{kind!r} has no source to promise anything. Bundle the data "
+            "it was computed from instead."
+        )
+    raise ValidationError(
+        f"{ref} is a {kind!r} and was labelled frame_kind={frame_kind!r}. "
+        f"A {kind!r} belongs under {list(admissible)}. The label is not a "
+        "comment: validate_data_bundle picks the temporal contract from it, "
+        f"so this bundle would be judged as {frame_kind!r} and answer "
+        "confidently about data it does not hold. Pass "
+        f"frame_kind={admissible[0]!r}, or pass the reference that really "
+        f"is {frame_kind!r}."
+    )
 
 
 def _resolved(ref: str, expect: Optional[str] = None) -> Any:
@@ -189,6 +270,11 @@ def _published(
         entities=sorted(entities or []),
         start=start,
         end=end,
+        # WHICH VENDOR DATASET ANSWERED. The provider writes it onto the
+        # frame and it went no further than this function: a caller could
+        # not tell a consolidated tape from a single-venue sample carrying
+        # a few percent of volume, and which one answers is date-dependent.
+        **_vendor_provenance(frame),
         warnings=list(warnings or []),
     )
 
@@ -408,6 +494,10 @@ def get_dataset_metadata(
         survivorship_free=getattr(meta, "survivorship_free", None),
         point_in_time=getattr(meta, "point_in_time", None),
         timezone=getattr(meta, "timezone", None),
+        # The provider's own prose, which the four booleans above cannot
+        # carry: this is where a provider names the feed that answers an
+        # early window and what is wrong with it.
+        notes=[str(n) for n in (getattr(meta, "notes", None) or [])],
         warnings=warnings,
     )
 
@@ -467,7 +557,14 @@ def build_data_bundle(input_data: BuildDataBundleInput) -> DataBundleResult:
     """Name several published frames as one unit and publish the manifest."""
     bundle = DataBundle(input_data.name)
     rows = []
+    unchecked: List[str] = []
     for entry in input_data.frames:
+        # BEFORE resolving: the label decides which contract the bundle is
+        # validated under, so a mismatch is a refusal rather than a frame
+        # loaded and then judged as something else.
+        note = _checked_bundle_label(entry.ref, entry.frame_kind)
+        if note:
+            unchecked.append(note)
         frame = _resolved(entry.ref)
         bundle.add(entry.frame_kind, frame, source=entry.source)
         rows.append(
@@ -497,7 +594,7 @@ def build_data_bundle(input_data: BuildDataBundleInput) -> DataBundleResult:
         ],
         pit_safe=bool(described["pit_safe"]),
         reproduces_history=bool(described["reproduces_history"]),
-        warnings=list(described["warnings"]),
+        warnings=list(described["warnings"]) + unchecked,
     )
 
 
@@ -563,13 +660,113 @@ def validate_financial_ratios(
     )
 
 
+#: Keys a `fetch_financial_ratios` payload carries that are not ratios.
+#: Present so a flat payload can be told from an entity map by its shape
+#: rather than by asking the caller which one they passed.
+_RATIO_PAYLOAD_KEYS = ("symbol", "definition_notes")
+
+#: What a single company's ratios are keyed under once wrapped. The SAME
+#: key on both sides, deliberately: a flat payload holds one company by
+#: construction, so the two sides are the two answers about it and keying
+#: them by their own `symbol` would make a comparison impossible whenever
+#: one provider spelled the ticker differently or omitted it.
+_SINGLE_ENTITY = "(one company)"
+
+
+def _ratio_values(payload: Dict[str, Any]) -> List[Any]:
+    """The entries of a ratios payload that could be either a ratio or an
+    entity -- everything except the keys that are neither."""
+    return [v for k, v in payload.items() if k not in _RATIO_PAYLOAD_KEYS]
+
+
+def _unwrapped(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """A `fetch_financial_ratios` result reduced to its ratios map."""
+    inner = payload.get("ratios")
+    return dict(inner) if isinstance(inner, dict) and inner else dict(payload)
+
+
+def _as_entity_map(payload: Dict[str, Any], side: str) -> Dict[str, Any]:
+    """
+    One provider's ratios in the shape the comparison reads: entity -> ratios.
+
+    `fetch_financial_ratios` returns ONE company's ratios as a flat
+    `{field: value}` map, and the comparison reads `{entity: ratios}`. The
+    obvious composition -- fetch from two providers, hand both here -- was
+    therefore read as two universes of entities named `forward_pe`,
+    `trailing_pe` and so on, every one of whose ratios was a bare float
+    with no fields on it. Two IDENTICAL payloads came back with all eight
+    fields reported as disagreeing.
+
+    A flat payload is wrapped as a single entity rather than refused,
+    because that composition is the one an agent will reach for. What is
+    refused is a payload that is neither shape, and a comparison where one
+    side is flat and the other nested -- those cannot be reconciled without
+    guessing which entity the flat one belongs to.
+    """
+    if not payload:
+        return {}
+    payload = _unwrapped(payload)
+    values = _ratio_values(payload)
+    nested = [v for v in values if isinstance(v, dict)]
+    if nested and len(nested) == len(values):
+        return dict(payload)
+    if nested:
+        raise ValidationError(
+            f"the {side} payload mixes shapes: {len(nested)} of "
+            f"{len(values)} entries are themselves mappings. It has to be "
+            "either one company's ratios ({'forward_pe': 21.4, ...}) or a "
+            "map of ticker -> that, not both."
+        )
+    return {_SINGLE_ENTITY: {k: v for k, v in payload.items() if k != "symbol"}}
+
+
+def _is_flat(payload: Dict[str, Any]) -> bool:
+    """True when this is ONE company's ratios rather than a ticker map."""
+    values = _ratio_values(_unwrapped(payload))
+    return bool(values) and not any(isinstance(v, dict) for v in values)
+
+
+def _comparable(left: Dict[str, Any], right: Dict[str, Any]) -> None:
+    """Refuse the two ways this composition silently compares the wrong
+    things: mismatched nesting, and two different companies."""
+    if not left or not right:
+        return
+    if _is_flat(left) != _is_flat(right):
+        flat, nested = ("left", "right") if _is_flat(left) else ("right", "left")
+        raise ValidationError(
+            f"the {flat} payload is ONE company's ratios and the {nested} "
+            "payload is a map of ticker -> ratios. Comparing them would "
+            "mean guessing which ticker the single company is, and a wrong "
+            "guess reports every field as a disagreement. Pass both as one "
+            "company, or both as a ticker map."
+        )
+    if not _is_flat(left):
+        return
+    symbols = {
+        side: str(_unwrapped(payload).get("symbol") or payload.get("symbol") or "")
+        .strip()
+        .upper()
+        for side, payload in (("left", left), ("right", right))
+    }
+    if all(symbols.values()) and symbols["left"] != symbols["right"]:
+        raise ValidationError(
+            f"the left payload is for {symbols['left']} and the right one "
+            f"for {symbols['right']}. This tool asks whether two SOURCES "
+            "disagree about one company; two different companies disagree "
+            "for reasons that have nothing to do with the providers, and "
+            "every field would be reported as a divergence."
+        )
+
+
 def compare_ratio_frames(
     input_data: CompareRatioFramesInput,
 ) -> RatioComparisonResult:
     """Two providers' ratios side by side, with each gap classified."""
+    left, right = dict(input_data.left), dict(input_data.right)
+    _comparable(left, right)
     report: Dict[str, Any] = compare_ratio_sources(
-        dict(input_data.left),
-        dict(input_data.right),
+        _as_entity_map(left, "left"),
+        _as_entity_map(right, "right"),
         left_name=input_data.left_name,
         right_name=input_data.right_name,
         fields=list(input_data.fields) if input_data.fields else None,
@@ -578,11 +775,15 @@ def compare_ratio_frames(
     fields = [
         RatioFieldComparison(
             field_name=str(row.get("field", row.get("field_name", ""))),
+            # The library reports a SPAN, not two numbers, because over a
+            # universe two numbers would be one entity's pair passed off as
+            # the comparison. It names the pair only when there is one.
             left=row.get("left"),
             right=row.get("right"),
-            relative_difference=row.get(
-                "relative_difference", row.get("relative_diff")
-            ),
+            relative_difference=row.get("max_relative_difference"),
+            ratio=row.get("ratio"),
+            ratio_spread=row.get("ratio_spread"),
+            n_compared=int(row.get("n_compared", 0) or 0),
             # `comparison.py` writes this key as "verdict"; reading only
             # "classification" made every field null and n_disagreeing
             # always 0, so a 100x unit mismatch reported as agreement.
@@ -590,12 +791,19 @@ def compare_ratio_frames(
         )
         for row in rows
     ]
-    disagreeing = [f for f in fields if f.classification not in (None, "agree")]
+    # `no_overlap` IS NOT A DISAGREEMENT. It means the field was never
+    # checked, and counting it as one made two identical inputs report
+    # every field in conflict.
+    no_overlap = [f for f in fields if f.classification == "no_overlap"]
+    disagreeing = [
+        f for f in fields if f.classification not in (None, "agree", "no_overlap")
+    ]
     return RatioComparisonResult(
         left_name=input_data.left_name,
         right_name=input_data.right_name,
         n_compared=len(fields),
         n_disagreeing=len(disagreeing),
+        n_no_overlap=len(no_overlap),
         fields=fields,
         warnings=list(report.get("warnings", []))
         or [

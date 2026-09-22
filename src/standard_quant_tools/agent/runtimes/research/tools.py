@@ -159,6 +159,8 @@ from standard_quant_tools.portfolio.portfolio import (
 from standard_quant_tools.screener.screener import screen_stocks
 from standard_quant_tools.validation import last_finite
 
+from .._optional_ref import publish_if_requested as _publish_if_requested
+
 # Indicators technical_indicators() can compute in one native call. "atr" is
 # deliberately excluded: the tool's plain atr() uses a simple rolling mean,
 # while the fused call's ATR field is Wilder-smoothed -- a different
@@ -720,6 +722,23 @@ def run_kalman_hedge_ratio(input_data: KalmanHedgeRatioInput) -> KalmanHedgeRati
 
     beta_series = kf["Hedge_Ratio"]
 
+    warnings: List[str] = []
+    if not input_data.include_intercept:
+        warnings.append(
+            "`Intercept` is all zero in the published path and "
+            "`current_intercept` is 0.0: include_intercept=False fits the "
+            "slope only and forces the spread through the origin. That is a "
+            "constraint of the fit, not a finding about the two legs."
+        )
+
+    path_ref = _publish_if_requested(
+        kf,
+        kind="analytic_frame",
+        run_id=input_data.run_id,
+        name=input_data.name,
+        producer="research.run_kalman_hedge_ratio",
+    )
+
     return KalmanHedgeRatioResult(
         symbol_a=input_data.symbol_a,
         symbol_b=input_data.symbol_b,
@@ -731,6 +750,8 @@ def run_kalman_hedge_ratio(input_data: KalmanHedgeRatioInput) -> KalmanHedgeRati
         current_zscore=current_z,
         signal=signal,
         n_obs=len(kf),
+        path_ref=path_ref,
+        warnings=warnings,
     )
 
 
@@ -787,6 +808,34 @@ def run_pca_analysis(input_data: PCAInput) -> PCAResult:
         for t in contrib.index
     }
 
+    warnings: List[str] = []
+    full = result.get("explained_variance_ratio_full")
+    if full is None:
+        full_list: List[float] = []
+        warnings.append(
+            "`explained_variance_ratio_full` is empty because "
+            "method='power_iteration' solves for the leading components and "
+            "never forms the rest of the spectrum -- which is the reason to "
+            "use it. The ratios above are shares of the full variance and "
+            "are correct; what is missing is how much sits in the "
+            "components that were not extracted. Ask for method='svd' to "
+            "see it."
+        )
+    else:
+        full_list = [round(float(v), 6) for v in full]
+
+    # The PC scores ARE factor returns -- one return series per component,
+    # on the same dates -- so they publish as a `returns_panel` and resolve
+    # into anything that scores returns, rather than as a private shape
+    # only this tool's reader would know how to read.
+    factor_returns_ref = _publish_if_requested(
+        result["factor_returns"],
+        kind="returns_panel",
+        run_id=input_data.run_id,
+        name=input_data.name,
+        producer="research.run_pca_analysis",
+    )
+
     return PCAResult(
         tickers=input_data.tickers,
         n_components=result["n_components"],
@@ -795,6 +844,9 @@ def run_pca_analysis(input_data: PCAInput) -> PCAResult:
         cumulative_variance_ratio=cumvar,
         loadings=loadings_dict,
         factor_contributions=contrib_dict,
+        explained_variance_ratio_full=full_list,
+        factor_returns_ref=factor_returns_ref,
+        warnings=warnings,
     )
 
 
@@ -1074,6 +1126,18 @@ def run_garch_volatility_forecast(
             "will be too narrow; the point forecast is unaffected."
         )
 
+    # The square root of the variance the recursion carries, not its
+    # annualization: the forecast above is annualized because that is how a
+    # forecast is read, but the path is in the returns' own units so it
+    # lines up with the series it was fitted to.
+    conditional_vol_ref = _publish_if_requested(
+        np.sqrt(result["conditional_variance"]).rename("conditional_vol"),
+        kind="analytic_series",
+        run_id=input_data.run_id,
+        name=input_data.name,
+        producer="research.run_garch_volatility_forecast",
+    )
+
     return GarchVolatilityForecastResult(
         symbol=input_data.symbol,
         omega=result["omega"],
@@ -1095,6 +1159,7 @@ def run_garch_volatility_forecast(
         standardized_skew=result["standardized_skew"],
         standardized_kurtosis=result["standardized_kurtosis"],
         misspecified=result["misspecified"],
+        conditional_vol_ref=conditional_vol_ref,
         warnings=warnings,
     )
 
@@ -1536,6 +1601,26 @@ def get_tail_risk_metrics(input_data: TailRiskInput) -> TailRiskResult:
     )
 
 
+def _quality_provider(source: Optional[str]):
+    """The named provider, or the default, with an unknown name refused.
+
+    `DataFactory` raises a bare ValueError for a source it does not know,
+    which reaches a caller as an internal failure rather than as "you asked
+    for a provider that does not exist, here are the ones that do".
+    """
+    if not source:
+        return DataFactory.get_provider()
+    try:
+        return DataFactory.get_provider(source)
+    except (ValueError, NotImplementedError) as exc:
+        raise ValidationError(
+            f"{exc} Providers this library serves: 'yfinance', 'polygon', "
+            "'bloomberg', 'databento'. Leave `source` unset for the "
+            "configured default, or call describe_data_capabilities to see "
+            "which of them this environment can actually reach."
+        ) from exc
+
+
 def get_data_quality_report(
     input_data: DataQualityReportInput,
 ) -> DataQualityReportResult:
@@ -1544,10 +1629,23 @@ def get_data_quality_report(
     doesn't guarantee) plus missing-bar/stale-price/price-jump detection
     (data/quality.py) on the fetched OHLCV. All checks are heuristics on
     data already fetched, not a new data source — see each function's
-    docstring for known false-positive modes. In particular, missing_bars
-    has no market-holiday calendar: every U.S. market holiday in the
-    requested range will be reported as a gap, not just genuine missing
-    data — treat entries as leads to investigate, not confirmed defects.
+    docstring for known false-positive modes.
+
+    `missing_bars` IS JUDGED AGAINST AN EXCHANGE CALENDAR whenever
+    `exchange_calendars` is installed, so a market holiday is not reported
+    as a gap and each entry's `basis` says which rule judged it. Which
+    calendar decides the answer: a 2024 US equity frame has no gaps under
+    the default XNYS and nine under XTKS, so pass the `calendar` the data
+    actually trades on. Without the library — or with a code it does not
+    recognize — it falls back to weekdays and every holiday does become an
+    entry; `basis='weekday'` is how to tell that happened.
+
+    `source` picks the provider, and `volume_window`/`thin_fraction` decide
+    what counts as a thin bar. The defaults are severe on purpose: a feed
+    that carries a few percent of consolidated volume all the way through
+    is thin consistently rather than occasionally, and nothing here flags
+    it. `thin_fraction=0.5` with a short window is the question "is this
+    bar thin against its own recent past".
     """
     logger.debug(
         "[data_quality_report] %s  %s → %s",
@@ -1555,13 +1653,15 @@ def get_data_quality_report(
         input_data.start_date,
         input_data.end_date,
     )
-    provider = DataFactory.get_provider()
+    provider = _quality_provider(input_data.source)
     df = provider.get_ohlcv(
         input_data.symbol, input_data.start_date, input_data.end_date
     )
     metadata = provider.get_metadata(input_data.symbol)
 
-    missing = [MissingBar(**m) for m in detect_missing_bars(df)]
+    missing = [
+        MissingBar(**m) for m in detect_missing_bars(df, calendar=input_data.calendar)
+    ]
     stale = [
         StalePriceRun(**s)
         for s in detect_stale_prices(df, n=input_data.stale_run_length)
@@ -1570,7 +1670,14 @@ def get_data_quality_report(
         PriceJump(**j)
         for j in detect_price_jumps(df, threshold=input_data.jump_threshold)
     ]
-    volume_anomalies = [VolumeAnomaly(**v) for v in detect_volume_anomalies(df)]
+    volume_anomalies = [
+        VolumeAnomaly(**v)
+        for v in detect_volume_anomalies(
+            df,
+            window=input_data.volume_window,
+            thin_fraction=input_data.thin_fraction,
+        )
+    ]
 
     logger.debug(
         "[data_quality_report] missing_bars=%d  stale_runs=%d  price_jumps=%d",
@@ -1914,6 +2021,12 @@ def run_stationarity_tests(input_data: StationarityInput) -> StationarityResult:
     `contradictory` — both rejecting — usually means a structural break or
     changing volatility rather than either answer. Run detect_change_points
     before trusting either.
+
+    `lags` is the ADF's augmentation and `kpss_lags` is the KPSS
+    bandwidth — two different tests with two different knobs, which one
+    field could not express. `kpss_lags_used` reports the bandwidth that
+    ran either way, because a KPSS statistic quoted without its own
+    bandwidth cannot be reproduced.
     """
     from standard_quant_tools.analysis.stationarity import (
         run_stationarity_tests as _tests,
@@ -1923,7 +2036,12 @@ def run_stationarity_tests(input_data: StationarityInput) -> StationarityResult:
     series = _price_series(
         input_data.symbol, input_data.start_date, input_data.end_date, input_data.on
     )
-    result = _tests(series, lags=input_data.lags)
+    result = _tests(
+        series,
+        lags=input_data.lags,
+        vr_periods=tuple(input_data.vr_periods),
+        kpss_lags=input_data.kpss_lags,
+    )
     return StationarityResult(
         symbol=input_data.symbol,
         n_observations=result["n_observations"],
@@ -1933,6 +2051,8 @@ def run_stationarity_tests(input_data: StationarityInput) -> StationarityResult:
         kpss_statistic=result["kpss_statistic"],
         kpss_critical_5pct=result["kpss_critical_5pct"],
         kpss_rejects_stationarity=result["kpss_rejects_stationarity"],
+        kpss_lags_used=result["kpss_lags_used"],
+        kpss_lags_source=result["kpss_lags_source"],
         variance_ratios=[VarianceRatio(**v) for v in result["variance_ratios"]],
         verdict=result["verdict"],
         detail=result["detail"],
@@ -1961,6 +2081,24 @@ def detect_regimes(input_data: RegimeDetectionInput) -> RegimeDetectionResult:
         input_data.symbol, input_data.start_date, input_data.end_date, "returns"
     )
     result = _regimes(series, n_regimes=input_data.n_regimes)
+
+    # The labels are computed on the series after NaN removal, so they are
+    # put back on THAT index rather than on the raw one -- a positional
+    # zip against the unfiltered series would shift every label by however
+    # many gaps the history had.
+    labels_ref = _publish_if_requested(
+        pd.Series(
+            result["labels"],
+            index=pd.Series(series).dropna().index,
+            name="regime",
+            dtype="int64",
+        ),
+        kind="analytic_series",
+        run_id=input_data.run_id,
+        name=input_data.name,
+        producer="research.detect_regimes",
+    )
+
     return RegimeDetectionResult(
         symbol=input_data.symbol,
         n_regimes=result["n_regimes"],
@@ -1968,5 +2106,6 @@ def detect_regimes(input_data: RegimeDetectionInput) -> RegimeDetectionResult:
         current_regime=result["current_regime"],
         persistence=result["persistence"],
         n_switches=result["n_switches"],
+        labels_ref=labels_ref,
         warnings=result["warnings"],
     )

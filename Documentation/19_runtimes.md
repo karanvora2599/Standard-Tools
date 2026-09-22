@@ -227,6 +227,8 @@ trade log.
 | `weight_panel` | `{ticker: {date: weight}}` — what `run_portfolio_simulation` consumes |
 | `score_panel` | `{ticker: {date: score}}` — unrestricted alpha scores |
 | `returns_panel` | Wide frame of per-asset returns |
+| `analytic_series` | One per-bar analytic series: a state curve, a rolling statistic, a label sequence |
+| `analytic_frame` | A date-indexed frame of analytic columns: a Kalman path, a basis history |
 | `price_panel` | Wide price frame or stacked OHLCV |
 | `predictions` | Long `(date, entity, prediction)` frame |
 | `feature_panel` | Computed features, entity by date |

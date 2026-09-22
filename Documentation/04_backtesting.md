@@ -1011,6 +1011,22 @@ as everywhere else in this library):**
   set) must be finite and strictly positive.
 
 **Post-trade enforcement — target weights vs. realized, post-cost state:**
+
+**The state curves are published, not summarised.** Every engine builds a
+family of per-bar account series and used to ship the equity curve alone.
+With a `run_id`, `run_portfolio_simulation` publishes cash, gross exposure,
+net exposure and leverage as `analytic_series` references and its returns
+as a one-column `returns_panel`, and reports the net exposure's minimum,
+maximum and mean inline, so a dollar-neutral book that drifted says so;
+each rebalance names the tickers the participation cap hit. The futures
+backtest publishes cash, margin, position, exposure and leverage and
+reports the minimum margin cushion, which separates comfortably margined
+from one tick away when both show zero margin calls. The pair backtest
+publishes its spread state machine, the signal-panel backtest its
+portfolio returns (the one backtest output no return-consuming tool could
+read), and the walk-forward backtest its stitched out-of-sample curve.
+Without a `run_id` nothing is written and every reference is `None`.
+
 `max_gross_leverage`/`max_position_pct` bound the *target* weights (validated
 upfront, as above), and each rebalance's `target_shares` are sized from
 `equity_now` — account equity immediately **before** that rebalance's own

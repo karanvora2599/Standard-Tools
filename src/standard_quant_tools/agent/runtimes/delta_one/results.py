@@ -146,6 +146,15 @@ class BasisHistoryResult(_Result):
     )
     annualized: bool = False
     window: Optional[int] = None
+    history_ref: Optional[str] = Field(
+        None,
+        description="`sqt://analytic_frame/...` for the series themselves: "
+        "`basis_points`, `basis_bps` (plus `annualized_bps` when a time to "
+        "expiry was given) and `zscore`, one row per observation. "
+        "`percentile` and `half_life_observations` are both statements "
+        "about this history and cannot be checked against anything without "
+        "it. Null unless `run_id` and `name` were given.",
+    )
 
 
 class CurvePoint(BaseModel):

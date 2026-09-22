@@ -528,6 +528,13 @@ def amihud_illiquidity(
         "trend_pct": trend,
         "scaling": "1e6",
         "mean_dollar_volume": float(dollar_volume.mean()),
+        # The rolling series every number above summarizes. The percentile
+        # and the trend are both comparisons WITHIN it, so a caller who
+        # disagrees with either -- or who wants to see when the name became
+        # illiquid rather than that it is -- has nothing to look at without
+        # this. `n - window + 1` values, on the bars that survived the
+        # non-positive filter.
+        "rolling": rolling.rename("amihud_illiquidity"),
         "warnings": warnings,
     }
 

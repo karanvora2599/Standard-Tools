@@ -102,6 +102,12 @@ same signature, so this is a lead, not a proven defect either.
 
 ## Agent Tool: `get_data_quality_report`
 
+The tool takes a `source` (any registered provider, so a Databento frame can
+be checked), the exchange `calendar` the gap detector uses (the same frame
+gives different gap counts under XNYS and XTKS, and every gap says which
+basis found it), and the volume-anomaly window and thin fraction.
+
+
 Combines both pieces above into one JSON-shaped call for LLM tool-calling.
 
 ```python

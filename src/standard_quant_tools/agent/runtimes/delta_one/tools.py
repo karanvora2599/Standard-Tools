@@ -50,6 +50,7 @@ from standard_quant_tools.delta_one import streaming as _streaming
 from standard_quant_tools.delta_one import swaps as _swaps
 from standard_quant_tools.error import ValidationError
 
+from .._optional_ref import publish_if_requested as _publish_if_requested
 from .models import (
     BasisDislocationInput,
     BasisHistoryInput,
@@ -151,14 +152,24 @@ def solve_forward_carry(
 
 
 def analyze_basis_history(input_data: BasisHistoryInput) -> BasisHistoryResult:
-    return BasisHistoryResult(
-        **_basis.basis_history(
-            spot=input_data.spot_prices,
-            futures=input_data.futures_prices,
-            window=input_data.window,
-            time_to_expiry=input_data.time_to_expiry,
-        )
+    computed = _basis.basis_history(
+        spot=input_data.spot_prices,
+        futures=input_data.futures_prices,
+        window=input_data.window,
+        time_to_expiry=input_data.time_to_expiry,
     )
+    # This result model is extra="allow": splatting the frame would put
+    # three floats per observation inline beside the eleven numbers that
+    # summarize them. Published instead when the caller asked for it.
+    history = computed.pop("history", None)
+    ref = _publish_if_requested(
+        history,
+        kind="analytic_frame",
+        run_id=input_data.run_id,
+        name=input_data.name,
+        producer="delta_one.analyze_basis_history",
+    )
+    return BasisHistoryResult(**computed, history_ref=ref)
 
 
 def analyze_futures_curve(input_data: FuturesCurveInput) -> FuturesCurveResult:

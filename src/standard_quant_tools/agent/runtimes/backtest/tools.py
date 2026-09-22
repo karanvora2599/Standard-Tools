@@ -93,6 +93,64 @@ def _metric(row: Any, column: str, digits: int) -> Optional[float]:
     return None if math.isnan(value) else round(value, digits)
 
 
+def _publish_state(
+    data: Any,
+    kind: str,
+    run_id: Optional[str],
+    name: str,
+    producer: str,
+) -> Optional[str]:
+    """
+    Publish one per-bar series a backtest built, or return None.
+
+    REFERENCES ARE OPT-IN HERE, unlike the fetch tools, because every one
+    of these tools already answers its question inline: the scalars are the
+    result and the curve is the evidence behind them. A caller who wants
+    the evidence passes a run_id; a caller who does not pays nothing, and
+    every call written before these fields existed keeps working unchanged.
+
+    `overwrite=True`, matching run_backtest_compact: the NAME is this
+    library's, not the caller's, so re-running a simulation under the same
+    run_id replaces that run's own curve rather than colliding with another
+    agent's artifact. The (run_id, name) collision rule still protects
+    everything a caller named itself.
+    """
+    if run_id is None or data is None or len(data) == 0:
+        return None
+    from standard_quant_tools.agent.runtimes import handoff
+
+    if isinstance(data, pd.Series) and data.name is None:
+        # A quotient of two differently named series carries no name, and
+        # the stored column would be "value". Named after the artifact
+        # instead, so the frame a consumer resolves says what it holds.
+        data = data.rename(name)
+    return handoff.publish(
+        data,
+        kind,
+        run_id,
+        name,
+        producer=producer,
+        overwrite=True,
+    )
+
+
+def _account_state_refs(
+    raw: Dict[str, Any], run_id: Optional[str], producer: str
+) -> Dict[str, Optional[str]]:
+    """The four curves every shared-cash simulation builds, as references."""
+    return {
+        f"{curve}_ref": _publish_state(
+            raw.get(curve), "analytic_series", run_id, curve, producer
+        )
+        for curve in (
+            "cash_curve",
+            "gross_exposure_curve",
+            "net_exposure_curve",
+            "leverage_curve",
+        )
+    }
+
+
 logger = logging.getLogger(__name__)
 
 import numpy as np
@@ -404,13 +462,32 @@ def compare_strategies(input_data: CompareStrategiesInput) -> CompareStrategiesR
                 win_rate=bt.win_rate,
                 num_trades=bt.num_trades,
                 final_equity=bt.final_equity,
+                # Three metrics sort_by offers and this row did not carry.
+                # `getattr(c, sort_by, 0.0)` below returned the same 0.0 for
+                # every strategy, so ranking by any of them was a silent tie
+                # and the "best" was whichever ran first. The backtest has
+                # always computed all three.
+                annualized_volatility=bt.annualized_volatility,
+                profit_factor=bt.profit_factor,
+                avg_trade_return_pct=bt.avg_trade_return_pct,
             )
         )
 
-    # Higher is always better for all supported metrics (max_drawdown: -0.10 > -0.30)
+    # The direction follows the metric. Higher is better for a ratio, a
+    # return and a trade count, and for max_drawdown, which is a signed
+    # fraction at most zero here (-0.10 beats -0.30). It is backwards for
+    # a volatility, so `annualized_volatility` sorts ascending -- the same
+    # rule, from the same set, as every grid sort in this module.
+    lower_is_better = input_data.sort_by in _LOWER_IS_BETTER
     comparisons.sort(
-        key=lambda c: getattr(c, input_data.sort_by, 0.0),
-        reverse=True,
+        # A metric a run could not compute sorts last either way rather
+        # than winning a minimum by being absent.
+        key=lambda c: (
+            getattr(c, input_data.sort_by, None)
+            if getattr(c, input_data.sort_by, None) is not None
+            else (float("inf") if lower_is_better else float("-inf"))
+        ),
+        reverse=not lower_is_better,
     )
     logger.debug(
         "[compare_strategies] winner=%s  sharpe=%.3f  return=%.2f%%  vs B&H=%.2f%%",
@@ -961,6 +1038,16 @@ def run_walk_forward_backtest(input_data: WalkForwardInput) -> WalkForwardResult
         stitched_oos_sortino=round(stitched["sortino_ratio"], 4),
         stitched_oos_max_drawdown=round(stitched["max_drawdown"], 6),
         stitched_oos_calmar=round(stitched["calmar_ratio"], 4),
+        # The curve the five scalars above reduce. Five numbers cannot say
+        # whether the decay was one bad quarter or a steady bleed, and the
+        # curve was already built to compute them.
+        stitched_equity_curve_ref=_publish_state(
+            stitched.get("equity_curve"),
+            "equity_curve",
+            input_data.run_id,
+            "stitched_oos_equity_curve",
+            "backtest.run_walk_forward_backtest",
+        ),
         is_to_oos_sharpe_decay=round(avg_is_sharpe - stitched["sharpe_ratio"], 4),
         is_to_oos_return_decay=round(avg_is_return - stitched["total_return"], 6),
         worst_oos_window=worst_window.window_index,
@@ -1223,6 +1310,45 @@ def run_signal_panel_backtest(
         )
 
     portfolio_metrics_out = dict(raw["portfolio_metrics"])
+
+    # The blended return series the summary above is a reduction of. The
+    # library has always built it and this boundary has always dropped it,
+    # which left this the one backtest tool whose output could not be fed
+    # to anything on the return-consuming side of the surface -- not the
+    # metrics tool, not the bootstrap, not the regime detector. Published
+    # as a one-column `returns_panel` rather than a bespoke kind, because
+    # that is the kind those consumers already take.
+    portfolio_returns = raw.get("portfolio_returns")
+    portfolio_returns_ref = _publish_state(
+        (
+            portfolio_returns.to_frame(name="portfolio")
+            if isinstance(portfolio_returns, pd.Series)
+            else portfolio_returns
+        ),
+        "returns_panel",
+        input_data.run_id,
+        "portfolio_returns",
+        "backtest.run_signal_panel_backtest",
+    )
+
+    # Every per-ticker result carried the engine's caveats -- the
+    # fill_price='close' look-ahead warning above all -- and the portfolio
+    # result carried none, so the combined answer looked cleaner than any
+    # of its parts. One entry per distinct caveat: universe-wide when every
+    # ticker raised it, otherwise naming the ones that did.
+    raised_by: Dict[str, List[str]] = {}
+    for ticker in input_data.tickers:
+        for message in raw["per_ticker"][ticker].get("warnings", []):
+            raised_by.setdefault(str(message), []).append(ticker)
+    panel_warnings: List[str] = [
+        (
+            message
+            if len(names) == len(input_data.tickers)
+            else f"{', '.join(names)}: {message}"
+        )
+        for message, names in raised_by.items()
+    ]
+
     logger.debug(
         "[signal_panel_backtest] portfolio  sharpe=%.3f  return=%.2f%%",
         portfolio_metrics_out.get("sharpe_ratio", float("nan")),
@@ -1233,6 +1359,8 @@ def run_signal_panel_backtest(
         tickers=input_data.tickers,
         per_ticker=per_ticker,
         portfolio_metrics=portfolio_metrics_out,
+        portfolio_returns_ref=portfolio_returns_ref,
+        warnings=panel_warnings,
     )
 
 
@@ -1529,6 +1657,10 @@ def run_portfolio_simulation(
             n_positions=int(r["n_positions"]),
             n_capped=int(r.get("n_capped", 0) or 0),
             capped_notional=float(r.get("capped_notional", 0.0) or 0.0),
+            # The engine records WHICH tickers it sized down; only the
+            # count used to cross this boundary, so a run that traded
+            # three names short of target could not say which three.
+            capped=[str(t) for t in (r.get("capped") or [])],
         )
         for r in raw["rebalance_log"].to_dict(orient="records")
     ]
@@ -1569,6 +1701,31 @@ def run_portfolio_simulation(
         round(float(leverage_series.max()), 4) if not leverage_series.empty else 0.0
     )
 
+    # Net exposure as a fraction of that bar's equity, reduced to the three
+    # numbers that answer "did the book stay where it was built". Dollar
+    # neutrality is an INPUT here and was never an output: a book built
+    # neutral drifts as prices move, and no reported field moved with it.
+    # The curves are the engine's own, so this is a reduction rather than
+    # a second pass over the simulation.
+    net_series = raw["net_exposure_curve"] / raw["equity_curve"].where(
+        raw["equity_curve"].abs() > 1e-9, other=1e-9
+    )
+    net_series = net_series.replace([np.inf, -np.inf], np.nan).dropna()
+    net_exposure_min = float(net_series.min()) if not net_series.empty else None
+    net_exposure_max = float(net_series.max()) if not net_series.empty else None
+    net_exposure_mean = float(net_series.mean()) if not net_series.empty else None
+
+    state_refs = _account_state_refs(
+        raw, input_data.run_id, "backtest.run_portfolio_simulation"
+    )
+    portfolio_returns_ref = _publish_state(
+        returns.to_frame(name="portfolio"),
+        "returns_panel",
+        input_data.run_id,
+        "portfolio_returns",
+        "backtest.run_portfolio_simulation",
+    )
+
     logger.debug(
         "[portfolio_simulation] rebalances=%d  final_equity=%.2f  sharpe=%.3f  warnings=%s",
         len(rebalance_events),
@@ -1601,7 +1758,12 @@ def run_portfolio_simulation(
         avg_gross_leverage=avg_gross_leverage,
         max_gross_leverage_used=max_gross_leverage_used,
         equity_curve=equity_curve.tolist(),
+        net_exposure_min=net_exposure_min,
+        net_exposure_max=net_exposure_max,
+        net_exposure_mean=net_exposure_mean,
+        portfolio_returns_ref=portfolio_returns_ref,
         warnings=simulation_warnings,
+        **state_refs,
     )
 
 
@@ -1668,9 +1830,34 @@ def run_pair_trade_backtest(
             n_positions=int(r["n_positions"]),
             n_capped=int(r.get("n_capped", 0) or 0),
             capped_notional=float(r.get("capped_notional", 0.0) or 0.0),
+            # The engine records WHICH tickers it sized down; only the
+            # count used to cross this boundary, so a run that traded
+            # three names short of target could not say which three.
+            capped=[str(t) for t in (r.get("capped") or [])],
         )
         for r in raw["rebalance_log"].to_dict(orient="records")
     ]
+
+    # The state machine and the account's four curves, both built by the
+    # run and both dropped here. n_round_trips counts the transitions
+    # without saying when any of them happened, and a pair held through a
+    # spread that never reverted is indistinguishable from one that
+    # traded, on the scalars alone.
+    state_refs = _account_state_refs(
+        raw, input_data.run_id, "backtest.run_pair_trade_backtest"
+    )
+    state_series = raw.get("state")
+    state_ref = _publish_state(
+        (
+            state_series.rename("state")
+            if isinstance(state_series, pd.Series)
+            else state_series
+        ),
+        "analytic_series",
+        input_data.run_id,
+        "spread_state",
+        "backtest.run_pair_trade_backtest",
+    )
 
     logger.debug(
         "[pair_trade_backtest] rebalances=%d  round_trips=%d  final_equity=%.2f  sharpe=%.3f",
@@ -1704,7 +1891,9 @@ def run_pair_trade_backtest(
         final_equity=round(float(raw["final_equity"]), 2),
         final_cash=round(float(raw["final_cash"]), 2),
         equity_curve=equity_curve.tolist(),
+        state_ref=state_ref,
         warnings=list(raw["warnings"]),
+        **state_refs,
     )
 
 

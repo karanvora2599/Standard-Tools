@@ -877,7 +877,13 @@ class DatabentoProvider(DataProvider):
             out = out.head(int(limit))
         out = out.set_index("timestamp") if "timestamp" in out.columns else out
         _record(symbol, start_date, end_date, "trades", _dataset, out)
-        return out
+        # WHICH TAPE ANSWERED, on the frame, the way the bars path does it.
+        # The tick datasets are single-venue, so a volume here is that
+        # venue's share and not the market's -- and which venue it was is
+        # chosen by the request rather than by the caller.
+        return _with_attrs(
+            out, {"dataset": _dataset, "provider": "databento", "adjusted": False}
+        )
 
     def get_quotes(
         self,
@@ -900,7 +906,9 @@ class DatabentoProvider(DataProvider):
             out = out.head(int(limit))
         out = out.set_index("timestamp") if "timestamp" in out.columns else out
         _record(symbol, start_date, end_date, "quotes", _dataset, out)
-        return out
+        return _with_attrs(
+            out, {"dataset": _dataset, "provider": "databento", "adjusted": False}
+        )
 
     def get_order_book(
         self,
@@ -944,7 +952,9 @@ class DatabentoProvider(DataProvider):
         if limit is not None and len(out) > limit:
             out = out.head(int(limit))
         _record(symbol, start_date, end_date, f"mbp-10:{int(levels)}", _dataset, out)
-        return out
+        return _with_attrs(
+            out, {"dataset": _dataset, "provider": "databento", "adjusted": False}
+        )
 
     def get_order_events(
         self,
@@ -983,7 +993,9 @@ class DatabentoProvider(DataProvider):
         if limit is not None and len(out) > limit:
             out = out.head(int(limit))
         _record(symbol, start_date, end_date, "mbo", _dataset, out)
-        return out
+        return _with_attrs(
+            out, {"dataset": _dataset, "provider": "databento", "adjusted": False}
+        )
 
     def get_ticker_info(self, symbol: str) -> TickerInfo:
         """

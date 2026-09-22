@@ -90,6 +90,12 @@ def classify_divergence(
     the comparison: 0/0 and x/0 say nothing about scale, and letting them in
     would make the ratio wander for arithmetic reasons and mislabel a clean
     unit error as a definition difference.
+
+    ONE PAIR IS A SPECIAL CASE and the result says so: `left` and `right`
+    carry the two numbers themselves. Over a universe they are deliberately
+    absent, because a single pair picked out of fifty reads as the answer
+    and is a sample; with one entity there is nothing to sample from and the
+    values are the whole comparison.
     """
     if not pairs:
         return {
@@ -100,6 +106,7 @@ def classify_divergence(
 
     a = np.array([p[1] for p in pairs], dtype=float)
     b = np.array([p[2] for p in pairs], dtype=float)
+    single = {"left": float(a[0]), "right": float(b[0])} if len(pairs) == 1 else {}
 
     scale = np.maximum(np.abs(a), np.abs(b))
     relative = np.where(scale > 0, np.abs(a - b) / np.where(scale > 0, scale, 1), 0.0)
@@ -113,6 +120,7 @@ def classify_divergence(
             "max_relative_difference": max_relative,
             "median_relative_difference": median_relative,
             "detail": "the two sources agree to within rounding",
+            **single,
         }
 
     usable = (np.abs(a) > 0) & (np.abs(b) > 0)
@@ -137,6 +145,7 @@ def classify_divergence(
                 "first, which is a unit conversion rather than a "
                 "disagreement about the quantity"
             ),
+            **single,
         }
 
     return {
@@ -150,6 +159,7 @@ def classify_divergence(
             "the two sources are computing different quantities. No "
             "conversion exists -- pick one deliberately and record which"
         ),
+        **single,
     }
 
 
@@ -232,6 +242,17 @@ def _declared_notes(left, right, left_name, right_name) -> List[Dict[str, str]]:
 
 def _warnings(per_field, left_name, right_name, declared) -> List[str]:
     out: List[str] = []
+    if per_field and all(r["verdict"] == "no_overlap" for r in per_field):
+        # NOTHING WAS COMPARED, which is the one outcome that reads as a
+        # clean bill of health if it is not said out loud: every field
+        # comes back not-disagreeing because no field was checked.
+        out.append(
+            f"NOTHING WAS COMPARED: no entity reported any of the "
+            f"{len(per_field)} field(s) from BOTH {left_name} and "
+            f"{right_name}, so this result says the two sources were never "
+            "put side by side -- not that they agree. Check that both "
+            "payloads are keyed the same way and cover a common entity."
+        )
     for result in per_field:
         if result["verdict"] == "scale":
             out.append(
@@ -240,6 +261,21 @@ def _warnings(per_field, left_name, right_name, declared) -> List[str]:
                 "is a unit conversion, not a disagreement -- but ranking a "
                 "universe on a mix of the two would order it by which "
                 "provider answered."
+            )
+        elif result["verdict"] == "definition" and result["n_compared"] == 1:
+            # ONE ENTITY CANNOT TELL THE TWO APART. The scale test asks
+            # whether the ratio is CONSTANT, and a single pair has nothing
+            # to be constant across -- so the verdict falls through to
+            # `definition` on evidence that does not support it. Saying so
+            # is the difference between a finding and a coin toss.
+            out.append(
+                f"{result['field']}: {left_name} and {right_name} disagree "
+                "on the ONE entity they both report. A unit error and a "
+                "definition difference look identical on one entity -- the "
+                "scale test needs the ratio to be constant across several "
+                "-- so `definition` here means 'not shown to be a unit "
+                "conversion', not 'shown not to be'. Compare more names "
+                "before choosing a side."
             )
         elif result["verdict"] == "definition":
             out.append(

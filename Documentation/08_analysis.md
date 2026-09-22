@@ -248,6 +248,12 @@ print(json.dumps(payload, indent=2))
 
 ## Cointegration & Pairs Spread Analysis *(C++ / statsmodels)*
 
+The `run_kalman_hedge_ratio` tool publishes the Kalman path (hedge ratio,
+intercept, spread, gain) as an `analytic_frame` when `run_id` and `name`
+are given; the intercept column is all zero when no intercept was fitted,
+and the result says so.
+
+
 Two price series are **cointegrated** when a linear combination of them is stationary, even though each series individually follows a random walk. This is the statistical foundation of pairs trading.
 
 `cointegration_test` uses the **C++ extension** (`_sqt_core`) when available — a self-contained Engle-Granger implementation (OLS + ADF + MacKinnon 2010 response surface) with no dependency on `statsmodels`. The C++ path is **5–15× faster** on typical series lengths (n = 250–1 000). The statsmodels fallback is used automatically when the extension is not built; the API and return format are identical either way.
@@ -509,6 +515,13 @@ shorter sample.
 ---
 
 ## PCA on Returns
+
+The `run_pca_analysis` tool returns the full eigenvalue spectrum inline
+beside the truncated one and, with `run_id` and `name`, publishes the
+principal-component scores as a `returns_panel`, since they are factor
+returns and every returns-taking tool can read them. Its factor
+contributions come from the same decomposition as its loadings.
+
 
 `pca_returns` decomposes a multi-asset return matrix into orthogonal principal components (PCs) using full SVD — pure NumPy, no sklearn required. `factor_contributions` then quantifies how much each PC explains for each individual asset.
 
@@ -1082,7 +1095,7 @@ Both refuse a bar whose low is non-positive or whose high sits below its low, wi
 
 ## GARCH(1,1) Conditional Volatility
 
-`standard_quant_tools.analysis.garch` — fits a GARCH(1,1) model (today's variance depends on yesterday's shock and yesterday's variance) and forecasts it forward, unlike the realized-volatility estimators above which only describe past variance. The variance recursion is inherently sequential and numba-`@njit`'d (same tool `backtest.strategies`' state machines use — no native build step required); fitting is MLE via `scipy.optimize` (required — there's no meaningful scipy-free fallback for a maximum-likelihood fit). See [09_advanced_agent_tools.md, Tool 26](09_advanced_agent_tools.md) for the agent-tool wrapper (`run_garch_volatility_forecast`). The fit reports whether it removed the clustering it was fitted to remove: the standardized residuals' Ljung-Box statistics (raw and squared), their skew and excess kurtosis, and a `misspecified` verdict with a warning that `converged` is about the optimizer, not the model.
+`standard_quant_tools.analysis.garch` — fits a GARCH(1,1) model (today's variance depends on yesterday's shock and yesterday's variance) and forecasts it forward, unlike the realized-volatility estimators above which only describe past variance. The variance recursion is inherently sequential and numba-`@njit`'d (same tool `backtest.strategies`' state machines use — no native build step required); fitting is MLE via `scipy.optimize` (required — there's no meaningful scipy-free fallback for a maximum-likelihood fit). See [09_advanced_agent_tools.md, Tool 26](09_advanced_agent_tools.md) for the agent-tool wrapper (`run_garch_volatility_forecast`). The fit reports whether it removed the clustering it was fitted to remove: the standardized residuals' Ljung-Box statistics (raw and squared), their skew and excess kurtosis, and a `misspecified` verdict with a warning that `converged` is about the optimizer, not the model. With `run_id` and `name` the conditional volatility path is published as an `analytic_series` reference.
 
 ```python
 from standard_quant_tools.analysis.garch import garch_volatility_forecast

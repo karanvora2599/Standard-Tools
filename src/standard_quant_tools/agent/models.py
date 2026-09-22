@@ -495,6 +495,70 @@ class PortfolioOptimizationInput(BaseModel):
         return self
 
 
+class ViewAbsorption(BaseModel):
+    """How much of one Black-Litterman view the posterior actually took."""
+
+    view_index: int = Field(
+        ..., description="Position of this view in the `views` list, from 0."
+    )
+    stated: float = Field(
+        ..., description="What the view claimed the spread would be: Q[i]."
+    )
+    prior_spread: float = Field(
+        ...,
+        description="What the same combination of assets is worth under the "
+        "implied equilibrium, before the view: P[i] @ pi.",
+    )
+    posterior_spread: float = Field(
+        ..., description="What it is worth after blending: P[i] @ posterior."
+    )
+    absorbed_fraction: Stat = Field(
+        None,
+        description="(posterior - prior) / (stated - prior). 1.0 means the "
+        "posterior moved the whole way to the view, 0.0 that the view "
+        "changed nothing, and a value between says how much the confidence "
+        "and tau let through — the one number that says whether stating a "
+        "view did anything. Null when the view states the equilibrium "
+        "itself: there is no distance to cover, so no fraction of it.",
+    )
+
+
+class SolverReport(BaseModel):
+    """What the optimizer said about its own run."""
+
+    method: str = Field(
+        ...,
+        description="'SLSQP' for the constrained path, or 'closed_form' for "
+        "the unconstrained analytic solution, which runs no iterations.",
+    )
+    iterations: int = Field(
+        0, description="Major iterations. 0 on the closed-form path."
+    )
+    status: Optional[int] = Field(
+        None,
+        description="The solver's own exit code: 0 is success. Null on the "
+        "closed-form path and on an older scipy that does not report one.",
+    )
+    message: Optional[str] = Field(None, description="The solver's exit message.")
+    objective: Stat = Field(
+        None,
+        description="The scalar that was minimized, at the returned weights "
+        "— portfolio variance for min_volatility and target_return, the "
+        "negated Sharpe for max_sharpe, the negated return for "
+        "target_volatility.",
+    )
+    n_function_evals: Optional[int] = Field(
+        None, description="Objective evaluations, where the solver counts them."
+    )
+    multipliers: Optional[List[float]] = Field(
+        None,
+        description="Lagrange multipliers at the solution, where scipy "
+        "reports them: the shadow price of each constraint, so a binding "
+        "one is visible instead of being inferred from the weights. Null on "
+        "the closed-form path and on a scipy too old to return them.",
+    )
+
+
 class PortfolioOptimizationResult(BaseModel):
     tickers: List[str]
     method: str
@@ -502,10 +566,57 @@ class PortfolioOptimizationResult(BaseModel):
     expected_return: float
     expected_volatility: float
     sharpe_ratio: float
-    converged: bool
+    converged: bool = Field(
+        ...,
+        description="Whether the weights satisfy the constraints that were "
+        "requested, checked independently of what the solver said about "
+        "itself. `solver.status` is the solver's own opinion.",
+    )
     risk_contributions: Optional[Dict[str, float]] = Field(
         None,
         description="risk_parity only: fractional contribution to total variance per asset, sums to 1.",
+    )
+    solver: Optional[SolverReport] = Field(
+        None,
+        description="Mean-variance methods only: what the optimizer "
+        "reported about its own run. Null for risk_parity and "
+        "black_litterman, which do not go through it.",
+    )
+    condition_number: Stat = Field(
+        None,
+        description="Condition number of the annualized covariance that was "
+        "inverted. Mean-variance amplifies the inverse straight into the "
+        "weights, so a large value means two assets are nearly collinear "
+        "and the split between them is noise — a warning is raised above "
+        "1e10, and the number is here at every level so it can be compared "
+        "across universes rather than only noticed at the threshold.",
+    )
+    implied_equilibrium_returns: Optional[Dict[str, float]] = Field(
+        None,
+        description="black_litterman only: pi, the returns the market "
+        "weights already imply under the given risk aversion. This is the "
+        "prior the views are blended INTO, and without it there is no way "
+        "to see what a view moved.",
+    )
+    posterior_returns: Optional[Dict[str, float]] = Field(
+        None,
+        description="black_litterman only: the blended expected returns the "
+        "weights were solved from.",
+    )
+    posterior_volatilities: Optional[Dict[str, float]] = Field(
+        None,
+        description="black_litterman only: the square root of the posterior "
+        "covariance's diagonal, per asset. The posterior covariance is the "
+        "prior plus the estimation error of the blend, so these are wider "
+        "than the sample volatilities and are what the posterior Sharpe is "
+        "measured against.",
+    )
+    view_absorption: Optional[List[ViewAbsorption]] = Field(
+        None,
+        description="black_litterman only: one row per view, saying how far "
+        "the posterior moved toward it. Stating a view and reading only the "
+        "weights cannot distinguish a view that was taken from one that "
+        "tau and the confidence damped to nothing.",
     )
     warnings: List[str] = []
 
@@ -761,6 +872,18 @@ class KalmanHedgeRatioInput(BaseModel):
         gt=1,
         description="Rolling window (bars) for the spread z-score used to generate a signal.",
     )
+    run_id: Optional[str] = Field(
+        None,
+        description=(
+            "With `name`, publishes the filter's whole path as an "
+            "`analytic_frame` reference and returns it as `path_ref`. Both "
+            "or neither: one alone is refused, because a reference is "
+            "addressed by both."
+        ),
+    )
+    name: Optional[str] = Field(
+        None, description="Names the published path within the run. See `run_id`."
+    )
 
 
 class KalmanHedgeRatioResult(BaseModel):
@@ -774,6 +897,17 @@ class KalmanHedgeRatioResult(BaseModel):
     current_zscore: float
     signal: str  # "long_a_short_b" | "short_a_long_b" | "neutral"
     n_obs: int
+    path_ref: Optional[str] = Field(
+        None,
+        description=(
+            "`sqt://analytic_frame/...` for the filter's per-bar path: "
+            "`Hedge_Ratio`, `Intercept`, `Spread` and `Kalman_Gain`, one row "
+            "per aligned observation. Null unless `run_id` and `name` were "
+            "given. The six scalars above are the last row and its "
+            "dispersion; the drift between them is only visible here."
+        ),
+    )
+    warnings: List[str] = Field(default_factory=list)
 
 
 # ──────────────────────────────────────────────
@@ -815,6 +949,18 @@ class PCAInput(BaseModel):
     n_components: int = Field(
         3, description="Number of principal components to extract (default 3)."
     )
+    run_id: Optional[str] = Field(
+        None,
+        description=(
+            "With `name`, publishes the PC SCORES -- the factor return "
+            "series, one column per component -- as a `returns_panel` "
+            "reference and returns it as `factor_returns_ref`. Both or "
+            "neither: one alone is refused."
+        ),
+    )
+    name: Optional[str] = Field(
+        None, description="Names the published scores within the run. See `run_id`."
+    )
 
     @field_validator("n_components")
     @classmethod
@@ -834,6 +980,28 @@ class PCAResult(BaseModel):
     factor_contributions: Dict[
         str, Dict[str, float]
     ]  # {"AAPL": {"PC1": 0.38, ...}, ...}
+    explained_variance_ratio_full: List[Stat] = Field(
+        default_factory=list,
+        description=(
+            "The WHOLE spectrum in order, not just the `n_components` kept "
+            "above, so its entries sum to 1. `explained_variance_ratio` is "
+            "its prefix: without the rest there is no way to tell a third "
+            "component carrying 4% out of a remaining 6% from one carrying "
+            "4% out of a remaining 40%. Empty under "
+            "`method='power_iteration'`, which solves for the leading "
+            "components and never forms the rest -- ask for 'svd' to get it."
+        ),
+    )
+    factor_returns_ref: Optional[str] = Field(
+        None,
+        description=(
+            "`sqt://returns_panel/...` for the PC SCORES: one series per "
+            "component, on the returns' own dates. A score series IS a "
+            "return series, so it resolves into anything that scores "
+            "returns. Null unless `run_id` and `name` were given."
+        ),
+    )
+    warnings: List[str] = Field(default_factory=list)
 
 
 # ──────────────────────────────────────────────
@@ -1104,6 +1272,18 @@ class GarchVolatilityForecastInput(BaseModel):
     forecast_horizon: int = Field(
         10, gt=0, le=252, description="Periods ahead to forecast."
     )
+    run_id: Optional[str] = Field(
+        None,
+        description=(
+            "With `name`, publishes the FITTED conditional volatility path "
+            "-- one value per in-sample observation -- as an "
+            "`analytic_series` reference and returns it as "
+            "`conditional_vol_ref`. Both or neither: one alone is refused."
+        ),
+    )
+    name: Optional[str] = Field(
+        None, description="Names the published path within the run. See `run_id`."
+    )
 
 
 class GarchVolatilityForecastResult(BaseModel):
@@ -1165,6 +1345,17 @@ class GarchVolatilityForecastResult(BaseModel):
             "The squared-residual Ljung-Box p-value is below 0.05: the fitted "
             "model did not remove the volatility clustering it was fitted to "
             "remove. Independent of `converged`."
+        ),
+    )
+    conditional_vol_ref: Optional[str] = Field(
+        None,
+        description=(
+            "`sqt://analytic_series/...` for the fit's own conditional "
+            "volatility, one value per in-sample observation, in the "
+            "RETURNS' units and NOT annualized -- the square root of the "
+            "variance the recursion carries. `current_annualized_vol` is "
+            "its last value annualized; the path is where a volatility "
+            "regime is visible. Null unless `run_id` and `name` were given."
         ),
     )
     warnings: List[str] = Field(default_factory=list)
@@ -1408,6 +1599,17 @@ class WalkForwardInput(BaseModel):
         ),
     )
 
+    run_id: Optional[str] = Field(
+        None,
+        description=(
+            "Identifier for the saved artifacts. When supplied, the single "
+            "continuous out-of-sample equity curve — the one the five "
+            "stitched_oos_* scalars are computed from — is published under "
+            "it and returned as stitched_equity_curve_ref. Omit it and the "
+            "curve is built and discarded."
+        ),
+    )
+
     @field_validator("param_grid")
     @classmethod
     def _check_param_grid(cls, v: Dict[str, List[Any]]) -> Dict[str, List[Any]]:
@@ -1446,6 +1648,16 @@ class WalkForwardResult(BaseModel):
     stitched_oos_sortino: float
     stitched_oos_max_drawdown: float
     stitched_oos_calmar: float
+    stitched_equity_curve_ref: Optional[str] = Field(
+        None,
+        description=(
+            "An 'equity_curve' reference to the continuous out-of-sample "
+            "curve the five stitched_oos_* fields reduce — one capital "
+            "base across every window, window boundaries included as "
+            "ordinary bars. Five scalars cannot say WHEN the decay "
+            "happened; this can. Published only when run_id was given."
+        ),
+    )
     is_to_oos_sharpe_decay: float  # avg in-sample sharpe minus stitched OOS sharpe
     is_to_oos_return_decay: float  # avg in-sample return minus stitched OOS return
     worst_oos_window: int  # window_index with the lowest out_of_sample_return
@@ -1900,6 +2112,24 @@ class StrategyComparison(BaseModel):
     win_rate: float
     num_trades: int
     final_equity: float
+    # Three metrics sort_by offers that this row did not carry. Sorting on
+    # an absent attribute fell back to one constant for every strategy, so
+    # asking for the quietest or the most profitable comparison returned
+    # the four runs in whatever order they were produced and said nothing.
+    annualized_volatility: Stat = Field(
+        None,
+        description="Annualized standard deviation of the strategy's own "
+        "returns. Ranking by it sorts ASCENDING — the quietest first.",
+    )
+    profit_factor: Stat = Field(
+        None,
+        description="Gross profit over gross loss across this strategy's "
+        "closed trades.",
+    )
+    avg_trade_return_pct: Stat = Field(
+        None,
+        description="Mean return per closed trade, as a fraction.",
+    )
 
 
 class CompareStrategiesInput(BaseModel):
@@ -1937,8 +2167,13 @@ class CompareStrategiesInput(BaseModel):
     ] = Field(
         "sharpe_ratio",
         description=(
-            "Metric to rank strategies by. "
-            "Options: 'total_return', 'sharpe_ratio', 'sortino_ratio', 'calmar_ratio', 'max_drawdown'."
+            "Metric to rank strategies by (default: 'sharpe_ratio'). The "
+            "SORT DIRECTION follows the metric: 'annualized_volatility' "
+            "sorts ASCENDING, so the winner is the quietest strategy, and "
+            "every other choice sorts DESCENDING. That includes "
+            "'max_drawdown', which is a signed fraction at most zero here "
+            "(-0.10 ranks above -0.30), and 'num_trades', where the highest "
+            "count wins — it ranks activity, it does not penalise it."
         ),
     )
     sma_parameters: Optional[Dict[str, Any]] = Field(
@@ -2572,6 +2807,17 @@ class SignalPanelBacktestInput(BaseModel):
         ),
     )
 
+    run_id: Optional[str] = Field(
+        None,
+        description=(
+            "Identifier for the saved artifacts. When supplied, the blended "
+            "portfolio return series is published under it and returned as "
+            "portfolio_returns_ref, which every return-consuming tool on "
+            "this surface accepts. Omit it and the series is computed and "
+            "discarded, which is what this tool used to do unconditionally."
+        ),
+    )
+
     @model_validator(mode="after")
     def _check_panel_and_weights(self) -> "SignalPanelBacktestInput":
         # A reference carries the panel, so there is nothing to check yet.
@@ -2605,6 +2851,26 @@ class SignalPanelBacktestResult(BaseModel):
     tickers: List[str]
     per_ticker: Dict[str, BacktestResult]
     portfolio_metrics: Dict[str, Any]
+    portfolio_returns_ref: Optional[str] = Field(
+        None,
+        description=(
+            "A 'returns_panel' reference to the blended per-bar portfolio "
+            "return series, one column named 'portfolio'. Published only "
+            "when run_id was given. The summary above is a reduction of "
+            "exactly this series, and it was the only backtest output on "
+            "this surface that could not be fed to a return-consuming "
+            "tool -- calculate_series_metrics, the bootstrap, the "
+            "regime and stationarity tools all take it now."
+        ),
+    )
+    warnings: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Caveats the per-ticker engines raised about this run — the "
+            "fill_price='close' look-ahead warning above all, which this "
+            "result used to drop while every per-ticker entry carried it."
+        ),
+    )
 
 
 # ──────────────────────────────────────────────
@@ -2802,6 +3068,19 @@ class PortfolioSimulationInput(BaseModel):
         ),
     )
 
+    run_id: Optional[str] = Field(
+        None,
+        description=(
+            "Identifier for the saved artifacts. When supplied, the state "
+            "curves this simulation builds per bar -- cash, gross exposure, "
+            "net exposure, leverage, and the portfolio's own return series "
+            "-- are published under it and returned as the *_ref fields. "
+            "Omit it and only the inline summary comes back, which is what "
+            "this tool used to offer for state the engine had already "
+            "computed."
+        ),
+    )
+
     @model_validator(mode="after")
     def _check_weights_panel(self) -> "PortfolioSimulationInput":
         # A reference carries the panel, so there is nothing to validate
@@ -2850,9 +3129,26 @@ class PortfolioSimulationInput(BaseModel):
         # signal_type == TARGET_WEIGHT (default): today's exact validation.
         for date in next(iter(calendars), frozenset()):
             row = {t: self.target_weights[t][date] for t in self.tickers}
-            _validate_signal_values(
-                row, SignalType.TARGET_WEIGHT, self.max_position_pct
-            )
+            try:
+                _validate_signal_values(
+                    row, SignalType.TARGET_WEIGHT, self.max_position_pct
+                )
+            except ValueError as exc:
+                # The shared validator spells the bound `max_abs_weight`,
+                # which is not a field of THIS tool -- so the refusal named
+                # an argument the caller could not find, let alone raise.
+                # The number is `max_position_pct`, and the message says so.
+                raise ValueError(
+                    f"rebalance date {date}: {exc} The bound here is this "
+                    f"tool's max_position_pct={self.max_position_pct} "
+                    "('max_abs_weight' is the shared validator's spelling "
+                    "of the same number and is not an argument of this "
+                    "tool). Raise max_position_pct to the largest position "
+                    "you mean to hold, or pass the panel as "
+                    "signal_type='score', where a weight over the cap is "
+                    "this tool's own conversion and is clipped and named "
+                    "rather than refused."
+                ) from exc
             gross = sum(abs(v) for v in row.values())
             if gross > self.max_gross_leverage + 1e-9:
                 raise ValueError(
@@ -2878,6 +3174,13 @@ class RebalanceEvent(BaseModel):
         description="Dollar notional requested and not traded because of the "
         "cap, summed over this rebalance's capped trades.",
     )
+    capped: List[str] = Field(
+        default_factory=list,
+        description="WHICH tickers were sized down on this rebalance. The "
+        "engine has always recorded the names; only the count crossed the "
+        "boundary, so a run that traded three names short of its target "
+        "could not say which three. Empty when nothing was capped.",
+    )
 
 
 class PortfolioSimulationResult(BaseModel):
@@ -2899,6 +3202,63 @@ class PortfolioSimulationResult(BaseModel):
     avg_gross_leverage: float
     max_gross_leverage_used: float
     equity_curve: List[float]
+    # ── Net exposure, inline ─────────────────────────────────────────────
+    # The three numbers that answer "did the book stay where I built it".
+    # A dollar-neutral construction is an INPUT (make_dollar_neutral); a
+    # book built neutral drifts as prices move, and until these fields
+    # existed no output said by how much -- a measured run wandered from
+    # -12.8% to +7.6% of equity with every reported field unchanged.
+    # Reductions of net_exposure_curve_ref, so they cost no extra pass and
+    # need no dereference to read.
+    net_exposure_min: Stat = Field(
+        None,
+        description="Most negative (net short) exposure over the run, as a "
+        "fraction of that bar's equity. Negative means short overall.",
+    )
+    net_exposure_max: Stat = Field(
+        None,
+        description="Most positive (net long) exposure over the run, as a "
+        "fraction of that bar's equity.",
+    )
+    net_exposure_mean: Stat = Field(
+        None,
+        description="Average net exposure as a fraction of equity. Near "
+        "zero beside a large gross is what a dollar-neutral book looks "
+        "like when neutrality actually held.",
+    )
+    # ── The state curves ─────────────────────────────────────────────────
+    # All four are built bar by bar by the simulation and were discarded at
+    # this boundary. Published only when run_id was given; None otherwise.
+    cash_curve_ref: Optional[str] = Field(
+        None,
+        description="An 'analytic_series' reference to the cash balance per "
+        "bar. Published only when run_id was given.",
+    )
+    gross_exposure_curve_ref: Optional[str] = Field(
+        None,
+        description="An 'analytic_series' reference to sum(|position value|) "
+        "per bar, in currency. Published only when run_id was given.",
+    )
+    net_exposure_curve_ref: Optional[str] = Field(
+        None,
+        description="An 'analytic_series' reference to sum(position value) "
+        "per bar, in currency — the curve the three net_exposure_* scalars "
+        "reduce. Published only when run_id was given.",
+    )
+    leverage_curve_ref: Optional[str] = Field(
+        None,
+        description="An 'analytic_series' reference to gross exposure over "
+        "equity per bar. avg_gross_leverage and max_gross_leverage_used are "
+        "two points of it. Published only when run_id was given.",
+    )
+    portfolio_returns_ref: Optional[str] = Field(
+        None,
+        description="A 'returns_panel' reference to the account's own per-bar "
+        "return series, one column named 'portfolio', measured from the "
+        "pre-trade opening equity so a day-0 rebalance cost is in it. What "
+        "every return-consuming tool on this surface takes. Published only "
+        "when run_id was given.",
+    )
     warnings: List[str] = []
 
 
@@ -2973,6 +3333,17 @@ class PairTradeBacktestInput(BaseModel):
             "EXCESS return."
         ),
     )
+    run_id: Optional[str] = Field(
+        None,
+        description=(
+            "Identifier for the saved artifacts. When supplied, the spread "
+            "state machine (+1 long the spread, -1 short it, 0 flat, one "
+            "value per bar) and the account's four state curves are "
+            "published under it and returned as the *_ref fields. Omit it "
+            "and only the inline summary comes back — n_round_trips counts "
+            "the transitions without saying when any of them happened."
+        ),
+    )
 
 
 class PairTradeBacktestResult(BaseModel):
@@ -2994,6 +3365,35 @@ class PairTradeBacktestResult(BaseModel):
     final_equity: float
     final_cash: float
     equity_curve: List[float]
+    state_ref: Optional[str] = Field(
+        None,
+        description="An 'analytic_series' reference to the spread state per "
+        "bar: +1 long the spread (long symbol_a, short symbol_b), -1 short "
+        "it, 0 flat. The series the entry/exit thresholds actually produced, "
+        "which n_round_trips reduces to one integer. Published only when "
+        "run_id was given.",
+    )
+    cash_curve_ref: Optional[str] = Field(
+        None,
+        description="An 'analytic_series' reference to the cash balance per "
+        "bar. Published only when run_id was given.",
+    )
+    gross_exposure_curve_ref: Optional[str] = Field(
+        None,
+        description="An 'analytic_series' reference to sum(|leg value|) per "
+        "bar, in currency. Published only when run_id was given.",
+    )
+    net_exposure_curve_ref: Optional[str] = Field(
+        None,
+        description="An 'analytic_series' reference to sum(leg value) per "
+        "bar, in currency — for a hedged pair this is the residual the "
+        "hedge_ratio did not cancel. Published only when run_id was given.",
+    )
+    leverage_curve_ref: Optional[str] = Field(
+        None,
+        description="An 'analytic_series' reference to gross exposure over "
+        "equity per bar. Published only when run_id was given.",
+    )
     warnings: List[str] = []
 
 
@@ -3450,6 +3850,29 @@ class DataQualityReportInput(BaseModel):
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
+    source: Optional[str] = Field(
+        None,
+        description=(
+            "Data provider to fetch from; None uses the configured default. "
+            "This tool used to be able to quality-check one provider's data "
+            "only, which meant the feeds most worth checking -- a "
+            "single-venue tape, a vendor extract -- could never be checked "
+            "at all. An unknown name is refused and the legal ones named."
+        ),
+    )
+    calendar: str = Field(
+        "XNYS",
+        description=(
+            "Exchange calendar code that decides which sessions SHOULD have "
+            "a bar, as exchange_calendars spells it. XNYS is US equities; "
+            "XLON, XTKS and CMES are London, Tokyo and CME. This is not "
+            "cosmetic: a 2024 US equity frame reports no gaps against XNYS "
+            "and nine against XTKS, because the two exchanges do not trade "
+            "on the same days. A code the library does not recognize falls "
+            "back to weekdays rather than refusing, and every missing_bars "
+            "entry then carries basis=weekday, which is how to tell."
+        ),
+    )
     stale_run_length: int = Field(
         3,
         description="Minimum consecutive-identical-Close run length to flag as stale.",
@@ -3457,6 +3880,26 @@ class DataQualityReportInput(BaseModel):
     jump_threshold: float = Field(
         0.15,
         description="Fractional single-bar Close-to-Close move to flag as a jump (default 0.15 = 15%).",
+    )
+    volume_window: int = Field(
+        20,
+        gt=0,
+        description=(
+            "Trailing bars whose median volume a bar is judged thin " "against."
+        ),
+    )
+    thin_fraction: float = Field(
+        0.05,
+        gt=0,
+        le=1,
+        description=(
+            "Flag a bar whose volume is below this fraction of that "
+            "trailing median. The default is deliberately severe, so a feed "
+            "carrying a few percent of consolidated volume all the way "
+            "through looks normal -- it is thin CONSISTENTLY, not "
+            "occasionally. Raise it (0.5 with a short window) to ask "
+            "whether volume is thin relative to its own recent past."
+        ),
     )
 
 
@@ -3948,8 +4391,12 @@ class DataCapabilitiesInput(BaseModel):
     source: str = Field(
         "yfinance",
         description=(
-            "Provider to describe: 'yfinance', 'polygon', or 'bloomberg'. "
-            "Describing a provider does NOT fetch any market data."
+            "Provider to describe: 'yfinance', 'polygon', 'bloomberg' or "
+            "'databento'. Databento is the only one of them that serves "
+            "depth and order events, so leaving it unnamed here left the "
+            "provider that answers the depth question off the list of legal "
+            "values of the tool that exists to report coverage. Describing "
+            "a provider does NOT fetch any market data."
         ),
     )
 
@@ -3986,6 +4433,40 @@ class DataCapabilitiesResult(BaseModel):
             "provider='databento' serves."
         ),
     )
+    order_book: bool = Field(
+        False,
+        description=(
+            "L2 depth snapshots. The capability that actually separates "
+            "the providers: one of them serves it and the rest report a "
+            "book of one level whose imbalance is zero by construction, "
+            "which reads as a balanced market rather than as missing depth."
+        ),
+    )
+    order_events: bool = Field(
+        False,
+        description=(
+            "Market-by-order: every add, cancel, modify and fill with its "
+            "order id. The only feed from which queue position and a true "
+            "cancellation rate can be computed."
+        ),
+    )
+    point_in_time_records: bool = Field(
+        False,
+        description=(
+            "Records carrying the time each value BECAME KNOWABLE, not "
+            "just the date it describes. Without it a fundamentals join "
+            "uses numbers nobody had on the date it claims."
+        ),
+    )
+    temporal_contract: bool = Field(
+        False,
+        description=(
+            "Whether this provider declares its own availability contract "
+            "per frame kind rather than falling back to the base one. The "
+            "base default is honest but generic; an override is the "
+            "provider speaking for itself."
+        ),
+    )
     supported_intervals: Optional[List[str]] = Field(
         None, description="Bar intervals this provider accepts, if it declares a set."
     )
@@ -3998,6 +4479,31 @@ class DataCapabilitiesResult(BaseModel):
         ),
     )
     cache_dir: str = Field(..., description="Where the persistent OHLCV cache lives.")
+    cache_files: int = Field(
+        0,
+        description=(
+            "Parquet files in that directory. Zero for a directory that "
+            "does not exist yet, which is a cold cache and not an error."
+        ),
+    )
+    cache_bytes: int = Field(0, description="Their total size on disk.")
+    cache_generations: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Cache format versions present on disk, e.g. ['v2', 'v3']. More "
+            "than one means earlier-generation files are still occupying "
+            "space that nothing will ever read."
+        ),
+    )
+    cache_dead_files: int = Field(
+        0,
+        description=(
+            "How many of those files were written under an earlier format "
+            "and will never be read again. COUNTED, never removed: "
+            "`sqt cache gc` is the command that deletes them, and a tool "
+            "asked to describe something must not change it."
+        ),
+    )
     notes: List[str] = Field(default_factory=list)
 
 
@@ -4637,6 +5143,19 @@ class DataSourceRef(BaseModel):
     start_date: Optional[str] = None
     end_date: Optional[str] = None
     rows: Optional[int] = None
+    source: Optional[str] = Field(
+        None,
+        description=(
+            "Provider and vendor dataset, as the record wrote them -- "
+            "'databento:EQUS.MINI'. Which dataset answered can be "
+            "date-dependent, so two calls to one provider over different "
+            "windows can be answered by different feeds; this is the only "
+            "place that difference is recoverable after the fact."
+        ),
+    )
+    interval: Optional[str] = Field(
+        None, description="The bar interval that was read, as recorded."
+    )
     content_hash: Optional[str] = Field(
         None,
         description=(
@@ -5262,6 +5781,35 @@ class DescribeReferenceResult(BaseModel):
     columns: List[str]
     index_start: Optional[str] = None
     index_end: Optional[str] = None
+    dataset: Optional[str] = Field(
+        None,
+        description=(
+            "The vendor dataset the frame was fetched from, carried on the "
+            "frame itself and preserved through publication. A provider "
+            "that picks between feeds by date can answer one window from a "
+            "consolidated tape and an earlier one from a single-venue "
+            "sample; the rows look the same and this is what says which. "
+            "Null for a frame no provider stamped."
+        ),
+    )
+    provider: Optional[str] = Field(
+        None, description="Which provider served it, when the frame records it."
+    )
+    adjusted: Optional[bool] = Field(
+        None,
+        description=(
+            "Whether prices carry split and dividend adjustment. Null when "
+            "unrecorded, which is NOT the same as False."
+        ),
+    )
+    source: Optional[str] = Field(
+        None,
+        description=(
+            "Provider and dataset as one string, spelled the way the "
+            "decision record spells it, so a reference and an audit record "
+            "can be matched without re-deriving either."
+        ),
+    )
 
 
 class ReadReferenceInput(BaseModel):
@@ -6288,7 +6836,35 @@ class StationarityInput(BaseModel):
         description="'price' tests the level for a unit root — the usual "
         "question for a spread. 'returns' tests the increments.",
     )
-    lags: int = Field(1, ge=0, le=30, description="ADF augmentation lags.")
+    lags: int = Field(
+        1,
+        ge=0,
+        le=30,
+        description="ADF augmentation lags. This is the ADF test's lag only "
+        "— KPSS has its own, under `kpss_lags`.",
+    )
+    kpss_lags: Optional[int] = Field(
+        None,
+        ge=0,
+        le=100,
+        description="Bartlett-kernel bandwidth for the KPSS long-run "
+        "variance. None (the default) picks it from the data's own "
+        "persistence by the automatic Andrews (1991) rule, which is there "
+        "because the conventional 4*(n/100)^(1/4) rule over-rejects badly "
+        "on persistent series — measured at 23% on a stationary AR(1) with "
+        "phi=0.7 and 40% at phi=0.9, against a nominal 5%. Set it only to "
+        "reproduce a published number; `kpss_lags_used` reports what ran "
+        "either way.",
+    )
+    vr_periods: List[Annotated[int, Field(ge=2, le=252)]] = Field(
+        [2, 4, 8],
+        min_length=1,
+        max_length=12,
+        description="Aggregation horizons for the Lo-MacKinlay variance "
+        "ratio, one row of `variance_ratios` per horizon. A horizon needs "
+        "at least four times its own length in returns, and one that does "
+        "not have them is skipped rather than reported.",
+    )
 
 
 class VarianceRatio(BaseModel):
@@ -6307,6 +6883,19 @@ class StationarityResult(BaseModel):
     kpss_statistic: Optional[float] = None
     kpss_critical_5pct: float
     kpss_rejects_stationarity: bool
+    kpss_lags_used: int = Field(
+        0,
+        description="The Bartlett bandwidth the KPSS statistic above was "
+        "actually computed at, after the clamp to [0, n-1]. The statistic "
+        "is not comparable across bandwidths, so a KPSS number without this "
+        "cannot be reproduced or argued with.",
+    )
+    kpss_lags_source: Literal["andrews", "caller"] = Field(
+        "andrews",
+        description="'andrews' means the bandwidth was chosen from the "
+        "data's own persistence; 'caller' means `kpss_lags` was supplied "
+        "and the automatic rule did not run.",
+    )
     variance_ratios: List[VarianceRatio] = Field(default_factory=list)
     verdict: str = Field(
         ...,
@@ -6325,6 +6914,17 @@ class RegimeDetectionInput(BaseModel):
     start_date: str
     end_date: str
     n_regimes: int = Field(2, ge=2, le=5)
+    run_id: Optional[str] = Field(
+        None,
+        description=(
+            "With `name`, publishes the PER-OBSERVATION labels as an "
+            "`analytic_series` reference and returns it as `labels_ref`. "
+            "Both or neither: one alone is refused."
+        ),
+    )
+    name: Optional[str] = Field(
+        None, description="Names the published labels within the run. See `run_id`."
+    )
 
 
 class Regime(BaseModel):
@@ -6348,4 +6948,15 @@ class RegimeDetectionResult(BaseModel):
         "hidden Markov model would smooth.",
     )
     n_switches: int
+    labels_ref: Optional[str] = Field(
+        None,
+        description=(
+            "`sqt://analytic_series/...` for the regime label of every "
+            "observation, an integer 0..n_regimes-1 on the series' own "
+            "dates, sorted so 0 is always the calm one. `current_regime` is "
+            "its last value and `n_switches` counts its changes; WHEN the "
+            "changes happened is only here. Null unless `run_id` and `name` "
+            "were given."
+        ),
+    )
     warnings: List[str] = Field(default_factory=list)

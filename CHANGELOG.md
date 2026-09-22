@@ -1,5 +1,60 @@
 # Changelog
 
+## What was computed and thrown away is published or returned
+
+The dominant finding across every runtime was a series computed and
+collapsed to a scalar: a backtest builds four or five daily state curves
+and ships one, a rolling Sharpe ships four summary numbers, a Kalman
+hedge ships six scalars off an 875-row path. Two reference kinds and a
+`run_id` on the tools that had none make them retrievable, opt in.
+
+- **Two new reference kinds**, `analytic_series` (one date-indexed
+  column) and `analytic_frame`, beside the fourteen that existed; a
+  single return series stays a one-column `returns_panel`, so any
+  return-consuming tool reads it.
+- **The backtest state curves.** `run_portfolio_simulation` publishes
+  cash, gross exposure, net exposure and leverage and reports the net
+  exposure's minimum, maximum and mean inline, so a dollar-neutral book
+  that drifted from minus thirteen to plus eight percent finally says
+  so; each rebalance names the tickers the participation cap hit. The
+  futures backtest publishes its cash, margin, position, exposure and
+  leverage curves and reports the minimum margin cushion, which
+  separates comfortably margined from one tick away with zero margin
+  calls either way. The pair backtest publishes its spread state
+  machine. The signal-panel backtest publishes its portfolio returns,
+  the one backtest output that could feed no return-consuming tool.
+  The walk-forward backtest publishes its stitched curve.
+- **The research series.** The rolling Sharpe, the GARCH conditional
+  volatility, the regime labels, the Kalman path with its gain, the PC
+  scores (as a returns panel), the Amihud rolling series and the basis
+  history are published on request; the full eigenvalue spectrum is
+  returned inline.
+- **Black-Litterman returns the reason.** The implied equilibrium
+  returns, the posterior returns and volatilities, and per view how much
+  of the stated spread the posterior absorbed, the one number that says
+  whether the view did anything. The optimizer reports its solver's
+  iterations, status, objective and multipliers, and the covariance
+  condition number as a number rather than a sentence above a threshold.
+- **The stationarity composite** exposes `kpss_lags` and `vr_periods`
+  and reports the bandwidth Andrews chose.
+- **The data layer says which tape answered.** Every fetch result,
+  `describe_reference` and `explain_decision`'s data sources carry the
+  vendor dataset, the provider and whether the bars are adjusted, read
+  from the frame the handler already held; below 2024-07-01 the daily
+  feed is a sample carrying a few percent of consolidated volume, and
+  nothing used to say so. `describe_data_capabilities` reports depth,
+  order events, point-in-time records and the temporal contract per
+  provider, names databento as a legal source, and reports the cache's
+  size and dead generation count. The dataset metadata's notes reach
+  the agent. The quality report takes a source, a calendar and the
+  volume-anomaly knobs, and its two sentences claiming it had no
+  holiday calendar are gone. A data bundle refuses a reference whose
+  kind contradicts its declared frame kind. The ratio comparison reads
+  the keys the library emits, reports the conversion ratio, counts no
+  overlap as silence rather than disagreement, and accepts its sibling
+  tool's shape, so two identical inputs no longer disagree on every
+  field.
+
 ## Answers that were wrong while looking right say what they are
 
 None of these adds a tool. Each is a field the library computed and the

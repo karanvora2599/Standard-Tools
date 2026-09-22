@@ -51,7 +51,7 @@ Two things genuinely did not exist anywhere and had to be written:
 |---|---|
 | `analyze_cash_futures_basis` | Is this future rich, and which carry component explains it |
 | `solve_forward_carry` | What financing / dividend / borrow does this quote imply |
-| `analyze_basis_history` | Is this basis wide *for this name* |
+| `analyze_basis_history` | Is this basis wide *for this name*; with `run_id` and `name` the basis, its annualized form and its z-scores are published as an `analytic_frame` |
 | `analyze_futures_curve` | What does the term structure look like, and what does a calendar spread price *(`curve_curvature` is null below FOUR contracts: a second difference needs three carries and three contracts give two)* |
 | `analyze_roll` | What does moving this position to the next contract cost | *(roll yield is annualized over the gap BETWEEN the two expiries, so it needs `days_between_expiries`; without it that field is null rather than annualized over the wrong period. `spread_ticks` needs `tick_value` to become a cost and is refused without it — at the old default of zero the bid-ask crossed on both legs was charged as nothing, 83% of the spread cost on a live roll)* Takes a `day_count` and names it: ACT/360 against ACT/365F moves a quarterly roll yield by about 1.4%
 | `size_futures_hedge` | How many contracts, and what does rounding leave behind |

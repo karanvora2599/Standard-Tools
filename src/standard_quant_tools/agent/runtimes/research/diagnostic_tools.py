@@ -30,6 +30,8 @@ from standard_quant_tools.agent.runtimes._json_safe import (
 from standard_quant_tools.analysis import diagnostics as lib
 from standard_quant_tools.error import ValidationError
 
+from .._optional_ref import publish_if_requested as _publish_if_requested
+
 logger = logging.getLogger(__name__)
 Stat = Annotated[Optional[float], BeforeValidator(_finite_or_none)]
 
@@ -118,6 +120,18 @@ class SharpeStabilityInput(BaseModel):
         252, ge=20, description="Rolling window, for the displayed series."
     )
     periods_per_year: int = Field(252, ge=1)
+    run_id: Optional[str] = Field(
+        None,
+        description=(
+            "With `name`, publishes the rolling Sharpe series itself as an "
+            "`analytic_series` reference and returns it as "
+            "`rolling_sharpe_ref`. Both or neither: one alone is refused, "
+            "because a reference is addressed by both."
+        ),
+    )
+    name: Optional[str] = Field(
+        None, description="Names the published series within the run. See `run_id`."
+    )
 
 
 class DrawdownProfileInput(BaseModel):
@@ -258,6 +272,13 @@ class SharpeStabilityResult(_Result):
     trend_per_year: Stat = None
     n_blocks: int = 0
     fraction_of_windows_positive: Stat = None
+    rolling_sharpe_ref: Optional[str] = Field(
+        None,
+        description="`sqt://analytic_series/...` for the rolling series "
+        "itself, one annualized Sharpe per window. The twenty-one scalars "
+        "above summarize it; WHEN it was above and below zero is only "
+        "visible here. Null unless `run_id` and `name` were given.",
+    )
 
 
 class DrawdownEpisode(BaseModel):
@@ -369,9 +390,18 @@ def get_sharpe_stability(input_data: SharpeStabilityInput) -> SharpeStabilityRes
     # extra="allow", so splatting it would put one float per window inline
     # in the payload -- hundreds of numbers whose summary is already in the
     # twenty-one scalars beside them. Dropped here rather than in the
-    # library, where the series is the point.
-    computed.pop("rolling_sharpe", None)
-    return SharpeStabilityResult(**computed)
+    # library, where the series is the point -- and PUBLISHED instead when
+    # the caller asked for it, so "too big to inline" stopped meaning
+    # "unobtainable".
+    rolling = computed.pop("rolling_sharpe", None)
+    ref = _publish_if_requested(
+        rolling,
+        kind="analytic_series",
+        run_id=input_data.run_id,
+        name=input_data.name,
+        producer="research.get_sharpe_stability",
+    )
+    return SharpeStabilityResult(**computed, rolling_sharpe_ref=ref)
 
 
 def get_drawdown_profile(input_data: DrawdownProfileInput) -> DrawdownProfileResult:

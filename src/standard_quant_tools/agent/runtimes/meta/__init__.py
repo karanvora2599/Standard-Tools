@@ -141,7 +141,7 @@ TOOL_DEFS = [
     ),
     (
         "describe_data_capabilities",
-        "What a data provider can serve — tick trades, top-of-book quotes, async OHLCV, supported intervals, and its adjusted/survivorship/point-in-time guarantees. Fetches no market data. Call this before a tool that needs a capability the active provider may not have.",
+        "What a data provider can serve — tick trades, top-of-book quotes, L2 depth, order events, point-in-time records, its own temporal contract, async OHLCV, supported intervals, and its adjusted/survivorship/point-in-time guarantees. Also reports the persistent cache: how many files, how large, and how many were written under a format version nothing reads any more (counted, never deleted). Fetches no market data. Call this before a tool that needs a capability the active provider may not have — depth and order events are served by one provider only, and point-in-time records by a different one.",
         DataCapabilitiesInput,
     ),
 ]

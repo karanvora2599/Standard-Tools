@@ -41,6 +41,8 @@ from standard_quant_tools.agent.runtimes._json_safe import (
 from standard_quant_tools.analysis import microstructure_estimators as lib
 from standard_quant_tools.error import ValidationError
 
+from .._optional_ref import publish_if_requested as _publish_if_requested
+
 logger = logging.getLogger(__name__)
 Stat = Annotated[Optional[float], BeforeValidator(_finite_or_none)]
 
@@ -133,6 +135,18 @@ class AmihudInput(BaseModel):
     close: List[float] = Field(..., min_length=30)
     volume: List[float] = Field(..., min_length=30)
     window: int = Field(21, ge=2, description="Averaging window, in bars.")
+    run_id: Optional[str] = Field(
+        None,
+        description=(
+            "With `name`, publishes the rolling illiquidity series itself "
+            "as an `analytic_series` reference and returns it as "
+            "`rolling_ref`. Both or neither: one alone is refused, because "
+            "a reference is addressed by both."
+        ),
+    )
+    name: Optional[str] = Field(
+        None, description="Names the published series within the run. See `run_id`."
+    )
 
 
 class KyleLambdaInput(BaseModel):
@@ -326,6 +340,14 @@ class AmihudResult(_Result):
     trend_pct: Stat = None
     scaling: str = "1e6"
     mean_dollar_volume: Stat = None
+    rolling_ref: Optional[str] = Field(
+        None,
+        description="`sqt://analytic_series/...` for the rolling ratio "
+        "itself, `n_observations - window + 1` values. `current_percentile` "
+        "and `trend_pct` are both comparisons within this series, and "
+        "neither can be checked without it. Null unless `run_id` and "
+        "`name` were given.",
+    )
 
 
 class KyleRolling(BaseModel):
@@ -444,7 +466,19 @@ def get_amihud_illiquidity(input_data: AmihudInput) -> AmihudResult:
     frame = _ohlcv(
         "get_amihud_illiquidity", close=input_data.close, volume=input_data.volume
     )
-    return AmihudResult(**lib.amihud_illiquidity(frame, window=input_data.window))
+    computed = lib.amihud_illiquidity(frame, window=input_data.window)
+    # This result model is extra="allow", so splatting the series would put
+    # one float per bar inline beside the numbers that summarize it.
+    # Published instead when the caller asked for it.
+    rolling = computed.pop("rolling", None)
+    ref = _publish_if_requested(
+        rolling,
+        kind="analytic_series",
+        run_id=input_data.run_id,
+        name=input_data.name,
+        producer="microstructure.get_amihud_illiquidity",
+    )
+    return AmihudResult(**computed, rolling_ref=ref)
 
 
 def estimate_kyle_lambda(input_data: KyleLambdaInput) -> KyleLambdaResult:

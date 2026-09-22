@@ -14,16 +14,56 @@ engine exists to break.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Literal, Optional
+from typing import Annotated, Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
+from standard_quant_tools.agent.runtimes._json_safe import (
+    finite_or_none as _finite_or_none,
+)
 from standard_quant_tools.backtest.futures_engine import run_futures_simulation
 from standard_quant_tools.backtest.futures_hedge_backtest import (
     run_futures_hedge_backtest as _run_futures_hedge_backtest,
 )
 
 logger = logging.getLogger(__name__)
+Stat = Annotated[Optional[float], BeforeValidator(_finite_or_none)]
+
+
+def _publish_state(
+    data: Any,
+    run_id: Optional[str],
+    name: str,
+) -> Optional[str]:
+    """
+    Publish one per-bar curve this simulation built, or return None.
+
+    Opt-in, like every state curve on this surface: the scalars answer the
+    question and the curve is the evidence behind them, so a caller who
+    wants the evidence passes a run_id and a caller who does not pays
+    nothing. `overwrite=True` because the NAME belongs to this library
+    rather than the caller -- re-running under one run_id replaces that
+    run's own curve instead of colliding with another agent's artifact.
+    """
+    if run_id is None or data is None or len(data) == 0:
+        return None
+    from standard_quant_tools.agent.runtimes import handoff
+
+    if getattr(data, "name", None) is None:
+        # The leverage curve is a quotient of two differently named series,
+        # so pandas hands it no name and the stored column would be
+        # "value". Named after the artifact instead, so the frame a
+        # consumer resolves says what it holds.
+        data = data.rename(name)
+    return handoff.publish(
+        data,
+        "analytic_series",
+        run_id,
+        name,
+        producer="backtest.run_futures_backtest",
+        overwrite=True,
+    )
+
 
 __all__ = [
     "FUTURES_TOOL_CATEGORY",
@@ -98,6 +138,15 @@ class FuturesBacktestInput(BaseModel):
         "day's variation margin is skipped (and the result says so); with "
         "it the old contract's move is booked before the roll.",
     )
+    run_id: Optional[str] = Field(
+        None,
+        description="Identifier for the saved artifacts. When supplied, the "
+        "five curves this simulation builds per bar -- cash, posted margin, "
+        "contracts held, economic exposure and leverage -- are published "
+        "under it and returned as the *_ref fields. Omit it and only the "
+        "inline summary comes back, which cannot tell a comfortably "
+        "margined quarter from one spent a tick from a call.",
+    )
 
 
 class FuturesBacktestResult(BaseModel):
@@ -147,6 +196,47 @@ class FuturesBacktestResult(BaseModel):
     equity_curve: Dict[str, float] = Field(
         default_factory=dict, description="Cash plus posted margin, by date."
     )
+    min_margin_cushion: Stat = Field(
+        None,
+        description="The narrowest the account ever got to a margin call: "
+        "min over bars of (equity - maintenance required) / equity, where "
+        "the requirement is |contracts| x maintenance_margin. 0.05 means "
+        "that at its worst the account was 5% of its equity from a forced "
+        "reduction. n_margin_calls = 0 says only that the line was never "
+        "crossed; this says by how much. None when maintenance margin is "
+        "zero -- an unmargined account has no line to be near, and the "
+        "warnings say so.",
+    )
+    cash_curve_ref: Optional[str] = Field(
+        None,
+        description="An 'analytic_series' reference to the cash balance per "
+        "bar, which for a futures account is most of the equity. Published "
+        "only when run_id was given.",
+    )
+    margin_curve_ref: Optional[str] = Field(
+        None,
+        description="An 'analytic_series' reference to margin POSTED per "
+        "bar. Published only when run_id was given.",
+    )
+    position_curve_ref: Optional[str] = Field(
+        None,
+        description="An 'analytic_series' reference to signed contracts held "
+        "per bar -- what the account actually carried, as opposed to what "
+        "target_contracts asked for on the bars margin would not allow. "
+        "Published only when run_id was given.",
+    )
+    exposure_curve_ref: Optional[str] = Field(
+        None,
+        description="An 'analytic_series' reference to economic exposure per "
+        "bar, in currency; peak_exposure is one point of it. Published only "
+        "when run_id was given.",
+    )
+    leverage_curve_ref: Optional[str] = Field(
+        None,
+        description="An 'analytic_series' reference to exposure over equity "
+        "per bar; max_leverage is one point of it. Published only when "
+        "run_id was given.",
+    )
     warnings: List[str] = Field(
         default_factory=list,
         description="What this result knows that the numbers do not say.",
@@ -168,6 +258,30 @@ def run_futures_backtest(input_data: FuturesBacktestInput) -> FuturesBacktestRes
         allow_fractional=input_data.allow_fractional,
         roll_day_prior_prices=input_data.roll_day_prior_prices,
     )
+
+    # How close the account ever came to a forced reduction. The engine
+    # tests `equity < |contracts| * maintenance_margin` on every bar and
+    # reports only whether that ever fired, so a run that spent a quarter a
+    # tick above the line and a run that never went near it both reported
+    # n_margin_calls = 0. maintenance_margin defaults to initial_margin,
+    # exactly as the engine defaults it.
+    maintenance = (
+        input_data.initial_margin
+        if input_data.maintenance_margin is None
+        else input_data.maintenance_margin
+    )
+    min_margin_cushion: Optional[float] = None
+    if maintenance > 0:
+        equity = out["equity_curve"]
+        required = out["position_curve"].abs() * maintenance
+        # Only over bars where equity is positive: past that the account is
+        # gone, and a ratio to a non-positive equity is not a cushion.
+        solvent = equity[equity > 0]
+        if not solvent.empty:
+            cushion = (solvent - required.loc[solvent.index]) / solvent
+            min_margin_cushion = float(cushion.min())
+
+    run_id = input_data.run_id
     return FuturesBacktestResult(
         initial_capital=out["initial_capital"],
         final_equity=out["final_equity"],
@@ -188,6 +302,18 @@ def run_futures_backtest(input_data: FuturesBacktestInput) -> FuturesBacktestRes
         rolls=out["rolls"],
         margin_limited_fills=out["margin_limited_fills"],
         equity_curve={str(k.date()): float(v) for k, v in out["equity_curve"].items()},
+        min_margin_cushion=min_margin_cushion,
+        cash_curve_ref=_publish_state(out["cash_curve"], run_id, "cash_curve"),
+        margin_curve_ref=_publish_state(out["margin_curve"], run_id, "margin_curve"),
+        position_curve_ref=_publish_state(
+            out["position_curve"], run_id, "position_curve"
+        ),
+        exposure_curve_ref=_publish_state(
+            out["exposure_curve"], run_id, "exposure_curve"
+        ),
+        leverage_curve_ref=_publish_state(
+            out["leverage_curve"], run_id, "leverage_curve"
+        ),
         warnings=out["warnings"],
     )
 

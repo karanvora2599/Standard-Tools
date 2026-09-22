@@ -291,20 +291,20 @@ vendor normalizer produces one.
 
 | Tool | Answers |
 |---|---|
-| `fetch_ohlcv` | One symbol's bars, as a `price_panel` reference |
+| `fetch_ohlcv` | One symbol's bars, as a `price_panel` reference, carrying the vendor `dataset`, the `provider` and whether the bars are `adjusted`, read from the frame; below 2024-07-01 the Databento daily feed is a sample, and the result says which feed answered |
 | `fetch_ohlcv_panel` | A universe's bars, stacked long with an `entity` column |
 | `fetch_returns_panel` | A wide date-by-ticker return frame, ready for panel analysis |
 | `fetch_tick_tape` | Individual trades, for measuring rather than estimating |
 | `fetch_quote_panel` | Top-of-book quotes, what Lee-Ready signing needs |
 | `fetch_financial_ratios` | A company's ratios, with implausible values flagged |
-| `get_dataset_metadata` | What the provider guarantees: adjusted, survivorship, point-in-time |
+| `get_dataset_metadata` | What the provider guarantees: adjusted, survivorship, point-in-time; carries the provider's `notes`, where Databento names its sampling |
 | `infer_temporal_contract` | What a frame's own columns imply about timing |
 | `build_continuous_futures_series` | Stitch a futures chain into one series, returning the back-adjusted research series and the tradeable contract map SEPARATELY -- an adjusted price is fine for indicators and is not a price anyone could have traded |
-| `build_data_bundle` | Name several published frames as one unit |
+| `build_data_bundle` | Name several published frames as one unit; a reference whose handoff kind contradicts its declared frame kind is refused naming both |
 | `describe_data_bundle` | What a bundle contains and what its sources promise |
 | `validate_data_bundle` | Is this safe to model on, and what blocks it |
 | `validate_financial_ratios` | Check ratios you already hold, without fetching |
-| `compare_ratio_frames` | Two sources side by side, each gap classified |
+| `compare_ratio_frames` | Two sources side by side, each gap classified; reads the keys the classifier emits, reports the conversion `ratio`, counts `no_overlap` as silence rather than disagreement, and accepts `fetch_financial_ratios`' own shape |
 | `prepare_vendor_extract` | Convert a raw vendor export into this library's contract, reporting the judgements that change the numbers |
 | `register_external_dataset` | Make a file you already hold resolvable, without copying it |
 | `describe_external_dataset` | Its schema and size, and whether it changed since registration |

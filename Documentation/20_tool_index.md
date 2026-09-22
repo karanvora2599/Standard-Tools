@@ -33,13 +33,13 @@ advertises 155 of the 228 below.
 
 | Runtime | Tools | Schema cost | Categories | Deep documentation |
 |---|---:|---:|---|---|
-| `research` | 42 | 49 KB | `screener`, `analysis`, `quant_research` | [08_analysis.md](08_analysis.md), [23_inference.md](23_inference.md) |
+| `research` | 42 | 53 KB | `screener`, `analysis`, `quant_research` | [08_analysis.md](08_analysis.md), [23_inference.md](23_inference.md) |
 | `modeling` | 37 | 171 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
-| `backtest` | 35 | 83 KB | `backtest_execution`, `backtest_validation`, `custom_signal` | [04_backtesting.md](04_backtesting.md), [24_overfitting.md](24_overfitting.md) |
-| `meta` | 20 | 17 KB | `discovery`, `provenance` | [27_meta.md](27_meta.md), [10_auditability.md](10_auditability.md) |
+| `backtest` | 35 | 86 KB | `backtest_execution`, `backtest_validation`, `custom_signal` | [04_backtesting.md](04_backtesting.md), [24_overfitting.md](24_overfitting.md) |
+| `meta` | 20 | 18 KB | `discovery`, `provenance` | [27_meta.md](27_meta.md), [10_auditability.md](10_auditability.md) |
 | `data` | 18 | 25 KB | *(one surface)* | [26_data.md](26_data.md) |
 | `portfolio` | 18 | 33 KB | `portfolio_risk` | [05_portfolio.md](05_portfolio.md) |
-| `delta_one` | 18 | 42 KB | *(one surface)* | [28_delta_one.md](28_delta_one.md) |
+| `delta_one` | 18 | 43 KB | *(one surface)* | [28_delta_one.md](28_delta_one.md) |
 | `microstructure` | 17 | 27 KB | *(one surface)* | [22_microstructure.md](22_microstructure.md) |
 | `derivatives` | 12 | 21 KB | *(one surface)* | [21_derivatives.md](21_derivatives.md) |
 | `feature_lab` | 11 | 38 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
@@ -86,7 +86,7 @@ Compute Parabolic SAR (trend), Wilder ATR (volatility), and MFI (volume-flow osc
 Dataset provenance (adjusted/survivorship-free/point-in-time guarantees) plus missing-bar/stale-price/price-jump detection on a symbol's OHLCV.
 
 **Required:** `symbol`, `start_date`, `end_date`  
-**Optional:** `stale_run_length`, `jump_threshold`
+**Optional:** `source`, `calendar`, `stale_run_length`, `jump_threshold`, `volume_window`, `thin_fraction`
 
 #### `get_extended_risk_metrics`
 
@@ -149,7 +149,7 @@ Realized volatility via Parkinson, Garman-Klass, and Yang-Zhang estimators vs. p
 GARCH(1,1) conditional volatility: fits how variance evolves over time and forecasts it forward, unlike get_volatility_estimators' backward-looking realized estimates.
 
 **Required:** `symbol`, `start_date`, `end_date`  
-**Optional:** `forecast_horizon`
+**Optional:** `forecast_horizon`, `run_id`, `name`
 
 ### `quant_research`
 
@@ -186,7 +186,7 @@ When the process generating a series CHANGED, by binary segmentation on the mean
 Label each observation with a volatility regime, by a Gaussian mixture. A MIXTURE rather than a hidden Markov model: it has no transition matrix, so it flips on single observations where an HMM would smooth, and `persistence` reports how often it does -- below about 0.8 the labels describe noise. Regimes come back sorted by volatility so regime 0 is always the calm one.
 
 **Required:** `symbol`, `start_date`, `end_date`  
-**Optional:** `n_regimes`
+**Optional:** `n_regimes`, `run_id`, `name`
 
 #### `estimate_tail_index`
 
@@ -248,7 +248,7 @@ The correlation between two assets once the common drivers are removed from BOTH
 Whether the edge DECAYED, or the full-sample Sharpe is the average of a good period and a dead one. A Sharpe of 1.0 made of 2.0 in the first half and 0.0 in the second is arithmetically correct and describes a dead strategy -- and the second half is the half that predicts tomorrow. The p-value comes from comparing two NON-OVERLAPPING halves, not from a regression on the rolling series, because consecutive rolling windows share all but one observation and cannot support inference.
 
 **Required:** `returns`  
-**Optional:** `window`, `periods_per_year`
+**Optional:** `window`, `periods_per_year`, `run_id`, `name`
 
 #### `run_cointegration_test`
 
@@ -276,14 +276,14 @@ Hurst exponent (DFA/R-S): regime classification and optional rolling breakdown.
 Time-varying hedge ratio via a Kalman filter — a staleness diagnostic companion to run_cointegration_test's static OLS hedge ratio.
 
 **Required:** `symbol_a`, `symbol_b`, `start_date`, `end_date`  
-**Optional:** `observation_noise`, `include_intercept`, `delta`, `zscore_window`
+**Optional:** `observation_noise`, `include_intercept`, `delta`, `zscore_window`, `run_id`, `name`
 
 #### `run_pca_analysis`
 
 PCA on multi-asset returns: explained variance, loadings, factor contributions.
 
 **Required:** `tickers`, `start_date`, `end_date`  
-**Optional:** `standardize`, `method`, `n_components`
+**Optional:** `standardize`, `method`, `n_components`, `run_id`, `name`
 
 #### `run_seasonality_analysis`
 
@@ -297,7 +297,7 @@ Whether performance concentrates in a day of the week or a month of the year, co
 ADF, KPSS and the variance ratio, with the four-way verdict spelled out. The two tests have OPPOSITE nulls, which is the whole reason to run both: failing to reject ADF is not evidence of a unit root, and the verdict separates 'the data says non-stationary' from 'the data says nothing'. 'contradictory' usually means a structural break rather than either answer.
 
 **Required:** `symbol`, `start_date`, `end_date`  
-**Optional:** `on`, `lags`
+**Optional:** `on`, `lags`, `kpss_lags`, `vr_periods`
 
 #### `scan_pairs`
 
@@ -653,7 +653,7 @@ Buy-and-hold baseline: long the full period. Use as a passive benchmark.
 Simulate a FUTURES account, whose books the shared-cash engine cannot keep. Buying ten ES at 6200 does not cost 10 x 6200 x 50 of cash, it costs margin; the position then has no market value, because its profit arrives as daily variation margin credited to cash; and a short future pays no borrow. Equity here is cash plus posted margin and the contracts contribute nothing, so the leverage reported is economic exposure over equity rather than the gross-market-value ratio, and the two are not comparable. Margin calls reduce the position rather than being financed away.
 
 **Required:** `prices`, `target_contracts`, `multiplier`  
-**Optional:** `initial_capital`, `initial_margin`, `maintenance_margin`, `commission_per_contract`, `slippage_points`, `collateral_rate`, `contract_map`, `allow_fractional`, `roll_day_prior_prices`
+**Optional:** `initial_capital`, `initial_margin`, `maintenance_margin`, `commission_per_contract`, `slippage_points`, `collateral_rate`, `contract_map`, `allow_fractional`, `roll_day_prior_prices`, `run_id`
 
 #### `run_futures_hedge_backtest`
 
@@ -674,14 +674,14 @@ Backtest a MACD signal-line crossover. Trend-following like the SMA version but 
 Backtest a cointegrated pair as one synchronized two-leg trade — both legs enter/exit together and share one cash account, unlike scan_pairs which only screens candidates.
 
 **Required:** `symbol_a`, `symbol_b`, `start_date`, `end_date`, `hedge_ratio`  
-**Optional:** `entry_z`, `exit_z`, `zscore_window`, `initial_capital`, `commission_pct`, `slippage_pct`, `gross_leverage`, `fill_price`, `risk_free_rate`
+**Optional:** `entry_z`, `exit_z`, `zscore_window`, `initial_capital`, `commission_pct`, `slippage_pct`, `gross_leverage`, `fill_price`, `risk_free_rate`, `run_id`
 
 #### `run_portfolio_simulation`
 
 True shared-cash portfolio simulation with rebalancing at target-weight dates — unlike run_signal_panel_backtest, positions share one account instead of each ticker getting its own capital.
 
 **Required:** `tickers`, `start_date`, `end_date`  
-**Optional:** `target_weights_ref`, `target_weights`, `signal_type`, `construction_method`, `gross_leverage`, `n_long`, `n_short`, `vol_lookback`, `make_dollar_neutral`, `initial_capital`, `commission_pct`, `sell_commission_pct`, `slippage_pct`, `max_gross_leverage`, `max_position_pct`, `fill_price`, `commission_model`, `per_share_rate`, `min_commission`, `use_impact_model`, `impact_coefficient`, `impact_lookback`, `borrow_fee_bps`, `margin_interest_rate`, `max_adv_participation`, `benchmark`, `risk_free_rate`
+**Optional:** `target_weights_ref`, `target_weights`, `signal_type`, `construction_method`, `gross_leverage`, `n_long`, `n_short`, `vol_lookback`, `make_dollar_neutral`, `initial_capital`, `commission_pct`, `sell_commission_pct`, `slippage_pct`, `max_gross_leverage`, `max_position_pct`, `fill_price`, `commission_model`, `per_share_rate`, `min_commission`, `use_impact_model`, `impact_coefficient`, `impact_lookback`, `borrow_fee_bps`, `margin_interest_rate`, `max_adv_participation`, `benchmark`, `risk_free_rate`, `run_id`
 
 #### `run_rsi_backtest`
 
@@ -851,7 +851,7 @@ Monte Carlo that keeps only where the paths ENDED, so the simulation count is ca
 Walk-forward validation: optimise in-sample, evaluate out-of-sample, return OOS stats.
 
 **Required:** `symbol`, `start_date`, `end_date`, `strategy`, `param_grid`  
-**Optional:** `train_bars`, `test_bars`, `initial_capital`, `commission_pct`, `slippage_pct`, `sort_by`, `fill_price`, `risk_free_rate`
+**Optional:** `train_bars`, `test_bars`, `initial_capital`, `commission_pct`, `slippage_pct`, `sort_by`, `fill_price`, `risk_free_rate`, `run_id`
 
 ### `custom_signal`
 
@@ -867,7 +867,7 @@ Backtest a signal computed outside this library (your own alpha model) on one sy
 Backtest a pre-computed signal panel across a ticker universe, combined into portfolio metrics.
 
 **Required:** `tickers`, `start_date`, `end_date`  
-**Optional:** `signal_panel`, `signal_panel_ref`, `weights`, `signal_fill_policy`, `initial_capital`, `commission_pct`, `slippage_pct`, `benchmark`, `include_trade_log`, `fill_price`, `signal_type`, `max_abs_weight`, `risk_free_rate`
+**Optional:** `signal_panel`, `signal_panel_ref`, `weights`, `signal_fill_policy`, `initial_capital`, `commission_pct`, `slippage_pct`, `benchmark`, `include_trade_log`, `fill_price`, `signal_type`, `max_abs_weight`, `risk_free_rate`, `run_id`
 
 ---
 
@@ -900,7 +900,7 @@ Turn one kind of published value into another and publish the result: raw model 
 
 #### `describe_data_capabilities`
 
-What a data provider can serve — tick trades, top-of-book quotes, async OHLCV, supported intervals, and its adjusted/survivorship/point-in-time guarantees. Fetches no market data. Call this before a tool that needs a capability the active provider may not have.
+What a data provider can serve — tick trades, top-of-book quotes, L2 depth, order events, point-in-time records, its own temporal contract, async OHLCV, supported intervals, and its adjusted/survivorship/point-in-time guarantees. Also reports the persistent cache: how many files, how large, and how many were written under a format version nothing reads any more (counted, never deleted). Fetches no market data. Call this before a tool that needs a capability the active provider may not have — depth and order events are served by one provider only, and point-in-time records by a different one.
 
 *No required arguments.*  
 **Optional:** `source`
@@ -1027,13 +1027,13 @@ Stitch a chain of futures contracts into one continuous series, and publish TWO 
 
 #### `build_data_bundle`
 
-Name several already-published frames as one unit and publish the manifest as a data_bundle reference. A bundle holds references rather than copies, so it cannot diverge from the frames it names, and it pairs each frame with what its source can say about timing -- which is the pairing a point-in-time join depends on and which a bare frame throws away.
+Name several already-published frames as one unit and publish the manifest as a data_bundle reference. A bundle holds references rather than copies, so it cannot diverge from the frames it names, and it pairs each frame with what its source can say about timing -- which is the pairing a point-in-time join depends on and which a bare frame throws away. Each `frame_kind` label is CHECKED against what its reference actually is, because the label chooses the contract the bundle is later validated under: mislabelling a returns panel as fundamentals used to buy a confident point-in-time verdict about the wrong thing.
 
 **Required:** `frames`, `run_id`, `name`
 
 #### `compare_ratio_frames`
 
-Two providers' ratios side by side, with each disagreement CLASSIFIED rather than merely measured: a unit mismatch is fixable by rescaling, a definition difference is not, and averaging across the second kind produces a number neither provider would stand behind. Takes the values as arguments, so it works for sources this library cannot fetch.
+Two providers' ratios side by side, with each disagreement CLASSIFIED rather than merely measured: a unit mismatch is fixable by rescaling, a definition difference is not, and averaging across the second kind produces a number neither provider would stand behind. Takes the values as arguments, so it works for sources this library cannot fetch, and accepts fetch_financial_ratios' own output on either side -- one company's flat field map or a map of ticker -> ratios, the same shape on both sides. A field neither source reported is counted as `n_no_overlap`, never as a disagreement.
 
 **Required:** `left`, `right`  
 **Optional:** `left_name`, `right_name`, `fields`
@@ -1095,7 +1095,7 @@ Fetch individual trades and publish them as a tick_tape reference, for the micro
 
 #### `get_dataset_metadata`
 
-What the active provider GUARANTEES about the data it serves: whether prices are adjusted, whether the universe is survivorship-free, whether values are point-in-time, and which timezone stamps them. Read this before trusting a backtest over history, because a provider that is not point-in-time will hand you restated values under their original dates.
+What the active provider GUARANTEES about the data it serves: whether prices are adjusted, whether the universe is survivorship-free, whether values are point-in-time, and which timezone stamps them. Read this before trusting a backtest over history, because a provider that is not point-in-time will hand you restated values under their original dates. `notes` carries what the booleans cannot -- which feed answers which window, and what is wrong with it.
 
 **Required:** `symbol`  
 **Optional:** `source`, `interval`
@@ -1281,7 +1281,7 @@ Which instrument is the cheapest way to own or hedge this exposure. Carry and ba
 Where today's basis sits inside its own history -- z-score, percentile, half-life and the distribution it came from. A basis of 38 bps means nothing until you know the series has spent a year between -5 and +25, which is the difference between a number and a trade. Measured in bps of spot rather than points, because points are not comparable through time on anything that has moved. Without a window the z-score is full-sample and looks ahead.
 
 **Required:** `spot_prices`, `futures_prices`  
-**Optional:** `window`, `time_to_expiry`
+**Optional:** `window`, `time_to_expiry`, `run_id`, `name`
 
 #### `analyze_cash_futures_basis`
 
@@ -1461,7 +1461,7 @@ Flow one-sidedness measured in VOLUME time rather than clock time (Easley, Lopez
 How far the price moves per dollar traded (Amihud 2002) -- the most widely used liquidity proxy in the literature, because it needs nothing but daily bars. THE RAW NUMBER IS UNINTERPRETABLE: its units are return-per-dollar, so it scales inversely with dollar volume and a large cap's reading is orders of magnitude below a microcap's with neither meaning anything alone. Read the percentile against this name's own history. It is NOT a spread -- it conflates spread, book depth and the information content of trades, and a genuinely volatile stock scores as illiquid even with a deep book.
 
 **Required:** `close`, `volume`  
-**Optional:** `window`
+**Optional:** `window`, `run_id`, `name`
 
 #### `get_effective_spread_series`
 

@@ -48,6 +48,36 @@ class FetchResult(_Result):
     )
     start: Optional[str] = None
     end: Optional[str] = None
+    dataset: Optional[str] = Field(
+        None,
+        description=(
+            "The vendor dataset that actually answered, when the provider "
+            "says. This is not decoration: a provider that picks between "
+            "feeds by date can answer one window from the consolidated "
+            "tape and an earlier one from a single-venue sample carrying a "
+            "few percent of volume, and the rows look the same either way. "
+            "None when the provider records no dataset."
+        ),
+    )
+    provider: Optional[str] = Field(
+        None, description="Which provider served it, when the frame records it."
+    )
+    adjusted: Optional[bool] = Field(
+        None,
+        description=(
+            "Whether prices carry split and dividend adjustment. False "
+            "means a split is a real -50% bar. None when unrecorded, which "
+            "is not the same as False."
+        ),
+    )
+    source: Optional[str] = Field(
+        None,
+        description=(
+            "Provider and dataset as one string, the spelling the audit "
+            "record uses for the same fetch, so a result and a decision "
+            "record can be matched up without re-deriving it."
+        ),
+    )
 
 
 class FinancialRatiosResult(_Result):
@@ -67,6 +97,16 @@ class DatasetMetadataResult(_Result):
     survivorship_free: Optional[bool] = None
     point_in_time: Optional[bool] = None
     timezone: Optional[str] = None
+    notes: List[str] = Field(
+        default_factory=list,
+        description=(
+            "The provider's own prose about what it serves -- which feed "
+            "answers which window, how the index is stamped, which symbols "
+            "it refuses. The four booleans above are the guarantees; this "
+            "is where a provider names a sampling problem that no boolean "
+            "has a slot for, so it was the field worth not dropping."
+        ),
+    )
 
 
 class TemporalContractResult(_Result):
@@ -253,15 +293,53 @@ class ExternalValidationResult(_Result):
 class RatioFieldComparison(BaseModel):
     model_config = ConfigDict(extra="forbid")
     field_name: str
-    left: Stat = None
-    right: Stat = None
-    relative_difference: Stat = None
+    left: Stat = Field(
+        None,
+        description=(
+            "The left source's value, when exactly one entity carried this "
+            "field on both sides. Null across a universe, where a single "
+            "pair of numbers would be a sample rather than the comparison."
+        ),
+    )
+    right: Stat = Field(
+        None, description="The right source's value, on the same terms."
+    )
+    relative_difference: Stat = Field(
+        None,
+        description=(
+            "The LARGEST relative gap over the entities compared, scaled by "
+            "the bigger of the two values. The worst case rather than the "
+            "average, because one entity off by 100x is the finding."
+        ),
+    )
+    ratio: Stat = Field(
+        None,
+        description=(
+            "right / left, averaged over the entities where both sides are "
+            "non-zero. Set only for a `scale` verdict, where it IS the "
+            "conversion -- 100 means one source reports a percentage and "
+            "the other a fraction."
+        ),
+    )
+    ratio_spread: Stat = Field(
+        None,
+        description=(
+            "How far that ratio wanders, as its coefficient of variation. "
+            "Near zero is a unit error; a wandering ratio is why a "
+            "`definition` difference cannot be converted away."
+        ),
+    )
+    n_compared: int = Field(
+        0, description="Entities where BOTH sources reported this field."
+    )
     classification: Optional[str] = Field(
         None,
         description=(
             "What the gap most likely IS -- a unit mismatch, a definition "
             "difference, or a genuine data disagreement. The distinction is "
-            "the point: only one of them is fixable by rescaling."
+            "the point: only one of them is fixable by rescaling. "
+            "'no_overlap' means neither source could be checked against the "
+            "other for this field, which is silence rather than agreement."
         ),
     )
 
@@ -271,6 +349,15 @@ class RatioComparisonResult(_Result):
     right_name: str = "right"
     n_compared: int = 0
     n_disagreeing: int = 0
+    n_no_overlap: int = Field(
+        0,
+        description=(
+            "Fields no entity reported on both sides. These are counted "
+            "here and NOT in `n_disagreeing`: an unanswered question is not "
+            "a disagreement, and counting it as one made two identical "
+            "inputs read as a total mismatch."
+        ),
+    )
     fields: List[RatioFieldComparison] = Field(default_factory=list)
 
 

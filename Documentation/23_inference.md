@@ -226,7 +226,7 @@ that is robust.
 | `estimate_tail_index` | Which moments actually exist |
 | `get_correlation_stability` | Is this correlation a property of the pair or an average over regimes |
 | `decompose_returns` | Where did the compound growth come from |
-| `get_sharpe_stability` | Did the edge decay; the rolling series the warning always promised is returned |
+| `get_sharpe_stability` | Did the edge decay; the rolling series the warning always promised is returned as `rolling_sharpe_ref` when `run_id` and `name` are given |
 | `get_drawdown_profile` | Every drawdown, not just the worst |
 | `test_autocorrelation` | Is there autocorrelation at all, jointly across lags |
 | `get_entropy_measures` | Is there structure a linear test would miss |
@@ -234,8 +234,8 @@ that is robust.
 | `get_lead_lag_matrix` | Which series move first — and does anything survive the search size |
 | `test_structural_break` | Did something break at this known date |
 | `detect_change_points` | When did the process change, at an unknown date |
-| `run_stationarity_tests` | ADF, KPSS and variance ratio, with the four-way verdict |
-| `detect_regimes` | Label each observation with a volatility regime |
+| `run_stationarity_tests` | ADF, KPSS and variance ratio, with the four-way verdict; `kpss_lags` (Andrews' bandwidth by default, and reported) and `vr_periods` are inputs |
+| `detect_regimes` | Label each observation with a volatility regime; with `run_id` and `name` the per-bar labels are published as an `analytic_series` |
 | `test_granger_causality` | Does A precede B — Bonferroni corrected for the lags tested |
 | `get_partial_correlation` | What is left once the common drivers are removed from both |
 | `analyze_tail_dependence` | Do these move together in the tail, where it matters |

@@ -247,7 +247,11 @@ _norm_cdf = norm_cdf
 
 
 def run_stationarity_tests(
-    series: pd.Series, *, lags: int = 1, vr_periods: Sequence[int] = (2, 4, 8)
+    series: pd.Series,
+    *,
+    lags: int = 1,
+    vr_periods: Sequence[int] = (2, 4, 8),
+    kpss_lags: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     ADF, KPSS and the variance ratio, with the four-way verdict spelled out.
@@ -256,11 +260,30 @@ def run_stationarity_tests(
     it is a random walk", which conflates "the data says no" with "the data
     says nothing" — and on the sample sizes this library works with, the
     second is the common case.
+
+    `lags` is the ADF's augmentation only. KPSS has its own bandwidth, and
+    `kpss_lags=None` picks it with `andrews_bandwidth`; the choice is
+    reported as `kpss_lags_used` either way, because a KPSS statistic is
+    not comparable across bandwidths and one quoted without its own is not
+    reproducible.
     """
     values = _clean(series, "run_stationarity_tests")
 
+    # The bandwidth is decided HERE rather than inside `kpss_statistic`, so
+    # the number that ran can be returned. The clamp below is the same one
+    # that function applies; applying it here as well means the reported
+    # bandwidth is the one the statistic used and not the one it was asked
+    # for.
+    if kpss_lags is None:
+        requested = andrews_bandwidth(values - values.mean())
+        kpss_source = "andrews"
+    else:
+        requested = int(kpss_lags)
+        kpss_source = "caller"
+    kpss_used = int(max(0, min(requested, len(values) - 1)))
+
     adf = adf_statistic(values, lags=lags)
-    kpss = kpss_statistic(values)
+    kpss = kpss_statistic(values, lags=kpss_used)
     adf_rejects = adf < _ADF_CRITICAL[0.05]
     kpss_rejects = kpss > _KPSS_CRITICAL[0.05] if np.isfinite(kpss) else False
 
@@ -294,6 +317,22 @@ def run_stationarity_tests(
         except ValidationError:
             continue
 
+    warnings = _stationarity_warnings(verdict, len(values), ratios)
+    if kpss_used != requested:
+        warnings.append(
+            f"The KPSS bandwidth was clamped from {requested} to "
+            f"{kpss_used}: a Bartlett kernel cannot reach further than "
+            f"{len(values) - 1} lags on {len(values)} observations, so the "
+            "statistic is not the one that bandwidth describes. The default "
+            "is the automatic Andrews (1991) rule rather than the "
+            "conventional 4*(n/100)^(1/4), because the fixed rule "
+            "over-rejects badly on persistent series -- measured at 23% on "
+            "a stationary AR(1) with phi=0.7 and 40% at phi=0.9, against a "
+            "nominal 5% -- since it truncates the autocovariance sum long "
+            "before a persistent series has decayed. Leave `kpss_lags` "
+            "unset to get it."
+        )
+
     return {
         "n_observations": int(len(values)),
         "adf_statistic": adf,
@@ -302,10 +341,16 @@ def run_stationarity_tests(
         "kpss_statistic": float(kpss),
         "kpss_critical_5pct": _KPSS_CRITICAL[0.05],
         "kpss_rejects_stationarity": bool(kpss_rejects),
+        # The bandwidth the statistic above was computed at, and where it
+        # came from. Without them a KPSS number cannot be reproduced: the
+        # automatic rule reads the data, so two runs on two samples are two
+        # different tests wearing one name.
+        "kpss_lags_used": kpss_used,
+        "kpss_lags_source": kpss_source,
         "variance_ratios": ratios,
         "verdict": verdict,
         "detail": detail,
-        "warnings": _stationarity_warnings(verdict, len(values), ratios),
+        "warnings": warnings,
     }
 
 

@@ -236,6 +236,16 @@ Solved via a damped multiplicative fixed-point iteration — a **documented heur
 
 ### Black-Litterman
 
+The tool returns the reason as well as the weights: the implied
+equilibrium returns, the posterior returns and volatilities, and per view
+how much of the stated spread the posterior absorbed (`absorbed_fraction`,
+`None` when the view states the equilibrium), which is the one number that
+says whether a view did anything. Every optimization also reports its
+solver's iterations, status, objective and multipliers (`solver`, with
+`method="closed_form"` on the unconstrained path) and the covariance
+condition number as a number, not only as a sentence above a threshold.
+
+
 ```python
 from standard_quant_tools.portfolio import black_litterman, build_bl_views
 

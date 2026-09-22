@@ -4,11 +4,18 @@ Data-quality checks on an already-fetched OHLCV frame: missing bars, stale
 unadjusted split/dividend or a data error. All pure functions operating on
 data the caller already has — no new data source or provider required.
 
-Calendar-free heuristic, stated explicitly: detect_missing_bars infers
-expected trading days from the data's own weekday pattern. It does not add
-a market-holiday-calendar dependency, so U.S. market holidays will show up
-as false-positive "gaps" — a documented limitation, not a silently hidden
-one. Treat findings as leads to investigate, not proven defects.
+Which sessions SHOULD have a bar is answered by an exchange calendar, not
+by a weekday rule: `detect_missing_bars` takes a calendar code and asks
+`exchange_calendars` for that exchange's sessions, so a market holiday is
+not a gap. The calendar is an argument because it changes the answer — the
+same 2024 US frame has no gaps under XNYS and nine under XCME, since the
+two exchanges do not trade on the same days.
+
+The weekday heuristic survives only as the fallback for an environment
+without `exchange_calendars` installed, or for a code it does not
+recognize. It flags every holiday, so every entry carries `basis`, which
+says which rule judged it. Treat findings as leads to investigate, not
+proven defects.
 """
 
 import logging

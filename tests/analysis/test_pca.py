@@ -74,6 +74,7 @@ class TestPcaReturnsKeys:
         assert set(pca_one_factor.keys()) == {
             "explained_variance_ratio",
             "cumulative_variance_ratio",
+            "explained_variance_ratio_full",
             "loadings",
             "factor_returns",
             "n_components",

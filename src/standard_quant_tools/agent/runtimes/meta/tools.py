@@ -94,9 +94,11 @@ from standard_quant_tools.backtest.strategy_params import (
 from standard_quant_tools.backtest.stress_test import (
     list_stress_scenarios as _library_stress_scenarios,
 )
-from standard_quant_tools.data._cache import _CACHE_ROOT
+from standard_quant_tools.data import _cache as _cache_module
+from standard_quant_tools.data._cache import dead_generations
 from standard_quant_tools.data.base import DataProvider
 from standard_quant_tools.data.bloomberg_provider import BloombergProvider
+from standard_quant_tools.data.databento_provider import DatabentoProvider
 from standard_quant_tools.data.factory import DataFactory
 from standard_quant_tools.data.polygon_provider import PolygonProvider
 from standard_quant_tools.data.yfinance_provider import YFinanceProvider
@@ -106,10 +108,16 @@ from standard_quant_tools.error import ValidationError
 #: constructed here (no API key, SDK absent). DataFactory raises in that
 #: case rather than returning an instance, and "you would need a key" is a
 #: more useful answer than the raise.
+#:
+#: DATABENTO BELONGS HERE for that reason above all: it is the one provider
+#: that serves depth and order events, it reads its credential lazily, and
+#: without a key it is exactly the provider a caller needs described rather
+#: than raised at. Its absence was a KeyError on that path.
 _PROVIDER_CLASSES: Dict[str, type] = {
     "yfinance": YFinanceProvider,
     "polygon": PolygonProvider,
     "bloomberg": BloombergProvider,
+    "databento": DatabentoProvider,
 }
 
 
@@ -180,6 +188,13 @@ def explain_decision(input_data: ExplainDecisionInput) -> ExplainDecisionResult:
             end_date=source.get("end") or source.get("end_date"),
             rows=source.get("rows"),
             content_hash=source.get("content_hash") or source.get("hash"),
+            # The record has written both of these since provider fetches
+            # started reporting themselves, and neither crossed. `source`
+            # is the one that says WHICH vendor dataset answered, which is
+            # date-dependent for at least one provider here and is
+            # otherwise unrecoverable after the fact.
+            source=source.get("source"),
+            interval=source.get("interval"),
         )
         for source in record.get("data_sources", [])
     ]
@@ -886,6 +901,55 @@ def list_stress_scenarios(
     return ListStressScenariosResult(scenarios=scenarios)
 
 
+#: A cache file's format-version prefix, `v3_...`. Matched here rather than
+#: imported so this reports what is ON DISK, including generations the
+#: reader no longer knows about.
+_CACHE_GENERATION_RE = re.compile(r"^(v\d+)_")
+
+
+def _cache_census() -> Dict[str, Any]:
+    """
+    What is in the persistent OHLCV cache: how much, and how much is dead.
+
+    ONE directory listing, no reads and no deletions. Nothing on the tool
+    surface could say anything about the cache beyond its path, so "is this
+    the cache answering, and how much of it is stale" was a question an
+    agent could only answer by leaving the tool surface -- while the live
+    cache held 1,574 files, 501 of them written under a format version the
+    reader no longer looks up.
+
+    `dead_generations(dry_run=True)` is the COUNT. Removing them belongs to
+    `sqt cache gc`: a describe tool that deleted files as a side effect of
+    being asked a question would be the worst possible place to put it.
+    An absent directory is zeros, not a refusal -- a cold cache is a normal
+    state and not an error to report.
+    """
+    root = _cache_module._CACHE_ROOT
+    if not root.exists():
+        return {
+            "cache_files": 0,
+            "cache_bytes": 0,
+            "cache_generations": [],
+            "cache_dead_files": 0,
+        }
+    files = [p for p in root.glob("*.parquet") if p.is_file()]
+    generations = sorted(
+        {p.name.split("_", 1)[0] for p in files if _CACHE_GENERATION_RE.match(p.name)}
+    )
+    total = 0
+    for path in files:
+        try:
+            total += int(path.stat().st_size)
+        except OSError:  # a file evicted between the glob and the stat
+            continue
+    return {
+        "cache_files": len(files),
+        "cache_bytes": total,
+        "cache_generations": generations,
+        "cache_dead_files": len(dead_generations(dry_run=True)),
+    }
+
+
 def describe_data_capabilities(
     input_data: DataCapabilitiesInput,
 ) -> DataCapabilitiesResult:
@@ -937,6 +1001,15 @@ def describe_data_capabilities(
 
     trades = _overrides("get_trades")
     quotes = _overrides("get_quotes")
+    # THE FOUR THAT ACTUALLY SEPARATE THE PROVIDERS, and the four this tool
+    # did not report. Depth and order events are served by exactly one
+    # provider here, point-in-time records by exactly one other -- so an
+    # agent asked to consult this tool before choosing a source could not
+    # learn the only facts that would have decided the choice.
+    order_book = _overrides("get_order_book")
+    order_events = _overrides("get_order_events")
+    point_in_time_records = _overrides("get_point_in_time_records")
+    temporal_contract = _overrides("get_temporal_contract")
     if not trades:
         notes.append(
             "No tick feed: the microstructure tools cannot run on this "
@@ -974,6 +1047,15 @@ def describe_data_capabilities(
             "constructed; they are reported by an instance, not the class."
         )
 
+    cache = _cache_census()
+    if cache["cache_dead_files"]:
+        notes.append(
+            f"{cache['cache_dead_files']} of {cache['cache_files']} cached "
+            "file(s) were written under an earlier cache format and will "
+            "never be read again. They are COUNTED here and not touched -- "
+            "`sqt cache gc` is what removes them."
+        )
+
     return DataCapabilitiesResult(
         provider=provider_cls.__name__,
         available=available,
@@ -984,9 +1066,14 @@ def describe_data_capabilities(
         financial_ratios=_overrides("get_financial_ratios") or provider is not None,
         trades=trades,
         quotes=quotes,
+        order_book=order_book,
+        order_events=order_events,
+        point_in_time_records=point_in_time_records,
+        temporal_contract=temporal_contract,
         supported_intervals=sorted(intervals) if intervals else None,
         guarantees=guarantees,
-        cache_dir=str(_CACHE_ROOT),
+        cache_dir=str(_cache_module._CACHE_ROOT),
+        **cache,
         notes=notes,
     )
 
@@ -1021,6 +1108,16 @@ def describe_reference(
         columns=described["columns"],
         index_start=described["index_start"],
         index_end=described["index_end"],
+        # WHICH VENDOR DATASET IS IN THERE. The provider writes it onto the
+        # frame, Parquet round-trips it, and the answer survives the
+        # process boundary this tool exists to be called across -- so the
+        # agent that RESOLVES a reference can learn what the agent that
+        # fetched it was answered by. Null for an externally registered
+        # dataset, which carries no such attributes.
+        dataset=described.get("dataset"),
+        provider=described.get("provider"),
+        adjusted=described.get("adjusted"),
+        source=described.get("source"),
     )
 
 

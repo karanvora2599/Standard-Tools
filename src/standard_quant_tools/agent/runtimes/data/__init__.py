@@ -147,7 +147,9 @@ TOOL_DEFS = [
         "survivorship-free, whether values are point-in-time, and which "
         "timezone stamps them. Read this before trusting a backtest over "
         "history, because a provider that is not point-in-time will hand you "
-        "restated values under their original dates.",
+        "restated values under their original dates. `notes` carries what "
+        "the booleans cannot -- which feed answers which window, and what is "
+        "wrong with it.",
         DatasetMetadataInput,
     ),
     (
@@ -219,7 +221,11 @@ TOOL_DEFS = [
         "rather than copies, so it cannot diverge from the frames it names, "
         "and it pairs each frame with what its source can say about timing "
         "-- which is the pairing a point-in-time join depends on and which a "
-        "bare frame throws away.",
+        "bare frame throws away. Each `frame_kind` label is CHECKED against "
+        "what its reference actually is, because the label chooses the "
+        "contract the bundle is later validated under: mislabelling a "
+        "returns panel as fundamentals used to buy a confident "
+        "point-in-time verdict about the wrong thing.",
         BuildDataBundleInput,
     ),
     (
@@ -256,7 +262,11 @@ TOOL_DEFS = [
         "by rescaling, a definition difference is not, and averaging across "
         "the second kind produces a number neither provider would stand "
         "behind. Takes the values as arguments, so it works for sources this "
-        "library cannot fetch.",
+        "library cannot fetch, and accepts fetch_financial_ratios' own "
+        "output on either side -- one company's flat field map or a map of "
+        "ticker -> ratios, the same shape on both sides. A field neither "
+        "source reported is counted as `n_no_overlap`, never as a "
+        "disagreement.",
         CompareRatioFramesInput,
     ),
     (

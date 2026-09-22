@@ -41,6 +41,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 import pandas as pd
@@ -148,6 +149,26 @@ KINDS: Dict[str, Dict[str, str]] = {
     "indicator_panel": {
         "storage": "frame",
         "description": "Technical indicator values across a universe.",
+    },
+    "analytic_series": {
+        "storage": "series",
+        "description": (
+            "One per-bar analytic series (a state curve, a rolling "
+            "statistic, a label sequence), date-indexed, one column. NOT an "
+            "`equity_curve`: that kind names account value, and a cash "
+            "balance, a leverage path or a +1/0/-1 state machine would be "
+            "read as one by anything that drew a drawdown from it."
+        ),
+    },
+    "analytic_frame": {
+        "storage": "frame",
+        "description": (
+            "A date-indexed frame of analytic columns (a Kalman path, a "
+            "basis history) -- several series a tool computed together and "
+            "that are only read together. A single one of them is an "
+            "`analytic_series`; per-asset RETURNS are a `returns_panel`, "
+            "because the tools that score returns expect that kind."
+        ),
     },
     "order_book_panel": {
         "storage": "external",
@@ -555,8 +576,11 @@ def resolve(ref: str, expect: Optional[str] = None) -> Any:
                 "with a kind, or drop the expectation and check the shape "
                 "yourself."
             )
+        # `stringify_path` hands back a str and the containment check takes
+        # a Path, so this raised AttributeError -- from inside the guard --
+        # for every raw path it was written to accept.
         return load_artifact(
-            str(_resolved_within_runs_dir(pd.io.common.stringify_path(ref)))
+            str(_resolved_within_runs_dir(Path(pd.io.common.stringify_path(ref))))
         )
 
     reference = parse(text)
@@ -587,6 +611,37 @@ def resolve(ref: str, expect: Optional[str] = None) -> Any:
             )
         return squeezed
     return frame
+
+
+def _vendor_provenance(frame: Any) -> Dict[str, Any]:
+    """
+    Which vendor dataset a frame came from, off the frame itself.
+
+    A provider that chooses between feeds by date writes its choice into
+    `DataFrame.attrs`, and pandas round-trips attrs through Parquet -- so
+    the answer survives publish, a process boundary and a resolve in
+    another runtime, and is simply not read by anything. Every consumer
+    that wants to report it reads it here, so there is one spelling of
+    `source` rather than one per result model.
+
+    `source` is composed from the two parts when the frame does not carry
+    it already, in the same `provider:dataset` spelling the decision record
+    uses, so a result and an audit record can be matched without
+    re-deriving either.
+    """
+    attrs = dict(getattr(frame, "attrs", None) or {})
+    dataset = attrs.get("dataset")
+    provider = attrs.get("provider")
+    source = attrs.get("source")
+    if source is None and provider is not None:
+        source = f"{provider}:{dataset}" if dataset is not None else str(provider)
+    adjusted = attrs.get("adjusted")
+    return {
+        "dataset": str(dataset) if dataset is not None else None,
+        "provider": str(provider) if provider is not None else None,
+        "adjusted": bool(adjusted) if adjusted is not None else None,
+        "source": str(source) if source is not None else None,
+    }
 
 
 def describe(ref: str) -> Dict[str, Any]:
@@ -639,6 +694,10 @@ def describe(ref: str) -> Dict[str, Any]:
         "columns": [str(c) for c in frame.columns],
         "index_start": str(frame.index[0]) if len(frame) else None,
         "index_end": str(frame.index[-1]) if len(frame) else None,
+        # Which vendor dataset answered, carried on the frame by the
+        # provider and preserved through Parquet. An externally registered
+        # dataset has no such attrs and reports these as null.
+        **_vendor_provenance(frame),
     }
 
 

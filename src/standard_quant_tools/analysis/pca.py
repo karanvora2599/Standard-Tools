@@ -176,6 +176,10 @@ def pca_returns(
     dict with keys:
         explained_variance_ratio  : pd.Series  – EVR per PC, indexed "PC1", "PC2", ...
         cumulative_variance_ratio : pd.Series  – cumulative EVR
+        explained_variance_ratio_full : pd.Series | None – EVR over EVERY
+            component, so it sums to 1 and the two series above are its
+            prefix. None under method="power_iteration", which never forms
+            the discarded part of the spectrum.
         loadings                  : pd.DataFrame – (assets × components)
         factor_returns            : pd.DataFrame – (dates × components)
         n_components              : int
@@ -246,6 +250,14 @@ def pca_returns(
         n_obs,
     )
 
+    # The WHOLE spectrum, when the decomposition that ran produced one.
+    # Power iteration solves for the leading components and deliberately
+    # never forms the rest -- that is the reason to use it -- so there is
+    # nothing honest to put here on that path, and `None` says so rather
+    # than a padded vector that would sum to less than one without
+    # explaining why.
+    full_eigenvalues: Optional[np.ndarray] = None
+
     if method == "power_iteration":
         Vt, eigenvalues, total_var, converged = _top_k_pc_power_iteration(
             arr, n_comp, _POWER_ITERATION_TOL, _POWER_ITERATION_MAX_ITER
@@ -306,6 +318,20 @@ def pca_returns(
     )
     cumvar_series = evr_series.cumsum().rename("cumulative_variance_ratio")
 
+    # Every component's share, not only the kept ones. `n_components` is a
+    # truncation of the answer, not of the decomposition, and the discarded
+    # tail is what says whether the truncation lost anything: a third
+    # component at 4% means one thing when the remainder is 6% and another
+    # when it is 40%.
+    full_evr_series: Optional[pd.Series] = None
+    if full_eigenvalues is not None:
+        shares = full_eigenvalues / total_var if total_var > 0 else full_eigenvalues
+        full_evr_series = pd.Series(
+            shares,
+            index=[f"PC{i + 1}" for i in range(len(shares))],
+            name="explained_variance_ratio_full",
+        )
+
     evr_strs = "  ".join(f"{k}={v:.3f}" for k, v in evr_series.items())
     logger.debug(
         "[pca] EVR: %s  (cumulative=%.3f)", evr_strs, float(cumvar_series.iloc[-1])
@@ -314,6 +340,7 @@ def pca_returns(
     return {
         "explained_variance_ratio": evr_series,
         "cumulative_variance_ratio": cumvar_series,
+        "explained_variance_ratio_full": full_evr_series,
         "loadings": loadings,
         "factor_returns": factor_rets,
         "n_components": n_comp,
