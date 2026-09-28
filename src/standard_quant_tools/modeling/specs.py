@@ -1440,6 +1440,22 @@ class ModelSpec(BaseModel):
         "can say which field was wrong.",
     )
 
+    @field_validator("random_seed", mode="before")
+    @classmethod
+    def _seed_is_not_a_flag(cls, v: object) -> object:
+        # A bool is an int to Python and to the bounds above, so True ran
+        # as seed 1 and False as seed 0 -- a flag read as a number. The
+        # agent surface's `Seed` type refuses it the same way; it is not
+        # imported from there because importing the agent package loads
+        # the modeling runtime, which imports this module.
+        if isinstance(v, bool):
+            raise ValueError(
+                f"random_seed is a whole number in [0, 2**32 - 1], got the "
+                f"boolean {v!r}. Pass the number itself; a flag would "
+                f"silently run as seed {int(v)}."
+            )
+        return v
+
     @field_validator("quantiles")
     @classmethod
     def _quantiles_are_levels(cls, v: List[float]) -> List[float]:

@@ -23,6 +23,7 @@ import logging
 import math
 from typing import Annotated, Dict, List, Optional
 
+import numpy as np
 import pandas as pd
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
 
@@ -96,12 +97,24 @@ class PBOInput(BaseModel):
     )
 
 
-#: Paths times observations one call may build. Each path walks every
-#: observation, so the work is their product, and C(n_splits,
-#: n_test_splits) grows fast: C(16, 8) is 12,870 paths. The default six
-#: groups, two held out, at the observation ceiling is 150,000; the
-#: ceiling itself keeps the slowest legal call to seconds, not minutes.
-_MAX_CV_PATH_OBSERVATIONS = 300_000
+#: The longest series one call splits: a year of one-minute bars. The
+#: splitter is linear in the length (see the CHANGELOG entry of
+#: 2026-09-28), so this bounds memory rather than time.
+_MAX_CV_OBSERVATIONS = 100_000
+
+#: Paths times observations one call may build. Every path carries a train
+#: and a test index as long as the series, so memory is their product, and
+#: C(n_splits, n_test_splits) grows fast: C(16, 8) is 12,870 paths. The
+#: default six groups, two held out, at the observation ceiling is
+#: 1,500,000; the ceiling keeps the largest legal call to about a third of
+#: a second and roughly a hundred megabytes while it runs.
+_MAX_CV_PATH_OBSERVATIONS = 3_000_000
+
+#: Paths one call returns. Each is a row of the result, however short the
+#: series, so the payload grows with the count and not with the length --
+#: 12,870 paths is 2.5 MB of ranges for an agent to read back, and 6,000
+#: keeps it near one.
+_MAX_CV_PATHS = 6_000
 
 
 class PurgedCVInput(BaseModel):
@@ -110,10 +123,10 @@ class PurgedCVInput(BaseModel):
     n_observations: int = Field(
         ...,
         ge=50,
-        le=10_000,
-        description="Length of the series to be split. At most 10,000: the "
-        "splits are built observation by observation, and the cost grows "
-        "faster than the length -- 100,000 ran for minutes.",
+        le=_MAX_CV_OBSERVATIONS,
+        description="Length of the series to be split. At most 100,000 -- a "
+        "year of one-minute bars; the paths are built whole, so the ceiling "
+        "bounds the memory one call holds.",
     )
     n_splits: int = Field(6, ge=2, le=20, description="Groups to cut it into.")
     n_test_splits: int = Field(
@@ -133,7 +146,7 @@ class PurgedCVInput(BaseModel):
     label_horizon: int = Field(
         1,
         ge=1,
-        le=1_000,
+        le=_MAX_CV_OBSERVATIONS,
         description="How many observations forward the label looks. A 5-day "
         "forward return is 5. This is what purging needs to know.",
     )
@@ -145,6 +158,13 @@ class PurgedCVInput(BaseModel):
         if self.n_test_splits >= self.n_splits:
             return self
         n_paths = math.comb(self.n_splits, self.n_test_splits)
+        if n_paths > _MAX_CV_PATHS:
+            raise ValueError(
+                f"C({self.n_splits}, {self.n_test_splits}) = {n_paths:,} paths "
+                f"is above the {_MAX_CV_PATHS:,} one call returns: every path "
+                "is a row of the result, however short the series. Hold out "
+                "fewer groups or cut fewer groups."
+            )
         work = n_paths * self.n_observations
         if work > _MAX_CV_PATH_OBSERVATIONS:
             raise ValueError(
@@ -396,20 +416,18 @@ def _as_ranges(indices: List[int]) -> List[List[int]]:
     have grown linearly -- 360 KB at 5,000 observations, for a payload an
     agent then has to read back through a context window. The ranges carry
     the same information and are recovered with range(start, end).
+
+    Found with array operations rather than a step per index: the splitter
+    is linear in the length of the series, and a Python loop here would
+    have become the slowest part of the call.
     """
-    if not indices:
+    if not len(indices):
         return []
-    ordered = sorted(indices)
-    ranges: List[List[int]] = []
-    start = previous = ordered[0]
-    for value in ordered[1:]:
-        if value == previous + 1:
-            previous = value
-            continue
-        ranges.append([start, previous + 1])
-        start = previous = value
-    ranges.append([start, previous + 1])
-    return ranges
+    ordered = np.sort(np.asarray(indices, dtype=np.int64))
+    breaks = np.flatnonzero(np.diff(ordered) != 1)
+    starts = ordered[np.concatenate(([0], breaks + 1))]
+    ends = ordered[np.concatenate((breaks, [ordered.size - 1]))] + 1
+    return [[int(start), int(end)] for start, end in zip(starts, ends)]
 
 
 def build_purged_cv_splits(input_data: PurgedCVInput) -> PurgedCVResult:

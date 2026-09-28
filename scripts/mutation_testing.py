@@ -83,10 +83,8 @@ MUTATIONS: List[Mutation] = [
     Mutation(
         "cpcv: skip purging entirely",
         SRC / "backtesting/overfitting.py",
-        "            label_window = range(i, min(i + label_horizon + 1, n_observations))\n"
-        "            if any(j in test_set for j in label_window):\n"
-        "                purged += 1\n                continue",
-        "            pass",
+        "        dropped = seen[window_end] > seen\n",
+        "        dropped = np.zeros(n_observations, dtype=bool)\n",
         "tests/backtesting/test_overfitting.py",
     ),
     Mutation(

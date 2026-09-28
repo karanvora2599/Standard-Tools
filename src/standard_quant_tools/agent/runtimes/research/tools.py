@@ -961,7 +961,9 @@ def get_correlation_analysis(
             **summary["lowest_correlated_pair"],
             "correlation": round(summary["lowest_correlated_pair"]["correlation"], 4),
         },
-        diversification_ratio=round(dr, 4) if dr == dr else 0.0,
+        # NaN when the portfolio volatility is zero: null, with the reason.
+        # It was 0.0, a ratio the definition bounds below at 1.
+        diversification_ratio=round(dr, 4),
     )
 
 

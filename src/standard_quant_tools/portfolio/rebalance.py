@@ -133,6 +133,10 @@ def plan_rebalance(
             "total_cost_bps": 0.0,
             "total_cost_dollars": 0.0,
             "converged": True,
+            # Zero, not absent: a missing key reached the tool as a null, and
+            # the result then explained a plan with nothing to trade as one
+            # whose distance to target was undefined.
+            "residual_distance": 0.0,
             "unreachable": [],
             "warnings": ["already at target: nothing to trade"],
         }

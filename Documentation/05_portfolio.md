@@ -335,7 +335,10 @@ either of them publishes.
 **null with a warning** when the rate sits at or above the minimum-variance
 portfolio's own return: there is then no maximum-Sharpe portfolio on the
 efficient branch, and normalizing the same algebra anyway lands on the
-inefficient one and reads as an ordinary answer. `condition_number` is
+inefficient one and reads as an ordinary answer. The rate itself is a
+decimal within ±10 (1,000%), bounded on magnitude and never on sign; a
+larger magnitude is a unit error and is refused rather than answered with a
+null tangency. `condition_number` is
 reported at every level rather than only above the warning threshold — the
 frontier inverts that covariance for every point it returns.
 
@@ -708,4 +711,7 @@ A name missing from `adv` used to be read as having **zero** liquidity: it
 never traded, and the warning did not say why. It is now refused by name —
 supply that name's ADV, or omit `adv` altogether to plan without
 participation limits, which the result then reports as an unpriced
-transition rather than a free one.
+transition rather than a free one. A NaN or infinite entry in
+`current_weights`, `target_weights` or `adv` is refused by key: a holding
+has no gap to skip, and it used to come back as a schedule of nulls. A plan
+already at target reports a `residual_distance` of 0.0.

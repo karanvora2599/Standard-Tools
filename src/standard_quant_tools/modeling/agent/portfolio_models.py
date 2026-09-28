@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 from standard_quant_tools.agent.runtimes._json_safe import ExplainsNulls
+from standard_quant_tools.data.factory import ProviderName
 
 from ..specs import PortfolioSimSpec, PredictionTransformSpec, Task
 from .models import PORTFOLIO_METRIC_REASONS, Stat
@@ -66,7 +67,7 @@ class EvaluatePredictionsPortfolioInput(BaseModel):
         "Inherited from dataset_id when that is given; an explicit value "
         "overrides it.",
     )
-    provider: Optional[str] = Field(
+    provider: Optional[ProviderName] = Field(
         None,
         description="Data provider to price the simulation with. Inherited "
         "from dataset_id when that is given; an explicit value overrides it.",

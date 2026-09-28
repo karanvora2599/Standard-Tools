@@ -100,6 +100,18 @@ that arrives as NaN or infinity is null with a line in `warnings` saying so
 -- `half_life_t_statistic is null: the basis did not vary enough for the
 Dickey-Fuller regression behind the half-life to be fitted`.
 
+**A price past any market is refused, not answered with nulls.** The price
+inputs of `analyze_cash_futures_basis` (`spot`, `future_price`) and
+`analyze_etf_fair_value` (`etf_price`, `nav`, `basket_value`, and
+`cash_component` on magnitude) are bounded at 1e12, the ceiling the option
+pricers already use, and each tick of `monitor_spread_stream`'s two legs
+must be finite and within 1e12 in magnitude -- on magnitude because
+`absolute_points` takes a leg below zero. The ETF half-spreads are at most
+10,000 bps, the whole price. A future quoted at 1e308, or legs scaled by
+1e300, used to overflow inside and come back as null rates and a null
+baseline with a reason; that reason belongs to a legal input with no
+defined answer, and these are unit errors.
+
 ## 3. Three things this surface gets wrong if you let it
 
 ### A wide basis is usually not an arbitrage

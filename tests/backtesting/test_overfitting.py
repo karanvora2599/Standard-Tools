@@ -324,6 +324,146 @@ class TestCombinatorialPurgedCV:
             combinatorial_purged_cv(1000, n_splits=4, n_test_splits=4)
 
 
+def _rule_by_rule_splits(
+    n_observations, n_splits, n_test_splits, embargo_pct, label_horizon
+):
+    """
+    The purge and embargo rules applied one observation at a time, exactly
+    as the docstring states them: drop a training observation whose label
+    window [i, i + horizon] holds a test observation, or which sits within
+    `embargo` observations after the end of any test block.
+
+    Quadratic and obviously correct, which is its job: the splitter answers
+    every observation of a path at once, and this is what it must agree
+    with, index for index.
+    """
+    import itertools
+
+    horizon = max(1, int(label_horizon))
+    embargo = int(math.ceil(float(embargo_pct) * n_observations))
+    groups = np.array_split(np.arange(n_observations), n_splits)
+    paths = []
+    for combination in itertools.combinations(range(n_splits), n_test_splits):
+        test_index = np.concatenate([groups[c] for c in combination])
+        test = set(test_index.tolist())
+        ordered = sorted(test)
+        block_ends = [
+            t
+            for k, t in enumerate(ordered)
+            if k + 1 == len(ordered) or ordered[k + 1] != t + 1
+        ]
+        train, purged = [], 0
+        for i in range(n_observations):
+            if i in test:
+                continue
+            window = range(i, min(i + horizon + 1, n_observations))
+            touches = any(j in test for j in window)
+            after_block = embargo > 0 and any(0 < i - t <= embargo for t in block_ends)
+            if touches or after_block:
+                purged += 1
+            else:
+                train.append(i)
+        paths.append(
+            {
+                "test_groups": list(combination),
+                "n_train": len(train),
+                "n_test": int(test_index.size),
+                "n_purged": purged,
+                "train_index": train,
+                "test_index": test_index.tolist(),
+            }
+        )
+    return paths
+
+
+class TestTheSplitterAgreesWithItsRules:
+    """The splitter answers every observation of a path at once, so its
+    cost is linear in the length of the series. These hold it to the rules
+    it implements, on inputs chosen to reach every edge of them."""
+
+    @pytest.mark.parametrize("seed", range(6))
+    def test_randomized_inputs_give_the_rule_by_rule_indices(self, seed):
+        rng = np.random.default_rng(seed)
+        for _ in range(25):
+            n = int(rng.integers(50, 260))
+            n_splits = int(rng.integers(2, 9))
+            n_test = int(rng.integers(1, n_splits))
+            embargo_pct = float(
+                rng.choice([0.0, 0.004, 0.01, 0.05, 0.2, 0.5, rng.random()])
+            )
+            horizon = int(rng.choice([1, 2, 5, 17, n // 3, n - 1]))
+            expected = _rule_by_rule_splits(n, n_splits, n_test, embargo_pct, horizon)
+            got = combinatorial_purged_cv(
+                n,
+                n_splits=n_splits,
+                n_test_splits=n_test,
+                embargo_pct=embargo_pct,
+                label_horizon=horizon,
+            )
+            assert got["paths"] == expected, (n, n_splits, n_test, embargo_pct, horizon)
+            assert got["mean_purged"] == pytest.approx(
+                np.mean([p["n_purged"] for p in expected])
+            )
+
+    @pytest.mark.parametrize(
+        "embargo_pct,label_horizon",
+        [
+            (0.0, 1),  # neither rule reaches past the next observation
+            (-0.3, 1),  # a negative embargo is no embargo
+            (1.0, 1),  # an embargo as long as the series
+            (7.5, 3),  # and longer than it
+            (0.01, 0),  # a horizon below one is read as one
+            (0.01, -4),
+            (0.01, 10**20),  # a label window past the last observation
+            (0.25, 10**20),
+        ],
+    )
+    def test_edge_settings_give_the_rule_by_rule_indices(
+        self, embargo_pct, label_horizon
+    ):
+        for n, n_splits, n_test in ((50, 5, 2), (97, 6, 3), (131, 4, 1)):
+            got = combinatorial_purged_cv(
+                n,
+                n_splits=n_splits,
+                n_test_splits=n_test,
+                embargo_pct=embargo_pct,
+                label_horizon=label_horizon,
+            )
+            assert got["paths"] == _rule_by_rule_splits(
+                n, n_splits, n_test, embargo_pct, label_horizon
+            )
+
+    def test_more_groups_than_observations_leaves_some_test_sets_empty(self):
+        """array_split hands out empty groups past the length; a path whose
+        test set is empty trains on everything and purges nothing."""
+        got = combinatorial_purged_cv(
+            52, n_splits=60, n_test_splits=1, embargo_pct=0.1, label_horizon=3
+        )
+        assert got["paths"] == _rule_by_rule_splits(52, 60, 1, 0.1, 3)
+        empty = [p for p in got["paths"] if p["n_test"] == 0]
+        assert empty and all(p["n_train"] == 52 and p["n_purged"] == 0 for p in empty)
+
+    def test_the_indices_are_plain_integers(self):
+        """The result is JSON; a numpy integer in an index list is not."""
+        path = combinatorial_purged_cv(200)["paths"][0]
+        for key in ("train_index", "test_index"):
+            assert all(type(i) is int for i in path[key])
+        assert type(path["n_train"]) is int and type(path["n_purged"]) is int
+
+    def test_a_long_series_is_split_in_linear_time(self):
+        """A hundred thousand observations, fifteen paths, a 20-bar label
+        and a 1% embargo. Walked one observation at a time this took
+        minutes; answered a path at a time it takes a fraction of a second,
+        and the budget here is generous so a slow machine does not fail it."""
+        import time
+
+        started = time.perf_counter()
+        result = combinatorial_purged_cv(100_000, label_horizon=20, embargo_pct=0.01)
+        elapsed = time.perf_counter() - started
+        assert result["n_paths"] == 15
+        assert elapsed < 10.0, f"took {elapsed:.1f}s"
+
+
 class TestRealityCheck:
     def test_the_false_positive_rate_is_near_nominal(self):
         """

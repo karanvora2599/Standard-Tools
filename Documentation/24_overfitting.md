@@ -154,6 +154,15 @@ however long the series is: 500 observations across 15 paths is 37 KB as
 indices and 2.6 KB as ranges, and stays at 2.7 KB at 5,000 observations
 where indices would have reached 360 KB.
 
+**Cost.** Each path is answered with array operations -- a running count of
+test observations for the purge, a search over the block ends for the
+embargo -- so a call is linear in the length of the series and costs
+nothing extra for a long label horizon. The default split of 100,000
+observations (a year of one-minute bars) takes about a tenth of a second.
+The tool bounds what it holds and returns rather than how long it runs: at
+most 100,000 observations, a label horizon of at most the same, 6,000 paths
+(each is a row of the result), and 3,000,000 path-observations in one call.
+
 ## What the equity curve does not say
 
 A backtest reports one path, in one order. Most of what is worth knowing is

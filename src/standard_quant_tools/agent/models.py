@@ -740,8 +740,12 @@ class EfficientFrontierInput(BaseModel):
     )
     risk_free_rate: float = Field(
         0.0,
+        ge=-10,
+        le=10,
         description="ANNUAL rate, used only to locate the tangency "
-        "portfolio. The frontier itself does not depend on it.",
+        "portfolio. The frontier itself does not depend on it. A decimal "
+        "bounded to +/-10 (1,000%) on magnitude, never on sign: a larger "
+        "magnitude is a unit error.",
     )
     periods_per_year: int = Field(
         252,
@@ -1867,15 +1871,39 @@ class RegimeAdaptiveInput(BaseModel):
     )
 
 
-class RegimeAdaptiveResult(BaseModel):
+#: Why the regime diagnostics of an adaptive backtest are null. They were
+#: reported as 0.0 when the exponent could not be fitted, and a Hurst of 0.0
+#: reads as strongly mean-reverting -- the opposite of "unknown", which is
+#: what the regime beside it said.
+_HURST_REASONS: Dict[str, Reason] = {
+    "hurst": (
+        "no exponent could be fitted -- too few returns for the window range, "
+        "or a series with no scaling to fit (a constant one) -- so the regime "
+        "is 'unknown'"
+    ),
+    "fit_r_squared": (
+        "no log-log fit was made, or the fitted values did not vary, so there "
+        "is no R^2 to report"
+    ),
+}
+
+
+class RegimeAdaptiveResult(ExplainsNulls):
+    null_reasons = _HURST_REASONS
+
     symbol: str
-    regime: str  # "trending" | "random_walk" | "mean_reverting"
-    hurst: float
-    fit_r_squared: float
+    regime: str  # "trending" | "random_walk" | "mean_reverting" | "unknown"
+    hurst: Stat
+    fit_r_squared: Stat
     selected_strategy: str
     best_parameters: Dict[str, Any]
     grid_combinations: int
     backtest: BacktestResult
+    warnings: List[str] = Field(
+        default_factory=list,
+        description="Why the Hurst exponent or its fit is null, when one is. "
+        "The backtest's own caveats are in backtest.warnings.",
+    )
 
 
 # ──────────────────────────────────────────────
@@ -2258,7 +2286,7 @@ class RegimeAdaptiveWalkForwardInput(BaseModel):
 
 
 class RegimeAdaptiveWalkForwardWindow(ExplainsNulls):
-    null_reasons = _PERFORMANCE_REASONS
+    null_reasons = {**_PERFORMANCE_REASONS, **_HURST_REASONS}
 
     window_index: int
     train_start: str
@@ -2266,8 +2294,10 @@ class RegimeAdaptiveWalkForwardWindow(ExplainsNulls):
     test_start: str
     test_end: str
     regime: str  # "trending" | "random_walk" | "mean_reverting" | "unknown" — diagnostic context only
-    hurst: float
-    fit_r_squared: float
+    # Measured on the training window; null, with the reason in the
+    # walk-forward result's warnings, where it could not be fitted.
+    hurst: Stat
+    fit_r_squared: Stat
     selected_strategy: str
     best_params: Dict[str, Any]
     in_sample_sharpe: float
@@ -3627,7 +3657,12 @@ class PortfolioSimulationInput(BaseModel):
     margin_interest_rate: float = Field(
         0.0,
         ge=0,
-        description="Annualized rate accrued daily on negative cash (implied margin borrowing).",
+        # The bound every other rate on the surface carries. 1e308 ran and
+        # returned a null account -- it is a unit error, not a scenario.
+        le=10,
+        description="Annualized rate accrued daily on negative cash (implied "
+        "margin borrowing), as a decimal: 0.08 is 8%. At most 10 (1,000%); a "
+        "larger value is a unit error.",
     )
     max_adv_participation: Optional[float] = Field(
         None,
@@ -4512,7 +4547,7 @@ class DataQualityReportInput(BaseModel):
     symbol: str = Field(..., description="Ticker symbol.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
-    source: Optional[str] = Field(
+    source: Optional[ProviderName] = Field(
         None,
         description=(
             "Data provider to fetch from; None uses the configured default. "
@@ -5135,7 +5170,7 @@ class DataCapabilitiesInput(BaseModel):
     # the one choosing the names.
     model_config = ConfigDict(extra="forbid")
 
-    source: str = Field(
+    source: ProviderName = Field(
         "yfinance",
         description=(
             "Provider to describe: 'yfinance', 'polygon', 'bloomberg' or "
@@ -5367,7 +5402,13 @@ class EstimateTradeCostInput(BaseModel):
         ),
     )
     spread_bps: float = Field(
-        1.0, ge=0, description="spread_model='fixed_bps': basis points of notional."
+        1.0,
+        ge=0,
+        # 10,000 bps is the whole notional. A spread past it is not a cost
+        # of trading, and 1e308 overflowed the breakeven move to infinity.
+        le=10_000,
+        description="spread_model='fixed_bps': basis points of notional, at "
+        "most 10,000 (the whole notional).",
     )
     bar_high: Optional[float] = Field(
         None, gt=0, description="spread_model='pct_of_range': the bar's High."
@@ -6431,7 +6472,7 @@ class MicrostructureInput(BaseModel):
             "call to one page rather than an unbounded crawl."
         ),
     )
-    source: str = Field(
+    source: ProviderName = Field(
         "polygon",
         description=(
             "Provider to fetch from. Only a provider with a tick feed can "
@@ -6513,7 +6554,7 @@ class TradeProfileInput(BaseModel):
         description="Bucket width for the time-of-day volume profile (e.g. '15min', '1h').",
     )
     limit: Optional[int] = Field(50_000, gt=0, description="Cap on ticks fetched.")
-    source: str = Field("polygon", description="Provider with a tick feed.")
+    source: ProviderName = Field("polygon", description="Provider with a tick feed.")
 
 
 class SizeBucket(BaseModel):
@@ -6614,7 +6655,7 @@ class SpreadProxyCheckInput(BaseModel):
         20, gt=0, description="Rolling window (bars) for the OHLCV proxies."
     )
     limit: Optional[int] = Field(50_000, gt=0, description="Cap on ticks fetched.")
-    source: str = Field("polygon", description="Provider with a tick feed.")
+    source: ProviderName = Field("polygon", description="Provider with a tick feed.")
 
 
 class SpreadProxyCheckResult(BaseModel):
@@ -7156,9 +7197,10 @@ class TemporalContractInput(BaseModel):
     # An argument this tool does not take is REJECTED, not ignored.
     model_config = ConfigDict(extra="forbid")
 
-    source: str = Field(
+    source: ProviderName = Field(
         "yfinance",
-        description="Provider name: 'yfinance', 'polygon' or 'bloomberg'. "
+        description="Provider name: 'yfinance', 'polygon', 'bloomberg' or "
+        "'databento'. "
         "Same argument and same default as describe_data_capabilities, so "
         "the two tools describe the same provider unless told otherwise.",
     )
@@ -7415,8 +7457,8 @@ class LiquidityEventsResult(BaseModel):
 
 
 _REBALANCE_UNDEFINED = (
-    "a current or target weight is not a finite number, so no schedule "
-    "toward it is defined"
+    "the gap between a current and a target weight is too large to "
+    "represent, so no schedule toward it is defined"
 )
 
 
@@ -7501,6 +7543,16 @@ class PlanRebalanceInput(BaseModel):
         "square-root law. A MODEL, not a measurement — pass your own if you "
         "have calibrated one.",
     )
+
+    @field_validator("current_weights", "target_weights", "adv")
+    @classmethod
+    def _finite_holdings(
+        cls, v: Optional[Dict[str, float]], info: Any
+    ) -> Optional[Dict[str, float]]:
+        # A holding or a volume is not a series with gaps: a NaN weight has
+        # no distance to its target, and it came back as a schedule of
+        # nulls with a reason instead of a refusal naming the name.
+        return v if v is None else _finite_entries(v, info.field_name)
 
 
 class PlanRebalanceResult(ExplainsNulls):

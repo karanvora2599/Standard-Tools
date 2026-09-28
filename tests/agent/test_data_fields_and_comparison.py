@@ -40,6 +40,7 @@ from unittest.mock import patch
 import numpy as np
 import pandas as pd
 import pytest
+from pydantic import ValidationError as PydanticValidationError
 
 from standard_quant_tools.agent.runtimes import resolve as resolve_runtime
 from standard_quant_tools.agent.runtimes.data.tools import _BUNDLE_KINDS
@@ -567,8 +568,10 @@ class TestWhichProviderIsBeingChecked:
     def test_an_unknown_provider_is_refused_by_name(self):
         """Hard-wiring one provider meant the feeds most worth checking
         could never be checked; taking the argument means an unknown one
-        has to refuse with the list rather than raise from the factory."""
-        with pytest.raises(ValidationError) as exc:
+        has to refuse with the list rather than raise from the factory.
+        The field is typed with the provider names now, so the list comes
+        from the schema's refusal, before the tool runs."""
+        with pytest.raises(PydanticValidationError) as exc:
             _quality(source="nosuch")
         message = str(exc.value)
         for provider in ("yfinance", "polygon", "bloomberg", "databento"):

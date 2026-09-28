@@ -251,6 +251,138 @@ class TestBacktestRatios:
         )
 
 
+# ── regime diagnostics and the diversification ratio ────────────────────
+
+
+def _serve(monkeypatch, frame: pd.DataFrame) -> None:
+    """Every fetch answers with `frame`, whatever the symbol."""
+    provider = MagicMock()
+    provider.get_ohlcv.side_effect = lambda *a, **k: frame
+    provider.get_ohlcv_async = AsyncMock(side_effect=lambda *a, **k: frame)
+    monkeypatch.setattr(DataFactory, "get_provider", lambda *a, **k: provider)
+
+
+def _flat_market(periods: int = 500) -> pd.DataFrame:
+    index = pd.bdate_range("2020-01-02", periods=periods)
+    return _bars(pd.Series(100.0, index=index))
+
+
+def _moving_market(seed: int, periods: int = 500) -> pd.DataFrame:
+    index = pd.bdate_range("2020-01-02", periods=periods)
+    rng = np.random.default_rng(seed)
+    return _bars(
+        pd.Series(100 * np.exp(np.cumsum(rng.normal(0, 0.01, periods))), index=index)
+    )
+
+
+class TestRegimeDiagnosticsAndDiversification:
+    """Each was NaN on a legal input and written into the result as 0.0: a
+    Hurst of 0.0 reads as strongly mean-reverting beside a regime that says
+    'unknown', and a diversification ratio of 0.0 is below the 1.0 its
+    definition guarantees. Each is null now, with the reason."""
+
+    def test_an_exponent_that_cannot_be_fitted_is_null_not_zero(self, monkeypatch):
+        from standard_quant_tools.agent.runtimes.backtest import tools as T
+
+        _serve(monkeypatch, _flat_market())
+        result = T.run_regime_adaptive_backtest(
+            M.RegimeAdaptiveInput(
+                symbol="AAA", start_date="2020-01-02", end_date="2021-12-01"
+            )
+        )
+        assert result.regime == "unknown"
+        assert result.hurst is None
+        assert result.fit_r_squared is None
+        assert any(
+            line.startswith("hurst is null: no exponent could be fitted")
+            for line in result.warnings
+        ), result.warnings
+        assert any(line.startswith("fit_r_squared is null") for line in result.warnings)
+
+    def test_a_fitted_exponent_is_a_number_and_says_nothing(self, monkeypatch):
+        """The null case."""
+        from standard_quant_tools.agent.runtimes.backtest import tools as T
+
+        _serve(monkeypatch, _moving_market(5))
+        result = T.run_regime_adaptive_backtest(
+            M.RegimeAdaptiveInput(
+                symbol="AAA", start_date="2020-01-02", end_date="2021-12-01"
+            )
+        )
+        assert isinstance(result.hurst, float) and math.isfinite(result.hurst)
+        assert isinstance(result.fit_r_squared, float)
+        assert _null_lines(result) == []
+
+    def test_each_walk_forward_window_says_why_its_exponent_is_null(self, monkeypatch):
+        from standard_quant_tools.agent.runtimes.backtest import tools as T
+
+        _serve(monkeypatch, _flat_market())
+        result = T.run_regime_adaptive_walkforward_backtest(
+            M.RegimeAdaptiveWalkForwardInput(
+                symbol="AAA",
+                start_date="2020-01-02",
+                end_date="2021-12-01",
+                train_bars=200,
+                test_bars=50,
+            )
+        )
+        assert result.windows and all(w.hurst is None for w in result.windows)
+        assert all(w.fit_r_squared is None for w in result.windows)
+        assert any(
+            line.startswith(f"windows[*].hurst is null in {len(result.windows)} places")
+            and "no exponent could be fitted" in line
+            for line in result.warnings
+        ), result.warnings
+
+    def test_walk_forward_windows_on_a_moving_market_have_exponents(self, monkeypatch):
+        """The null case."""
+        from standard_quant_tools.agent.runtimes.backtest import tools as T
+
+        _serve(monkeypatch, _moving_market(9))
+        result = T.run_regime_adaptive_walkforward_backtest(
+            M.RegimeAdaptiveWalkForwardInput(
+                symbol="AAA",
+                start_date="2020-01-02",
+                end_date="2021-12-01",
+                train_bars=200,
+                test_bars=50,
+            )
+        )
+        assert all(isinstance(w.hurst, float) for w in result.windows)
+        assert not any("hurst is null" in line for line in result.warnings)
+
+    def test_a_ratio_over_a_portfolio_that_never_moved_is_null(self, monkeypatch):
+        from standard_quant_tools.agent.runtimes.research import tools as R
+
+        _serve(monkeypatch, _flat_market(120))
+        result = R.get_correlation_analysis(
+            M.CorrelationAnalysisInput(
+                tickers=["AAA", "BBB"], start_date="2020-01-02", end_date="2020-06-30"
+            )
+        )
+        assert result.diversification_ratio is None
+        assert any(
+            line.startswith("diversification_ratio is null: the portfolio volatility")
+            for line in result.warnings
+        ), result.warnings
+
+    def test_a_ratio_over_a_moving_portfolio_is_at_least_one(self, monkeypatch):
+        """The null case: every ticker is served the same series, so the
+        ratio is exactly its floor of 1.0 and nothing is null."""
+        from standard_quant_tools.agent.runtimes.research import tools as R
+
+        _serve(monkeypatch, _moving_market(2, 120))
+        result = R.get_correlation_analysis(
+            M.CorrelationAnalysisInput(
+                tickers=["AAA", "BBB"], start_date="2020-01-02", end_date="2020-06-30"
+            )
+        )
+        assert result.diversification_ratio == pytest.approx(1.0)
+        assert not any(
+            line.startswith("diversification_ratio is null") for line in result.warnings
+        )
+
+
 # ── every other result model in scope ───────────────────────────────────
 
 #: (model, field, value, a phrase the warning must contain)

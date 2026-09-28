@@ -1351,7 +1351,7 @@ not originally reach:
 |---|---|
 | Feature window params | ≤ 100,000 bars |
 | `DatasetSpec.universe` | ≤ 1,000 symbols |
-| `ModelSpec.random_seed` | 0 – 2³²−1 (NumPy's RNG range) |
+| `ModelSpec.random_seed` | 0 – 2³²−1 (NumPy's RNG range); a boolean is refused rather than run as seed 1 or 0 |
 
 Integer-valued **feature** params are enforced from the default's *type*
 rather than a vocabulary of parameter names. `refit_every` is not a

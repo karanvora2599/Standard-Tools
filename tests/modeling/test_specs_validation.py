@@ -201,6 +201,29 @@ class TestParameterAndResourceBounds:
         )
         assert spec.random_seed == 2**32 - 1
 
+    @pytest.mark.parametrize("flag", [True, False])
+    def test_a_boolean_seed_is_refused_by_name(self, flag):
+        """A bool is an int to the bounds, so True ran as seed 1 and False as
+        seed 0; the agent surface's seeds already refused it."""
+        with pytest.raises(PydanticValidationError, match="boolean"):
+            ModelSpec(
+                task="regression",
+                estimator=EstimatorSpec(type="ridge", params={}),
+                validation=ValidationSpec(train_window=100, test_window=20, embargo=5),
+                random_seed=flag,
+            )
+
+    @pytest.mark.parametrize("seed", [0, 1])
+    def test_the_numbers_a_flag_would_have_become_are_still_seeds(self, seed):
+        """The null case: 0 and 1 as integers are ordinary seeds."""
+        spec = ModelSpec(
+            task="regression",
+            estimator=EstimatorSpec(type="ridge", params={}),
+            validation=ValidationSpec(train_window=100, test_window=20, embargo=5),
+            random_seed=seed,
+        )
+        assert spec.random_seed == seed and type(spec.random_seed) is int
+
 
 class TestReservedPanelColumnNames:
     """

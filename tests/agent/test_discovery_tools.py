@@ -14,6 +14,7 @@ anything, so it stays callable when the thing it describes is unavailable.
 """
 
 import pytest
+from pydantic import ValidationError as PydanticValidationError
 
 from standard_quant_tools.agent.tools import dispatch
 from standard_quant_tools.backtest.strategies import STRATEGY_REGISTRY
@@ -161,7 +162,9 @@ class TestDescribeDataCapabilities:
         }
 
     def test_unknown_source_is_a_caller_error(self):
-        with pytest.raises(ValidationError):
+        """Refused by the schema, which lists the four providers, rather
+        than in the body after lower-casing the name."""
+        with pytest.raises(PydanticValidationError, match="databento"):
             dispatch("describe_data_capabilities", {"source": "not_a_provider"})
 
     def test_describing_a_provider_fetches_no_market_data(self, monkeypatch):

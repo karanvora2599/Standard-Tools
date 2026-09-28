@@ -1,5 +1,26 @@
 # Changelog
 
+## A value no market can produce is refused, and the purged splitter is linear
+
+- **Mistakes are refused instead of answered with nulls.**
+  `margin_interest_rate` and the frontier's `risk_free_rate` are decimals
+  within ±10; delta-one prices and every spread-monitor tick stay within the
+  library's price ceiling; ETF half-spreads and `spread_bps` are at most
+  10,000 bps; `plan_rebalance` refuses a non-finite weight or ADV by key. A
+  plan already at target reports a residual of 0.0 rather than a null.
+- **An undefined number is null, not zero.** An unfittable Hurst exponent in
+  the regime-adaptive tools and a zero-volatility diversification ratio are
+  null with the reason instead of 0.0, which read as maximal mean reversion
+  and as no diversification.
+- **The purged combinatorial splitter is linear.** It rebuilt the block ends
+  for every observation; it now uses a cumulative count and one sorted
+  search, with identical indices, so ten thousand observations take
+  milliseconds instead of eleven seconds and `build_purged_cv_splits` accepts
+  a hundred thousand (at most 6,000 paths).
+- **The last loose inputs.** `ModelSpec.random_seed` refuses a boolean, and
+  every field that chooses a data provider lists the four providers in its
+  schema; fields that only label where a file came from stay free text.
+
 ## The tool surface refuses what it cannot answer, and says why a number is missing
 
 An offline sweep of every tool with some seven thousand adversarial inputs

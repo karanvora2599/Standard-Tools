@@ -26,10 +26,12 @@ the error this surface is most exposed to: passing 43 for a 4.3% rate, or
 
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from standard_quant_tools.analysis.derivatives import MAX_PRICE as _MAX_PRICE
 from standard_quant_tools.delta_one.daycount import CONVENTIONS as _CONVENTIONS
 from standard_quant_tools.delta_one.streaming import (
     STREAMING_THRESHOLD as _STREAMING_THRESHOLD,
@@ -83,8 +85,16 @@ __all__ = [
 class CashFuturesBasisInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    spot: float = Field(..., gt=0, description="Current cash index or share price.")
-    future_price: float = Field(..., gt=0, description="The QUOTED future.")
+    # Prices are bounded where the option pricers bound them: far outside
+    # anything a market quotes, so only a unit error or a typo is refused. A
+    # future at 1e308 overflowed the carry to infinity and was answered with
+    # null rates rather than refused.
+    spot: float = Field(
+        ..., gt=0, le=_MAX_PRICE, description="Current cash index or share price."
+    )
+    future_price: float = Field(
+        ..., gt=0, le=_MAX_PRICE, description="The QUOTED future."
+    )
     time_to_expiry: float = Field(
         ..., gt=0, le=100, description="Years to expiry (0.25 = three months)."
     )
@@ -478,8 +488,14 @@ class ReplicationBasketInput(BaseModel):
 class EtfFairValueInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    etf_price: float = Field(..., gt=0, description="Traded price of the fund.")
-    nav: float = Field(..., gt=0, description="Net asset value PER SHARE.")
+    # Bounded as every price on this surface is; a fund at 1e308 overflowed
+    # its premium to infinity instead of being refused.
+    etf_price: float = Field(
+        ..., gt=0, le=_MAX_PRICE, description="Traded price of the fund."
+    )
+    nav: float = Field(
+        ..., gt=0, le=_MAX_PRICE, description="Net asset value PER SHARE."
+    )
     nav_is_intraday: bool = Field(
         False,
         description="False means a struck end-of-day NAV, in which case an "
@@ -488,12 +504,15 @@ class EtfFairValueInput(BaseModel):
     basket_value: Optional[float] = Field(
         None,
         gt=0,
+        le=_MAX_PRICE,
         description="Independent value of one share's worth of creation "
         "basket. Supply it to separate a fund away from its holdings from a "
         "NAV that disagrees with them.",
     )
     cash_component: float = Field(
         0.0,
+        ge=-_MAX_PRICE,
+        le=_MAX_PRICE,
         description="Per-share cash in the creation basket. Must be finite: "
         "an infinite one priced the fund at a 10,000 bp discount to its "
         "basket and recommended redeeming.",
@@ -504,9 +523,13 @@ class EtfFairValueInput(BaseModel):
         description="Shares per creation unit. Needed to express a fee in bps.",
     )
     creation_fee: float = Field(0.0, ge=0, description="Currency, per unit.")
-    etf_spread_bps: float = Field(0.0, ge=0, description="Half-spread, ONE way.")
+    # At most the whole price: a half-spread of 1e308 bps overflowed the
+    # round-trip execution cost to infinity rather than being refused.
+    etf_spread_bps: float = Field(
+        0.0, ge=0, le=10_000, description="Half-spread, ONE way."
+    )
     basket_spread_bps: float = Field(
-        0.0, ge=0, description="Blended basket half-spread, one way."
+        0.0, ge=0, le=10_000, description="Blended basket half-spread, one way."
     )
     tolerance_bps: float = Field(
         25.0, ge=0, le=10_000, description="Within this the premium reads as fair."
@@ -792,6 +815,28 @@ class SpreadMonitorInput(BaseModel):
     slack: float = Field(
         0.5, ge=0, le=100, description="Standardized deviations absorbed per step."
     )
+
+    @field_validator("primary_prices", "reference_prices")
+    @classmethod
+    def _plausible_prices(cls, v: List[float], info: Any) -> List[float]:
+        # On MAGNITUDE, not sign: absolute_points takes a leg below zero, as
+        # a roll spread on a contract that settled negative does. Prices
+        # scaled by 1e300 overflowed the warm-up variance to infinity, and
+        # the monitor answered with a null baseline instead of a refusal.
+        bad = [
+            index
+            for index, price in enumerate(v)
+            if not math.isfinite(price) or abs(price) > _MAX_PRICE
+        ]
+        if bad:
+            raise ValueError(
+                f"{info.field_name} has {len(bad)} price(s) that are not "
+                f"finite or are beyond {_MAX_PRICE:g} in magnitude, at "
+                f"position(s) {bad[:10]}. That is far outside anything a "
+                "market quotes, so it is a unit error or a typo; pass each "
+                "leg in its own quoted units."
+            )
+        return v
 
 
 class BasisScanPair(BaseModel):

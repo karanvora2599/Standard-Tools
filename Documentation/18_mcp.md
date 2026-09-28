@@ -421,7 +421,9 @@ surface neither flag describes.
 `microstructure` splits in two. The tools that MEASURE from a tape need a
 provider with a **tick feed** (Polygon or Databento) and refuse by name on
 a bar-only one, naming the providers that serve ticks rather than
-approximating from OHLCV; the bar-based estimators beside them work from
+approximating from OHLCV. Their `source` is typed with the same four
+provider names every data door lists, so a name the library does not serve
+is refused by the schema before anything is fetched; the bar-based estimators beside them work from
 OHLCV and say what each is a proxy for. Call `describe_data_capabilities`
 (in `discovery`) first.
 

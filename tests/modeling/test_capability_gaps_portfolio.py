@@ -320,14 +320,17 @@ class TestTheSimulatorTakesAReference:
 
     def test_the_five_fields_given_explicitly_are_enough(self, trained):
         """A caller with no dataset_id -- an externally computed alpha --
-        names the price window itself and gets the same simulation."""
+        names the price window itself and gets the same simulation. The
+        provider is one the library serves: the field is typed with the
+        factory's provider names, so the made-up 'mock' this used is refused
+        by the schema now (the fixture answers whichever name is asked)."""
         ref = _publish_oos(trained["model_ids"][0], "oos_explicit")
         result = evaluate_predictions_portfolio(
             EvaluatePredictionsPortfolioInput(
                 predictions_ref=ref,
                 task="regression",
                 interval="1d",
-                provider="mock",
+                provider="polygon",
                 start_date="2022-01-01",
                 end_date="2023-12-31",
                 run_id="refeval_explicit",
@@ -335,7 +338,7 @@ class TestTheSimulatorTakesAReference:
         )
         assert np.isfinite(result.metrics["sharpe_ratio"])
         assert result.provenance["interval"] == "1d"
-        assert result.provenance["provider"] == "mock"
+        assert result.provenance["provider"] == "polygon"
 
     def test_a_raw_artifact_path_is_not_a_reference(self, trained):
         uri = _registered_oos_path(trained["model_ids"][0])

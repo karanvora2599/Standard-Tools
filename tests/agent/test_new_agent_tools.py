@@ -163,7 +163,9 @@ class TestRegimeAdaptiveBacktest:
     def test_hurst_bounded(self, patched_long):
         inp = RegimeAdaptiveInput(symbol="AAPL", start_date=START, end_date=END)
         result = run_regime_adaptive_backtest(inp)
-        assert 0.0 <= result.hurst <= 1.0 or result.hurst == 0.0  # 0.0 on NaN fallback
+        # Null, with the reason in warnings, when no exponent can be fitted;
+        # it used to read 0.0 there, which is strongly mean-reverting.
+        assert result.hurst is None or 0.0 <= result.hurst <= 1.0
 
     def test_backtest_fields_populated(self, patched_long):
         inp = RegimeAdaptiveInput(symbol="AAPL", start_date=START, end_date=END)
@@ -281,7 +283,7 @@ class TestRegimeAdaptiveWalkForwardBacktest:
                 "random_walk",
                 "unknown",
             )
-            assert 0.0 <= win.hurst <= 1.0 or win.hurst == 0.0
+            assert win.hurst is None or 0.0 <= win.hurst <= 1.0
 
     def test_stitched_and_stability_fields_present(self, patched_long):
         inp = RegimeAdaptiveWalkForwardInput(
@@ -3230,9 +3232,13 @@ class TestAdvancedToolBounds:
 
 
 class TestPurgedSplitsAreBoundedBeforeTheyRun:
-    """The splits are built observation by observation for every path, so
-    100,000 observations ran for minutes and C(16, 8) = 12,870 paths would
-    have run for longer."""
+    """Every path holds a train and a test index as long as the series, and
+    every path is a row of the result. So the length, the path count and
+    their product are bounded before anything is built. The splitter itself
+    is linear in the length, which is why the length ceiling is a year of
+    one-minute bars (100,000) and the label horizon may reach it: the pins
+    below at 100,000 observations and a 5,000-bar horizon used to be
+    refusals, when each path was walked one observation at a time."""
 
     @staticmethod
     def _splits(**arguments):
@@ -3240,18 +3246,58 @@ class TestPurgedSplitsAreBoundedBeforeTheyRun:
 
     def test_a_series_past_the_ceiling_is_refused(self):
         with pytest.raises(PydanticValidationError, match="n_observations"):
-            self._splits(n_observations=100_000)
+            self._splits(n_observations=1_000_000)
 
     def test_too_many_paths_for_the_length_are_refused_with_the_count(self):
         with pytest.raises(PydanticValidationError) as exc:
             self._splits(n_observations=2_000, n_splits=16, n_test_splits=8)
         assert "12,870 paths" in str(exc.value)
 
+    def test_too_many_paths_are_refused_however_short_the_series(self):
+        """C(16, 8) over the shortest legal series is 643,500
+        path-observations, well inside the work ceiling; it is the 12,870
+        rows of the result that are refused."""
+        with pytest.raises(PydanticValidationError) as exc:
+            self._splits(n_observations=50, n_splits=16, n_test_splits=8)
+        assert "12,870 paths" in str(exc.value)
+        assert "row of the result" in str(exc.value)
+
+    def test_too_much_work_for_the_length_is_refused_with_the_product(self):
+        with pytest.raises(PydanticValidationError) as exc:
+            self._splits(n_observations=100_000, n_splits=10, n_test_splits=2)
+        assert "4,500,000 path-observations" in str(exc.value)
+
     def test_a_label_horizon_past_the_ceiling_is_refused(self):
         with pytest.raises(PydanticValidationError, match="label_horizon"):
-            self._splits(n_observations=500, label_horizon=5_000)
+            self._splits(n_observations=500, label_horizon=1_000_000)
+
+    def test_a_label_horizon_longer_than_the_series_is_answered(self):
+        """A horizon past the end purges everything before each test block;
+        that is an answer with a warning, not a refusal."""
+        result = self._splits(n_observations=500, label_horizon=5_000)
+        assert result["n_paths"] == 15
+        assert any("most of the sample" in w for w in result["warnings"])
 
     def test_the_default_split_at_the_ceiling_still_runs(self):
-        result = self._splits(n_observations=10_000)
+        result = self._splits(n_observations=100_000)
         assert result["n_paths"] == 15
-        assert result["n_observations"] == 10_000
+        assert result["n_observations"] == 100_000
+
+    def test_the_ranges_recover_the_library_indices(self):
+        """The result compresses each index set into half-open ranges; they
+        must expand back to exactly what the splitter built."""
+        from standard_quant_tools.backtesting.overfitting import (
+            combinatorial_purged_cv,
+        )
+
+        arguments = dict(n_splits=6, n_test_splits=2, embargo_pct=0.02)
+        result = self._splits(n_observations=700, label_horizon=9, **arguments)
+        library = combinatorial_purged_cv(700, label_horizon=9, **arguments)
+        for ranged, path in zip(result["paths"], library["paths"]):
+            for key in ("train", "test"):
+                expanded = [
+                    i
+                    for start, end in ranged[f"{key}_ranges"]
+                    for i in range(start, end)
+                ]
+                assert expanded == sorted(path[f"{key}_index"])

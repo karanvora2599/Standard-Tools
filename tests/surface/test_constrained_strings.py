@@ -67,8 +67,6 @@ DELIBERATELY_UNCONSTRAINED = {
         "any pandas offset alias, the same field as DatasetSpec.interval"
     ),
     ("analyze_stock_risk", "period"): "refuses: 'not a recognized window'",
-    ("describe_data_capabilities", "source"): "refuses: unknown data provider",
-    ("describe_temporal_contract", "source"): "refuses: unknown data provider",
     ("describe_temporal_contract", "frame_kind"): "refuses via TemporalContract",
     ("estimate_covariance", "method"): "refuses against covariance.METHODS",
     ("get_intraday_volume_profile", "exchange_timezone"): (
@@ -76,7 +74,29 @@ DELIBERATELY_UNCONSTRAINED = {
     ),
     ("get_option_pricing", "model"): "refuses: 'unknown pricing model'",
     ("run_portfolio_simulation", "commission_model"): "refuses via _COMMISSION_CODES",
+    # A `source` that records who supplied a registered frame, rather than
+    # selecting a provider to fetch from: a vendor, a desk, a file. Nothing
+    # is fetched with it, so any label is a legitimate one.
+    ("infer_temporal_contract", "source"): "a provenance label, not a provider",
+    ("register_external_dataset", "source"): "a provenance label, not a provider",
+    ("register_external_panel", "source"): "a provenance label, not a provider",
 }
+
+#: Every field that selects the data provider a tool fetches from. Each is
+#: typed with the factory's `ProviderName`, so the schema lists the four the
+#: library serves and anything else is refused before the call runs.
+#: Several were bare strings the factory checked in the body, so the schema
+#: an agent reads did not list the choices.
+PROVIDER_FIELDS = [
+    ("check_spread_proxy", "source"),
+    ("describe_data_capabilities", "source"),
+    ("describe_temporal_contract", "source"),
+    ("evaluate_predictions_portfolio", "provider"),
+    ("fetch_ohlcv", "source"),
+    ("get_data_quality_report", "source"),
+    ("get_microstructure_metrics", "source"),
+    ("get_trade_profile", "source"),
+]
 
 _QUOTED = re.compile(r"'([a-z0-9_]{2,30})'")
 
@@ -142,6 +162,51 @@ class TestTheFixedFieldsDeclareTheirChoices:
         default = model.model_fields[field].default
         with pytest.raises(Exception):
             model.model_validate({field: str(default).upper()})
+
+
+def _enum_of(spec):
+    enum = spec.get("enum")
+    for branch in spec.get("anyOf", []) or []:
+        enum = enum or branch.get("enum")
+    return enum
+
+
+class TestProviderFieldsNameTheProviders:
+    @pytest.mark.parametrize("tool,field", PROVIDER_FIELDS)
+    def test_the_schema_lists_the_providers(self, tool, field):
+        from standard_quant_tools.data.factory import PROVIDER_NAMES
+
+        spec = (_catalog()[tool].input_schema or {}).get("properties", {})[field]
+        assert set(_enum_of(spec) or ()) == set(
+            PROVIDER_NAMES
+        ), f"{tool}.{field} is not typed with ProviderName"
+
+    @pytest.mark.parametrize("tool,field", PROVIDER_FIELDS)
+    def test_an_unknown_provider_is_refused_by_the_schema(self, tool, field):
+        import pydantic
+
+        model = _input_model(tool)
+        with pytest.raises(pydantic.ValidationError) as excinfo:
+            model.model_validate({field: "not_a_provider"})
+        assert any(
+            error["loc"] == (field,) and error["type"] == "literal_error"
+            for error in excinfo.value.errors()
+        )
+
+    @pytest.mark.parametrize("tool,field", PROVIDER_FIELDS)
+    def test_a_named_provider_passes_the_field(self, tool, field):
+        """The null case: the field itself accepts each provider the library
+        serves, whatever else the model still requires."""
+        import pydantic
+
+        model = _input_model(tool)
+        for name in ("yfinance", "polygon", "bloomberg", "databento"):
+            try:
+                model.model_validate({field: name})
+            except pydantic.ValidationError as exc:
+                assert not any(
+                    e["loc"] == (field,) for e in exc.errors()
+                ), f"{tool}.{field} refused {name!r}"
 
 
 class TestNoNewOpenChoiceAppears:

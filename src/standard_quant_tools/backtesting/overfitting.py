@@ -42,7 +42,7 @@ from __future__ import annotations
 import itertools
 import logging
 import math
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -459,40 +459,19 @@ def combinatorial_purged_cv(
     label_horizon = max(1, int(label_horizon))
     embargo = int(math.ceil(float(embargo_pct) * n_observations))
 
-    groups = np.array_split(np.arange(n_observations), n_splits)
     paths: List[Dict[str, Any]] = []
     total_purged = 0
-    for combination in itertools.combinations(range(n_splits), n_test_splits):
-        test_index = np.concatenate([groups[c] for c in combination])
-        test_set = set(test_index.tolist())
-        train: List[int] = []
-        purged = 0
-        for i in range(n_observations):
-            if i in test_set:
-                continue
-            # PURGE: does this observation's label window touch the test set?
-            label_window = range(i, min(i + label_horizon + 1, n_observations))
-            if any(j in test_set for j in label_window):
-                purged += 1
-                continue
-            # EMBARGO: does it sit just after a test block? Every block's
-            # end, which includes the last one -- a separate check on
-            # `test_index.max()` alone could never purge anything this
-            # one would not.
-            if embargo > 0 and any(
-                0 < (i - t) <= embargo for t in _block_ends(test_index)
-            ):
-                purged += 1
-                continue
-            train.append(i)
+    for combination, test_index, train, purged in _purged_paths(
+        n_observations, n_splits, n_test_splits, embargo, label_horizon
+    ):
         total_purged += purged
         paths.append(
             {
                 "test_groups": list(combination),
-                "n_train": len(train),
+                "n_train": int(train.size),
                 "n_test": int(test_index.size),
                 "n_purged": purged,
-                "train_index": train,
+                "train_index": train.tolist(),
                 "test_index": test_index.tolist(),
             }
         )
@@ -534,15 +513,60 @@ def combinatorial_purged_cv(
     }
 
 
-def _block_ends(index: np.ndarray) -> List[int]:
-    """The last index of each contiguous run, which is where an embargo starts."""
-    if index.size == 0:
-        return []
-    sorted_index = np.sort(index)
-    breaks = np.where(np.diff(sorted_index) > 1)[0]
-    ends = [int(sorted_index[b]) for b in breaks]
-    ends.append(int(sorted_index[-1]))
-    return ends
+def _purged_paths(
+    n_observations: int,
+    n_splits: int,
+    n_test_splits: int,
+    embargo: int,
+    label_horizon: int,
+) -> Iterator[Tuple[Tuple[int, ...], np.ndarray, np.ndarray, int]]:
+    """
+    `(test groups, test index, train index, number purged)` for every path,
+    each index an ascending integer array.
+
+    An observation outside the test set is dropped from training when
+    either rule reaches it, and counted once:
+
+    - PURGE: a test observation lies in (i, i + label_horizon] -- its label
+      window touches the test set;
+    - EMBARGO: the end of a test block lies in [i - embargo, i) -- it sits
+      just after a block. Every block's end counts, including the last one.
+
+    Both are answered for all observations at once, which is what keeps a
+    path linear in the length of the series. Written as a loop over the
+    observations -- scan each label window, then every block's end -- it
+    cost the length times the horizon plus the length times the number of
+    test observations, so 10,000 observations took seconds and 100,000
+    took minutes. The two forms give the same indices; the test suite
+    holds them to it on randomized inputs.
+    """
+    positions = np.arange(n_observations)
+    # A label window never reaches past the last observation, and a gap
+    # between two positions is never longer than the series: clipping both
+    # here changes no answer and keeps the arithmetic inside int64.
+    window_end = np.minimum(
+        positions + min(label_horizon, n_observations), n_observations - 1
+    )
+    reach = min(embargo, n_observations)
+    groups = np.array_split(positions, n_splits)
+    for combination in itertools.combinations(range(n_splits), n_test_splits):
+        test_index = np.concatenate([groups[c] for c in combination])
+        in_test = np.zeros(n_observations, dtype=bool)
+        in_test[test_index] = True
+        # How many test observations lie at or before each position, so the
+        # count strictly after i and up to its window's end is a difference.
+        seen = np.cumsum(in_test)
+        dropped = seen[window_end] > seen
+        if reach > 0:
+            block_ends = np.flatnonzero(in_test & ~np.append(in_test[1:], False))
+            if block_ends.size:
+                # The nearest block end strictly before each position.
+                before = np.searchsorted(block_ends, positions, side="left") - 1
+                nearest = block_ends[np.maximum(before, 0)]
+                dropped |= (before >= 0) & (positions - nearest <= reach)
+        dropped &= ~in_test
+        train = np.flatnonzero(~in_test & ~dropped)
+        yield combination, test_index, train, int(np.count_nonzero(dropped))
 
 
 # ── is this better than the alternatives ────────────────────────────────

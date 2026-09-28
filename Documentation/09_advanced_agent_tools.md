@@ -164,12 +164,13 @@ regime maps only to the four above.
 | Field | Type | Description |
 |---|---|---|
 | `regime` | `str` | `"trending"`, `"random_walk"`, `"mean_reverting"`, or `"unknown"` |
-| `hurst` | `float` | Hurst exponent H (NaN when data is insufficient for a reliable estimate) |
-| `fit_r_squared` | `float` | Quality of the Hurst log-log scaling fit |
+| `hurst` | `Optional[float]` | Hurst exponent H; null, with the reason in `warnings`, when no exponent can be fitted (too few returns, or a constant series) and the regime is `"unknown"` — never 0.0, which reads as strongly mean-reverting |
+| `fit_r_squared` | `Optional[float]` | Quality of the Hurst log-log scaling fit; null with the reason when no fit was made |
 | `selected_strategy` | `str` | Strategy name chosen for this regime |
 | `best_parameters` | `dict` | Best parameter set from grid search |
 | `grid_combinations` | `int` | Number of parameter combinations tested |
 | `backtest` | `BacktestResult` | Full backtest result for the best parameters |
+| `warnings` | `List[str]` | Why `hurst` or `fit_r_squared` is null, when one is; the backtest's own caveats stay in `backtest.warnings` |
 
 **Multi-symbol regime scan — routing a universe to the right strategy:**
 
@@ -1891,7 +1892,7 @@ for win in result.windows:
 | `worst_oos_window` | `int` | `window_index` of the window with the lowest `out_of_sample_return` |
 | `longest_losing_window_streak` | `int` | Longest run of consecutive windows with negative OOS return |
 
-Each `RegimeAdaptiveWalkForwardWindow` additionally reports `regime`, `hurst`, `fit_r_squared`, `selected_strategy`, `best_params`, `in_sample_sharpe`, `in_sample_return` alongside the usual `out_of_sample_*` fields.
+Each `RegimeAdaptiveWalkForwardWindow` additionally reports `regime`, `hurst`, `fit_r_squared`, `selected_strategy`, `best_params`, `in_sample_sharpe`, `in_sample_return` alongside the usual `out_of_sample_*` fields. A window whose training slice admits no Hurst fit reports `hurst` and `fit_r_squared` as null, and the result's `warnings` says so once for all such windows.
 
 **Cost:** each window grid-searches eight strategies instead of one, so this tool costs roughly 8× a single `run_walk_forward_backtest` call per window. Still fast enough for interactive use at default grid sizes (65 combinations total per window).
 
@@ -2060,7 +2061,10 @@ cannot be *estimated* (no usable volume baseline) is still refused by name.
 `borrow_fee_bps`/`margin_interest_rate` accrue using the actual elapsed
 **calendar** days since the previous bar (e.g. 3 days over a Friday →
 Monday gap), not a hardcoded 1 — so financing cost is not under-accrued
-across weekends/holidays.
+across weekends/holidays. `margin_interest_rate` is a decimal of at most 10
+(1,000% a year), the bound every rate on the surface carries: a larger
+value is a unit error and is refused rather than run into an account that
+overflows.
 
 ```python
 result = run_portfolio_simulation(PortfolioSimulationInput(
@@ -2547,7 +2551,7 @@ print(f"Diversification ratio    : {result.diversification_ratio:.2f}")
 | `avg_pairwise_correlation` | `float` | Mean of every off-diagonal pair (each pair counted once) |
 | `highest_correlated_pair` | `Dict[str, Any]` | `{"a": ..., "b": ..., "correlation": ...}` for the most correlated off-diagonal pair |
 | `lowest_correlated_pair` | `Dict[str, Any]` | Same shape, for the least correlated (or most negatively correlated) pair |
-| `diversification_ratio` | `float` | Choueifaty-Coignard ratio; >= 1.0, higher is more diversified |
+| `diversification_ratio` | `Optional[float]` | Choueifaty-Coignard ratio; >= 1.0, higher is more diversified. Null, with the reason in `warnings`, when the portfolio volatility it divides by is zero — never 0.0, which its definition rules out |
 
 **Interpreting the results:**
 

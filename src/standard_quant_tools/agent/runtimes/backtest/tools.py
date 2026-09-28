@@ -649,7 +649,7 @@ def run_regime_adaptive_backtest(
 
     logger.debug(
         "[regime_adaptive] H=%.4f  regime=%s  strategy=%s  best_params=%s  combos=%d",
-        float(h) if not math.isnan(float(h)) else 0.0,
+        float(h),
         regime,
         strategy_name,
         best_params,
@@ -658,8 +658,10 @@ def run_regime_adaptive_backtest(
     return RegimeAdaptiveResult(
         symbol=input_data.symbol,
         regime=regime,
-        hurst=round(float(h) if not math.isnan(float(h)) else 0.0, 4),
-        fit_r_squared=round(float(fit_r2) if not math.isnan(float(fit_r2)) else 0.0, 4),
+        # NaN when no exponent could be fitted: the result nulls it and says
+        # why. It was 0.0 here, which reads as strongly mean-reverting.
+        hurst=round(float(h), 4),
+        fit_r_squared=round(float(fit_r2), 4),
         selected_strategy=strategy_name,
         best_parameters=best_params,
         grid_combinations=n_combos,
@@ -839,10 +841,8 @@ def run_regime_adaptive_walkforward_backtest(
                 test_start=str(test_df.index[0].date()),
                 test_end=str(test_df.index[-1].date()),
                 regime=regime,
-                hurst=round(float(h) if not math.isnan(float(h)) else 0.0, 4),
-                fit_r_squared=round(
-                    float(fit_r2) if not math.isnan(float(fit_r2)) else 0.0, 4
-                ),
+                hurst=round(float(h), 4),
+                fit_r_squared=round(float(fit_r2), 4),
                 selected_strategy=strategy_name,
                 best_params=best_params,
                 in_sample_sharpe=round(best_overall["sharpe"], 4),

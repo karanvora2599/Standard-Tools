@@ -16,6 +16,11 @@ reported safe, an inverted Hurst window reported 0.0, factor names that
 did not match their tickers were zipped short, and a weight panel was
 accepted as scores and transformed twice.
 
+`BAD_VALUES` pins inputs that can only be a mistake -- a rate of 1e308, a
+price past anything a market quotes, a NaN holding. Each was answered with
+null numbers and a reason, which is the right answer to a legal input with
+no defined result and the wrong one to an input that should never have run.
+
 Every call runs against the hermetic market and the published fixtures in
 conftest, so a pin reaches the computation that failed.
 """
@@ -92,9 +97,52 @@ def _swap(low: str, high: str) -> Modifier:
     return lambda args, _fx: {**args, low: args[high], high: args[low]}
 
 
+#: Values past any plausible magnitude, or a non-finite holding. The bounds
+#: are the library's own: rates are decimals within +/-10, prices within
+#: the 1e12 the option pricers use, a spread at most the whole notional.
+BAD_VALUES: List[Tuple[str, str, str, Modifier]] = [
+    (
+        "backtest",
+        "run_portfolio_simulation",
+        "margin_interest_rate=1e308",
+        _set(margin_interest_rate=1e308),
+    ),
+    (
+        "delta_one",
+        "analyze_cash_futures_basis",
+        "a future quoted at 1e308",
+        _set(future_price=1e308),
+    ),
+    (
+        "delta_one",
+        "analyze_etf_fair_value",
+        "a fund priced at 1e308",
+        _set(etf_price=1e308),
+    ),
+    (
+        "delta_one",
+        "monitor_spread_stream",
+        "primary prices scaled by 1e300",
+        _scaled("primary_prices", 1e300),
+    ),
+    (
+        "portfolio",
+        "plan_rebalance",
+        "a NaN target weight",
+        _first_value("target_weights", float("nan")),
+    ),
+    ("portfolio", "estimate_trade_cost", "spread_bps=1e308", _set(spread_bps=1e308)),
+    (
+        "portfolio",
+        "get_efficient_frontier",
+        "risk_free_rate=1e308",
+        _set(risk_free_rate=1e308),
+    ),
+]
+
 #: (runtime, tool, what is wrong, how the baseline is changed). Each must be
 #: REFUSED: every one of these inputs names something that cannot be done.
-REFUSED: List[Tuple[str, str, str, Modifier]] = [
+REFUSED: List[Tuple[str, str, str, Modifier]] = BAD_VALUES + [
     ("backtest", "compare_against_random", "seed=-1", _set(seed=-1)),
     ("backtest", "get_robustness_diagnostics", "random_seed=-1", _set(random_seed=-1)),
     ("backtest", "run_backtest_optimization", "top_n=0", _set(top_n=0)),
@@ -342,7 +390,11 @@ def test_a_futures_hedge_on_its_synthesized_input_is_handled():
     _outcome("backtest", "run_futures_hedge_backtest", arguments)
 
 
-@pytest.mark.parametrize("runtime,tool", [(r, t) for r, t, _w, _m in REFUSED[:3]])
+@pytest.mark.parametrize(
+    "runtime,tool",
+    [(r, t) for r, t, _w, _m in BAD_VALUES]
+    + [(r, t) for r, t, _w, _m in REFUSED[len(BAD_VALUES) : len(BAD_VALUES) + 3]],
+)
 def test_the_unmodified_baseline_still_returns(runtime, tool, published):
     """The null case: the same baseline, unchanged, is answered -- so each
     refusal above is about the one thing the pin changed."""
