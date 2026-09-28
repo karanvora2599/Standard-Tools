@@ -435,8 +435,12 @@ class TestCppPythonEquivalence:
     def test_profit_factor_zero_over_zero_agrees(self):
         """
         Flat prices + zero costs → every trade returns exactly 0.0, so
-        gross_win and gross_loss are both 0. C++ returned 0.0 here while
-        Python returned inf; both must now report inf ("no losing trades").
+        gross_win and gross_loss are both 0. C++ once returned 0.0 here
+        while Python returned inf. Both then agreed on inf, read as "no
+        losing trades" -- but that is the x/0 answer for x > 0, and this
+        is 0/0: undefined, NaN, by the same rule as a Sharpe with no
+        dispersion. inf also ranked such a run first under
+        sort_by="profit_factor". Both backends now report NaN.
         """
         cpp = self._cpp()
         if cpp is None:
@@ -455,8 +459,26 @@ class TestCppPythonEquivalence:
             "profit_factor"
         ]
 
-        assert math.isinf(cpp_pf), f"C++ profit_factor should be inf, got {cpp_pf}"
-        assert math.isinf(py_pf), f"Python profit_factor should be inf, got {py_pf}"
+        assert math.isnan(cpp_pf), f"C++ profit_factor should be NaN, got {cpp_pf}"
+        assert math.isnan(py_pf), f"Python profit_factor should be NaN, got {py_pf}"
+
+    def test_profit_factor_with_no_loss_and_a_gain_stays_inf(self):
+        """The null case: x/0 with x > 0 is still +inf on both backends."""
+        cpp = self._cpp()
+        if cpp is None:
+            pytest.skip("_sqt_core not built")
+
+        prices = np.array([100.0, 110.0, 110.0, 110.0, 110.0])
+        signals = np.array([1.0, 0.0, 1.0, 0.0, 0.0])  # a +10% lot and a 0% lot
+        cpp_pf = cpp.run_strategy(prices, signals, 10_000.0, 0.0, 0.0)["profit_factor"]
+
+        idx = pd.RangeIndex(len(prices))
+        p = pd.Series(prices, index=idx)
+        executed = pd.Series(signals, index=idx).shift(1).fillna(0.0)
+        py_pf = _compute_trade_stats(_build_trade_log(p.shift(1), p, executed, 0.0))[
+            "profit_factor"
+        ]
+        assert math.isinf(cpp_pf) and math.isinf(py_pf)
 
     def test_rolling_factor_loadings_underdetermined_agrees(self):
         """

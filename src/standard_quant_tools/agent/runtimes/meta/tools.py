@@ -992,7 +992,11 @@ def list_strategies(input_data: ListStrategiesInput) -> ListStrategiesResult:
                         name=param,
                         kind=spec.kind,
                         default=spec.default,
-                        minimum=1.0 if spec.kind == "window" else spec.minimum,
+                        minimum=(
+                            float(spec.minimum or 1.0)
+                            if spec.kind == "window"
+                            else spec.minimum
+                        ),
                         maximum=(
                             float(_MAX_WINDOW_BARS)
                             if spec.kind == "window"

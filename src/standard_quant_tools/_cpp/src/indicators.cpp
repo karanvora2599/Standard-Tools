@@ -21,33 +21,46 @@ namespace {
 constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
 }  // namespace
 
+// ── Missing bars in the Wilder recursions ─────────────────────────────────────
+//
+// RSI, Wilder's ATR and ADX are recursions: every value carries the whole
+// history before it. A bar whose inputs are not finite is a MISSING bar, and
+// the recursion SKIPS it -- the state is carried across unchanged, the output
+// at the missing bar is NaN, and the next present bar is measured against the
+// last present one. The result is exactly the indicator of the series with the
+// missing bars dropped, reported back at the bars that remain.
+//
+// The alternatives are both worse. Letting the NaN into the state poisons
+// every later value (one NaN in RSI's seed window used to leave the rest of
+// the series NaN), and reading it as a zero change fabricates a flat bar (the
+// forward pass used to do exactly that, so the answer depended on WHERE the
+// gap fell). A windowed indicator can report NaN for the windows holding the
+// gap and resume after it; a recursion has no window to wait out.
+//
+// +/-inf is folded in with NaN here because an infinity entering a Wilder
+// state is unrecoverable (inf - inf is NaN on the next smoothing step). The
+// library's own entry points refuse an infinity before it gets here; this is
+// what a direct kernel caller sees. The Python fallback kernels
+// (momentum._rsi_numba, trend._adx_numba, volatility._wilder_atr_kernel)
+// implement the same rule, operation for operation.
+
 
 // ── RSI ───────────────────────────────────────────────────────────────────────
 //
-// Wilder's smoothing: SMA seed for first `period` bars, then exponential
-// smoothing with alpha = 1/period.  Matches the Numba reference exactly.
+// Wilder's smoothing: SMA seed over the first `period` changes, then
+// exponential smoothing with alpha = 1/period. A change is measured between
+// consecutive PRESENT bars (see the note above). Matches the Numba reference
+// exactly, including where the gaps fall.
 
 void rsi_into(const double* SQT_RESTRICT prices, std::size_t n, int period,
               double* SQT_RESTRICT out) {
     std::fill(out, out + n, kNaN);
 
-    // period <= 0 would index out[period] with a negative/zero-derived
-    // value below — for period < 0 that wraps to a huge size_t via the
-    // implicit int->size_t conversion in operator[], an out-of-bounds write.
-    // Reject up front rather than relying on downstream arithmetic to stay
-    // in range.
+    // period <= 0 would divide by zero below and never reach a seed. Reject
+    // up front rather than relying on downstream arithmetic to stay sane.
     if (period <= 0) return;
+    // Fewer than period + 1 bars cannot hold period + 1 present ones.
     if (n <= static_cast<std::size_t>(period)) return;
-
-    // Seed: simple mean of first `period` gains/losses
-    double avg_gain = 0.0, avg_loss = 0.0;
-    for (int i = 1; i <= period; ++i) {
-        const double change = prices[i] - prices[i - 1];
-        if (change > 0.0) avg_gain += change;
-        else              avg_loss -= change;
-    }
-    avg_gain /= period;
-    avg_loss /= period;
 
     const auto to_rsi = [](double gain, double loss) -> double {
         if (loss == 0.0) return 100.0;
@@ -55,17 +68,41 @@ void rsi_into(const double* SQT_RESTRICT prices, std::size_t n, int period,
         return 100.0 - (100.0 / (1.0 + rs));
     };
 
-    out[period] = to_rsi(avg_gain, avg_loss);
+    const std::size_t period_sz = static_cast<std::size_t>(period);
+    double avg_gain = 0.0, avg_loss = 0.0;
+    double prev = 0.0;
+    bool have_prev = false;
+    std::size_t n_changes = 0;  // changes folded into the averages so far
 
-    // Wilder's forward pass
-    for (std::size_t i = static_cast<std::size_t>(period) + 1; i < n; ++i) {
-        const double change = prices[i] - prices[i - 1];
-        const double gain   = (change > 0.0) ? change : 0.0;
-        const double loss   = (change < 0.0) ? -change : 0.0;
+    for (std::size_t i = 0; i < n; ++i) {
+        const double price = prices[i];
+        if (!std::isfinite(price)) continue;  // a missing bar: state unchanged
+        if (!have_prev) {
+            prev = price;
+            have_prev = true;
+            continue;
+        }
+        const double change = price - prev;
+        prev = price;
+        // Adding the zero half of the split keeps the seed bit-identical to
+        // the former `if (change > 0) gain += change; else loss -= change;`
+        // (x + 0.0 == x, and x - c == x + (-c) exactly in IEEE 754).
+        const double gain = (change > 0.0) ? change : 0.0;
+        const double loss = (change < 0.0) ? -change : 0.0;
+        ++n_changes;
 
-        avg_gain = (avg_gain * (period - 1) + gain) / period;
-        avg_loss = (avg_loss * (period - 1) + loss) / period;
-
+        if (n_changes <= period_sz) {
+            // Seed: simple mean of the first `period` gains/losses.
+            avg_gain += gain;
+            avg_loss += loss;
+            if (n_changes < period_sz) continue;
+            avg_gain /= period;
+            avg_loss /= period;
+        } else {
+            // Wilder's forward pass.
+            avg_gain = (avg_gain * (period - 1) + gain) / period;
+            avg_loss = (avg_loss * (period - 1) + loss) / period;
+        }
         out[i] = to_rsi(avg_gain, avg_loss);
     }
 }
@@ -80,7 +117,9 @@ std::vector<double> rsi(const double* prices, std::size_t n, int period) {
 // ── ADX ───────────────────────────────────────────────────────────────────────
 //
 // Wilder's Average Directional Index.  Flat row-major output: (DI+, DI-, ADX).
-// Matches _adx_numba in trend.py exactly.
+// Matches _adx_numba in trend.py exactly. A bar is missing when its high, low
+// or close is not finite, and the recursions skip it (see the note above
+// rsi_into): DM and TR are measured against the last PRESENT bar.
 
 void adx_into(
     const double* SQT_RESTRICT high,
@@ -119,23 +158,48 @@ void adx_into(
     const auto di_p_val = [&]() { return (atr_s != 0.0) ? 100.0 * dmp_s / atr_s : 0.0; };
     const auto di_m_val = [&]() { return (atr_s != 0.0) ? 100.0 * dmm_s / atr_s : 0.0; };
 
-    // Needs `period` DX values to initialise ADX -> starts at bar 2*period-1.
-    // Computed in size_t space -- 2*period could overflow int for an
-    // extreme (if unrealistic) period near INT_MAX/2.
+    // Needs `period` DX values to initialise ADX -> starts at the
+    // (2*period-1)-th present bar. Computed in size_t space -- 2*period could
+    // overflow int for an extreme (if unrealistic) period near INT_MAX/2.
     const std::size_t adx_start = static_cast<std::size_t>(period) * 2 - 1;
+    const std::size_t period_sz = static_cast<std::size_t>(period);
 
-    for (std::size_t i = 1; i < n; ++i) {
-        const double up_move   = high[i] - high[i - 1];
-        const double down_move = low[i - 1] - low[i];
+    // `j` is the bar's position among the PRESENT bars, which is what every
+    // warm-up threshold below counts; `i` is where its output is written.
+    // On a series with no missing bar j == i throughout, and the sequence of
+    // operations is the one this loop always performed.
+    std::size_t j = 0;
+    bool have_prev = false;
+    double prev_high = 0.0, prev_low = 0.0, prev_close = 0.0;
+
+    for (std::size_t i = 0; i < n; ++i) {
+        if (!std::isfinite(high[i]) || !std::isfinite(low[i]) ||
+            !std::isfinite(close[i])) {
+            continue;  // a missing bar: every Wilder state carried across
+        }
+        if (!have_prev) {
+            prev_high  = high[i];
+            prev_low   = low[i];
+            prev_close = close[i];
+            have_prev  = true;
+            continue;
+        }
+        ++j;
+
+        const double up_move   = high[i] - prev_high;
+        const double down_move = prev_low - low[i];
         const double dm_plus_i  = (up_move > down_move && up_move > 0.0)   ? up_move   : 0.0;
         const double dm_minus_i = (down_move > up_move && down_move > 0.0) ? down_move : 0.0;
         const double tr_i = std::max({
             high[i] - low[i],
-            std::abs(high[i] - close[i - 1]),
-            std::abs(low[i]  - close[i - 1]),
+            std::abs(high[i] - prev_close),
+            std::abs(low[i]  - prev_close),
         });
+        prev_high  = high[i];
+        prev_low   = low[i];
+        prev_close = close[i];
 
-        if (i <= static_cast<std::size_t>(period)) {
+        if (j <= period_sz) {
             // Step 2: Wilder's seed sums.
             atr_s += tr_i;
             dmp_s += dm_plus_i;
@@ -147,7 +211,7 @@ void adx_into(
             dmm_s = dmm_s - (dmm_s / period) + dm_minus_i;
         }
 
-        if (i < static_cast<std::size_t>(period)) continue;  // DI/DX undefined before bar `period`
+        if (j < period_sz) continue;  // DI/DX undefined before the `period`-th move
 
         const double di_p = di_p_val();
         const double di_m = di_m_val();
@@ -158,11 +222,11 @@ void adx_into(
         const double dx_i = (di_sum != 0.0) ? 100.0 * std::abs(di_p - di_m) / di_sum : 0.0;
 
         // Step 4: ADX = Wilder's smooth of DX.
-        if (i <= adx_start) {
+        if (j <= adx_start) {
             dx_seed_sum += dx_i;
-            if (i == adx_start) {
+            if (j == adx_start) {
                 adx_val = dx_seed_sum / period;
-                out[adx_start * 3 + 2] = adx_val;
+                out[i * 3 + 2] = adx_val;
             }
         } else {
             adx_val = (adx_val * (period - 1) + dx_i) / period;
@@ -285,7 +349,10 @@ std::vector<double> parabolic_sar(
 // ── Wilder's ATR ──────────────────────────────────────────────────────────────
 //
 // Identical smoothing to RSI and ADX: SMA seed for the first `period` bars,
-// then alpha=1/period.  Not the same as a simple rolling mean of TR.
+// then alpha=1/period.  Not the same as a simple rolling mean of TR. A bar
+// is missing when its high, low or close is not finite, and the recursion
+// skips it (see the note above rsi_into): TR is measured against the last
+// PRESENT close, and the first present bar's TR is its own high - low.
 
 void wilder_atr_into(
     const double* SQT_RESTRICT high,
@@ -297,38 +364,45 @@ void wilder_atr_into(
 {
     std::fill(out, out + n, kNaN);
 
-    // period <= 0 would index out[period-1] with a negative/zero-derived
-    // value below — for period <= 0 that wraps to a huge size_t, an
-    // out-of-bounds write (this is the exact case the reviewer flagged).
+    // period <= 0 would divide by zero and never reach a seed.
     if (period <= 0) return;
     if (n < static_cast<std::size_t>(period)) return;
 
     // ── True range, computed inline (no O(n) tr[] buffer) ─────────────────────
-    // Every TR[i] depends only on high[i]/low[i]/close[i-1] (and high[0]/
-    // low[0] for bar 0) -- no lookback beyond the immediately-preceding
-    // close -- so it's computable on demand in both the seed and forward-
-    // smoothing loops below with O(1) auxiliary memory, exactly like
-    // adx_into's existing fused single-pass design above (see that
-    // function's own comment for the same technique applied to DM/TR).
-    auto tr_at = [&](std::size_t i) {
-        return (i == 0)
-            ? (high[0] - low[0])
-            : std::max({
-                  high[i] - low[i],
-                  std::abs(high[i] - close[i - 1]),
-                  std::abs(low[i]  - close[i - 1]),
-              });
-    };
-
-    // ── Seed: SMA of first `period` TR values ─────────────────────────────────
+    // TR depends only on this bar's high/low and the previous present close,
+    // so it is computable on demand with O(1) auxiliary memory, exactly like
+    // adx_into's fused single-pass design above.
+    const std::size_t period_sz = static_cast<std::size_t>(period);
     double atr_val = 0.0;
-    for (int i = 0; i < period; ++i) atr_val += tr_at(static_cast<std::size_t>(i));
-    atr_val /= period;
-    out[static_cast<std::size_t>(period) - 1] = atr_val;
+    double prev_close = 0.0;
+    bool have_prev = false;
+    std::size_t n_tr = 0;  // true ranges folded in so far
 
-    // ── Wilder's forward smoothing ────────────────────────────────────────────
-    for (std::size_t i = static_cast<std::size_t>(period); i < n; ++i) {
-        atr_val = (atr_val * (period - 1) + tr_at(i)) / period;
+    for (std::size_t i = 0; i < n; ++i) {
+        if (!std::isfinite(high[i]) || !std::isfinite(low[i]) ||
+            !std::isfinite(close[i])) {
+            continue;  // a missing bar: the average is carried across
+        }
+        const double tr_i = have_prev
+            ? std::max({
+                  high[i] - low[i],
+                  std::abs(high[i] - prev_close),
+                  std::abs(low[i]  - prev_close),
+              })
+            : (high[i] - low[i]);
+        prev_close = close[i];
+        have_prev = true;
+        ++n_tr;
+
+        if (n_tr <= period_sz) {
+            // ── Seed: SMA of the first `period` TR values ─────────────────
+            atr_val += tr_i;
+            if (n_tr < period_sz) continue;
+            atr_val /= period;
+        } else {
+            // ── Wilder's forward smoothing ────────────────────────────────
+            atr_val = (atr_val * (period - 1) + tr_i) / period;
+        }
         out[i] = atr_val;
     }
 }
@@ -389,16 +463,18 @@ void bollinger_bands_into(
     // period) reports NaN for exactly those windows, and so does this
     // kernel (`nan_in_window`).
     //
-    // Inf is folded in with NaN here, unlike stochastic_oscillator_into
-    // below, which lets it flow through. That is not an inconsistency: an
-    // Inf entering these sums is unrecoverable, because the sliding update
-    // subtracts it back out as inf - inf = NaN, so an Inf bar would corrupt
-    // every later window exactly the way a NaN does. The deques in the
-    // stochastic kernel have no such accumulator and compare against Inf
-    // correctly, so there is nothing to protect there. pandas reports an
-    // Inf mean and a NaN standard deviation for such a window; this reports
-    // NaN for all three bands, which is the same information without a
-    // middle band a caller could plot.
+    // Inf is folded in with NaN here, as it is in every kernel in this
+    // file: an Inf entering these sums is unrecoverable, because the
+    // sliding update subtracts it back out as inf - inf = NaN, so an Inf bar
+    // would corrupt every later window exactly the way a NaN does. pandas
+    // reports an Inf mean and a NaN standard deviation for such a window;
+    // this reports NaN for all three bands, which is the same information
+    // without a middle band a caller could plot. The library's entry points
+    // refuse an infinity before it reaches this kernel.
+    //
+    // A period below 2 is refused by those entry points too: the sample
+    // standard deviation of one bar is 0/0, so there are no bands to report,
+    // and this kernel's all-NaN answer for it is what a direct caller sees.
     //
     // The second variable is the one that is easy to miss. An O(1) sliding
     // sum cannot un-add a NaN: `Sx += (prices[i]-c) - (prices[old]-c)`
@@ -589,9 +665,14 @@ void stochastic_oscillator_into(
     // reports the window as unevaluable -- matching pandas'
     // rolling(min_periods=k), where a window containing a missing
     // observation yields NaN rather than a number computed from whichever
-    // observations happen to be present. +/-Inf is a real observation, not
-    // a missing one, and is left to flow through the arithmetic as pandas
-    // does.
+    // observations happen to be present.
+    //
+    // +/-inf counts as missing too. It used to flow through as a real
+    // observation, and an infinite %K then entered %D's running sum, where
+    // inf - inf left every later %D NaN. The library's entry points refuse an
+    // infinity before it gets here, as bollinger_bands_into's note explains
+    // for its own sums; this is what a direct kernel caller sees, and it is
+    // the same answer a NaN at that bar gives.
     long long nan_in_window = 0;
     // long long (not int) indices/deques: window_start and the loop bound
     // below are derived from n, which can exceed INT_MAX for a large
@@ -613,10 +694,10 @@ void stochastic_oscillator_into(
         // the window, then add the bar that just entered it.
         if (window_start >= 1) {
             const std::size_t leaving = static_cast<std::size_t>(window_start - 1);
-            if (std::isnan(high[leaving]) || std::isnan(low[leaving])) --nan_in_window;
+            if (!std::isfinite(high[leaving]) || !std::isfinite(low[leaving])) --nan_in_window;
         }
-        const bool high_missing = std::isnan(high[i_sz]);
-        const bool low_missing  = std::isnan(low[i_sz]);
+        const bool high_missing = !std::isfinite(high[i_sz]);
+        const bool low_missing  = !std::isfinite(low[i_sz]);
         if (high_missing || low_missing) ++nan_in_window;
 
         while (!max_dq.empty() && max_dq.front() < window_start) max_dq.pop_front();
@@ -637,7 +718,11 @@ void stochastic_oscillator_into(
             min_dq.push_back(i);
         }
 
-        if (i >= k_period_ll - 1 && nan_in_window == 0) {
+        // A missing CLOSE leaves this bar's %K unevaluable even over a clean
+        // window -- including a flat one, which would otherwise report 0.0
+        // for a bar whose close was never observed. The close is read at
+        // this bar only, so it does not blank the windows after it.
+        if (i >= k_period_ll - 1 && nan_in_window == 0 && std::isfinite(close[i_sz])) {
             // nan_in_window == 0 guarantees both deques are non-empty here:
             // every bar of the window was pushed into each of them.
             const double hi  = high[static_cast<std::size_t>(max_dq.front())];
@@ -666,12 +751,14 @@ void stochastic_oscillator_into(
         const double k_in = K_vals[i_sz];
         out[i_sz * 2] = k_in;  // %K
 
-        if (std::isnan(k_in)) ++nan_k; else Sk += k_in;
+        // isfinite, not isnan: a %K that overflowed to +/-inf could no more
+        // be subtracted back out of Sk than a NaN could.
+        if (!std::isfinite(k_in)) ++nan_k; else Sk += k_in;
         ++count;
         if (count >= d_period_ll) {
             out[i_sz * 2 + 1] = (nan_k == 0) ? Sk / d_period : kNaN;  // %D
             const double k_out = K_vals[static_cast<std::size_t>(i - d_period_ll + 1)];
-            if (std::isnan(k_out)) --nan_k; else Sk -= k_out;
+            if (!std::isfinite(k_out)) --nan_k; else Sk -= k_out;
         }
     }
 }

@@ -428,9 +428,10 @@ OHLCV and say what each is a proxy for. Call `describe_data_capabilities`
 (in `discovery`) first.
 
 `provenance` reads and verifies the decision log. It is read-only by
-design: retention operations that could destroy evidence (`gc`, `seal`,
-`hold`) stay CLI-only, because an agent that can delete the record of its
-own decisions is not audited by it.
+design: operations that could destroy or rewrite evidence (`gc`, `seal`,
+`hold`, signing, and cutting a torn final record with
+`sqt audit repair-tail`) stay CLI-only, because an agent that can delete
+the record of its own decisions is not audited by it.
 
 ---
 
@@ -590,9 +591,10 @@ The eleven `feature_lab` tools run on that path too, through the
 `feature_dispatch`, which ran the tool and returned its dump and nothing
 else: a feature_lab call over MCP wrote no record for `explain_decision` or
 `replay_decision` to find, and a NaN in its result would have failed the
-server's strict JSON encoding. `feature_dispatch` is still importable for
-Python callers and still unaudited; call a tool through
-`agent.runtimes.resolve("feature_lab").dispatch` for a record.
+server's strict JSON encoding. `feature_dispatch`, still importable for
+Python callers, takes the same path now: a direct call writes a decision
+record, refuses a NaN or infinite scalar argument by name before anything
+runs, and returns a non-finite number as `null`.
 
 ```bash
 sqt report  <request_id>     # what the model actually called

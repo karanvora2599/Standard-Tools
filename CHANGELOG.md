@@ -1,5 +1,55 @@
 # Changelog
 
+## A missing bar reads the same everywhere, the trade log adds up, and a torn record has a command
+
+The open ends left after the tool surface was closed: behaviour that still
+depended on which backend ran, a trade log that only approximately matched
+its own equity curve, library functions that crashed on input their tool
+doors already refused, and two audit operations that had no safe way to be
+done.
+
+- **A missing bar reads the same on both backends.** NaN is a gap in `rsi`,
+  `wilder_atr`, `adx`, `bollinger_bands`, `stochastic_oscillator` and the
+  indicator panel, natively and in the fallback: the Wilder recursions skip
+  it (the result is the indicator of the series with that bar dropped, NaN
+  at the bar itself) and the windows holding it are NaN; ±inf is refused.
+  The native kernels used to stay NaN forever after one bad bar while the
+  fallback recovered, and the panel's fallback raised where the native panel
+  went quiet. The five single-series functions used to refuse NaN; they now
+  accept it as a gap. A Bollinger period below 2 is refused everywhere a
+  period is taken.
+- **The trade log adds up.** Each lot's return is the equity curve's growth
+  over its bars, costs included, so the lots multiply back to the total
+  return exactly on both engines; the curve itself is unchanged. A profit
+  factor over trades that all returned exactly zero is NaN, not infinite.
+- **Infinite training values are refused by the preprocessing fit** on both
+  backends: no clip bound computed through an infinity is usable.
+- **The library refuses what its tool doors refuse.** The feature-analysis
+  functions refuse a feature named twice and a `selection_end` or
+  `split_date` that is empty, unreadable or in the wrong time zone (an empty
+  `split_date` no longer means the median). Every covariance-taking
+  construction function refuses an asset named twice — risk parity over
+  `["A", "A"]` answered `{"A": 0.4}` — and the concentration, exposure,
+  capacity, marginal-risk and scenario functions refuse non-finite or
+  repeated weights, loadings, tickers and shocks, and quantities past the
+  float range. Position sizing moved into `portfolio.position_sizing`, so a
+  direct caller sizes and refuses exactly as `get_position_size` does. The
+  spread monitor's ratio channels refuse a leg below 1e-8 or a time to
+  expiry below 1e-8 years, and every channel applies the price ceiling.
+- **A torn record is cut by a command.** `sqt audit repair-tail` shows the
+  fragment a crash left at the end of the newest day and, with `--confirm`,
+  cuts exactly those bytes under the writer's lock, keeping them in a side
+  file; it refuses anything that is not a torn write, and the writer's
+  refusal names it. It is a command, never a tool.
+- **A mapping's keys can be redacted.** A `SQT_AUDIT_REDACT_FIELDS` segment
+  ending in `{}` (`positions{}`) replaces a mapping's keys with the salted
+  placeholder values get, for inputs keyed by the value being hidden.
+- **Every feature-lab call is audited**, including a direct Python call to
+  its dispatch, which also refuses a non-finite scalar by name. A repaired
+  promotion log is named on the model summary and in `promote_model`, and a
+  sidecar read that meets a Windows sharing violation is retried instead of
+  being called damaged.
+
 ## A value no market can produce is refused, and the purged splitter is linear
 
 - **Mistakes are refused instead of answered with nulls.**

@@ -503,6 +503,15 @@ the weights returned are for the repaired matrix. The warning is the thing
 to act on: estimate the covariance on complete rows (`estimate_covariance`,
 below) and the repair never runs.
 
+Each of them also needs every asset named once. The results are keyed by
+name, so a repeated name collapsed two rows of the matrix into one key
+while both were still used: `optimize_risk_parity` over `["A", "A"]`
+answered `{"A": 0.4}`, a book whose weights summed to 0.4. A repeat in
+`assets` is refused at the schema, and the library functions in
+`portfolio.construction` refuse a covariance whose row or column labels
+repeat — and `hierarchical_risk_parity` a repeated return column — by name,
+so a direct caller meets the same rule.
+
 ## What the portfolio is actually exposed to
 
 ### `get_factor_exposure_budget`
@@ -530,6 +539,15 @@ NaN for the whole book. Give `0.0` where an asset genuinely has no
 loading, or narrow `factors` to the ones every asset has. `factors`, when
 given, names at least one factor and each once.
 
+`portfolio.construction.factor_exposure_budget`, the library function
+behind the tool, keeps the same rules for a direct caller: a weight that
+is not finite, a loading of a held asset that is missing or not finite
+(named as `asset/factor`), an asset or factor that labels two rows or
+columns of the loadings, a weight named twice, and an exposure or gross
+exposure that overflows the float range are each refused as a
+`ValidationError` by name. A gap in an asset that is not held never enters
+the sum and is left alone.
+
 ### `analyze_concentration`
 
 Turns "how concentrated is this" into numbers with known interpretations.
@@ -547,7 +565,10 @@ one.
 Weights must be finite. An infinite weight made the gross exposure
 infinite and the effective N a division by zero, and a NaN weight was
 dropped without a word; both are refused at the schema now, and so is a
-set of finite weights whose gross exposure overflows.
+set of finite weights whose gross exposure overflows. The library's
+`concentration_analysis` refuses the same inputs by name for a direct
+caller, and a name listed twice, instead of dropping the NaN or dividing
+by zero.
 
 ### `get_marginal_risk_contribution`
 
@@ -566,6 +587,13 @@ carrying 30% of the risk is the position to look at first.
 adding to that position *reduces* portfolio risk, which happens when the
 asset is negatively correlated with the rest of the book. Those positions
 are hedges whether or not they were intended as such.
+
+Weights must be finite. A NaN weight made the volatility and every row NaN,
+which reached the agent as nulls with no reason, and an infinite one gave
+NaN contributions under an infinite volatility; the schema and
+`marginal_risk_contribution` both refuse it by name. A book whose variance
+passes the float range from finite weights is refused too, rather than
+reported with every marginal at 0.0.
 
 ## Risk that admits you cannot exit at the mark
 
@@ -622,6 +650,13 @@ Assets in the portfolio but absent from a scenario are treated as
 **unchanged**, and the coverage is reported: a scenario touching three of
 forty positions produces a loss that is a lower bound, which is worth
 knowing before it is presented as a worst case.
+
+Weights and shocks must be finite. A NaN weight used to be dropped without
+a word, so every scenario described a smaller book than the one given, and
+a NaN shock made its scenario's return NaN, sorted anywhere among the
+others. Both are refused by name — the shock naming its scenario — at the
+schema and by `portfolio_scenarios`, and so is a scenario return past the
+float range.
 
 ## Related
 

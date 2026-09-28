@@ -910,6 +910,14 @@ class PromoteModelResult(BaseModel):
         "was False, so a waived check is visible here and in the evidence "
         "rather than only in the absence of a refusal.",
     )
+    promotion_log_repairs: List[str] = Field(
+        default_factory=list,
+        description="One sentence per fragment an interrupted append left at "
+        "the end of promotions.jsonl, which was not a record and was cut off "
+        "and kept in the side file each sentence names. Empty for a log that "
+        "was never torn; otherwise the history may lack a decision somebody "
+        "believes was recorded.",
+    )
 
 
 class MonitorModelInput(BaseModel):

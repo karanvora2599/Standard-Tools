@@ -127,6 +127,24 @@ a real date: an empty string parses to NaT without raising and used to
 fail deep in the computation, so it is refused at the schema with the
 field's name.
 
+The library functions behind these tools keep the same rules for a direct
+Python caller, so a call and a tool call refuse the same input the same
+way. `redundancy_report`, `build_feature_report`,
+`feature_distribution_stats`, `feature_predictive_stats`,
+`select_features`, `summarize_feature_set` and `compare_feature_sets`
+refuse a feature named twice — in the list, on either side of a
+comparison, or as two panel columns under one name — as a
+`ValidationError` naming it; it used to surface as pandas' "truth value of
+a DataFrame is ambiguous" from inside the redundancy clustering. A
+`selection_end` or `split_date` that is empty, `NaT` or unreadable is
+refused by the same parse the schema uses, where it used to raise an
+`IndexError` from a holdout with no dates in it or pandas' own
+`DateParseError`; an empty `split_date` no longer means "the median" —
+leave it unset for that. A boundary date carrying a time zone the panel's
+dates do not (or the reverse) is refused rather than compared, and a panel
+whose `date` column does not parse is refused naming the column and the
+values it could not read.
+
 `feature_lab` is a sibling runtime, not part of `modeling`'s dispatch table;
 the per-runtime counts are in the generated
 [tool index](20_tool_index.md). `Multi_Agent_Implementation/` gives it its
@@ -1516,7 +1534,12 @@ useful for feature-side lookback bleed.
 Preprocessing (`features.transforms.fit_preprocessing` — per-column
 winsorize bounds + zscore mean/std) is fit **on each fold's training rows
 only**, then applied unchanged to that fold's test rows — never refit on
-test.
+test. The fit skips NaN and refuses an infinite training value by column, on
+both backends: an infinity has no quantile to winsorize to and no z-score,
+and where it sat in a quantile's interpolation bracket the native kernel
+answered `+inf` and pandas `NaN` (either way every transformed value came
+out `-inf` or `NaN`). `build_model_dataset` already refuses infinite
+features, so this only reaches a frame handed to the fit directly.
 
 ### What the metrics mean
 
@@ -3204,8 +3227,13 @@ The rules are the ones the log exists to make visible:
   leaves an unterminated fragment at the end of the log; that is not a
   record, and it no longer makes the stage unreadable. It is skipped, kept
   as evidence in a dot-prefixed `.promotions.torn-*` file beside the log
-  and cut off, under the lock. A line that does not parse anywhere else is
-  an edit, and still makes the stage untrustworthy until it is repaired.
+  and cut off, under the lock, by whichever call reads the log first. The
+  repair is reported, not only logged: `inspect_model`'s summary view and
+  every `promote_model` result carry `promotion_log_repairs`, one sentence
+  per fragment set aside naming its side file, because the history may be
+  missing a decision somebody believes was recorded. It is empty for a log
+  that was never torn. A line that does not parse anywhere else is an edit,
+  and still makes the stage untrustworthy until it is repaired.
 - **A reason is required** and must be more than a word. It is read months
   later by someone deciding whether to trust the model, and `ok` does not
   help them.
@@ -3221,8 +3249,8 @@ The rules are the ones the log exists to make visible:
   mismatched.
 
 `list_models` takes a `stage` filter and every summary carries `stage`;
-`inspect_model`'s summary view carries `stage` and the full `promotions`
-history.
+`inspect_model`'s summary view carries `stage`, the full `promotions`
+history and `promotion_log_repairs`.
 
 ```python
 from standard_quant_tools.modeling.agent.tools import promote_model

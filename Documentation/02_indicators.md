@@ -18,10 +18,41 @@ not `_sqt_core` is built.
 
 | Check | Applies to | Behavior |
 |---|---|---|
-| `period`/`window` > 0 | all periodised indicators | `ValidationError`. `macd` additionally requires `fast < slow` — an inverted pair is a sign-flipped indicator, not an error the arithmetic would show. |
+| `period`/`window` > 0 | all periodised indicators | `ValidationError`. `macd` additionally requires `fast < slow` — an inverted pair is a sign-flipped indicator, not an error the arithmetic would show. `bollinger_bands` requires `period >= 2` (see below). |
 | Equal input lengths | multi-series indicators (`adx`, `atr`, `wilder_atr`, `williams_r`, `parabolic_sar`, `vwap`, `mfi`) | `ValidationError` naming the actual lengths. |
-| Finite (no NaN/Inf) | `rsi`, `adx`, `atr`, `wilder_atr`, `parabolic_sar`, `bollinger_bands`, `stochastic_oscillator` | `ValidationError` reporting how many non-finite values were found. |
-| No ±inf (NaN is a gap) | `technical_indicators_panel`; the fused path of `get_technical_analysis` | `ValidationError` naming the ticker (or symbol) and column. A Wilder recursion (RSI, ATR, ADX) carries one inf bar into every later value, and a stochastic %D after one never recovers, so the native kernel answered with NaN to the end of the history where the per-ticker wrappers refused. NaN is not refused here: the kernel treats it as a missing bar. |
+| No ±inf (NaN is a missing bar) | `rsi`, `adx`, `wilder_atr`, `bollinger_bands`, `stochastic_oscillator`, `technical_indicators_panel`; the fused path of `get_technical_analysis` | `ValidationError` naming the column (and, on the panel, the ticker) and how many infinite values it holds. NaN is not refused: it is a missing bar, read the same way on both backends — see [Missing bars](#missing-bars). |
+| Finite (no NaN/Inf) | `atr`, `parabolic_sar` | `ValidationError` reporting how many non-finite values were found. |
+
+### Missing bars
+
+One rule for the five indicators with a native kernel, at every door (the
+single-series function, the panel, the fused path) and on both backends:
+
+- **NaN is a missing bar.** The Wilder recursions — `rsi`, `wilder_atr`,
+  `adx` — **skip** it: the result is the indicator of the series with that
+  bar dropped, reported back at the bars that remain, and NaN at the bar
+  itself. A change, a true range or a directional move is measured against
+  the last *present* bar. A recursion has no window to wait out, so the
+  alternatives were to let the NaN into its state (every later value NaN) or
+  to read it as an unchanged price (a fabricated flat bar); both happened
+  before, depending on the backend and on where the gap fell. The windowed
+  indicators — `bollinger_bands`, `stochastic_oscillator` — are NaN for
+  every window that holds the missing bar and resume at the first one that
+  does not (pandas' `rolling(min_periods=period)`); a missing close blanks
+  `%K` at its own bar only, and `%D` over the windows holding that `%K`.
+- **±inf is refused.** An infinity is not a price. A window's mean and
+  range mean nothing with one in it, and a recursion cannot skip what it
+  has already absorbed: `inf - inf` is NaN on the next smoothing step, so
+  one infinite bar used to leave every later RSI, ATR and ADX NaN and a
+  stochastic `%D` that never recovered. Replace it with NaN to mark the bar
+  missing, or drop the bar. (A direct `_sqt_core` caller that passes one
+  sees it treated as a missing bar.)
+
+Before this rule the single-series functions refused NaN outright while the
+panel answered it, so the same universe was refused without the extension
+and answered with it. The native kernels and the Python fallbacks now
+implement the rule operation for operation, pinned against each other in
+`tests/cpp_bindings/test_missing_bar_parity.py`.
 
 Two of these were genuine safety fixes rather than ergonomics, and are worth
 knowing about if you call the kernels in unusual ways:
@@ -57,8 +88,12 @@ prices across the whole lookback) makes `%K` and `%R` a `0/0`:
   leaves a standard deviation of up to 2.6e-5 in about half such windows at
   real price levels. `bollinger_reversion` compares the close with the lower
   and middle bands exactly, so that residue used to decide which bars traded
-  depending on the backend. A 1-bar window is left as each backend computes
-  it.
+  depending on the backend.
+- `bollinger_bands` with **`period < 2` is refused**, at every door
+  (`bollinger_bands`, the panel, the `bollinger_period` tool fields, the
+  `bollinger_reversion` strategy's `period`). One bar has no sample
+  standard deviation — it is 0/0 — so there are no bands: the native kernel
+  answered all-NaN and pandas a middle band equal to the price.
 
 ---
 
@@ -377,8 +412,10 @@ path uses, so output is bit-identical to calling the per-ticker function in a lo
 
 **±inf is refused, NaN is a gap.** An infinite High, Low, Close or Volume on the shared
 bars raises `ValidationError` naming the ticker and column, on both paths. A NaN is not
-refused by the panel: the native kernel blanks the windows that hold it and resumes after
-it (the per-ticker wrappers the fallback loops refuse NaN themselves).
+refused: it is a [missing bar](#missing-bars), which the native kernel and the fallback
+read identically — the fallback loops the per-ticker wrappers, which used to refuse NaN
+and so refused a universe the native panel answered. `bollinger_period` below 2 is
+refused on both paths.
 
 **The index is the intersection** of every ticker's bars — the only shape a dense panel can
 have. A ticker with a shorter history therefore truncates the panel for everyone, which is

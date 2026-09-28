@@ -197,9 +197,15 @@ line that is neither record — the verifier could not read it and every
 later write refused. A record cut off mid-write (by a crash or a full disk:
 no newline, and the text does not parse) is still refused, as designed —
 nothing can chain onto a fragment — and the refusal now says the byte the
-fragment starts at. To continue: copy the day file somewhere safe, truncate
-it to that byte (the end of its last complete line), and run `sqt verify`.
-The fragment was never a whole record, so no record is lost by removing it.
+fragment starts at, and names the command that makes the cut:
+`sqt audit repair-tail <date>` shows the fragment, and with `--confirm` cuts
+exactly those bytes under the writer's lock, keeping them in a side file
+beside the day (see [`sqt audit repair-tail`](#sqt-audit-repair-tail)). By
+hand: copy the day file somewhere safe, truncate it to that byte (the end of
+its last complete line), and run `sqt verify`. The fragment was never a
+whole record, so no record is lost by removing it. A torn last line of the
+chain index is refused the same way; the command repairs day files only, so
+that refusal names the manual cut.
 A last line that parses to something other than a record (`[1,2,3]`, a
 number, bytes that are not UTF-8) is refused as corruption too; it used to
 escape as an unrelated exception that the fail-open policy swallowed.
@@ -250,7 +256,7 @@ for what they cover and how to verify them.
 | `SQT_AUDIT_FAIL_CLOSED` | `0` | Set to `1` (or `true`/`yes`/`on`) to make a failed audit *write* fail the tool call; any other word is refused, as above. The default is fail-open: for an analytics library, a full disk should not destroy a result the caller already paid to compute. Under a governance regime that trade is wrong — an action taken without a record of it is exactly what the trail exists to prevent — so the policy is selectable. This governs write failures only; a corrupted existing chain (`AuditIntegrityError`) always propagates, because it is a statement about the whole log rather than about one record. |
 | `SQT_AUDIT_DIR` | the platform state directory (see [Decision records](#decision-records)); an existing trail under `~/.cache/standard_quant_tools/audit/` keeps its home | Where JSONL files are written. An absolute path (`~` is expanded); blank is unset, and a relative path or one naming an existing file is refused by name |
 | `SQT_AUDIT_RETENTION_DAYS` | unset (never delete) | Default retention window for `gc()`/`sqt gc`, a whole number of days, `0` or more; a negative or non-numeric value is refused — see [Retention / garbage collection](#retention--garbage-collection) |
-| `SQT_AUDIT_REDACT_FIELDS` | unset (redact nothing) | Comma-separated dotted field paths in `input` (and, best-effort, `error_message`) to redact — see [Field redaction](#field-redaction) |
+| `SQT_AUDIT_REDACT_FIELDS` | unset (redact nothing) | Comma-separated dotted field paths in `input` (and, best-effort, `error_message`) to redact; a segment ending in `[]` fans out over a list, and one ending in `{}` redacts the keys of a mapping (`positions{}`) — see [Field redaction](#field-redaction) |
 | `SQT_AUDIT_REDACT_SALT` | unset (unsalted) | Salt mixed into the redaction placeholder hash — see [Field redaction](#field-redaction) |
 | `SQT_AUDIT_SIGNING_KEY_PATH` | unset | Private key file for `checkpoint_and_sign` when no `key_path`/`signer` is given — an absolute path; a relative one is refused without the value being repeated — see [Checkpoint signing](#checkpoint-signing-ed25519) |
 
@@ -272,8 +278,8 @@ tools an agent reaches the same log through — `find_decisions`,
 `explain_decision`, `replay_decision`, `compare_decisions`,
 `verify_audit_integrity`, `describe_audit_log` and `export_audit_bundle` —
 are [27_meta.md](27_meta.md)'s subject. Nothing on that surface mutates the
-log: holds, sealing, garbage collection and checkpoint signing are CLI-only,
-below.
+log: holds, sealing, garbage collection, checkpoint signing and cutting a
+torn final record are CLI-only, below.
 
 ---
 
@@ -668,6 +674,7 @@ sqt hold <date> [--reason TEXT]      # legal/retention hold on a calendar day
 sqt release-hold <date>              # remove a hold
 sqt gc [--confirm]                   # delete day files past retention (dry-run by default)
 sqt seal <date>                      # chmod a day file read-only (not WORM)
+sqt audit repair-tail [date] [--confirm]  # show (or cut, keeping it in a side file) the newest day's torn final record
 sqt export --start D --end D --out F # package a date range into an auditor-ready zip
 sqt keygen [--out DIR]                # generate an Ed25519 keypair (local dev only)
 sqt anchor <date> [--key PATH]        # sign a checkpoint for a calendar day
@@ -743,6 +750,49 @@ Verified through 2026-07-19: 212 record(s), last record_hash 3f9c…; 4810 recor
 
 Keep that line outside the audit directory; it is what shows a newest day
 that was later cut short or deleted.
+
+### `sqt audit repair-tail`
+
+```bash
+$ sqt audit repair-tail
+2026-09-28.jsonl ends in a torn record: 31 byte(s) from byte 48213, with no newline after them, that are not a record.
+  fragment: b'{"request_id": "r3", "record_ha'
+Would cut (dry-run; pass --confirm): truncate 2026-09-28.jsonl to 48213 byte(s), keeping the fragment in a side file 2026-09-28.jsonl.torn-<UTC time>-<id> beside it. No complete record is removed.
+
+$ sqt audit repair-tail 2026-09-28 --confirm
+...
+Cut: 2026-09-28.jsonl now ends at byte 48213, its last complete line. The 31 byte(s) are kept in .../2026-09-28.jsonl.torn-20260928T101502123456Z-3f9c2a1b.
+OK — no integrity problems found.
+Verified through 2026-09-28: ...
+```
+
+The remedy the writer names when a crash or a full disk cut the newest
+day's last record short (see [The chain fails closed on
+corruption](#the-chain-fails-closed-on-corruption)). With no date it works
+on the newest day, the only one a write can be cut short on. By default it
+only shows what it would cut. With `--confirm` it takes the lock the writer
+takes for that day, reads the day again, writes the fragment's bytes to a
+new side file `<date>.jsonl.torn-<UTC time>-<id>` beside it and flushes
+them to disk, and only then truncates the day to where the fragment starts.
+The day is then byte for byte what it was before the interrupted write, and
+the trail verification printed after the cut matches the one before it.
+The side file is not a day file: no reader of the trail, the verifier
+included, takes it for one.
+
+It refuses, naming why and changing nothing, when the final line is a
+complete record (a record that lost only its newline included — the writer
+restores that itself), when the final line is damaged in a way a cut-short
+write does not leave (it ends in a newline, parses to something that is not
+a record, or begins with a complete record), when another line of the day is
+unreadable too, when the day is not the newest, when the lock cannot be
+taken, and when the day cannot be written (a sealed day is read-only). Exit
+code `0` when the fragment was shown, or cut and the trail verifies; `1` on
+a refusal, or when problems remain after the cut.
+
+Like `gc`, `seal` and signing, it is CLI-only and in no dispatch table: an
+agent able to cut its own decision log is not audited by it. It reads and
+truncates the local day file directly, like `sqt verify`, rather than going
+through a storage backend.
 
 ### Standalone verification (no package install required)
 
@@ -875,15 +925,36 @@ position, `nested.deep[].ssn` every `ssn` in that list, and `tags[]` each
 element of `tags` separately. Naming a list without `[]` at the end
 (`positions`) still redacts it as one value. Until 2026-09-28 a path
 stopped at the first list, so these redacted nothing — and a policy that
-covers nothing looked exactly like one that matched nothing. Mapping keys
-are not redacted; only values are.
+covers nothing looked exactly like one that matched nothing.
+
+**Paths reach mapping keys.** A value path cannot hide a sensitive value
+that is a KEY — positions keyed by account, weights keyed by symbol — so a
+segment ending in `{}` names a mapping whose keys are redacted:
+`positions{}` turns `{"ACC-1": 100, "ACC-2": 50}` into
+`{"<redacted:…>": 100, "<redacted:…>": 50}`, and `book.accounts{}` reaches a
+nested one. Each key becomes exactly the placeholder the same text gets as
+a value, salted the same way, so an account hidden as a key in one record
+and as a value in another compares equal. The values, their order and the
+mapping's size are kept; two keys whose 32-bit placeholders collide keep
+both entries, the later one suffixed `~2`. A mapping inside a list is
+reached as a field inside a list is (`legs{}` redacts the keys of every
+mapping in `legs`), and a `{}` segment followed by more path goes on into
+every value (`accounts{}.ssn` hides the account keys and each account's
+`ssn`). Only a mapping a path names has its keys touched: `weights` in the
+same input keeps its keys unless `weights{}` is listed too. Keys are renamed
+after every path has been walked, so `positions{}` and
+`positions.ACC-1.ssn` together redact both whatever order they are listed
+in.
 
 If a tool raises an exception whose message happens to echo a redacted
 value back (e.g. a validation error that repeats the offending input), that
 message is scrubbed the same way before it reaches `error_message` on the
 `DecisionRecord` — each redacted field's raw value is replaced with the
 identical placeholder used in `input`, so the two never disagree on what a
-given value hashes to. The value is replaced **as a whole token**: redacting
+given value hashes to. A redacted mapping key is scrubbed the same way, with
+the placeholder it got in `input` — a `KeyError('ACC-1')` from positions
+keyed by account would otherwise put back the account the keys were hidden
+to protect. The value is replaced **as a whole token**: redacting
 a quantity of `5` leaves `123-45-6789` and `1.5` alone (it used to rewrite
 every `5` in the message), while `5` on its own or at the end of a sentence
 is replaced. Longer values are matched first, in one pass. This is still a
@@ -1155,8 +1226,8 @@ lock, and day-listing operations (used for writing records) go through
 whatever backend was passed in. `verify_audit_log_integrity()`,
 `verify_audit_trail_integrity()`, checkpoint signing and verification
 (which recompute a day through the verifier's walk), the retention
-functions (`hold_day`/`gc`/`seal_day`), and `export_bundle()` still read
-the local filesystem directly — extending those to the backend
+functions (`hold_day`/`gc`/`seal_day`), `repair_torn_tail()` and
+`export_bundle()` still read the local filesystem directly — extending those to the backend
 interface is work for whenever a non-local backend is actually built.
 
 A custom backend implements six methods (`acquire_lock`, `release_lock`,

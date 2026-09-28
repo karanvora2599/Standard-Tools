@@ -128,6 +128,7 @@ from standard_quant_tools.portfolio.optimize import (
 from standard_quant_tools.portfolio.portfolio import (
     fetch_returns_sync,
 )
+from standard_quant_tools.portfolio.position_sizing import size_position
 from standard_quant_tools.validation import last_finite
 
 
@@ -759,25 +760,6 @@ def run_stress_test(input_data: StressTestInput) -> StressTestResult:
     )
 
 
-def _whole_shares(amount: float, per_share: float, what: str) -> int:
-    """
-    Whole shares that `amount` buys at `per_share`, never negative.
-
-    `int()` of a non-finite quotient is an OverflowError or a ValueError
-    that names neither the position nor the input behind it, so a quotient
-    beyond the float range is refused here in the sizer's own terms.
-    """
-    count = amount / per_share
-    if not math.isfinite(count):
-        raise ValidationError(
-            f"{what} is not a finite number of shares ({amount:g} / "
-            f"{per_share:g}). account_equity is in dollars and "
-            "risk_per_trade_pct a fraction of it; check both are on that "
-            "scale."
-        )
-    return max(int(count), 0)
-
-
 def get_position_size(input_data: PositionSizerInput) -> PositionSizerResult:
     """
     Compute risk-adjusted position size using ATR-based stop-loss sizing
@@ -786,6 +768,11 @@ def get_position_size(input_data: PositionSizerInput) -> PositionSizerResult:
     Fixed-risk sizing: shares = (account × risk_pct) / (atr_multiplier × ATR)
     Kelly sizing:      f = (b×p − q) / b  where b = avg_win/avg_loss,
                        p = win_rate, q = 1−win_rate. Half-Kelly is recommended.
+
+    The arithmetic, and its refusals of a stop, a share count or a position
+    value past the float range, live in `portfolio.position_sizing`, so a
+    direct caller sizes and refuses exactly as this tool does. This fetches
+    the bars, takes the last close and ATR, and rounds for the result.
     """
     logger.debug(
         "[position_size] %s  equity=%.0f  risk_pct=%.2f%%  atr_period=%d  atr_mult=%.1f",
@@ -806,105 +793,49 @@ def get_position_size(input_data: PositionSizerInput) -> PositionSizerResult:
     ).dropna()
     last_atr = last_finite(atr_series, "atr_series")
 
-    stop_distance = last_atr * input_data.atr_multiplier
-    dollar_risk = input_data.account_equity * input_data.risk_per_trade_pct
-    if not math.isfinite(stop_distance):
-        # An infinite stop sized every position at zero shares and reported
-        # the worst-case loss as 0 x inf = NaN.
-        raise ValidationError(
-            f"atr_multiplier={input_data.atr_multiplier:g} times the last ATR "
-            f"({last_atr:g}) is not a finite stop distance. A multiplier is "
-            "a few ATRs -- 1 to 5 is the usual range."
-        )
-
-    shares_fr = (
-        _whole_shares(dollar_risk, stop_distance, "the fixed-risk position")
-        if stop_distance > 0
-        else 0
+    sized = size_position(
+        input_data.account_equity,
+        last_close,
+        last_atr,
+        risk_per_trade_pct=input_data.risk_per_trade_pct,
+        atr_multiplier=input_data.atr_multiplier,
+        win_rate=input_data.win_rate,
+        avg_win_pct=input_data.avg_win_pct,
+        avg_loss_pct=input_data.avg_loss_pct,
     )
-    pos_val_fr = shares_fr * last_close
-    port_pct_fr = (
-        pos_val_fr / input_data.account_equity if input_data.account_equity > 0 else 0.0
-    )
-
-    kelly_fraction: Optional[float] = None
-    shares_hk: Optional[int] = None
-    pos_val_hk: Optional[float] = None
-    port_pct_hk: Optional[float] = None
-
-    has_kelly_inputs = (
-        input_data.win_rate is not None
-        and input_data.avg_win_pct is not None
-        and input_data.avg_loss_pct is not None
-    )
-
-    if has_kelly_inputs:
-        assert input_data.win_rate is not None
-        assert input_data.avg_win_pct is not None
-        assert input_data.avg_loss_pct is not None
-        wr, aw, al = (
-            input_data.win_rate,
-            input_data.avg_win_pct,
-            input_data.avg_loss_pct,
-        )
-        b = aw / al if al > 0 else 0.0
-        raw_kelly = (b * wr - (1.0 - wr)) / b if b > 0 else 0.0
-        kelly_fraction = round(max(raw_kelly, 0.0), 4)
-
-        half_kelly_equity = input_data.account_equity * kelly_fraction * 0.5
-        shares_hk = (
-            _whole_shares(half_kelly_equity, last_close, "the half-Kelly position")
-            if last_close > 0
-            else 0
-        )
-        pos_val_hk = shares_hk * last_close
-        port_pct_hk = (
-            pos_val_hk / input_data.account_equity
-            if input_data.account_equity > 0
-            else 0.0
-        )
-
-    use_kelly = (
-        has_kelly_inputs
-        and kelly_fraction is not None
-        and kelly_fraction > 0
-        and (shares_hk or 0) > 0
-    )
-    recommended_sizing = "half_kelly" if use_kelly else "fixed_risk"
-    _rec_shares: int = (shares_hk or 0) if use_kelly else shares_fr  # type: ignore[assignment]
-    recommended_value = _rec_shares * last_close
     logger.debug(
         "[position_size] close=%.4f  ATR=%.4f  stop=%.4f  sizing=%s  shares=%d  value=%.2f  kelly=%s",
         last_close,
         last_atr,
-        stop_distance,
-        recommended_sizing,
-        _rec_shares,
-        recommended_value,
-        str(kelly_fraction),
+        sized["stop_distance"],
+        sized["recommended_sizing"],
+        sized["recommended_shares"],
+        sized["recommended_position_value"],
+        str(sized["kelly_fraction"]),
     )
+
+    def _rounded_or_none(value: Optional[float], digits: int) -> Optional[float]:
+        return round(value, digits) if value is not None else None
 
     return PositionSizerResult(
         symbol=input_data.symbol,
         last_close=round(last_close, 4),
         atr=round(last_atr, 4),
         atr_pct=round(last_atr / last_close * 100, 4) if last_close > 0 else 0.0,
-        stop_distance=round(stop_distance, 4),
-        shares_fixed_risk=shares_fr,
-        position_value_fixed_risk=round(pos_val_fr, 2),
-        portfolio_pct_fixed_risk=round(port_pct_fr, 4),
-        max_loss_fixed_risk=round(shares_fr * stop_distance, 2),
-        kelly_fraction=kelly_fraction,
-        shares_half_kelly=shares_hk,
-        position_value_half_kelly=(
-            round(pos_val_hk, 2) if pos_val_hk is not None else None
+        stop_distance=round(sized["stop_distance"], 4),
+        shares_fixed_risk=sized["shares_fixed_risk"],
+        position_value_fixed_risk=round(sized["position_value_fixed_risk"], 2),
+        portfolio_pct_fixed_risk=round(sized["portfolio_pct_fixed_risk"], 4),
+        max_loss_fixed_risk=round(sized["max_loss_fixed_risk"], 2),
+        kelly_fraction=sized["kelly_fraction"],
+        shares_half_kelly=sized["shares_half_kelly"],
+        position_value_half_kelly=_rounded_or_none(
+            sized["position_value_half_kelly"], 2
         ),
-        portfolio_pct_half_kelly=(
-            round(port_pct_hk, 4) if port_pct_hk is not None else None
-        ),
-        recommended_sizing=recommended_sizing,
-        recommended_shares=_rec_shares,
-        recommended_position_value=round(recommended_value, 2),
+        portfolio_pct_half_kelly=_rounded_or_none(sized["portfolio_pct_half_kelly"], 4),
+        recommended_sizing=sized["recommended_sizing"],
+        recommended_shares=sized["recommended_shares"],
+        recommended_position_value=round(sized["recommended_position_value"], 2),
     )
 
 

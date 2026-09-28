@@ -1,11 +1,13 @@
 import logging
+import math
 from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
 
 from standard_quant_tools.error import ValidationError
-from standard_quant_tools.validation import require_finite_array, validate_series
+from standard_quant_tools.indicators._missing import refuse_infinities
+from standard_quant_tools.validation import validate_series
 
 logger = logging.getLogger(__name__)
 
@@ -57,37 +59,55 @@ except ImportError:
 
 @njit
 def _rsi_numba(prices: np.ndarray, period: int) -> np.ndarray:
+    """
+    Wilder's RSI, the fallback for rsi_into in indicators.cpp.
+
+    A non-finite price is a missing bar and is skipped: a change is measured
+    between consecutive PRESENT bars, the averages are carried across the
+    gap unchanged, and the output there is NaN (see _missing.py). The
+    operations and their order are the native kernel's, so the two agree on
+    clean data and on data with gaps alike. The seed is a sequential sum
+    rather than np.mean, whose pairwise summation is a different rounding.
+    """
     n = len(prices)
     rsi = np.full(n, np.nan)
 
-    if n <= period:
+    if period <= 0 or n <= period:
         return rsi
 
-    delta = prices[1:] - prices[:-1]
+    have_prev = False
+    prev = 0.0
+    n_changes = 0
+    avg_gain = 0.0
+    avg_loss = 0.0
+    for i in range(n):
+        price = prices[i]
+        if not math.isfinite(price):
+            continue
+        if not have_prev:
+            prev = price
+            have_prev = True
+            continue
+        change = price - prev
+        prev = price
+        gain = change if change > 0.0 else 0.0
+        loss = -change if change < 0.0 else 0.0
+        n_changes += 1
 
-    # Initial Average (SMA)
-    gains = np.where(delta > 0, delta, 0.0)
-    losses = np.where(delta < 0, -delta, 0.0)
+        if n_changes <= period:
+            # Seed: the simple mean of the first `period` changes.
+            avg_gain += gain
+            avg_loss += loss
+            if n_changes < period:
+                continue
+            avg_gain /= period
+            avg_loss /= period
+        else:
+            # Wilder's smoothing.
+            avg_gain = (avg_gain * (period - 1) + gain) / period
+            avg_loss = (avg_loss * (period - 1) + loss) / period
 
-    avg_gain = np.mean(gains[:period])
-    avg_loss = np.mean(losses[:period])
-
-    if avg_loss == 0:
-        rsi[period] = 100.0
-    else:
-        rs = avg_gain / avg_loss
-        rsi[period] = 100.0 - (100.0 / (1.0 + rs))
-
-    # Wilder's Smoothing
-    for i in range(period + 1, n):
-        change = delta[i - 1]
-        gain = change if change > 0 else 0.0
-        loss = -change if change < 0 else 0.0
-
-        avg_gain = (avg_gain * (period - 1) + gain) / period
-        avg_loss = (avg_loss * (period - 1) + loss) / period
-
-        if avg_loss == 0:
+        if avg_loss == 0.0:
             rsi[i] = 100.0
         else:
             rs = avg_gain / avg_loss
@@ -102,6 +122,10 @@ def rsi(series: pd.Series, period: int = 14) -> pd.Series:
     Calculate Relative Strength Index (RSI).
     Uses C++ fast path when built, then Numba JIT, then pure Python fallback.
     All three paths use Wilder's smoothing (SMA seed, then alpha=1/period).
+
+    A NaN price is a missing bar: the recursion skips it, so the result is
+    the RSI of the series with that bar dropped, and NaN at the bar itself.
+    An infinite price is refused. See `indicators/_missing.py`.
     """
     # No `if series.empty` branch here: @validate_series() above already
     # rejects an empty Series, so it was unreachable.
@@ -109,7 +133,7 @@ def rsi(series: pd.Series, period: int = 14) -> pd.Series:
         raise ValidationError(f"period must be > 0, got {period}")
 
     values: np.ndarray = np.asarray(series.values, dtype=np.float64)
-    require_finite_array(values, "prices", "rsi")
+    refuse_infinities(values, "prices", "rsi")
     path = (
         "C++"
         if (HAS_CPP and _cpp_core is not None)
@@ -147,6 +171,11 @@ def stochastic_oscillator(
 
     Uses C++ fused sliding min+max path when available (5-15× faster than two
     pandas rolling passes).  Falls back to pandas otherwise.
+
+    A NaN is a missing bar: %K is NaN for every window holding a missing
+    high or low and at a bar whose close is missing, and %D is NaN for every
+    window holding such a %K; both resume after it, on either backend. An
+    infinite value is refused. See `indicators/_missing.py`.
     """
     if k_period <= 0:
         raise ValidationError(f"k_period must be > 0, got {k_period}")
@@ -166,11 +195,9 @@ def stochastic_oscillator(
     # C++ failure), which would otherwise silently swallow a
     # ValidationError raised inside the try block and mask bad input
     # behind a confusing fallback instead of rejecting it.
-    require_finite_array(
-        high.to_numpy(dtype=np.float64), "high", "stochastic_oscillator"
-    )
-    require_finite_array(low.to_numpy(dtype=np.float64), "low", "stochastic_oscillator")
-    require_finite_array(
+    refuse_infinities(high.to_numpy(dtype=np.float64), "high", "stochastic_oscillator")
+    refuse_infinities(low.to_numpy(dtype=np.float64), "low", "stochastic_oscillator")
+    refuse_infinities(
         close.to_numpy(dtype=np.float64), "close", "stochastic_oscillator"
     )
 
@@ -215,6 +242,10 @@ def stochastic_oscillator(
         k = (100 * ((close - lowest_low) / range_safe)).where(
             price_range.isna() | (price_range > 0), 0.0
         )
+        # A bar whose close is missing has no %K, even over a clean flat
+        # window, where the line above would have set 0.0 -- the kernel's
+        # rule, so a gap reads the same on both backends.
+        k = k.where(close.notna())
         d = k.rolling(window=d_period).mean()
         result = pd.DataFrame({"Stoch_K": k, "Stoch_D": d})
 

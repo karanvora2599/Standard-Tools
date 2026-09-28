@@ -112,6 +112,23 @@ must be finite and within 1e12 in magnitude -- on magnitude because
 baseline with a reason; that reason belongs to a legal input with no
 defined answer, and these are unit errors.
 
+**The ratio channels have a floor, and the library applies both bounds.**
+`update_spread_monitor` refuses a leg beyond 1e12 in magnitude on every
+channel, so a direct caller meets the ceiling the tool's schema applies.
+A ceiling alone left the ratio channels open underneath: a reference of
+1e-300 under a primary at the ceiling made `relative_bps` infinite and the
+warm-up baseline NaN, and on `annualized_bps` a primary of 5e-324
+underflowed the ratio to zero and raised a bare math domain error. So
+`relative_bps` and `annualized_bps` refuse a leg below 1e-8 — the floor
+the option pricers put on a spot or strike — naming the tick, and
+`annualized_bps` refuses a time to expiry below 1e-8 years, which divided
+a finite log-ratio into infinity. With both legs in [1e-8, 1e12] every
+channel value stays inside the float range. It is a floor rather than a
+ratio computed in logs because logs do not rescue the channel that
+overflows: `relative_bps` *is* `(p/r − 1) × 10⁴`, and `exp(ln p − ln r)`
+overflows exactly where `p/r` did. `absolute_points` takes no ratio and
+still accepts a leg at or below zero.
+
 ## 3. Three things this surface gets wrong if you let it
 
 ### A wide basis is usually not an arbitrage

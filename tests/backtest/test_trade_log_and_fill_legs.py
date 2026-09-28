@@ -6,9 +6,13 @@ overnight leg at yesterday's position and an intraday leg at today's. The
 two used to be ADDED, on the C++ and the Python path alike, so a held bar
 lost the product term: over five years of daily bars the equity curve fell
 0.2-0.5 points below the fill-to-fill trade log at zero cost. They compound
-now. The trade log still charges costs as a simple fraction, so with costs
-it agrees with the curve to first order and no better; the docstring used to
-claim more.
+now.
+
+The trade log reconciles EXACTLY, costs included: each lot's return_pct is
+its share of the equity curve, so the lots multiply back to the curve's
+total return on both engines. It used to charge costs as a simple fraction
+of notional, which agreed with the curve to first order only -- the log
+overstated cumulative P&L by 0.07-0.15 points at 15 bps.
 """
 
 import numpy as np
@@ -128,12 +132,13 @@ class TestHowExactlyTheLogReconciles:
             growth = equity.loc[lot["exit_date"]] / equity.iloc[before_entry]
             assert lot["return_pct"] == pytest.approx((growth - 1.0) * 100, abs=1e-4)
 
-    def test_with_costs_it_reconciles_to_first_order_only(self, engine_path):
-        """One long lot 100 -> 120 at 15 bps a side. The log charges both
-        costs as a simple fraction (19.70%); the curve charges them against
-        that bar's equity and compounds (19.64%). The gap is real, and
-        bounded by about 2 * c * |r| + c^2 -- which is what the trade-log
-        docstring now says, instead of claiming the two reconcile."""
+    def test_with_costs_a_lot_is_exactly_its_share_of_the_curve(self, engine_path):
+        """One long lot 100 -> 120 at 15 bps a side. The curve charges each
+        cost against the equity of the bar it is paid on and compounds:
+        (1 - c) * 1.2 * (1 - c) - 1 = 19.64%. The log now reads the lot off
+        that curve. It used to charge both costs as a simple fraction,
+        0.20 - 2c = 19.70%, a gap of about 2 * c * |r| + c^2 per lot that
+        its docstring had to disclose."""
         c = 0.0015
         dates = pd.date_range("2023-01-02", periods=6, freq="B")
         close = [100.0, 100.0, 110.0, 120.0, 120.0, 120.0]
@@ -147,7 +152,66 @@ class TestHowExactlyTheLogReconciles:
         )
         (lot_return,) = result["trade_log"]["return_pct"] / 100
         curve_return = result["total_return"]
-        assert lot_return == pytest.approx(0.20 - 2 * c, abs=1e-9)
         assert curve_return == pytest.approx((1 - c) * 1.2 * (1 - c) - 1, abs=1e-6)
-        gap = lot_return - curve_return
-        assert 0 < gap <= 2 * c * 0.20 + c**2
+        assert lot_return == pytest.approx(curve_return, abs=5e-7)
+        assert result["avg_trade_return_pct"] / 100 == pytest.approx(
+            curve_return, abs=5e-7
+        )
+
+
+class TestTheLogCompoundsToTheCurve:
+    """
+    The whole log, not one lot: the product of (1 + return_pct / 100) over
+    every lot is the curve's final equity over its initial capital, under
+    every fill and at every size, with long, short, resized and flipped
+    lots. Flat bars contribute exactly 1, and a flip bar is split where the
+    closing lot has earned the leg it still held and paid its exit cost.
+
+    The tolerance is the log's display rounding (return_pct to 4 decimals,
+    5e-7 per lot), not an allowance for a modelling gap: at 15 bps the old
+    log sat 0.07-0.15 points (7e-4 to 1.5e-3) away from the curve.
+    """
+
+    @staticmethod
+    def _compounded(log: pd.DataFrame) -> float:
+        return float(np.prod(1.0 + log["return_pct"].to_numpy(dtype=float) / 100.0))
+
+    @pytest.mark.parametrize("fill", ["close", "next_open", "hl2_exploratory"])
+    @pytest.mark.parametrize(
+        "levels", [[-1.0, 0.0, 0.5, 1.0], [0.0, 1.0], [-2.0, -1.0, 1.0, 2.0]]
+    )
+    def test_the_lots_multiply_back_to_the_curve(
+        self, engine_path, gapping, fill, levels
+    ):
+        rng = np.random.default_rng(len(levels) * 7 + len(fill))
+        # Runs of several bars, so lots last more than one bar.
+        blocks = rng.choice(levels, size=len(gapping) // 5 + 1)
+        signal = pd.Series(np.repeat(blocks, 5)[: len(gapping)], index=gapping.index)
+        result = run_strategy(
+            gapping,
+            signal,
+            commission_pct=0.001,
+            slippage_pct=0.0005,
+            fill_price=fill,
+            include_trade_log=True,
+        )
+        log = result["trade_log"]
+        assert len(log) > 5
+        growth = float(result["equity_curve"].iloc[-1] / result["equity_curve"].iloc[0])
+        assert self._compounded(log) == pytest.approx(growth, rel=len(log) * 1e-6)
+        # The native kernel's own trade stats read the same lots.
+        assert result["num_trades"] == len(log)
+        assert result["avg_trade_return_pct"] == pytest.approx(
+            float(log["return_pct"].mean()), abs=5e-5
+        )
+
+    def test_null_case_no_trade_no_log(self, engine_path, gapping):
+        result = run_strategy(
+            gapping,
+            pd.Series(0.0, index=gapping.index),
+            commission_pct=0.001,
+            slippage_pct=0.0005,
+            include_trade_log=True,
+        )
+        assert result["trade_log"].empty
+        assert result["total_return"] == 0.0

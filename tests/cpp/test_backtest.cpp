@@ -172,30 +172,45 @@ static void test_one_completed_losing_trade() {
     CHECK_NEAR(r.avg_trade_return_pct, expected_pct, 1e-6);
 }
 
-static void test_profit_factor_zero_over_zero_is_inf() {
-    // Regression: a flat price series with zero costs produces trades whose
-    // return is exactly 0.0 -- neither wins nor losses, so gross_win AND
-    // gross_loss are both 0.
+static void test_profit_factor_zero_over_zero_is_nan() {
+    // A flat price series with zero costs produces trades whose return is
+    // exactly 0.0 -- neither wins nor losses, so gross_win AND gross_loss
+    // are both 0, and the ratio is 0/0.
     //
-    // profit_factor used to be `(gross_loss > 0) ? win/loss
-    //                          : (gross_win > 0 ? inf : 0.0)`, which returned
-    // 0.0 here. That contradicted this file's own no-losing-trades -> inf
-    // convention (test_one_completed_winning_trade above) AND disagreed with
-    // engine.py's _compute_trade_stats, which returns inf whenever
-    // gross_loss == 0 -- so the same call answered differently depending on
-    // whether the C++ extension happened to be built.
+    // This test used to pin +inf here, read as "no losing trade". But +inf
+    // is the x/0 answer with x > 0 (test_one_completed_winning_trade
+    // above), and 0/0 is undefined: NaN, the library's convention for every
+    // other 0/0 ratio (a Sharpe without dispersion, a Sortino or Calmar of
+    // a book that never moved). +inf ranked a set of do-nothing trades
+    // FIRST under sort_by="profit_factor". It was 0.0 before that, which
+    // reads as "every trade lost". engine.py's _compute_trade_stats applies
+    // the same rule, so both backends answer NaN.
     std::vector<double> prices  = {100.0, 100.0, 100.0, 100.0};
     std::vector<double> signals = {1.0,   1.0,   1.0,   1.0};
     auto r = sqt::run_strategy(prices.data(), signals.data(), 4, 10000.0, 0.0, 0.0);
     CHECK(r.num_trades == 1);
     CHECK_NEAR(r.avg_trade_return_pct, 0.0, 1e-12);
-    CHECK_INF(r.profit_factor);
+    CHECK(std::isnan(r.profit_factor));
 
-    // run_strategy_summary carries its own copy of this expression -- both
-    // must agree, or batch_run_strategy silently disagrees with run_strategy.
+    // run_strategy_summary shares the expression -- both must agree, or
+    // batch_run_strategy silently disagrees with run_strategy.
     auto s = sqt::run_strategy_summary(prices.data(), signals.data(), 4, 10000.0, 0.0, 0.0);
-    CHECK_INF(s.profit_factor);
+    CHECK(std::isnan(s.profit_factor));
     CHECK(s.num_trades == r.num_trades);
+}
+
+static void test_profit_factor_with_a_winner_and_a_zero_trade_is_inf() {
+    // The null case for the rule above: a zero trade counts on the loss
+    // side, but with a gross profit and no gross loss the ratio is x/0 with
+    // x > 0 -- +inf, unchanged.
+    // executed = [0,1,0,1,0]: lot one 100 -> 110 (+10%), lot two 110 -> 110.
+    std::vector<double> prices  = {100.0, 110.0, 110.0, 110.0, 110.0};
+    std::vector<double> signals = {1.0,   0.0,   1.0,   0.0,   0.0};
+    auto r = sqt::run_strategy(prices.data(), signals.data(), 5, 10000.0, 0.0, 0.0);
+    CHECK(r.num_trades == 2);
+    CHECK_INF(r.profit_factor);
+    auto s = sqt::run_strategy_summary(prices.data(), signals.data(), 5, 10000.0, 0.0, 0.0);
+    CHECK_INF(s.profit_factor);
 }
 
 static void test_unclosed_position_flushed_as_one_trade_at_final_close() {
@@ -273,53 +288,46 @@ static void test_reversal_trade_long_to_short() {
 }
 
 static void test_trade_log_cost_scales_with_leveraged_position_size() {
-    // Regression test: the trade log's cost deduction used to be a flat
-    // 2*cost_per_unit / 1*cost_per_unit regardless of entry_size, so a 5x
-    // leveraged trade paid the exact same cost as a 1x trade even though
-    // strat_ret (the equity curve) already scales cost by abs(pdiff) --
-    // silently under-costing every leveraged (non-+/-1) SCORE-style
-    // position. prices=[100,110,121], signals=[size,0,0]: a real close
-    // event at i=2 (pdiff=-size), not a final-bar flush -- both entry and
-    // exit legs are costed at abs(entry_size)*cost_per_unit each.
-    const double cost_per_unit = 0.01;  // commission_pct + slippage_pct
+    // The trade log's cost scales with the size transacted, as the equity
+    // curve's does: each event pays abs(pdiff) * cost_per_unit, charged
+    // against the equity of the bar it is paid on. (A flat cost regardless
+    // of size once under-costed every leveraged SCORE-style position.)
+    // prices=[100,110,121], signals=[size,0,0] -> executed=[0,size,0]:
+    //   bar 1: entry, earns size * 10% and pays size * c
+    //   bar 2: exit, pays size * c
+    // and the lot is exactly the curve: (1 + 0.1s - sc)(1 - sc) - 1. These
+    // pins read 8.0 and 40.0 while costs were charged as a simple fraction
+    // of notional (0.1s - 2sc), which is the first-order approximation of
+    // the product and overstated the lot against the curve.
+    const double c = 0.01;  // commission_pct + slippage_pct
     std::vector<double> prices = {100.0, 110.0, 121.0};
 
     std::vector<double> signals_1x = {1.0, 0.0, 0.0};
-    auto r1 = sqt::run_strategy(prices.data(), signals_1x.data(), 3, 10000.0,
-                                 cost_per_unit, 0.0);
-    const double expected_1x = ((110.0 - 100.0) / 100.0 * 1.0 - 2.0 * 1.0 * cost_per_unit) * 100.0;
+    auto r1 = sqt::run_strategy(prices.data(), signals_1x.data(), 3, 10000.0, c, 0.0);
+    const double expected_1x = ((1.0 + 0.1 - c) * (1.0 - c) - 1.0) * 100.0;
     CHECK_NEAR(r1.avg_trade_return_pct, expected_1x, 1e-9);
-    CHECK_NEAR(expected_1x, 8.0, 1e-9);  // matches the review's own repro numbers
+    CHECK_NEAR(expected_1x, 7.91, 1e-9);
+    CHECK_NEAR(r1.avg_trade_return_pct, r1.total_return * 100.0, 1e-9);
 
     std::vector<double> signals_5x = {5.0, 0.0, 0.0};
-    auto r5 = sqt::run_strategy(prices.data(), signals_5x.data(), 3, 10000.0,
-                                 cost_per_unit, 0.0);
-    const double expected_5x = ((110.0 - 100.0) / 100.0 * 5.0 - 2.0 * 5.0 * cost_per_unit) * 100.0;
+    auto r5 = sqt::run_strategy(prices.data(), signals_5x.data(), 3, 10000.0, c, 0.0);
+    const double expected_5x = ((1.0 + 0.5 - 5.0 * c) * (1.0 - 5.0 * c) - 1.0) * 100.0;
     CHECK_NEAR(r5.avg_trade_return_pct, expected_5x, 1e-9);
-    // Before this fix, r5 came out as 48.0 (flat cost, same as r1's 8.0
-    // flat cost -> a 6x ratio, not a clean 5x one either) instead of the
-    // correctly cost-scaled 40.0 -- both pnl and cost are linear in
-    // position size for a single trade, so the fixed formula now produces
-    // an exactly 5x relationship between r5 and r1, unlike the old bug.
-    CHECK_NEAR(r5.avg_trade_return_pct, 40.0, 1e-9);
-    CHECK_NEAR(r5.avg_trade_return_pct, 5.0 * r1.avg_trade_return_pct, 1e-9);
+    CHECK_NEAR(expected_5x, 37.75, 1e-9);
+    CHECK_NEAR(r5.avg_trade_return_pct, r5.total_return * 100.0, 1e-9);
+    // A size-blind cost would have charged 5x the move but 1x the cost.
+    const double size_blind = ((1.0 + 0.5 - c) * (1.0 - c) - 1.0) * 100.0;
+    CHECK(std::abs(r5.avg_trade_return_pct - size_blind) > 1.0);
 }
 
-static void test_trade_log_resize_cost_is_weighted_cost_basis() {
-    // A same-sign RESIZE (1.0 -> 2.5, a single pos_diff event) is now
-    // handled as a weighted-average-cost-basis ADD to the SAME lot, not a
-    // close-then-reopen -- this test proves the previously-documented
-    // approximation (see git history: this test used to assert a 2-trade
-    // split with total cost 2*(1.0+2.5)*cost_per_unit = 7*cost_per_unit)
-    // is gone: the whole open->resize->close sequence is now exactly ONE
-    // trade, and its total cost matches the equity curve's own
-    // sum(abs(pdiff))*cost_per_unit exactly.
+static void test_trade_log_resize_is_one_lot() {
+    // A same-sign RESIZE (1.0 -> 2.5, a single pos_diff event) is an ADD to
+    // the SAME lot, not a close-then-reopen: the whole open->resize->close
+    // sequence is exactly ONE trade (an earlier reading split it in two and
+    // charged 2*(1.0+2.5)*cost_per_unit), and it pays the curve's own
+    // open(1.0) + resize(1.5) + close(2.5) units of cost.
     // prices=[100,105,110,108,108], signals=[1,2.5,2.5,0,0];
     // exec_i=signals[i-1] for i=1..4 -> exec=[1,2.5,2.5,0].
-    // Event i=1 (pdiff=1): open lot, cost_basis=prices[0]=100, size=1.0.
-    // Event i=2 (pdiff=1.5, resize): blend cost_basis with ref_price=
-    //   prices[1]=105 -> cost_basis=(1.0*100 + 1.5*105)/2.5=103.0, size=2.5.
-    // Event i=4 (pdiff=-2.5): close the lot @ ref_price=prices[3]=108.
     const double cost_per_unit = 0.01;
     std::vector<double> prices  = {100.0, 105.0, 110.0, 108.0, 108.0};
     std::vector<double> signals = {1.0,   2.5,   2.5,   0.0,   0.0};
@@ -327,57 +335,80 @@ static void test_trade_log_resize_cost_is_weighted_cost_basis() {
                                 cost_per_unit, 0.0);
     CHECK(r.num_trades == 1);  // open -> resize -> close is now ONE continuous lot
 
-    const double cost_basis = (1.0 * 100.0 + 1.5 * 105.0) / 2.5;
-    CHECK_NEAR(cost_basis, 103.0, 1e-9);
-
-    const double pnl = (108.0 - cost_basis) / cost_basis * 2.5;
-    // Total cost across the lot's whole life: open(1.0) + resize(1.5) +
-    // close(2.5) = 5.0 units transacted, at cost_per_unit each -- exactly
-    // what the equity curve itself charges via sum(abs(pdiff)):
-    const double total_cost = (1.0 + 1.5 + 2.5) * cost_per_unit;
-    const double expected_pct = (pnl - total_cost) * 100.0;
+    // One lot spanning every traded bar, so its return is the curve's:
+    //   bar 1: open 1.0,   earns 1.0 * (105/100 - 1), pays 1.0 * c
+    //   bar 2: resize 2.5, earns 2.5 * (110/105 - 1), pays 1.5 * c
+    //   bar 3: held,       earns 2.5 * (108/110 - 1)
+    //   bar 4: close,      pays 2.5 * c
+    // The costs are the curve's own open(1.0) + resize(1.5) + close(2.5).
+    // This pinned 735/103 = 7.1359% while the lot was priced off its
+    // weighted cost basis (103.0) with simple costs; the compounded, costed
+    // share of the curve is what the lot actually returned.
+    const double c = cost_per_unit;
+    const double expected_pct =
+        ((1.0 + 0.05 - c) * (1.0 + 2.5 * (110.0 / 105.0 - 1.0) - 1.5 * c) *
+             (1.0 + 2.5 * (108.0 / 110.0 - 1.0)) * (1.0 - 2.5 * c) -
+         1.0) * 100.0;
 
     CHECK_NEAR(r.avg_trade_return_pct, expected_pct, 1e-9);
-    CHECK_NEAR(expected_pct, 735.0 / 103.0, 1e-6);  // hand-verified exact fraction
+    CHECK_NEAR(r.avg_trade_return_pct, r.total_return * 100.0, 1e-9);
 }
 
-static void test_trade_log_cost_matches_equity_curve_cost_property() {
-    // The core economic invariant the PositionState rewrite establishes:
-    // for ANY signal sequence, the trade log's total realized cost across
-    // all completed trades equals the equity curve's own
-    // sum(abs(pos_diff))*cost_per_unit -- unlike the old close-then-reopen
-    // approximation, which double-counted cost on a same-sign resize.
-    const double cost_per_unit = 0.02;
+static void test_trade_log_is_the_equity_curves_share_across_a_flip() {
+    // The invariant the lot accounting establishes: every lot is its share
+    // of the equity curve, so the lots multiply back to the curve exactly,
+    // costs included. This test used to pin a weaker property -- that the
+    // SUM of the lots' simple costs equalled the curve's sum(abs(pdiff)) *
+    // cost -- which held while the lots' P&L still disagreed with the curve
+    // by the compounding of those costs.
+    //
+    // executed = [0, 1, 1, 2, 2, -1, -1]: open 1.0 at bar 1, resize to 2.0
+    // at bar 3, FLIP to -1.0 at bar 5 (closing 2.0, opening 1.0), still
+    // short at the end. Under a close fill the closing lot earns nothing on
+    // the flip bar (its exit is at the previous close) and pays its exit
+    // cost there, so it ends at equity[4] * (1 - 2c); the short begins at
+    // that split and ends at the final equity.
+    const double c = 0.02;
     std::vector<double> prices  = {100.0, 102.0, 101.0, 105.0, 103.0, 108.0, 106.0};
     std::vector<double> signals = {1.0,   1.0,   2.0,   2.0,  -1.0,  -1.0,   0.0};
     const std::size_t n = prices.size();
-    auto r = sqt::run_strategy(prices.data(), signals.data(), n, 10000.0,
-                                cost_per_unit, 0.0);
+    auto r = sqt::run_strategy(prices.data(), signals.data(), n, 10000.0, c, 0.0);
+    CHECK(r.num_trades == 2);
 
-    // sum(abs(pos_diff)) over executed[i]=signals[i-1], i=1..n-1
-    double sum_abs_pdiff = 0.0;
-    double prev_exec = 0.0;
-    for (std::size_t i = 1; i < n; ++i) {
-        const double exec_i = signals[i - 1];
-        sum_abs_pdiff += std::abs(exec_i - prev_exec);
-        prev_exec = exec_i;
-    }
-    const double equity_curve_total_cost = sum_abs_pdiff * cost_per_unit;
+    const auto& eq = r.equity_curve;
+    const double split = eq[4] * (1.0 - 2.0 * c);
+    const double long_lot  = split / eq[0] - 1.0;
+    const double short_lot = eq[n - 1] / split - 1.0;
+    CHECK_NEAR(r.avg_trade_return_pct, (long_lot + short_lot) / 2.0 * 100.0, 1e-9);
+    // ...and the two multiply back to the curve.
+    CHECK_NEAR((1.0 + long_lot) * (1.0 + short_lot), 1.0 + r.total_return, 1e-12);
 
-    // Reconstruct the trade log's own total realized cost from the public
-    // avg_trade_return_pct/num_trades fields is not directly possible
-    // (cost isn't separately exposed), so instead assert the *equivalent*
-    // property via a cost-free vs. costed comparison: the difference
-    // between the costed and cost-free total P&L (summed across trades,
-    // undoing the /100 scale and num_trades averaging) must equal the
-    // equity curve's own total cost.
-    auto r_free = sqt::run_strategy(prices.data(), signals.data(), n, 10000.0,
-                                     0.0, 0.0);
-    CHECK(r.num_trades == r_free.num_trades);
-    const double costed_total_pnl_pct   = r.avg_trade_return_pct * r.num_trades;
-    const double cost_free_total_pnl_pct = r_free.avg_trade_return_pct * r_free.num_trades;
-    const double implied_total_cost = (cost_free_total_pnl_pct - costed_total_pnl_pct) / 100.0;
-    CHECK_NEAR(implied_total_cost, equity_curve_total_cost, 1e-9);
+    // The summary kernel reads the same lots off its running equity.
+    auto s = sqt::run_strategy_summary(prices.data(), signals.data(), n, 10000.0, c, 0.0);
+    CHECK(s.num_trades == r.num_trades);
+    CHECK(s.avg_trade_return_pct == r.avg_trade_return_pct);
+}
+
+static void test_trade_log_flip_under_a_two_leg_fill() {
+    // Under a two-leg fill the closing lot still holds the overnight leg to
+    // the open. executed = [0, 1, -1]: bar 2 flips at the open.
+    //   bar 1: entry at open 101, earns 1 * (102/101 - 1), pays c
+    //   bar 2: the long earns the overnight leg 102 -> 104 and pays c;
+    //          the short earns the intraday leg 104 -> 100 and pays c.
+    const double c = 0.001;
+    std::vector<double> close   = {100.0, 102.0, 100.0};
+    std::vector<double> opens   = {100.0, 101.0, 104.0};
+    std::vector<double> signals = {1.0,  -1.0,  -1.0};
+    auto r = sqt::run_strategy(close.data(), signals.data(), 3, 10000.0, c, 0.0,
+                               252.0, opens.data());
+    CHECK(r.num_trades == 2);
+    const double e1 = 10000.0 * (1.0 + (102.0 / 101.0 - 1.0) - c);
+    const double overnight = 104.0 / 102.0 - 1.0;
+    const double split = e1 * (1.0 + overnight - c);
+    const double long_lot = split / 10000.0 - 1.0;
+    const double short_lot = r.equity_curve[2] / split - 1.0;
+    CHECK_NEAR(r.avg_trade_return_pct, (long_lot + short_lot) / 2.0 * 100.0, 1e-9);
+    CHECK_NEAR((1.0 + long_lot) * (1.0 + short_lot), 1.0 + r.total_return, 1e-12);
 }
 
 // ── run_strategy_summary() vs run_strategy() ────────────────────────────────
@@ -1152,7 +1183,8 @@ int main() {
     test_short_position_profits_when_prices_fall();
     test_one_completed_winning_trade();
     test_one_completed_losing_trade();
-    test_profit_factor_zero_over_zero_is_inf();
+    test_profit_factor_zero_over_zero_is_nan();
+    test_profit_factor_with_a_winner_and_a_zero_trade_is_inf();
     test_unclosed_position_flushed_as_one_trade_at_final_close();
     test_sortino_inf_when_no_negative_returns();
     test_equity_curve_length_matches_n();
@@ -1160,8 +1192,9 @@ int main() {
     test_calmar_inf_when_no_drawdown();
     test_reversal_trade_long_to_short();
     test_trade_log_cost_scales_with_leveraged_position_size();
-    test_trade_log_resize_cost_is_weighted_cost_basis();
-    test_trade_log_cost_matches_equity_curve_cost_property();
+    test_trade_log_resize_is_one_lot();
+    test_trade_log_is_the_equity_curves_share_across_a_flip();
+    test_trade_log_flip_under_a_two_leg_fill();
     test_risk_free_rate_defaults_to_zero();
     test_risk_free_rate_lowers_the_ratios();
     test_summary_matches_run_strategy_under_a_rate();

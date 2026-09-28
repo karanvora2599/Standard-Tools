@@ -36,32 +36,43 @@ namespace {
         return (numerator > 0.0) ? kInf : kNaN;
     }
 
-    // ── Trade-log position accounting (weighted-average cost basis) ─────────
+    // ── Trade-log position accounting: each lot is its share of the curve ───
     //
-    // Replaces the old "any pos_diff event closes-then-reopens" model, whose
-    // same-sign RESIZE handling (e.g. size 1.0 -> 2.5) double-counted cost --
-    // it treated a resize as closing a 1.0-sized trade AND opening a fresh
-    // 2.5-sized one, each independently costed at 2*abs(own size), totaling
-    // 2*(1.0+2.5)=7*cost_per_unit for a lot the equity curve itself only
-    // ever charged sum(abs(pdiff))*cost_per_unit = (1.0+1.5+2.5)=5*cost_per_unit
-    // for. PositionState now tracks a genuine weighted-average cost basis
-    // across a lot's whole life (open, any same-sign resizes, and the final
-    // close), so a resize is a partial ADD (blending cost basis, charging
-    // only the incremental amount actually transacted that event) instead of
-    // a full close+reopen -- equity P&L and trade-log stats now derive from
-    // the same economic events instead of the previous approximation.
+    // A "trade" is one LOT: from the bar exposure leaves zero until the bar
+    // it returns to zero. Same-sign resizes and partial reductions happen
+    // inside a lot. That definition is shared with engine.py's
+    // _build_trade_log, and so is the rest of this note.
     //
-    // A full close, a flip (close-then-reopen in one event), and the
-    // final-bar flush of a still-open lot are UNCHANGED in total cost/pnl
-    // from the old model for any sequence with no intermediate resize (see
-    // tests/cpp/test_backtest.cpp's pinned open/close/reversal/flush tests,
-    // which are unaffected by this rewrite) -- only the resize case's
-    // accounting actually changes.
+    // A lot's return is the growth of the equity curve over the lot's bars:
+    // the equity when the lot ends divided by the equity when it began. The
+    // trade log therefore compounds exactly as the curve does, from the same
+    // legs and the same costs charged the same way, and the product of
+    // (1 + return) over the lots IS the curve's total growth -- flat bars
+    // contribute a factor of exactly 1. The previous form priced each lot
+    // fill-to-fill and charged its costs as a simple fraction of notional,
+    // which agreed with the curve only to first order: the log overstated
+    // cumulative P&L by 0.07-0.15 points over five years of daily bars at
+    // 15 bps, and a lot sized other than 1 differed even at zero cost,
+    // because a constant fraction of equity compounds differently from a
+    // fixed number of units. See the CHANGELOG entry of 2026-09-28.
+    //
+    // The one bar two lots share is a FLIP, where one event closes a lot and
+    // opens the opposite one. The curve charges that bar once, as a fraction
+    // of the equity the bar started with: gross factor minus both costs. The
+    // closing lot ends once it has earned the part of the bar it still held
+    // (nothing under a close fill, whose exit is at the previous close; the
+    // overnight leg under a two-leg fill, which it held to the open) and paid
+    // its exit cost:
+    //     split = equity_before * (held_leg - closing_qty * cost)
+    // and the opening lot begins at `split` and ends the bar at the curve's
+    // own equity_after. Both factors come from the curve's arithmetic, so the
+    // two lots multiply back to the bar exactly.
+    //
+    // A zero or negative starting equity (an account that is already gone)
+    // has no growth to measure, and its lot reports a total loss.
     struct PositionState {
-        double size               = 0.0;  // signed net units held (0 = flat)
-        double cost_basis         = 0.0;  // weighted-average entry price of the open lot
-        double cost_accrued       = 0.0;  // sum of abs(delta)*cost_per_unit over the lot's life so far
-        double realized_pnl_accum = 0.0;  // sum of realized pnl from any partial closes of this lot
+        double size         = 0.0;  // signed net units held (0 = flat)
+        double start_equity = 0.0;  // equity at which the open lot began
     };
 
     struct TradeCompletion {
@@ -69,70 +80,80 @@ namespace {
         double return_pct = 0.0;
     };
 
-    // Applies one bar's position-changing event (exec_i != prev_exec) to
-    // `st`. exec_i/prev_exec are used directly wherever a raw *target*
-    // position size is needed (never a delta-derived value), matching the
-    // original entry_size=exec_i convention.
-    //
-    // `event_price` is the price this event actually TRANSACTS at: the
-    // previous close under close-to-close fills, or that bar's own fill price
-    // (Open, or (High+Low)/2) when the caller supplied one. It is deliberately
-    // NOT named ref_price -- callers used to pass prices[i-1] here even when
-    // filling at the open, which is the bug this rename makes hard to repeat. Returns a completed trade's
-    // return_pct only when this event fully closes the current lot (a
-    // same-sign resize or a partial reduce never completes a trade by
-    // itself) -- the caller decides what to do with a completion (push to a
-    // vector, or fold into running scalar trade stats).
+    inline double lot_return_pct(double start_equity, double end_equity) {
+        return (start_equity > 0.0) ? (end_equity / start_equity - 1.0) * 100.0
+                                    : -100.0;
+    }
+
+    // Applies bar i's position change (exec_i vs prev_exec) to `st`, given
+    // the equity before and after that bar and the factor the position held
+    // INTO the bar earns before any change (`held_leg`, see held_leg_at).
+    // Returns a completed lot's return_pct only when this event fully closes
+    // the current lot -- a same-sign resize or a partial reduce never
+    // completes a trade by itself.
     TradeCompletion apply_position_event(
-        PositionState& st, double exec_i, double prev_exec, double event_price,
+        PositionState& st, double exec_i, double prev_exec,
+        double equity_before, double equity_after, double held_leg,
         double cost_per_unit)
     {
         const double pdiff = exec_i - prev_exec;
         TradeCompletion result;
         if (pdiff == 0.0) return result;
 
+        bool   closed    = false;
+        double new_start = equity_before;
         if (st.size != 0.0 && (pdiff > 0.0) != (st.size > 0.0)) {
             // Opposite sign: reduce, fully close, or close-then-flip.
             const double pos_sign    = (st.size > 0.0) ? 1.0 : -1.0;
             const double closing_qty = std::min(std::abs(pdiff), std::abs(st.size));
-
-            st.cost_accrued += closing_qty * cost_per_unit;
-            st.realized_pnl_accum += (st.cost_basis != 0.0)
-                ? (event_price - st.cost_basis) / st.cost_basis * (closing_qty * pos_sign)
-                : 0.0;
             st.size -= closing_qty * pos_sign;
 
             if (st.size == 0.0) {
+                // A plain close ends at the bar's own equity; a flip ends at
+                // the split point, where the new lot begins (see above).
+                const double end = (exec_i == 0.0)
+                    ? equity_after
+                    : equity_before * (held_leg - closing_qty * cost_per_unit);
                 result.completed  = true;
-                result.return_pct = (st.realized_pnl_accum - st.cost_accrued) * 100.0;
+                result.return_pct = lot_return_pct(st.start_equity, end);
                 st = PositionState{};
+                closed = true;
+                new_start = end;
             }
         } else if (st.size != 0.0) {
-            // Same sign: a resize/add -- blend cost basis, charge cost only
-            // for the incremental amount actually transacted this event.
-            const double old_notional = st.size * st.cost_basis;
+            // Same sign: a resize/add. The lot lives on.
             st.size += pdiff;
-            st.cost_basis     = (old_notional + pdiff * event_price) / st.size;
-            st.cost_accrued  += std::abs(pdiff) * cost_per_unit;
-            return result;  // a resize never completes a trade
+            return result;
         }
 
         if (st.size == 0.0 && exec_i != 0.0) {
-            // Opening a fresh lot -- either already flat, or the branch
-            // above just fully closed the prior lot (a flip). Uses exec_i
-            // directly (the raw target position), not a delta-derived
-            // value.
-            st.cost_basis    = event_price;
-            st.size          = exec_i;
-            st.cost_accrued += std::abs(exec_i) * cost_per_unit;
+            // Opening a fresh lot -- either from flat, where it begins at
+            // the bar's starting equity, or on a flip, where it begins at
+            // the split point.
+            st.size         = exec_i;
+            st.start_equity = closed ? new_start : equity_before;
         }
         return result;
     }
 
-    // Mark-to-market close of a still-open lot at the series' final price
-    // (mirrors the original "no real exit event occurred" flush -- entry/
-    // resize costs only, already reflected in st.cost_accrued; no
-    // additional cost charged here).
+    // The factor the position held INTO bar i earns before that bar's
+    // change: nothing under a close fill (a change transacts at the previous
+    // close, so the old position is gone before the bar's return), the
+    // overnight leg under a two-leg fill. The same expression
+    // gross_return_at compounds, so the split is the curve's own arithmetic.
+    inline double held_leg_at(
+        const double* prices,
+        const double* signals,
+        const double* ref_prices,
+        std::size_t   i)
+    {
+        if (ref_prices == nullptr) return 1.0;
+        const double prev_close = prices[i - 1];
+        const double exec_prev  = (i >= 2) ? signals[i - 2] : 0.0;
+        const double overnight  = (prev_close != 0.0)
+            ? (ref_prices[i] - prev_close) / prev_close : 0.0;
+        return 1.0 + exec_prev * overnight;
+    }
 
     // Shared by both passes of the summary kernel and by run_strategy: the
     // gross (pre-cost) strategy return for bar i. Factored out so the two
@@ -170,15 +191,27 @@ namespace {
         return (1.0 + exec_prev * overnight) * (1.0 + exec_i * intraday) - 1.0;
     }
 
-    TradeCompletion flush_open_lot(const PositionState& st, double final_price) {
+    // A lot still open at the last bar ends at the final equity: marked to
+    // the final close, with no exit cost, because no exit event occurred and
+    // the curve never deducted one.
+    TradeCompletion flush_open_lot(const PositionState& st, double final_equity) {
         TradeCompletion result;
         if (st.size == 0.0) return result;
-        const double pnl = (st.cost_basis != 0.0)
-            ? (final_price - st.cost_basis) / st.cost_basis * st.size
-            : 0.0;
         result.completed  = true;
-        result.return_pct = (st.realized_pnl_accum + pnl - st.cost_accrued) * 100.0;
+        result.return_pct = lot_return_pct(st.start_equity, final_equity);
         return result;
+    }
+
+    // Gross profit over gross loss, with a trade of exactly 0.0 counted on
+    // the loss side as always. No losing trade and a positive gross profit
+    // is +inf, the documented "never lost" reading; no gross profit AND no
+    // gross loss -- every trade returned exactly zero -- is 0/0, undefined,
+    // and NaN like every other 0/0 ratio here (undefined_ratio). It was
+    // +inf, which ranked a do-nothing set of trades first under
+    // sort_by="profit_factor".
+    inline double profit_factor_of(double gross_win, double gross_loss) {
+        return (gross_loss > 0.0) ? gross_win / gross_loss
+                                  : undefined_ratio(gross_win);
     }
 }
 
@@ -223,38 +256,18 @@ BacktestResult run_strategy(
 
     std::vector<double> strat_ret(n, 0.0);
 
-    // ── Trade log: weighted-average-cost-basis position accounting ───────────
+    // ── Trade log: each lot is its share of the equity curve ─────────────────
     // (mirrors _build_trade_log in engine.py) via the shared
     // PositionState/apply_position_event/flush_open_lot helpers above --
-    // see their doc comments for the full rationale (this replaces a
-    // same-sign-resize approximation that used to double-count cost).
+    // see their doc comments for the full rationale. The curve is built in
+    // this same loop, with the arithmetic it always had, because a lot's
+    // boundaries are read off it.
     std::vector<double> trade_rets;  // per-trade return_pct (×100 scale)
     PositionState pos;
     double prev_exec = 0.0;
+    r.equity_curve[0] = initial_capital;
 
     for (std::size_t i = 1; i < n; ++i) {
-        const double prev_close = prices[i - 1];
-        // Trade accounting prices the event at the bar's actual FILL price
-        // whenever one was supplied, not at the previous close.
-        //
-        // The equity curve already used ref_prices[i]; only this side still
-        // used prices[i-1], so under fill_price="next_open" / "hl2_exploratory"
-        // the summary trade statistics described a trade that never happened.
-        // A lot entered at Open[1]=105 and exited at Open[3]=125 was booked as
-        // 100 -> 120, reporting +20.00% where the fill-to-fill return is
-        // +19.05%. It also crossed zero: a 104 -> 99 lot (-4.81%) was reported
-        // as a +2.00% WINNER, so a single result dict carried win_rate=1.0 and
-        // profit_factor=inf beside a trade_log row of -4.8077 -- and
-        // run_strategy_summary below, which feeds the parameter grid and
-        // walk-forward, ranked candidate strategies on the wrong number.
-        //
-        // prev_close stays the reference for the RETURN calculation, which is
-        // genuinely a close-to-close quantity in the close-fill case and the
-        // overnight leg's base in the two-leg decomposition. The two are
-        // different prices answering different questions, which is exactly why
-        // sharing one variable for both hid this for so long.
-        const double trade_price =
-            (ref_prices != nullptr) ? ref_prices[i] : prev_close;
         const double exec_i = signals[i - 1];
         const double pdiff  = exec_i - prev_exec;
         const double tcost  = std::abs(pdiff) * cost_per_unit;
@@ -269,21 +282,23 @@ BacktestResult run_strategy(
         // with and without ref_prices); nothing was keeping them that way.
         strat_ret[i] = gross_return_at(prices, signals, ref_prices, i) - tcost;
 
-        const auto tc = apply_position_event(pos, exec_i, prev_exec, trade_price, cost_per_unit);
-        if (tc.completed) trade_rets.push_back(tc.return_pct);
+        // ── Equity curve: cumprod(1 + strat_ret) ──────────────────────────
+        r.equity_curve[i] = r.equity_curve[i - 1] * (1.0 + strat_ret[i]);
+
+        if (pdiff != 0.0) {
+            const auto tc = apply_position_event(
+                pos, exec_i, prev_exec, r.equity_curve[i - 1], r.equity_curve[i],
+                held_leg_at(prices, signals, ref_prices, i), cost_per_unit);
+            if (tc.completed) trade_rets.push_back(tc.return_pct);
+        }
 
         prev_exec = exec_i;
     }
 
-    // Flush last open trade at final Close price (mirrors Python's
-    // synthesized final-bar exit — entry/resize costs only, no real exit event).
-    const auto final_tc = flush_open_lot(pos, prices[n - 1]);
+    // Flush a lot still open at the last bar at the final equity (mirrors
+    // Python's synthesized final-bar exit -- no real exit event, no cost).
+    const auto final_tc = flush_open_lot(pos, r.equity_curve[n - 1]);
     if (final_tc.completed) trade_rets.push_back(final_tc.return_pct);
-
-    // ── Equity curve: cumprod(1 + strat_ret) ──────────────────────────────────
-    r.equity_curve[0] = initial_capital;
-    for (std::size_t i = 1; i < n; ++i)
-        r.equity_curve[i] = r.equity_curve[i - 1] * (1.0 + strat_ret[i]);
 
     r.final_equity = r.equity_curve[n - 1];
     r.total_return = (r.final_equity - initial_capital) / initial_capital;
@@ -398,16 +413,10 @@ BacktestResult run_strategy(
             else gross_loss += std::abs(tr);
         }
         r.win_rate           = static_cast<double>(n_wins) / r.num_trades;
-        // gross_loss == 0 means there were no losing trades at all, which is
-        // reported as +inf regardless of gross_win -- the convention this
-        // file's own test already documents ("no losing trades -> inf",
-        // tests/cpp/test_backtest.cpp) and the one engine.py's
-        // _compute_trade_stats uses. The previous `gross_win > 0.0` sub-
-        // condition made the 0/0 case (every trade returning exactly 0.0,
-        // e.g. a flat price series with zero costs) return 0.0 here while
-        // Python returned inf -- the same call disagreeing across backends,
-        // and inconsistent with this function's own no-losing-trades rule.
-        r.profit_factor      = (gross_loss > 0.0) ? gross_win / gross_loss : kInf;
+        // +inf with no losing trade and some profit, NaN when every trade
+        // returned exactly 0.0 (0/0) -- see profit_factor_of. engine.py's
+        // _compute_trade_stats applies the same rule.
+        r.profit_factor      = profit_factor_of(gross_win, gross_loss);
         r.avg_trade_return_pct = sum_tr / r.num_trades;
     }
 
@@ -498,12 +507,11 @@ BacktestResult run_strategy_summary(
     };
 
     for (std::size_t i = 1; i < n; ++i) {
-        // Same fill-price correction as run_strategy() above -- see the long
-        // note there. This kernel is what batch_run_strategy / the parameter
-        // grid / walk-forward call, so the wrong price here mis-RANKED
-        // strategies, not just mis-reported one.
-        const double trade_price =
-            (ref_prices != nullptr) ? ref_prices[i] : prices[i - 1];
+        // Same lot accounting as run_strategy() above, read off the same
+        // running equity. This kernel is what batch_run_strategy / the
+        // parameter grid / walk-forward call, so a trade statistic that
+        // disagreed with run_strategy's here would mis-RANK strategies, not
+        // just mis-report one.
         const double exec_i = signals[i - 1];
         const double pdiff  = exec_i - prev_exec;
         const double tcost  = std::abs(pdiff) * cost_per_unit;
@@ -511,6 +519,7 @@ BacktestResult run_strategy_summary(
         const double strat_ret_i =
             gross_return_at(prices, signals, ref_prices, i) - tcost;
 
+        const double equity_before = equity;
         equity *= (1.0 + strat_ret_i);
         if (equity > peak) peak = equity;
         if (peak > 0.0) {
@@ -520,14 +529,18 @@ BacktestResult run_strategy_summary(
 
         sum_r += strat_ret_i;
 
-        const auto tc = apply_position_event(pos, exec_i, prev_exec, trade_price, cost_per_unit);
-        if (tc.completed) fold_trade(tc.return_pct);
+        if (pdiff != 0.0) {
+            const auto tc = apply_position_event(
+                pos, exec_i, prev_exec, equity_before, equity,
+                held_leg_at(prices, signals, ref_prices, i), cost_per_unit);
+            if (tc.completed) fold_trade(tc.return_pct);
+        }
 
         prev_exec = exec_i;
     }
 
-    // Flush last open trade at final Close price (mirrors run_strategy()).
-    const auto final_tc = flush_open_lot(pos, prices[n - 1]);
+    // Flush a lot still open at the last bar (mirrors run_strategy()).
+    const auto final_tc = flush_open_lot(pos, equity);
     if (final_tc.completed) fold_trade(final_tc.return_pct);
 
     r.final_equity = equity;
@@ -624,16 +637,8 @@ BacktestResult run_strategy_summary(
         static_cast<std::size_t>(num_trades), "run_strategy_summary: num_trades");
     if (r.num_trades > 0) {
         r.win_rate           = static_cast<double>(n_wins) / r.num_trades;
-        // gross_loss == 0 means there were no losing trades at all, which is
-        // reported as +inf regardless of gross_win -- the convention this
-        // file's own test already documents ("no losing trades -> inf",
-        // tests/cpp/test_backtest.cpp) and the one engine.py's
-        // _compute_trade_stats uses. The previous `gross_win > 0.0` sub-
-        // condition made the 0/0 case (every trade returning exactly 0.0,
-        // e.g. a flat price series with zero costs) return 0.0 here while
-        // Python returned inf -- the same call disagreeing across backends,
-        // and inconsistent with this function's own no-losing-trades rule.
-        r.profit_factor      = (gross_loss > 0.0) ? gross_win / gross_loss : kInf;
+        // The same expression as run_strategy() -- see profit_factor_of.
+        r.profit_factor      = profit_factor_of(gross_win, gross_loss);
         r.avg_trade_return_pct = sum_tr / r.num_trades;
     }
 

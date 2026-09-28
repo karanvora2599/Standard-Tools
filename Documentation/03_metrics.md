@@ -79,6 +79,11 @@ print(f"Worst drawdown started: {worst_start.date()}")
 > (positive CAGR over nothing) and `nan` when it never moved (0/0). A flat
 > curve used to score `inf` too, which ranked a parameter set that never
 > traded first in any grid sorted by Calmar.
+>
+> The backtest engine's `profit_factor` follows the same rule on both
+> backends: `inf` for a gross profit over no gross loss, `nan` for no trade
+> and for trades that all returned exactly 0.00% (0/0) — see
+> [Backtesting](04_backtesting.md#understanding-the-output).
 
 ---
 

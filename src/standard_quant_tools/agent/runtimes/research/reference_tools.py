@@ -408,7 +408,9 @@ class IndicatorPanelInput(BaseModel):
     atr_simple_period: int = Field(
         14, gt=0, le=1000, description="Simple-mean ATR lookback."
     )
-    bollinger_period: int = Field(20, gt=0, le=1000)
+    # At least 2: one bar has no sample standard deviation, so there are no
+    # bands (indicators.volatility.require_bollinger_period).
+    bollinger_period: int = Field(20, ge=2, le=1000)
     bollinger_num_std: float = Field(2.0, gt=0, le=100)
     stoch_k_period: int = Field(14, gt=0, le=1000)
     stoch_d_period: int = Field(3, gt=0, le=1000)

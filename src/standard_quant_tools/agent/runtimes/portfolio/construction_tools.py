@@ -26,6 +26,7 @@ from typing import Annotated, Dict, List, Optional
 import pandas as pd
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator
 
+from standard_quant_tools.agent.models import _distinct
 from standard_quant_tools.agent.runtimes._json_safe import (
     finite_or_none as _finite_or_none,
 )
@@ -75,6 +76,13 @@ def _finite_map(values: Dict[str, float], field: str) -> Dict[str, float]:
     return values
 
 
+def _distinct_assets(values: Optional[List[str]]) -> Optional[List[str]]:
+    """The names of a covariance matrix's rows, each once. The results are
+    keyed by name, so a repeat collapsed two rows into one key while both
+    were still used: risk parity over ["A", "A"] answered {"A": 0.4}."""
+    return values if values is None else _distinct(values, "assets")
+
+
 # ── inputs ──────────────────────────────────────────────────────────────
 
 
@@ -95,6 +103,11 @@ class RiskParityInput(BaseModel):
     )
     max_iterations: int = Field(5000, ge=1, le=100000)
     tolerance: float = Field(1e-10, gt=0)
+
+    @field_validator("assets")
+    @classmethod
+    def _assets_once(cls, v: List[str]) -> List[str]:
+        return _distinct_assets(v)
 
 
 class HRPInput(BaseModel):
@@ -568,6 +581,11 @@ class MaxDiversificationInput(BaseModel):
         ..., description="Square covariance matrix, rows parallel to `assets`."
     )
 
+    @field_validator("assets")
+    @classmethod
+    def _assets_once(cls, v: List[str]) -> List[str]:
+        return _distinct_assets(v)
+
 
 class MarginalRiskInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -579,6 +597,19 @@ class MarginalRiskInput(BaseModel):
     )
     assets: List[str] = Field(..., min_length=2)
     covariance: List[List[float]] = Field(...)
+
+    @field_validator("assets")
+    @classmethod
+    def _assets_once(cls, v: List[str]) -> List[str]:
+        return _distinct_assets(v)
+
+    @field_validator("weights")
+    @classmethod
+    def _finite_weights(cls, v: Dict[str, float]) -> Dict[str, float]:
+        # A NaN weight made the volatility and every row NaN, which reached
+        # the agent as nulls with no reason; an infinite one gave NaN
+        # contributions under an infinite volatility.
+        return _finite_map(v, "weights")
 
 
 class PortfolioScenariosInput(BaseModel):
@@ -597,6 +628,29 @@ class PortfolioScenariosInput(BaseModel):
         None,
         description="Optional, to express each scenario in portfolio sigmas.",
     )
+
+    @field_validator("assets")
+    @classmethod
+    def _assets_once(cls, v: Optional[List[str]]) -> Optional[List[str]]:
+        return _distinct_assets(v)
+
+    @field_validator("weights")
+    @classmethod
+    def _finite_weights(cls, v: Dict[str, float]) -> Dict[str, float]:
+        # A NaN weight was dropped without a word, so every scenario
+        # described a smaller book than the one given.
+        return _finite_map(v, "weights")
+
+    @field_validator("scenarios")
+    @classmethod
+    def _finite_shocks(
+        cls, v: Dict[str, Dict[str, float]]
+    ) -> Dict[str, Dict[str, float]]:
+        # A NaN shock made its scenario's return NaN, which then sorted
+        # anywhere among the others and was reported as null.
+        for name, shocks in v.items():
+            _finite_map(shocks, f"scenarios[{name!r}]")
+        return v
 
 
 class MaxDiversificationResult(_Result):

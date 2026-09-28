@@ -151,10 +151,25 @@ class TestADX:
         # No single bar should jump more than 30 points
         assert adx_vals.diff().abs().dropna().max() < 30
 
-    def test_nan_in_input_raises(self, sample_ohlcv):
+    def test_nan_is_a_missing_bar_the_recursion_skips(self, sample_ohlcv):
+        """A NaN low is a missing bar: the ADX of the series with that bar
+        dropped, NaN at the bar itself. It used to be refused here while
+        the panel answered it."""
         bad_low = sample_ohlcv["Low"].copy()
         bad_low.iloc[10] = np.nan
-        with pytest.raises(ValidationError, match="non-finite"):
+        out = adx(sample_ohlcv["High"], bad_low, sample_ohlcv["Close"])
+        assert out.iloc[10].isna().all()
+        keep = bad_low.notna()
+        dropped = adx(
+            sample_ohlcv["High"][keep], bad_low[keep], sample_ohlcv["Close"][keep]
+        )
+        pd.testing.assert_frame_equal(out[keep], dropped)
+        assert out.iloc[-1].notna().all()
+
+    def test_inf_in_input_raises(self, sample_ohlcv):
+        bad_low = sample_ohlcv["Low"].copy()
+        bad_low.iloc[10] = -np.inf
+        with pytest.raises(ValidationError, match="infinite"):
             adx(sample_ohlcv["High"], bad_low, sample_ohlcv["Close"])
 
 

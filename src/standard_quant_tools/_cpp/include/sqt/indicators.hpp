@@ -14,6 +14,14 @@ namespace sqt {
 // no copy at the Python/C++ boundary. Native tests and internal callers
 // continue to use the vector-returning forms unchanged (each is a thin
 // wrapper: allocate, call the `_into` variant, return).
+//
+// MISSING BARS. A non-finite input value (NaN or +/-inf) is a missing bar in
+// every kernel below. The Wilder recursions (rsi, adx, wilder_atr) skip it:
+// they compute the indicator of the series with the missing bars dropped and
+// report NaN at the missing ones. The windowed ones (bollinger_bands,
+// stochastic_oscillator) report NaN for every window holding a missing bar
+// and resume at the first window that does not. The Python entry points
+// refuse +/-inf before calling these; NaN reaches them as a gap.
 
 /**
  * RSI — Relative Strength Index (Wilder's smoothing).
@@ -21,7 +29,8 @@ namespace sqt {
  * @param prices  Contiguous close-price array.
  * @param n       Number of elements.
  * @param period  Lookback period (default 14).
- * @returns       Vector of length n; first `period` values are NaN.
+ * @returns       Vector of length n; NaN until `period` changes between
+ *                present bars have been seen, and NaN at a missing bar.
  */
 std::vector<double> rsi(const double* prices, std::size_t n, int period = 14);
 
@@ -37,7 +46,8 @@ void rsi_into(const double* SQT_RESTRICT prices, std::size_t n, int period,
  * Uses Wilder's smoothing identical to the Python/Numba reference.
  * Returns a flat row-major array of length 3*n:
  *   [DI+_0, DI-_0, ADX_0, DI+_1, DI-_1, ADX_1, ...].
- * First `period` rows have NaN in DI+/DI-; ADX starts at row 2*period-1.
+ * First `period` rows have NaN in DI+/DI-; ADX starts at row 2*period-1
+ * (counted in present bars when some are missing).
  *
  * @param high    Contiguous high-price array (length n).
  * @param low     Contiguous low-price array (length n).
@@ -107,6 +117,7 @@ void parabolic_sar_into(
  * True range:
  *   TR[0] = high[0] - low[0]  (no prior close)
  *   TR[i] = max(H[i]-L[i], |H[i]-C[i-1]|, |L[i]-C[i-1]|)  for i >= 1
+ * where "previous" means the previous PRESENT bar when some are missing.
  *
  * Seed: ATR[period-1] = mean(TR[0..period-1])
  * Forward: ATR[i] = (ATR[i-1] * (period-1) + TR[i]) / period
@@ -151,7 +162,9 @@ void wilder_atr_into(
  *
  * Returns a flat row-major array of length 3*n:
  *   [upper_0, middle_0, lower_0, upper_1, middle_1, lower_1, ...].
- * First (period-1) triples are NaN.
+ * First (period-1) triples are NaN. A period below 2 returns all NaN: the
+ * sample standard deviation of one bar is 0/0 (the Python entry points
+ * refuse it).
  *
  * @param prices   Contiguous close-price array (length n).
  * @param n        Number of bars.
@@ -184,7 +197,8 @@ void bollinger_bands_into(
  * Returns a flat row-major array of length 2*n:
  *   [K_0, D_0, K_1, D_1, ...].
  * First (k_period-1) K values are NaN; first (k_period + d_period - 2)
- * D values are NaN.
+ * D values are NaN. %K is NaN for a window holding a missing high or low and
+ * at a bar whose close is missing; %D is NaN for a window holding such a %K.
  *
  * @param high      Contiguous high-price array (length n).
  * @param low       Contiguous low-price array (length n).

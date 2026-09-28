@@ -40,6 +40,7 @@ from standard_quant_tools.modeling.validation.metrics import (
 )
 
 from ..validation.metrics import cross_sectional_ic
+from .feature_report import _boundary_date, _panel_dates
 
 logger = logging.getLogger(__name__)
 
@@ -138,7 +139,7 @@ def psi_verdict(psi: float) -> str:
     return "stable"
 
 
-def _date_blocks(frame: pd.DataFrame, n_blocks: int) -> List[np.ndarray]:
+def _date_blocks(frame: pd.DataFrame, n_blocks: int, caller: str) -> List[np.ndarray]:
     """
     The panel's dates cut into `n_blocks` contiguous chunks.
 
@@ -147,7 +148,7 @@ def _date_blocks(frame: pd.DataFrame, n_blocks: int) -> List[np.ndarray]:
     block, computed from two different partitions of the dates, would be
     inviting a comparison that is not one.
     """
-    dates = np.sort(pd.to_datetime(frame["date"]).unique())
+    dates = np.sort(_panel_dates(frame, caller).unique())
     if len(dates) < n_blocks:
         raise ValidationError(
             f"{len(dates)} dates cannot be split into {n_blocks} blocks"
@@ -174,7 +175,11 @@ def feature_drift(
 
     `split_date` defaults to the median date, which splits the panel into
     equal halves by TIME rather than by row count -- an entity that joins
-    the universe late should not drag the boundary.
+    the universe late should not drag the boundary. When it is given, it is
+    parsed by the rule the tool doors use: an unreadable string is refused
+    by name instead of raising pandas' own parse error, and an empty one is
+    refused rather than read as "use the median", which is what omitting it
+    means.
     """
     check_ic_method(method, what="feature_drift")
     _require(panel, feature)
@@ -184,8 +189,12 @@ def feature_drift(
     if frame.empty:
         raise ValidationError(f"feature {feature!r} has no observations")
 
-    dates = pd.to_datetime(frame["date"])
-    boundary = pd.Timestamp(split_date) if split_date else dates.median()
+    dates = _panel_dates(frame, "feature_drift")
+    boundary = (
+        _boundary_date(split_date, "split_date", "feature_drift", dates)
+        if split_date is not None
+        else dates.median()
+    )
     before = frame[dates < boundary]
     after = frame[dates >= boundary]
 
@@ -273,7 +282,7 @@ def feature_stability(
     if frame.empty:
         raise ValidationError(f"feature {feature!r} has no usable observations")
 
-    chunks = _date_blocks(frame, n_blocks)
+    chunks = _date_blocks(frame, n_blocks, "feature_stability")
 
     blocks: List[Dict[str, Any]] = []
     for index, chunk in enumerate(chunks):
@@ -380,7 +389,7 @@ def psi_by_block(
     if frame.empty:
         raise ValidationError(f"feature {feature!r} has no usable observations")
 
-    chunks = _date_blocks(frame, n_blocks)
+    chunks = _date_blocks(frame, n_blocks, "psi_by_block")
     dates = pd.to_datetime(frame["date"])
 
     windows: List[np.ndarray] = []

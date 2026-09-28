@@ -50,9 +50,10 @@ double interpolated_quantile(std::vector<double>& scratch,
         // Only q == 1 reaches here (floor((n-1)*q) < n-1 for every q < 1),
         // and its answer is the maximum, found by a scan rather than read
         // from a slot nothing has ordered. On finite data that is exactly
-        // pandas' quantile(1.0). With a +inf present this answers +inf,
-        // where pandas 2.x answers NaN (its interpolation forms inf - inf);
-        // the library's own callers never pass q = 1.
+        // pandas' quantile(1.0). An infinity never reaches this kernel from
+        // Python: the binding and fit_preprocessing refuse one, because
+        // this answered +inf where pandas 2.x answers NaN (its
+        // interpolation forms inf - inf), and neither is a usable bound.
         return *std::max_element(scratch.begin(),
                                  scratch.begin() + static_cast<std::ptrdiff_t>(n));
     }
@@ -164,8 +165,9 @@ bool fit_preprocess_stats(const double* values,
                 const double v = values[row * n_cols + c];
                 // NaN is skipped, matching Series.quantile/std. Infinities
                 // are NOT: pandas treats only NaN as missing, so an inf is a
-                // real (if pathological) order statistic and must sort as
-                // one.
+                // real (if pathological) order statistic and sorts as one
+                // here. The Python binding refuses a panel holding one
+                // before calling this, so that case is a C++ caller's.
                 if (!std::isnan(v)) scratch[finite_count++] = v;
             }
         }

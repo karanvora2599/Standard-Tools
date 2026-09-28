@@ -38,6 +38,12 @@ An unterminated final line that does not parse is therefore not a record:
 it is ignored, copied to a dot-prefixed `.promotions.torn-*` file as
 evidence and cut off, under the lock. A line that does not parse anywhere
 else is still an edit, and still makes the stage untrustworthy.
+
+A REPAIR IS REPORTED, not only logged. The warning went to a logger the
+package gives only a NullHandler, so the one reader who needed it -- whoever
+decides whether to trust the model's history -- never saw that a decision
+may have been interrupted. `torn_fragments` names every fragment set aside
+beside the log, and `inspect_model` and `promote_model` carry it.
 """
 
 from __future__ import annotations
@@ -234,6 +240,36 @@ def _repair_quietly(model_id: str, path: Path) -> None:
         _filelock.release_lock(handle)
 
 
+def torn_fragments(model_id: str) -> List[str]:
+    """
+    One sentence per fragment an interrupted append left at the end of the
+    model's promotion log and a repair set aside, naming the side file it
+    is kept in, oldest first; empty for a log that was never torn.
+
+    Read from the side files, not from whichever call made the repair. Any
+    reader repairs the log quietly (see `promotions`) -- `list_models` or
+    `monitor_model` as readily as a promotion -- and a repair one of those
+    made has to show on the model's card and at its next promotion all the
+    same: the fragment may be the start of a decision somebody believes
+    was recorded.
+    """
+    directory = _log_path(model_id).parent
+    notes: List[str] = []
+    for evidence in sorted(directory.glob(f"{_TORN_PREFIX}*")):
+        try:
+            size = evidence.stat().st_size
+        except OSError:
+            continue
+        notes.append(
+            f"{PROMOTIONS_FILE} ended in an unterminated fragment of {size} "
+            "byte(s), left by an interrupted append; it was not a promotion "
+            "record, so it was cut off the log and kept in "
+            f"{evidence.name} beside it. If a decision was being recorded "
+            "at the time, it is not in the history: record it again."
+        )
+    return notes
+
+
 def current_stage(model_id: str) -> str:
     """The stage the last promotion moved the model to, or `candidate`."""
     history = promotions(model_id)
@@ -334,4 +370,5 @@ __all__ = [
     "promote",
     "promotions",
     "promotions_lock",
+    "torn_fragments",
 ]

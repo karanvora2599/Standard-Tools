@@ -5,8 +5,8 @@ without touching `AuditWriter`'s chain-hashing/locking orchestration logic.
 Building that backend is a deliberately separate, later piece of work; see
 Documentation/10_auditability.md for what this seam does and does not cover
 today (in particular: only `AuditWriter`'s own read/append/lock/day-listing
-operations are backend-routed -- `verify`/`retention`/`export` still read
-the local filesystem directly)."""
+operations are backend-routed -- `verify`/`retention`/`export`/`repair`
+still read the local filesystem directly)."""
 
 import os
 from pathlib import Path
@@ -85,6 +85,13 @@ class AuditStorageBackend(Protocol):
         ...
 
 
+def lock_path_for(path: Path) -> Path:
+    """The sidecar `LocalFilesystemBackend` locks before touching `path`.
+    Named here once, because `sqt audit repair-tail` has to hold the very
+    lock the writer takes, or a cut could interleave with an append."""
+    return path.with_name(path.name + ".lock")
+
+
 class LocalFilesystemBackend:
     """
     The only backend implemented so far: local disk, cross-process
@@ -97,8 +104,7 @@ class LocalFilesystemBackend:
     """
 
     def acquire_lock(self, path: Path) -> Any:
-        lock_path = path.with_name(path.name + ".lock")
-        return _acquire_lock(lock_path)
+        return _acquire_lock(lock_path_for(path))
 
     def release_lock(self, handle: Any) -> None:
         _release_lock(handle)

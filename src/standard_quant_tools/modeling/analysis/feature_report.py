@@ -37,6 +37,7 @@ rewrite.
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
@@ -51,6 +52,7 @@ from ..features.transforms import (
     cross_sectional_counts,
     rank_within_date,
 )
+from ..specs import _parse_date
 from ..validation.metrics import cross_sectional_ic, summarize_cross_sectional_ic
 
 logger = logging.getLogger(__name__)
@@ -97,6 +99,105 @@ def _require_columns(panel: pd.DataFrame, feature_ids: Sequence[str]) -> None:
         )
 
 
+def _named_once(
+    panel: pd.DataFrame,
+    feature_ids: Sequence[str],
+    caller: str,
+    field: str = "feature_ids",
+) -> None:
+    """
+    Refuse a feature named twice, in the request or in the panel.
+
+    A feature is one column. Asked for twice, `panel[list(feature_ids)]`
+    returns the column twice, the correlation matrix carries the label
+    twice, and a lookup by name returns a frame where a number was
+    expected -- which surfaced as pandas' "truth value of a DataFrame is
+    ambiguous" from inside the redundancy clustering, naming neither the
+    feature nor the argument. A panel with two columns under one name
+    reaches the same lookup the same way. The tool doors refuse a repeated
+    name in their schemas; this is the same rule for a direct caller.
+    """
+    counts = Counter(feature_ids)
+    repeated = sorted(str(name) for name, n in counts.items() if n > 1)
+    if repeated:
+        raise ValidationError(
+            f"{caller}: {field} names {repeated} more than once. Each feature "
+            "is one column of the panel; list it once."
+        )
+    labels = panel.columns[panel.columns.duplicated(keep=False)]
+    doubled = sorted({str(name) for name in labels if name in counts})
+    if doubled:
+        raise ValidationError(
+            f"{caller}: the panel has more than one column named {doubled}. "
+            "A feature is one column, so a name must pick out exactly one; "
+            "drop or rename the copies."
+        )
+
+
+def _panel_dates(frame: pd.DataFrame, caller: str) -> pd.Series:
+    """
+    The panel's `date` column as timestamps, or a refusal naming it.
+
+    `pd.to_datetime` raises its own parse error on a value it cannot read,
+    which names the offending string but neither the column nor the
+    function that was asked.
+    """
+    column = frame["date"]
+    try:
+        return pd.to_datetime(column)
+    except (ValueError, TypeError):
+        pass
+    try:
+        coerced = pd.to_datetime(column, errors="coerce")
+        unread = column[coerced.isna() & column.notna()]
+        sample = f" such as {[str(v) for v in unread.head(3)]}" if len(unread) else ""
+    except (ValueError, TypeError):
+        sample = ""
+    raise ValidationError(
+        f"{caller}: the panel's 'date' column holds values{sample} that do "
+        "not parse as dates. Give every row a date, as a timestamp or a "
+        "YYYY-MM-DD string."
+    )
+
+
+def _boundary_date(value: Any, field: str, caller: str, dates: Any) -> pd.Timestamp:
+    """
+    A date that splits the panel, parsed by the same rule the tool doors
+    apply to it, or a refusal naming the argument.
+
+    Parsed by `specs._parse_date`, so a direct call and a tool call accept
+    and refuse exactly the same strings. Two cases matter beyond a plain
+    typo: an empty string, which parses without raising to NaT and then
+    compares false against every date -- a split with nothing on either
+    side, or a holdout window with no dates in it -- and a date carrying a
+    time zone the panel's dates do not (or the reverse), which cannot be
+    compared with them at all.
+    """
+    try:
+        parsed = _parse_date(value, field)
+    except ValueError:
+        raise ValidationError(
+            f"{caller}: {field}={value!r} is not a date. Give it as "
+            f"YYYY-MM-DD, or leave {field} unset for the default."
+        ) from None
+    # `dates` is the parsed column (a Series) or its sorted distinct values
+    # (a DatetimeIndex); the zone lives in a different place on each.
+    panel_tz = dates.tz if isinstance(dates, pd.DatetimeIndex) else dates.dt.tz
+    if parsed.tzinfo is not None and panel_tz is None:
+        raise ValidationError(
+            f"{caller}: {field}={value!r} carries a time zone and the panel's "
+            "dates do not, so the two cannot be compared. Give it as a plain "
+            "YYYY-MM-DD."
+        )
+    if parsed.tzinfo is None and panel_tz is not None:
+        raise ValidationError(
+            f"{caller}: {field}={value!r} has no time zone and the panel's "
+            f"dates are in {panel_tz}, so the two cannot be compared. Give it "
+            f"in the panel's zone, e.g. {parsed.tz_localize(panel_tz).isoformat()!r}."
+        )
+    return parsed
+
+
 def _safe(value: Any) -> float:
     """A float that survives JSON, with non-finite mapped to NaN."""
     try:
@@ -126,6 +227,7 @@ def feature_distribution_stats(
     features with the same IC and very different turnover are not equally
     useful, and the fast one may not survive its own trading costs.
     """
+    _named_once(panel, feature_ids, "feature_distribution_stats")
     out: Dict[str, Dict[str, float]] = {}
     n_rows = len(panel)
     grouped = panel.groupby("entity", sort=False)
@@ -237,6 +339,7 @@ def feature_predictive_stats(
     you it works at the extremes and not in the middle. That is worth knowing
     before it goes into a linear model.
     """
+    _named_once(panel, feature_ids, "feature_predictive_stats")
     dates = panel["date"].to_numpy()
     target = panel["target"].to_numpy(dtype=float)
     out: Dict[str, Dict[str, float]] = {}
@@ -368,6 +471,7 @@ def redundancy_report(
     is easy to explain, and at a threshold this high the "chaining" that would
     make single-linkage clustering misleading is not a practical concern.
     """
+    _named_once(panel, feature_ids, "redundancy_report")
     if len(feature_ids) < 2:
         return {
             "correlation": {},
@@ -432,7 +536,24 @@ def _frame_to_nested(frame: pd.DataFrame) -> Dict[str, Dict[str, float]]:
 def _correlation_clusters(
     correlation: pd.DataFrame, threshold: float
 ) -> List[List[str]]:
-    """Transitive closure over |corr| >= threshold, via union-find."""
+    """
+    Transitive closure over |corr| >= threshold, via union-find.
+
+    The union-find is keyed by name, so every name must pick out one row
+    and one column. `redundancy_report` refuses a repeat before building
+    the matrix; this guard keeps the rule for any other caller, rather
+    than letting `correlation.loc[a, b]` return a frame where a number is
+    compared.
+    """
+    if correlation.columns.has_duplicates or correlation.index.has_duplicates:
+        repeated = sorted(
+            {str(c) for c in correlation.columns[correlation.columns.duplicated()]}
+            | {str(c) for c in correlation.index[correlation.index.duplicated()]}
+        )
+        raise ValidationError(
+            f"feature redundancy: the correlation matrix names {repeated} more "
+            "than once. Each feature is one column of the panel; list it once."
+        )
     names = list(correlation.columns)
     parent = {name: name for name in names}
 
@@ -642,6 +763,7 @@ def build_feature_report(
     _require_columns(panel, feature_ids)
     if not feature_ids:
         raise ValidationError("feature report: no features to analyze")
+    _named_once(panel, feature_ids, "build_feature_report")
 
     report: Dict[str, Any] = {
         "n_rows": int(len(panel)),

@@ -17,7 +17,9 @@ struct BacktestResult {
                             // NaN when neither moved (0/0)
     int    num_trades;      // completed (closed) trades only
     double win_rate;
-    double profit_factor;   // +inf when no losing trades; NaN when no trades
+    double profit_factor;   // +inf when no losing trade and a gross profit;
+                            // NaN when no trades, or every trade returned
+                            // exactly 0.0 (0/0)
     double avg_trade_return_pct;
     std::vector<double> equity_curve;
 };
@@ -35,18 +37,16 @@ struct BacktestResult {
  *   equity[i]     = equity[i-1] * (1 + strat_ret[i])
  *
  * Trade log state machine mirrors _build_trade_log in engine.py exactly:
- *   open a trade when pos_diff != 0 and executed != 0, recording entry_price
- *   = the event's actual FILL price -- prices[i-1] when ref_prices is null
- *   (Close one bar before the trade-open event, since executed[i] =
- *   signals[i-1] earns its first return over that close), or ref_prices[i]
- *   when a fill series was supplied, matching what _build_trade_log is handed
- *   for fill_price="next_open"/"hl2_exploratory" -- and
- *   entry_size = exec_i (the raw signal value, not just its sign, so a
- *   leveraged/SCORE signal's trade return scales the same way strat_ret
- *   does); close it at the next trade event, deducting 2*cost_per_unit for
- *   a completed round trip; a position still open at the final bar is
- *   flushed at prices[n-1] with a single cost_per_unit deduction (entry
- *   only — no real exit event occurred).
+ *   a trade (lot) opens when exposure leaves zero and closes when it
+ *   returns to zero; same-sign resizes and partial reductions happen inside
+ *   it. Its return is the equity curve's growth over its bars -- the equity
+ *   when it ends over the equity when it began -- so the product of
+ *   (1 + return) over the trades is the curve's total growth, costs
+ *   included. On a flip bar the closing lot ends once it has earned the leg
+ *   it still held (none under a close fill, the overnight leg under a
+ *   two-leg fill) and paid its exit cost, and the new lot begins there. A
+ *   lot still open at the final bar ends at the final equity (no exit cost:
+ *   no exit event occurred).
  *
  * @param ref_prices     Optional per-bar REFERENCE (fill) price, length n.
  *                       nullptr  -> close-to-close returns, the historical

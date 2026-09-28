@@ -6,8 +6,8 @@ walk-forward run, so they got a C++ kernel. That kernel replaces a specific
 pandas expression, and the bar it has to clear is agreement with pandas at
 machine epsilon — including the parts that are pandas CONVENTIONS rather
 than mathematical necessity: linearly interpolated quantiles, a ddof=1
-standard deviation, NaN skipped by the moments but preserved by the
-transform, and infinities not treated as missing.
+standard deviation, and NaN skipped by the moments but preserved by the
+transform. An infinite training value is refused by both paths.
 
 The Python implementation stays as the reference and the oracle. These tests
 compare the two directly by toggling `transforms.HAS_CPP`, so they are
@@ -20,6 +20,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from standard_quant_tools.error import ValidationError
 from standard_quant_tools.modeling.features import transforms
 from standard_quant_tools.modeling.features.transforms import (
     apply_preprocessing,
@@ -151,13 +152,38 @@ class TestNativeMatchesPython:
         values[:, 1] = np.nan
         _assert_agree(pd.DataFrame(values, columns=["a", "all_nan", "c"]), monkeypatch)
 
-    def test_infinities_are_not_missing(self, monkeypatch):
-        """pandas treats only NaN as missing, so an inf is a real order
-        statistic and must participate in the quantile."""
+    @pytest.mark.parametrize("native", [True, False])
+    @pytest.mark.parametrize("n_rows", [50, 100, 5_000])
+    def test_an_infinity_is_refused_on_both_paths(self, monkeypatch, native, n_rows):
+        """An infinity used to be fitted as an order statistic. Where it sat
+        in a quantile's interpolation bracket the two paths disagreed --
+        the kernel's bound was +inf, pandas 2.x's NaN (at 50 rows, one inf
+        is in the 0.99 bracket) -- and either way the clipped mean was
+        infinite and every transformed value -inf or NaN. On 5,000 rows it
+        happened to be clipped away. The fit now refuses it by name, on
+        both paths and at every size, which is the contract
+        build_model_dataset already enforces for features."""
+        if not native:
+            monkeypatch.setattr(transforms, "HAS_CPP", False)
         rng = np.random.default_rng(7)
-        values = rng.normal(0, 1, (5_000, 3))
+        values = rng.normal(0, 1, (n_rows, 3))
         values[7, 0] = np.inf
         values[11, 1] = -np.inf
+        frame = pd.DataFrame(values, columns=["a", "b", "c"])
+        with pytest.raises(
+            ValidationError,
+            match=r"infinite values in column\(s\) 'a' \(1\), 'b' \(1\)",
+        ):
+            fit_preprocessing(frame)
+        with pytest.raises(ValidationError, match="infinite"):
+            transforms.fit_and_apply_preprocessing(frame, frame)
+
+    def test_nan_is_still_skipped_not_refused(self, monkeypatch):
+        """The null case: a missing value is skipped by the fit, as before."""
+        rng = np.random.default_rng(7)
+        values = rng.normal(0, 1, (5_000, 3))
+        values[7, 0] = np.nan
+        values[11, 1] = np.nan
         _assert_agree(pd.DataFrame(values, columns=["a", "b", "c"]), monkeypatch)
 
     @pytest.mark.parametrize("n_rows", [1, 2, 3])
@@ -269,15 +295,22 @@ class TestQuantileEndpoints:
         assert native["lo"][0] == values.min()
         assert native["hi"][0] == values.max()
 
-    def test_an_infinite_maximum_is_the_maximum(self):
-        """Infinities are order statistics here, not missing values, so the
-        q=1 bound of a column holding +inf is +inf. (pandas 2.x answers NaN
-        for this one case, because its interpolation forms inf - inf.)"""
+    def test_an_infinite_value_is_refused_not_fitted(self):
+        """This pinned the kernel's q=1 bound of a column holding +inf as
+        +inf, while pandas 2.x answers NaN for the same quantile (its
+        interpolation forms inf - inf). Neither is a usable winsorize
+        bound: the clipped mean is infinite either way. The binding now
+        refuses the panel, naming the column, as fit_preprocessing does."""
+        values = np.random.default_rng(3).normal(0, 1, (100, 2))
+        values[57, 1] = np.inf
+        with pytest.raises(ValueError, match="column 1 holds an infinite value"):
+            transforms._cpp_core.fit_preprocess_stats(values, 0.01, 1.0)
+
+    def test_null_case_a_finite_column_at_q_one_is_its_maximum(self):
         values = np.random.default_rng(3).normal(0, 1, (100, 1))
-        values[57, 0] = np.inf
         native = transforms._cpp_core.fit_preprocess_stats(values, 0.01, 1.0)
-        assert native["hi"][0] == np.inf
-        assert native["lo"][0] == pd.Series(values[:, 0]).quantile(0.01)
+        assert native["hi"][0] == values.max()
+        assert native["hi"][0] == pd.Series(values[:, 0]).quantile(1.0)
 
 
 class TestStatsThatNoFitProduces:

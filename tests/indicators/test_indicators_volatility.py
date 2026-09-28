@@ -77,19 +77,55 @@ class TestBollingerBands:
         result = bollinger_bands(sample_close, period=period)
         assert result.iloc[: period - 1].isna().all(axis=None)
 
-    def test_nan_in_input_raises(self, sample_close):
+    def test_nan_blanks_the_windows_that_hold_it(self, sample_close):
+        """A NaN price is a missing bar: every window holding it is NaN and
+        the bands resume at the first window past it. It used to be
+        refused here while the panel answered it."""
         bad = sample_close.copy()
-        bad.iloc[10] = np.nan
-        with pytest.raises(ValidationError, match="non-finite"):
+        bad.iloc[30] = np.nan
+        out = bollinger_bands(bad, period=20)
+        assert out.iloc[30:50].isna().all(axis=None)
+        assert out.iloc[50].notna().all()
+        clean = bollinger_bands(sample_close, period=20)
+        pd.testing.assert_frame_equal(out.iloc[50:], clean.iloc[50:], rtol=1e-9)
+
+    def test_inf_in_input_raises(self, sample_close):
+        bad = sample_close.copy()
+        bad.iloc[10] = np.inf
+        with pytest.raises(ValidationError, match="infinite"):
             bollinger_bands(bad)
+
+    @pytest.mark.parametrize("period", [1, 0, -3])
+    def test_a_period_below_two_is_refused(self, sample_close, period):
+        """One bar has no sample standard deviation (0/0). The kernel used
+        to answer all-NaN and pandas a middle band equal to the price."""
+        with pytest.raises(ValidationError, match="at least 2"):
+            bollinger_bands(sample_close, period=period)
+
+    def test_period_two_is_the_smallest_accepted(self, sample_close):
+        out = bollinger_bands(sample_close, period=2)
+        assert out.iloc[1:].notna().all(axis=None)
 
 
 class TestWilderATR:
-    def test_nan_in_input_raises(self, sample_ohlcv):
+    def test_inf_in_input_raises(self, sample_ohlcv):
         bad_high = sample_ohlcv["High"].copy()
         bad_high.iloc[5] = np.inf
-        with pytest.raises(ValidationError, match="non-finite"):
+        with pytest.raises(ValidationError, match="infinite"):
             wilder_atr(bad_high, sample_ohlcv["Low"], sample_ohlcv["Close"])
+
+    def test_nan_is_a_missing_bar_the_recursion_skips(self, sample_ohlcv):
+        """The ATR of the series with the bar dropped, NaN at the bar."""
+        bad_close = sample_ohlcv["Close"].copy()
+        bad_close.iloc[7] = np.nan
+        out = wilder_atr(sample_ohlcv["High"], sample_ohlcv["Low"], bad_close)
+        assert np.isnan(out.iloc[7])
+        keep = bad_close.notna()
+        dropped = wilder_atr(
+            sample_ohlcv["High"][keep], sample_ohlcv["Low"][keep], bad_close[keep]
+        )
+        pd.testing.assert_series_equal(out[keep], dropped)
+        assert np.isfinite(out.iloc[-1])
 
 
 class TestATR:

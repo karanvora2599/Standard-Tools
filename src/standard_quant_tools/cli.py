@@ -48,6 +48,21 @@ Command-line interface for the audit trail's JSONL decision records
     sqt seal <date>                      — chmod a day file read-only
                                             (not WORM — see
                                             audit.seal_day's docstring).
+    sqt audit repair-tail [date]
+                          [--confirm]    — for the newest day, whose final
+                                            line a crash or a full disk cut
+                                            off mid-record, show the torn
+                                            bytes (dry-run) or, with
+                                            --confirm, cut exactly those
+                                            under the writer's lock and keep
+                                            them in a side file beside the
+                                            day; then verify the trail.
+                                            Refuses a complete final line,
+                                            damage elsewhere in the day, and
+                                            a day that is not the newest.
+                                            Exit code: 0 = shown, or cut and
+                                            the trail verifies; 1 = refused,
+                                            or problems remain after the cut.
     sqt export --start D --end D --out F — package day files in [start,
                                             end] plus the chain index, a
                                             manifest, and the standalone
@@ -343,6 +358,47 @@ def _print_runs_gc(report, confirm: bool) -> None:
     )
 
 
+def cmd_repair_tail(
+    date: Optional[str] = None,
+    confirm: bool = False,
+    audit_dir: Optional[Path] = None,
+) -> "audit.TornTail":
+    """Dry-run (the default) reports the newest day's torn final line
+    without touching it; confirm=True cuts exactly those bytes and keeps
+    them in a side file (`audit.repair_torn_tail`). CLI only: an agent able
+    to cut its own decision log is not audited by it."""
+    return audit.repair_torn_tail(date, audit_dir=audit_dir, confirm=confirm)
+
+
+#: How much of a fragment the dry-run prints; the side file keeps it whole.
+_FRAGMENT_SHOWN = 160
+
+
+def _format_repair_tail(torn: "audit.TornTail") -> str:
+    shown = torn.fragment[:_FRAGMENT_SHOWN]
+    more = len(torn.fragment) - len(shown)
+    lines = [
+        f"{torn.day.name} ends in a torn record: {len(torn.fragment)} byte(s) "
+        f"from byte {torn.offset}, with no newline after them, that are not "
+        "a record.",
+        f"  fragment: {shown!r}" + (f" ... ({more} more byte(s))" if more else ""),
+    ]
+    if torn.cut:
+        lines.append(
+            f"Cut: {torn.day.name} now ends at byte {torn.offset}, its last "
+            f"complete line. The {len(torn.fragment)} byte(s) are kept in "
+            f"{torn.side_file}."
+        )
+    else:
+        lines.append(
+            f"Would cut (dry-run; pass --confirm): truncate {torn.day.name} "
+            f"to {torn.offset} byte(s), keeping the fragment in a side file "
+            f"{torn.day.name}{audit.repair.TORN_SUFFIX}<UTC time>-<id> beside "
+            "it. No complete record is removed."
+        )
+    return "\n".join(lines)
+
+
 def cmd_export(
     start: str, end: str, out: Path, audit_dir: Optional[Path] = None
 ) -> Path:
@@ -524,6 +580,30 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     p_seal.add_argument("date", help="YYYY-MM-DD")
 
+    p_audit = sub.add_parser(
+        "audit",
+        help="Repair the decision log. `audit repair-tail` shows (or with "
+        "--confirm cuts, keeping the bytes in a side file) the torn final "
+        "line a crash or a full disk left on the newest day, which the "
+        "writer refuses to append after.",
+    )
+    p_audit.add_argument(
+        "action",
+        choices=["repair-tail"],
+        help="repair-tail: the newest day's torn final line.",
+    )
+    p_audit.add_argument(
+        "date",
+        nargs="?",
+        default=None,
+        help="YYYY-MM-DD; has to be the newest day, which is the default.",
+    )
+    p_audit.add_argument(
+        "--confirm",
+        action="store_true",
+        help="Actually cut. Without this flag, only shows what would be cut.",
+    )
+
     p_export = sub.add_parser(
         "export",
         help="Package day files in a date range plus the chain index and a "
@@ -636,6 +716,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         elif args.command == "seal":
             path = cmd_seal(args.date)
             print(f"Sealed {path} read-only.")
+        elif args.command == "audit":
+            torn = cmd_repair_tail(args.date, confirm=args.confirm)
+            print(_format_repair_tail(torn))
+            if torn.cut:
+                # The cut is shown to have done what it claims: the trail,
+                # verified now, is what it was before the interrupted write.
+                notes = []
+                head = {}
+                problems = cmd_verify(notes=notes, head=head)
+                print(_format_verify(problems, notes, head))
+                return 1 if problems else 0
         elif args.command == "export":
             out_path = cmd_export(args.start, args.end, args.out)
             print(f"Exported bundle: {out_path}")

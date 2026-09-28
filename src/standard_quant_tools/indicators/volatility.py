@@ -1,10 +1,12 @@
 import logging
+import math
 from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
 
 from standard_quant_tools.error import ValidationError
+from standard_quant_tools.indicators._missing import refuse_infinities
 from standard_quant_tools.indicators.momentum import _LastFinite
 from standard_quant_tools.validation import require_finite_array, validate_series
 
@@ -21,6 +23,33 @@ try:
 except ImportError:
     pass
 
+try:
+    from numba import njit
+except ImportError:
+
+    def njit(func):
+        return func
+
+
+def require_bollinger_period(period: int, func: str) -> None:
+    """
+    Refuse a Bollinger period below 2, on every backend and every door.
+
+    The bands are the mean plus and minus a SAMPLE standard deviation, and
+    the sample standard deviation of one bar is 0/0: there is no dispersion
+    to measure. The native kernel answered all-NaN for period 1 and pandas
+    answered a middle band equal to the price with NaN bands around it, so
+    the same call had two answers depending on the build, and neither is a
+    Bollinger band.
+    """
+    if period < 2:
+        raise ValidationError(
+            f"{func}: the Bollinger period must be at least 2, got {period}. "
+            "The bands are a sample standard deviation either side of the "
+            "mean, and one bar has none (it is 0/0). Use a period of 2 or "
+            "more; 20 is the convention."
+        )
+
 
 @validate_series()
 def bollinger_bands(
@@ -35,9 +64,13 @@ def bollinger_bands(
     Wherever a window is flat (all `period` prices identical), upper, middle
     and lower are that price exactly, on either backend -- see
     `collapse_flat_windows`.
+
+    `period` must be at least 2 (one bar has no sample standard deviation).
+    A NaN price is a missing bar: every window holding it is NaN, and the
+    bands resume at the first window past it. An infinite price is refused.
+    See `indicators/_missing.py`.
     """
-    if period <= 0:
-        raise ValidationError(f"period must be > 0, got {period}")
+    require_bollinger_period(period, "bollinger_bands")
     if not np.isfinite(num_std):
         raise ValidationError(f"num_std must be finite, got {num_std!r}")
     logger.debug(
@@ -53,7 +86,7 @@ def bollinger_bands(
     # C++ failure), which would otherwise silently swallow a
     # ValidationError raised inside the try block and mask bad input
     # behind a confusing fallback instead of rejecting it.
-    require_finite_array(series.to_numpy(dtype=np.float64), "series", "bollinger_bands")
+    refuse_infinities(series.to_numpy(dtype=np.float64), "series", "bollinger_bands")
 
     prices = series.to_numpy(dtype=np.float64)
     bands: Optional[np.ndarray] = None
@@ -135,7 +168,9 @@ def collapse_flat_windows(
     everywhere.
 
     A 1-bar window is left alone: its sample standard deviation is 0/0,
-    not zero, and the backends' existing answers stand.
+    not zero. Every door refuses that period before reaching here (see
+    `require_bollinger_period`); the guard keeps this helper safe to call
+    on its own.
     """
     if period < 2:
         return bands
@@ -182,6 +217,57 @@ def atr(
     return result
 
 
+@njit
+def _wilder_atr_kernel(
+    high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int
+) -> np.ndarray:
+    """
+    Wilder's ATR, the fallback for wilder_atr_into in indicators.cpp,
+    operation for operation.
+
+    A bar whose high, low or close is not finite is a missing bar and is
+    skipped: TR is measured against the last PRESENT close, the average is
+    carried across the gap, and the output there is NaN (see _missing.py).
+    The seed is a sequential sum, as in the kernel, rather than np.mean's
+    pairwise one.
+    """
+    n = len(close)
+    result = np.full(n, np.nan)
+    if period <= 0 or n < period:
+        return result
+
+    atr_val = 0.0
+    prev_close = 0.0
+    have_prev = False
+    n_tr = 0
+    for i in range(n):
+        if not (
+            math.isfinite(high[i]) and math.isfinite(low[i]) and math.isfinite(close[i])
+        ):
+            continue
+        if have_prev:
+            tr = max(
+                high[i] - low[i],
+                abs(high[i] - prev_close),
+                abs(low[i] - prev_close),
+            )
+        else:
+            tr = high[i] - low[i]
+        prev_close = close[i]
+        have_prev = True
+        n_tr += 1
+
+        if n_tr <= period:
+            atr_val += tr
+            if n_tr < period:
+                continue
+            atr_val /= period
+        else:
+            atr_val = (atr_val * (period - 1) + tr) / period
+        result[i] = atr_val
+    return result
+
+
 @validate_series()
 def wilder_atr(
     high: pd.Series,
@@ -197,35 +283,33 @@ def wilder_atr(
     Seed:    ATR[period-1] = mean(TR[0..period-1])
     Forward: ATR[i]        = (ATR[i-1]*(period-1) + TR[i]) / period
 
-    Uses C++ fast path when built, otherwise falls back to a pure-Python loop.
-    First period-1 values are NaN.
+    Uses C++ fast path when built, otherwise the same recursion compiled by
+    Numba (or run as plain Python). First period-1 values are NaN.
+
+    A bar with a NaN high, low or close is a missing bar: the recursion
+    skips it (the next TR is measured against the last present close), so
+    the result is the ATR of the series with that bar dropped, and NaN at
+    the bar itself. An infinite value is refused. See
+    `indicators/_missing.py`.
     """
     if period <= 0:
         raise ValidationError(f"period must be > 0, got {period}")
+    if not (len(high) == len(low) == len(close)):
+        raise ValidationError(
+            "wilder_atr: high/low/close must all be the same length, got "
+            f"{len(high)}/{len(low)}/{len(close)}"
+        )
 
     h = high.to_numpy(dtype=np.float64)
     l = low.to_numpy(dtype=np.float64)
     c = close.to_numpy(dtype=np.float64)
-    n = len(h)
 
-    require_finite_array(h, "high", "wilder_atr")
-    require_finite_array(l, "low", "wilder_atr")
-    require_finite_array(c, "close", "wilder_atr")
+    refuse_infinities(h, "high", "wilder_atr")
+    refuse_infinities(l, "low", "wilder_atr")
+    refuse_infinities(c, "close", "wilder_atr")
 
     if HAS_CPP and _cpp_core is not None:
         raw = _cpp_core.wilder_atr(h, l, c, period)
-        return pd.Series(raw, index=close.index, name="Wilder_ATR")
-
-    # Pure-Python fallback (correct but slow; C++ path is preferred)
-    tr = np.empty(n)
-    tr[0] = h[0] - l[0]
-    for i in range(1, n):
-        tr[i] = max(h[i] - l[i], abs(h[i] - c[i - 1]), abs(l[i] - c[i - 1]))
-
-    result = np.full(n, np.nan)
-    if n >= period:
-        result[period - 1] = tr[:period].mean()
-        for i in range(period, n):
-            result[i] = (result[i - 1] * (period - 1) + tr[i]) / period
-
-    return pd.Series(result, index=close.index, name="Wilder_ATR")
+    else:
+        raw = _wilder_atr_kernel(h, l, c, period)
+    return pd.Series(raw, index=close.index, name="Wilder_ATR")

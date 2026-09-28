@@ -902,7 +902,9 @@ f = (b × win_rate − (1 − win_rate)) / b
 
 Half-Kelly is recommended (`f × 0.5`) — full Kelly is theoretically optimal but has severe drawdown consequences in practice.
 
-`account_equity` and `atr_multiplier` must be positive: at zero or below every position sized at zero shares and came back as a recommendation. A stop distance or a share count past the float range is refused naming the input, where it used to escape from `int()` as an `OverflowError`.
+`account_equity` and `atr_multiplier` must be positive: at zero or below every position sized at zero shares and came back as a recommendation. A stop distance or a share count past the float range is refused naming the input, where it used to escape from `int()` as an `OverflowError`, and so is a position value past it, which used to come back as an infinity.
+
+The arithmetic lives in the library as `standard_quant_tools.portfolio.position_sizing.size_position(account_equity, last_close, last_atr, ...)`, and the tool calls it after fetching the bars and computing the ATR. A direct caller therefore sizes and refuses exactly as the tool does; it checks the same inputs the tool's schema checks, and returns unrounded values.
 
 ```python
 from standard_quant_tools.agent.tools import get_position_size

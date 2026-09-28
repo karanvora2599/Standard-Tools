@@ -93,21 +93,26 @@ class TestRSI:
         with pytest.raises(ValidationError):
             rsi(pd.Series(dtype=float), 14)
 
-    def test_nan_in_input_raises(self, sample_close):
-        """NaN/Inf input contract enforced at the Python boundary (not
-        inside the C++ kernel, which has two internally-inconsistent NaN
-        behaviors depending on whether the NaN lands in the seed window or
-        the forward pass) -- must raise before either the C++ or Numba/
-        Python path is reached."""
+    def test_nan_is_a_missing_bar_the_recursion_skips(self, sample_close):
+        """A NaN price used to be refused here while the panel answered it,
+        and the two backends disagreed about where it fell (the kernel went
+        NaN for good after one in its seed window). It is now a gap on
+        every door: the RSI of the series with that bar dropped, and NaN at
+        the bar itself."""
         s = sample_close.copy()
         s.iloc[len(s) // 2] = np.nan
-        with pytest.raises(ValidationError, match="non-finite"):
-            rsi(s, 14)
+        s.iloc[5] = np.nan  # inside the seed window
+        out = rsi(s, 14)
+        present = s.notna()
+        assert out[~present].isna().all()
+        expected = rsi(s[present], 14)
+        pd.testing.assert_series_equal(out[present], expected, check_names=False)
+        assert np.isfinite(out.iloc[-1])
 
     def test_inf_in_input_raises(self, sample_close):
         s = sample_close.copy()
         s.iloc[3] = np.inf
-        with pytest.raises(ValidationError, match="non-finite"):
+        with pytest.raises(ValidationError, match="infinite"):
             rsi(s, 14)
 
 
@@ -138,11 +143,29 @@ class TestStochasticOscillator:
         d = result["Stoch_D"].dropna()
         assert (d >= 0).all() and (d <= 100).all()
 
-    def test_nan_in_input_raises(self, sample_ohlcv):
+    def test_a_missing_close_blanks_only_its_own_bar(self, sample_ohlcv):
+        """A NaN close is a missing bar: %K is NaN there (the close is read
+        at that bar only), %D is NaN over the windows holding that %K, and
+        both resume after it -- where it used to be refused."""
         bad_close = sample_ohlcv["Close"].copy()
-        bad_close.iloc[15] = np.nan
-        with pytest.raises(ValidationError, match="non-finite"):
-            stochastic_oscillator(sample_ohlcv["High"], sample_ohlcv["Low"], bad_close)
+        bad_close.iloc[30] = np.nan
+        out = stochastic_oscillator(
+            sample_ohlcv["High"], sample_ohlcv["Low"], bad_close
+        )
+        clean = stochastic_oscillator(
+            sample_ohlcv["High"], sample_ohlcv["Low"], sample_ohlcv["Close"]
+        )
+        assert np.isnan(out["Stoch_K"].iloc[30])
+        assert out["Stoch_D"].iloc[30:33].isna().all()
+        others = out.index != out.index[30]
+        pd.testing.assert_series_equal(out["Stoch_K"][others], clean["Stoch_K"][others])
+        assert np.isfinite(out["Stoch_D"].iloc[33])
+
+    def test_inf_in_input_raises(self, sample_ohlcv):
+        bad_high = sample_ohlcv["High"].copy()
+        bad_high.iloc[15] = np.inf
+        with pytest.raises(ValidationError, match="infinite"):
+            stochastic_oscillator(bad_high, sample_ohlcv["Low"], sample_ohlcv["Close"])
 
     def test_close_at_high_yields_k_100(self):
         """When close equals high, %K = 100."""

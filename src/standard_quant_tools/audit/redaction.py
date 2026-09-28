@@ -7,7 +7,7 @@ import logging
 import os
 import re
 import warnings
-from typing import Any, Dict, Iterator, List, Tuple
+from typing import Any, Dict, Iterator, List, NamedTuple
 
 from standard_quant_tools._env import env_str
 from standard_quant_tools.config import load_env
@@ -22,6 +22,22 @@ _warned_no_salt = False
 #: names: `positions[].symbol` is the `symbol` of every position.
 _EACH = "[]"
 
+#: A path segment ending in this names a mapping whose KEYS are redacted:
+#: `positions{}` hides every key of `positions` and keeps its values. A
+#: mapping keyed by account or by symbol carries the sensitive value in the
+#: key, where a value path cannot reach it.
+_KEYS = "{}"
+
+
+class _Segment(NamedTuple):
+    """One dotted segment of a redaction path."""
+
+    key: str
+    #: The segment ended in `[]`: fan out over the list it names.
+    each: bool
+    #: The segment ended in `{}`: redact the keys of the mapping it names.
+    keys: bool
+
 
 class UnsaltedRedactionWarning(UserWarning):
     """Redaction placeholders are being made without a salt."""
@@ -29,7 +45,8 @@ class UnsaltedRedactionWarning(UserWarning):
 
 def _redact_fields() -> List[str]:
     """Dotted field paths to redact from `input`, from `SQT_AUDIT_REDACT_FIELDS`
-    (comma-separated, e.g. "account_id,client.ssn,positions[].symbol").
+    (comma-separated, e.g. "account_id,client.ssn,positions[].symbol" or,
+    for the keys of a mapping, "positions{}").
     Empty/unset = redact nothing, the default."""
     raw = env_str("SQT_AUDIT_REDACT_FIELDS") or ""
     return [f.strip() for f in raw.split(",") if f.strip()]
@@ -91,70 +108,135 @@ def _placeholder_for(value: Any) -> str:
     return f"<redacted:{digest[:8]}>"
 
 
-def _segments(dotted: str) -> List[Tuple[str, bool]]:
-    """`"positions[].symbol"` -> `[("positions", True), ("symbol", False)]`:
-    each key, and whether the path fans out over the list it names."""
-    parts: List[Tuple[str, bool]] = []
+def _segments(dotted: str) -> List[_Segment]:
+    """`"positions[].symbol"` -> `[("positions", True, False), ("symbol",
+    False, False)]`, and `"book{}"` -> `[("book", False, True)]`: each key,
+    whether the path fans out over the list it names, and whether it
+    redacts the keys of the mapping it names."""
+    parts: List[_Segment] = []
     for segment in dotted.split("."):
+        keys = segment.endswith(_KEYS)
+        if keys:
+            segment = segment[: -len(_KEYS)]
         each = segment.endswith(_EACH)
-        parts.append((segment[: -len(_EACH)] if each else segment, each))
+        if each:
+            segment = segment[: -len(_EACH)]
+        parts.append(_Segment(segment, each, keys))
     return parts
 
 
-def _redact_path(node: Any, parts: List[Tuple[str, bool]]) -> None:
-    """Replace every value `parts` reaches in `node` with its placeholder.
+def _mappings(node: Any) -> Iterator[Dict[Any, Any]]:
+    """Every mapping `node` is or holds through lists -- what a `{}`
+    segment redacts the keys of. A list of mappings is walked for the
+    reason a list met mid-path is: the path continues into it."""
+    if isinstance(node, dict):
+        yield node
+    elif isinstance(node, list):
+        for element in node:
+            yield from _mappings(element)
+
+
+def _redact_path(
+    node: Any, parts: List[_Segment], key_maps: Dict[int, Dict[Any, Any]]
+) -> None:
+    """Replace every value `parts` reaches in `node` with its placeholder,
+    and collect into `key_maps` every mapping a `{}` segment names.
 
     A list met where the path continues is walked element by element, so a
     field inside a list of records is reached whether or not the path says
     `[]`. That used to stop at the list: `positions.symbol` and
     `positions[].symbol` both redacted nothing, and a policy covering
     nothing looked exactly like one that matched nothing.
+
+    Keys are collected, not renamed here. Every path is walked over the raw
+    keys first and each collected mapping is renamed once afterwards (see
+    `_redact`), so the order paths are listed in cannot decide whether
+    `book{}` hides a key that `book.ACC-1.ssn` still has to find, and a
+    mapping two paths both name is not hashed twice. A `{}` segment that is
+    not the last goes on into every value of that mapping.
     """
     if isinstance(node, list):
         for element in node:
-            _redact_path(element, parts)
+            _redact_path(element, parts, key_maps)
         return
     if not isinstance(node, dict) or not parts:
         return
-    (key, each), rest = parts[0], parts[1:]
-    if key not in node:
+    segment, rest = parts[0], parts[1:]
+    if segment.key not in node:
         return
-    if each and isinstance(node[key], list):
+    if segment.keys:
+        for mapping in _mappings(node[segment.key]):
+            key_maps[id(mapping)] = mapping
+            if rest:
+                for value in mapping.values():
+                    _redact_path(value, rest, key_maps)
+        return
+    if segment.each and isinstance(node[segment.key], list):
         if rest:
-            for element in node[key]:
-                _redact_path(element, rest)
+            for element in node[segment.key]:
+                _redact_path(element, rest, key_maps)
         else:
-            node[key] = [_placeholder_for(element) for element in node[key]]
+            node[segment.key] = [
+                _placeholder_for(element) for element in node[segment.key]
+            ]
         return
     if not rest:
-        node[key] = _placeholder_for(node[key])
+        node[segment.key] = _placeholder_for(node[segment.key])
     else:
-        _redact_path(node[key], rest)
+        _redact_path(node[segment.key], rest, key_maps)
 
 
-def _extract_path(node: Any, parts: List[Tuple[str, bool]]) -> Iterator[Any]:
-    """Every raw value `parts` reaches in `node`, by the same traversal as
-    `_redact_path` and without mutating anything."""
+def _redact_keys(mapping: Dict[Any, Any]) -> None:
+    """Rename every key of `mapping` to its placeholder, in place and in
+    order, keeping each value under it.
+
+    The placeholder is the one the same text gets as a value, salted the
+    same way, so a symbol redacted as a key and as a value reads the same in
+    both places. Two keys whose 32-bit placeholders collide keep both
+    entries -- the later one gains a `~2` -- because a record that dropped
+    one would misstate the input's shape rather than hide it.
+    """
+    items = list(mapping.items())
+    mapping.clear()
+    for key, value in items:
+        placeholder = _placeholder_for(key)
+        name, n = placeholder, 2
+        while name in mapping:
+            name, n = f"{placeholder}~{n}", n + 1
+        mapping[name] = value
+
+
+def _extract_path(node: Any, parts: List[_Segment]) -> Iterator[Any]:
+    """Every raw value -- and, for a `{}` segment, every raw key -- `parts`
+    reaches in `node`, by the same traversal as `_redact_path` and without
+    mutating anything."""
     if isinstance(node, list):
         for element in node:
             yield from _extract_path(element, parts)
         return
     if not isinstance(node, dict) or not parts:
         return
-    (key, each), rest = parts[0], parts[1:]
-    if key not in node:
+    segment, rest = parts[0], parts[1:]
+    if segment.key not in node:
         return
-    if each and isinstance(node[key], list):
-        for element in node[key]:
+    if segment.keys:
+        for mapping in _mappings(node[segment.key]):
+            yield from mapping.keys()
+            if rest:
+                for value in mapping.values():
+                    yield from _extract_path(value, rest)
+        return
+    if segment.each and isinstance(node[segment.key], list):
+        for element in node[segment.key]:
             if rest:
                 yield from _extract_path(element, rest)
             else:
                 yield element
         return
     if not rest:
-        yield node[key]
+        yield node[segment.key]
     else:
-        yield from _extract_path(node[key], rest)
+        yield from _extract_path(node[segment.key], rest)
 
 
 def _redact(input_dict: Dict[str, Any], fields: List[str]) -> Dict[str, Any]:
@@ -171,12 +253,22 @@ def _redact(input_dict: Dict[str, Any], fields: List[str]) -> Dict[str, Any]:
     walked element by element (`positions.symbol`), and a segment ending in
     `[]` says so explicitly (`positions[].symbol`, `nested.deep[].ssn`). A
     path ending in `[]` redacts each element of that list separately.
+
+    A segment ending in `{}` redacts the KEYS of the mapping it names
+    (`positions{}` for positions keyed by symbol, `book.accounts{}`), each
+    replaced by the placeholder that text gets as a value; the values and
+    the mapping's size are kept. Followed by more path (`accounts{}.ssn`),
+    it also goes on into every value of that mapping. Only a mapping a path
+    names has its keys touched.
     """
     if not fields:
         return input_dict
     result = copy.deepcopy(input_dict)
-    for dotted in fields:
-        _redact_path(result, _segments(dotted))
+    key_maps: Dict[int, Dict[Any, Any]] = {}
+    for dotted in dict.fromkeys(fields):
+        _redact_path(result, _segments(dotted), key_maps)
+    for mapping in key_maps.values():
+        _redact_keys(mapping)
     return result
 
 
@@ -199,7 +291,10 @@ def redact_text(text: str, raw_input: Dict[str, Any], fields: List[str]) -> str:
     Each redacted field's raw value (read from `raw_input`, before it was
     redacted, through the same path rules as `_redact`) is stringified and
     replaced with the same placeholder `_redact` used for it in `input`,
-    wherever it appears in `text` AS A WHOLE TOKEN. It used to replace every
+    wherever it appears in `text` AS A WHOLE TOKEN. A redacted mapping key
+    is scrubbed the same way, with the placeholder the key got in `input`:
+    `KeyError('ACC-1')` from positions keyed by account would otherwise put
+    back the account the keys were hidden to protect. It used to replace every
     substring, so redacting a quantity of 5 rewrote every 5 in the message
     -- `123-45-6789` became `123-4<redacted:...>-6789` -- and could corrupt a
     placeholder already written whose hex happened to contain the value.

@@ -48,6 +48,7 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from standard_quant_tools.analysis.derivatives import MAX_PRICE, MIN_TIME_TO_EXPIRY
 from standard_quant_tools.analysis.liquidity_events import (
     DEFAULT_SLACK,
     DEFAULT_THRESHOLD,
@@ -105,6 +106,22 @@ _MIN_WARMUP = 10
 #: stream, not something a constant can fix; reset the monitor periodically
 #: if the horizon is long.
 STREAMING_THRESHOLD = 15.0
+
+#: The smallest leg a RATIO channel divides by or takes a logarithm of: the
+#: floor `analysis.derivatives` puts on a spot or strike magnitude, so the
+#: library has one answer to "how small can a price be". With both legs in
+#: [1e-8, MAX_PRICE] the ratio lies in [1e-20, 1e20] and every channel value
+#: -- and the warm-up's sum of squares -- stays inside the float range.
+#:
+#: A floor rather than computing the ratio in log space, because logs do not
+#: rescue the channel that overflows. `relative_bps` IS (p/r - 1) * 10,000:
+#: with p at the price ceiling and r at 1e-300 that number is itself beyond
+#: the float range, and exp(log p - log r) overflows exactly where p / r did.
+#: A reference of 1e-300 is not a quote any market makes; it is a unit error
+#: or a placeholder, and the only honest answer is to refuse it by name.
+#: `absolute_points` takes no ratio and keeps accepting a leg at or below
+#: zero, as a roll spread on a contract that settled negative needs.
+_MIN_RATIO_PRICE = 1e-8
 
 #: How the two series combine into the number being watched. THREE, not
 #: five, because four of the roadmap's monitors are the same arithmetic
@@ -237,8 +254,8 @@ def update_spread_monitor(
     """
     state = _validated(state)
     channel = state["channel"]
-    primary_values = _floats(primary, "primary")
-    reference_values = _floats(reference, "reference")
+    primary_values = _prices(primary, "primary")
+    reference_values = _prices(reference, "reference")
     if len(primary_values) != len(reference_values):
         raise ValidationError(
             f"primary has {len(primary_values)} observations and reference "
@@ -465,7 +482,18 @@ def _channel_value(
     expiries: Optional[List[float]],
     index: int,
 ) -> float:
-    """One tick, combined the way this channel says."""
+    """One tick, combined the way this channel says.
+
+    A ratio channel refuses a leg below `_MIN_RATIO_PRICE` as well as one at
+    or below zero. The input bound is a ceiling on magnitude only, so a
+    reference of 1e-300 under a primary at the ceiling passed it, the ratio
+    came out infinite, and the warm-up mean and variance went to inf and
+    NaN -- a monitor answering with no baseline instead of a refusal. A
+    primary that small underflowed the ratio to 0.0 and `log` raised a bare
+    math domain error. The annualized channel also refuses a time to expiry
+    below `MIN_TIME_TO_EXPIRY`: dividing a finite log-ratio by 1e-310 years
+    overflowed the same way.
+    """
     if channel == "absolute_points":
         return primary - reference
 
@@ -481,6 +509,17 @@ def _channel_value(
             f"observation {index} has primary={primary!r}, which the "
             f"{channel!r} channel cannot take a ratio of."
         )
+    for name, leg in (("reference", reference), ("primary", primary)):
+        if leg < _MIN_RATIO_PRICE:
+            raise ValidationError(
+                f"observation {index} has {name}={leg!r}, below the "
+                f"{_MIN_RATIO_PRICE:g} the {channel!r} channel takes a ratio "
+                "of. No market quotes a price that small: it is a unit error "
+                "or a placeholder, and a ratio against it measures the mistake "
+                "rather than a spread -- far enough down, beyond the float "
+                "range. Pass each leg in its own quoted units, or use "
+                "absolute_points for a spread quoted as a difference."
+            )
 
     if channel == "relative_bps":
         return (primary / reference - 1.0) * 10_000.0
@@ -491,6 +530,14 @@ def _channel_value(
             f"observation {index} has time_to_expiry={t!r}. A contract at or "
             "past expiry has no annualized spread; roll the monitor onto the "
             "next contract instead."
+        )
+    if t < MIN_TIME_TO_EXPIRY:
+        raise ValidationError(
+            f"observation {index} has time_to_expiry={t!r} years, below the "
+            f"{MIN_TIME_TO_EXPIRY:g} (about a third of a second) the library "
+            "annualizes over; a rate over a shorter horizon leaves the float "
+            "range. Time to expiry is in YEARS -- roll the monitor onto the "
+            "next contract as this one expires."
         )
     return math.log(primary / reference) / t * 10_000.0
 
@@ -768,4 +815,27 @@ def _floats(values: Sequence[float], name: str) -> List[float]:
         out = [finite(v, f"{name}[{i}]") for i, v in enumerate(values)]
     except TypeError:
         raise ValidationError(f"{name} must be a sequence of numbers") from None
+    return out
+
+
+def _prices(values: Sequence[float], name: str) -> List[float]:
+    """
+    One leg's ticks: finite, and within the library's price ceiling on
+    MAGNITUDE -- the rule the tool door applies to the same list.
+
+    On magnitude, not sign, because `absolute_points` takes a leg below
+    zero. Prices scaled by 1e300 overflowed the warm-up variance to
+    infinity on any channel, and the monitor answered with a null baseline
+    instead of a refusal. The lower bound a ratio needs is the channel's
+    business and is checked per tick in `_channel_value`.
+    """
+    out = _floats(values, name)
+    beyond = [i for i, price in enumerate(out) if abs(price) > MAX_PRICE]
+    if beyond:
+        raise ValidationError(
+            f"{name} has {len(beyond)} price(s) beyond {MAX_PRICE:g} in "
+            f"magnitude, at position(s) {beyond[:10]}. That is far outside "
+            "anything a market quotes, so it is a unit error or a typo; pass "
+            "each leg in its own quoted units."
+        )
     return out

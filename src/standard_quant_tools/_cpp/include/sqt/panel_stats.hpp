@@ -71,6 +71,10 @@ struct PreprocessStats {
  * A column with fewer than two finite values has no ddof=1 dispersion;
  * std is set to 1.0 there for the same reason.
  *
+ * An infinity sorts as an order statistic here. The Python binding refuses
+ * a panel that holds one, as fit_preprocessing does: it has no quantile to
+ * winsorize to and no z-score.
+ *
  * @return false if a working buffer could not be allocated (the caller then
  *         falls back to the Python path); true otherwise.
  */

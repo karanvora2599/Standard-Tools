@@ -30,7 +30,13 @@ import pandas as pd
 
 from standard_quant_tools.error import ValidationError
 
-from .feature_report import feature_predictive_stats, redundancy_report
+from .feature_report import (
+    _boundary_date,
+    _named_once,
+    _panel_dates,
+    feature_predictive_stats,
+    redundancy_report,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -67,15 +73,21 @@ def _selection_cutoff(
     `caller` prefixes the refusals. Two functions share this cutoff now,
     and a refusal that named the wrong one would send the reader to fix an
     argument they did not pass.
+
+    `selection_end` is parsed by the rule the tool doors use. It used to go
+    straight to `pd.Timestamp`, where an unreadable string raised pandas'
+    own parse error and an empty one became NaT: NaT compares false against
+    every date, so it passed the range check below and left a holdout with
+    no dates in it, which failed later as an IndexError.
     """
-    dates = pd.DatetimeIndex(sorted(pd.to_datetime(panel["date"]).unique()))
+    dates = pd.DatetimeIndex(sorted(_panel_dates(panel, caller).unique()))
     if len(dates) < 2:
         raise ValidationError(
             f"{caller}: the panel has fewer than two dates, so nothing "
             "can be held out and no cross-sectional IC can be trusted."
         )
     if selection_end is not None:
-        cutoff = pd.Timestamp(selection_end)
+        cutoff = _boundary_date(selection_end, "selection_end", caller, dates)
         if cutoff < dates[0] or cutoff >= dates[-1]:
             raise ValidationError(
                 f"{caller}: selection_end={_date_label(cutoff)!r} must "
@@ -97,6 +109,17 @@ def _selection_cutoff(
 
 
 def _window(dates: pd.DatetimeIndex) -> Dict[str, Any]:
+    """First date, last date and count of a non-empty window.
+
+    Every caller passes a window `_selection_cutoff` guarantees non-empty;
+    the check keeps an empty one from surfacing as an IndexError that
+    names no argument, should that guarantee ever slip.
+    """
+    if len(dates) == 0:
+        raise ValidationError(
+            "feature selection: a window with no dates in it. selection_end "
+            "or holdout_fraction must leave at least one date on each side."
+        )
     return {
         "start": _date_label(dates[0]),
         "end": _date_label(dates[-1]),
@@ -198,6 +221,7 @@ def select_features(
     missing = [f for f in feature_ids if f not in panel.columns]
     if missing:
         raise ValidationError(f"panel has no features: {sorted(missing)}")
+    _named_once(panel, feature_ids, "select_features")
 
     dates, cutoff = _selection_cutoff(panel, selection_end, holdout_fraction)
     if cutoff is None:
@@ -363,6 +387,7 @@ def summarize_feature_set(
     then a statement the caller's warnings have to make, not a silence.
     """
     feature_ids = list(feature_ids)
+    _named_once(panel, feature_ids, caller)
     dates, cutoff = _selection_cutoff(
         panel, selection_end, holdout_fraction, caller=caller
     )
@@ -455,6 +480,10 @@ def compare_feature_sets(
     unknown = sorted({f for f in left + right if f not in panel.columns})
     if unknown:
         raise ValidationError(f"panel has no features: {unknown}")
+    # Each side on its own: a name shared by both sides is the comparison,
+    # a name twice on one side is a mistake.
+    _named_once(panel, left, "compare_feature_sets", field="left")
+    _named_once(panel, right, "compare_feature_sets", field="right")
 
     everything = sorted(set(left) | set(right))
     _dates, cutoff = _selection_cutoff(

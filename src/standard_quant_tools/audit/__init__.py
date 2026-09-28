@@ -27,6 +27,7 @@ pluggable storage backends, ...):
     verify      — verify_audit_log_integrity, verify_audit_trail_integrity
     redaction   — SQT_AUDIT_REDACT_FIELDS field redaction
     retention   — legal hold, retention/gc, read-only sealing
+    repair      — cutting a torn final record off the newest day (CLI only)
     export      — export_bundle (auditor-ready zip)
     signing     — Ed25519 checkpoint signing (optional `cryptography` extra)
     dispatch    — _run_and_record, the core agent.tools.dispatch() uses
@@ -63,6 +64,7 @@ from .provenance import (
     _strategy_source_hash,
 )
 from .redaction import _redact, _redact_fields, redact_text
+from .repair import TornTail, repair_torn_tail
 from .replay import verify_replay
 from .retention import gc, gc_candidates, hold_day, is_held, release_hold, seal_day
 from .signing import (
@@ -92,6 +94,7 @@ __all__ = [
     "LocalFilesystemBackend",
     "ReplayResult",
     "RequestIdFilter",
+    "TornTail",
     "checkpoint_and_sign",
     "configure_logging",
     "describe_head",
@@ -107,6 +110,7 @@ __all__ = [
     "new_request_id",
     "record_data_access",
     "release_hold",
+    "repair_torn_tail",
     "seal_day",
     "verify_audit_log_integrity",
     "verify_audit_trail_integrity",

@@ -81,6 +81,59 @@ def _zero_variance_assets(names: Sequence[Any], variances: np.ndarray) -> List[s
     return [str(n) for n, v in zip(names, variances) if not v > floor]
 
 
+def _named_once(labels: pd.Index, field: str, who: str) -> None:
+    """Refuse a name that labels two rows or two columns.
+
+    Every result here is keyed by name. A repeated name collapses into one
+    key while both of its rows are still used: a repeated factor was
+    reported once and counted twice in the variance, a repeated weight
+    broke the alignment with the loadings as a matmul shape error, and a
+    repeated asset in a concentration book raised a type error naming no
+    input at all."""
+    if labels.has_duplicates:
+        repeated = sorted({str(name) for name in labels[labels.duplicated()]})
+        raise ValidationError(
+            f"{who}: {repeated} appear more than once in {field}; list each once."
+        )
+
+
+def _finite_weights(weights: Any, field: str, who: str) -> pd.Series:
+    """
+    A {name: number} input as a float Series, each name once and every
+    number finite -- or a refusal naming the entries that are not.
+
+    A NaN weight used to be dropped without a word, or to come out as a NaN
+    exposure reported as if it had been measured; an infinite one became an
+    infinite exposure or a division by zero. The tool doors refuse both in
+    their schemas, and this is the same rule for a direct caller.
+    """
+    series = pd.Series(weights, dtype=float)
+    _named_once(series.index, field, who)
+    bad = [str(name) for name, value in series.items() if not math.isfinite(value)]
+    if bad:
+        raise ValidationError(
+            f"{who}: {field} is not finite at {bad[:10]}; every entry must be "
+            "a finite number."
+        )
+    return series
+
+
+def _finite_gross(values: np.ndarray, who: str) -> float:
+    """The gross exposure of finite weights, refused when it is not itself
+    finite: each weight within the float range, their sum past it. An
+    infinite gross made every share zero and the effective N a division by
+    zero."""
+    with np.errstate(over="ignore"):
+        gross = float(np.abs(values).sum())
+    if not math.isfinite(gross):
+        raise ValidationError(
+            f"{who}: the gross exposure of these weights is beyond the float "
+            "range. Give weights as fractions of the portfolio or as position "
+            "values in currency."
+        )
+    return gross
+
+
 def _repair_psd(frame: pd.DataFrame, who: str) -> "tuple[pd.DataFrame, List[str]]":
     """
     The nearest positive semi-definite matrix, by flooring the eigenvalues,
@@ -126,6 +179,14 @@ def _covariance_frame_with_notes(
     covariance: Any, who: str
 ) -> "tuple[pd.DataFrame, List[str]]":
     frame = pd.DataFrame(covariance).astype(float)
+    # One name per row and column. Every result is keyed by asset name, so a
+    # repeat collapsed two assets into one key while both rows of the matrix
+    # were still used: risk parity over ["A", "A"] returned {"A": 0.4}, a
+    # book whose weights sum to 0.4, and the marginal-risk rows came back
+    # twice under one name. The tool doors refuse a repeated asset in their
+    # schemas; this is the same rule for a direct caller.
+    _named_once(frame.index, "the covariance's row names", who)
+    _named_once(frame.columns, "the covariance's column names", who)
     # Squareness, finiteness and symmetry are the numeric contract's rules,
     # and this module had its own second implementation of all three: the
     # same three refusals, worded differently, at a looser tolerance
@@ -344,6 +405,9 @@ def hierarchical_risk_parity(
     sqrt(0.5 * (1 - rho)), implemented without scipy.
     """
     frame = pd.DataFrame(returns).astype(float).dropna()
+    # A repeated name is refused before the sort below, which selects by
+    # name and turned two columns called "A" into four.
+    _named_once(frame.columns, "the returns' column names", "hierarchical_risk_parity")
     # Sorted by name before anything reads them: the clustering's tie-breaks
     # follow column position, so forty permutations of one universe moved
     # single weights by up to 8.7 pp. The weights are keyed by name, and the
@@ -576,9 +640,20 @@ def factor_exposure_budget(
     is 90% explained by three factors is a factor bet. One where the factors
     explain 20% is a stock-picking portfolio, and its risk lives somewhere
     this decomposition cannot see. Both are reported.
+
+    INPUTS ARE CHECKED BY NAME, as the tool door checks them: every weight
+    finite and named once, each asset one row of loadings and each factor
+    one column, and every loading a HELD asset carries finite -- a gap in an
+    asset that is not held never enters the sum and is left alone. An
+    exposure or a gross exposure past the float range, from finite inputs
+    that multiply or add beyond it, is refused rather than reported as an
+    infinity.
     """
+    who = "factor_exposure_budget"
     loadings = pd.DataFrame(factor_loadings).astype(float)
-    series = pd.Series(weights, dtype=float)
+    series = _finite_weights(weights, "weights", who)
+    _named_once(loadings.index, "the loadings' assets (its index)", who)
+    _named_once(loadings.columns, "the loadings' factors (its columns)", who)
     common = [a for a in series.index if a in loadings.index]
     if not common:
         raise ValidationError(
@@ -590,7 +665,31 @@ def factor_exposure_budget(
     aligned_weights = series.loc[common].to_numpy()
     aligned_loadings = loadings.loc[common].to_numpy()
 
-    exposures = aligned_weights @ aligned_loadings
+    # A NaN loading made that factor's exposure -- and its variance share --
+    # NaN for the whole portfolio. Absent is not zero, so it is refused by
+    # asset and factor rather than filled.
+    rows, cols = np.nonzero(~np.isfinite(aligned_loadings))
+    if rows.size:
+        pairs = [f"{common[r]}/{loadings.columns[c]}" for r, c in zip(rows, cols)]
+        raise ValidationError(
+            f"{who}: {len(pairs)} held asset/factor loading(s) are missing or "
+            f"not finite: {pairs[:10]}. Give every held asset a finite loading "
+            "on every factor (0.0 where it genuinely has none), or drop the "
+            "factors not every asset has."
+        )
+
+    with np.errstate(over="ignore", invalid="ignore"):
+        exposures = aligned_weights @ aligned_loadings
+    overflowed = [
+        str(f) for f, e in zip(loadings.columns, exposures) if not np.isfinite(e)
+    ]
+    if overflowed:
+        raise ValidationError(
+            f"{who}: the exposure to {overflowed} is beyond the float range -- "
+            "weight times loading overflowed. Give weights as fractions of the "
+            "portfolio and loadings on their usual scale."
+        )
+    gross = _finite_gross(aligned_weights, who)
     exposure_map = {str(f): float(e) for f, e in zip(loadings.columns, exposures)}
 
     variance_shares: Optional[Dict[str, float]] = None
@@ -650,7 +749,7 @@ def factor_exposure_budget(
         "largest_exposures": [{"factor": f, "exposure": e} for f, e in ranked[:5]],
         "factor_variance": factor_variance,
         "factor_variance_shares": variance_shares,
-        "gross_exposure": float(np.abs(aligned_weights).sum()),
+        "gross_exposure": gross,
         "net_exposure": float(aligned_weights.sum()),
         "warnings": warnings,
     }
@@ -676,11 +775,17 @@ def concentration_analysis(weights: Dict[str, float]) -> Dict[str, Any]:
     direction. Concentration here is computed on the GROSS weights, which is
     the economically meaningful denominator: a market-neutral book with 50
     longs and 50 shorts has an effective N in the tens, not an undefined one.
+
+    Every weight must be finite and named once. A NaN weight used to be
+    dropped without a word, so the book described was not the book given;
+    an infinite one, or finite ones whose gross sum passes the float range,
+    made every share zero and the effective N a division by zero.
     """
-    series = pd.Series(weights, dtype=float).dropna()
+    who = "concentration_analysis"
+    series = _finite_weights(weights, "weights", who)
     if series.empty:
         raise ValidationError("concentration_analysis: no weights given.")
-    gross = float(series.abs().sum())
+    gross = _finite_gross(series.to_numpy(), who)
     if gross <= 0:
         raise ValidationError(
             "concentration_analysis: every weight is zero, so there is no "
@@ -1081,10 +1186,17 @@ def marginal_risk_contribution(
     adding to that position REDUCES portfolio risk, which happens when the
     asset is negatively correlated with the rest of the book. Those
     positions are hedges whether or not they were intended as such.
+
+    Every weight must be finite and named once. A NaN weight made the
+    volatility and every row NaN, and an infinite one an infinite
+    volatility with NaN contributions -- all reported as numbers, or as
+    nulls with no reason. A book whose variance passes the float range from
+    finite weights is refused the same way: every marginal came back 0.0.
     """
-    frame = _covariance_frame(covariance, "marginal_risk_contribution")
+    who = "marginal_risk_contribution"
+    frame = _covariance_frame(covariance, who)
     psd_notes = list(frame.attrs.get("warnings", []))
-    series = pd.Series(weights, dtype=float)
+    series = _finite_weights(weights, "weights", who)
     missing = [str(c) for c in frame.columns if str(c) not in series.index]
     if missing:
         raise ValidationError(
@@ -1094,8 +1206,16 @@ def marginal_risk_contribution(
         )
     ordered = np.array([float(series[str(c)]) for c in frame.columns])
     matrix = frame.to_numpy()
+    gross = _finite_gross(ordered, who)
 
-    volatility = _portfolio_volatility(ordered, matrix)
+    with np.errstate(over="ignore", invalid="ignore"):
+        volatility = _portfolio_volatility(ordered, matrix)
+    if not math.isfinite(volatility):
+        raise ValidationError(
+            f"{who}: the portfolio variance of these weights is beyond the "
+            "float range. Give weights as fractions of the portfolio and the "
+            "covariance in return units."
+        )
     if volatility <= 0:
         raise ValidationError(
             "marginal_risk_contribution: the portfolio has zero volatility, "
@@ -1103,7 +1223,6 @@ def marginal_risk_contribution(
         )
     marginal = matrix @ ordered / volatility
     contribution = ordered * marginal
-    gross = float(np.abs(ordered).sum())
 
     rows = [
         {
@@ -1183,8 +1302,16 @@ def portfolio_scenarios(
     With `covariance`, each scenario's move is also reported in standard
     deviations of the portfolio -- which is the honest way to compare a
     scenario against the statistical measures rather than instead of them.
+
+    Every weight and every shock must be finite, and a weight named once. A
+    NaN weight used to be dropped without a word, so the scenarios described
+    a smaller book than the one given; a NaN shock made its scenario's
+    return NaN, which then sorted anywhere among the others. A return or a
+    volatility that passes the float range from finite inputs is refused
+    rather than reported as an infinity.
     """
-    series = pd.Series(weights, dtype=float).dropna()
+    who = "portfolio_scenarios"
+    series = _finite_weights(weights, "weights", who)
     if series.empty:
         raise ValidationError("portfolio_scenarios: no weights given.")
     if not scenarios:
@@ -1192,20 +1319,40 @@ def portfolio_scenarios(
             "portfolio_scenarios: no scenarios given. This tool exists to "
             "make an assumption explicit; with none, use run_stress_test."
         )
+    for name, shocks in scenarios.items():
+        bad = [str(a) for a, v in shocks.items() if not math.isfinite(float(v))]
+        if bad:
+            raise ValidationError(
+                f"{who}: scenario {str(name)!r} is not finite at {bad[:10]}; "
+                "every shock must be a finite return."
+            )
 
     portfolio_volatility = None
     if covariance is not None:
-        frame = _covariance_frame(covariance, "portfolio_scenarios")
+        frame = _covariance_frame(covariance, who)
         common = [str(c) for c in frame.columns if str(c) in series.index]
         if len(common) == len(frame.columns):
             ordered = np.array([float(series[str(c)]) for c in frame.columns])
-            portfolio_volatility = _portfolio_volatility(ordered, frame.to_numpy())
+            with np.errstate(over="ignore", invalid="ignore"):
+                portfolio_volatility = _portfolio_volatility(ordered, frame.to_numpy())
+            if not math.isfinite(portfolio_volatility):
+                raise ValidationError(
+                    f"{who}: the portfolio variance of these weights is beyond "
+                    "the float range. Give weights as fractions of the "
+                    "portfolio and the covariance in return units."
+                )
 
     rows: List[Dict[str, Any]] = []
     for name, shocks in scenarios.items():
         covered = [a for a in series.index if a in shocks]
         uncovered = [a for a in series.index if a not in shocks]
         impact = float(sum(series[a] * float(shocks[a]) for a in covered))
+        if not math.isfinite(impact):
+            raise ValidationError(
+                f"{who}: scenario {str(name)!r} moves the portfolio by more "
+                "than the float range. Give weights as fractions of the "
+                "portfolio and shocks as decimal returns."
+            )
         rows.append(
             {
                 "scenario": str(name),

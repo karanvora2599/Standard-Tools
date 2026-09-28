@@ -289,8 +289,9 @@ AUDIT_SETTINGS: Tuple[_Setting, ...] = (
         is_secret=False,
         effect=(
             "Comma-separated dotted paths into a recorded input that are "
-            "replaced by a hashed placeholder. Which fields are redacted is "
-            "reportable; what they contained is not."
+            "replaced by a hashed placeholder; a path reaches into lists, and "
+            "a segment ending in `{}` redacts a mapping's keys. Which fields "
+            "are redacted is reportable; what they contained is not."
         ),
         resolve=_redact_fields_value,
     ),

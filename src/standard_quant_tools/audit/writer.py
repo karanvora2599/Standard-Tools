@@ -94,19 +94,34 @@ class AuditWriter:
         different remedies. A last line with no newline after it that does
         not parse is a record a crash or a full disk cut off mid-write: the
         refusal says where the fragment starts, so the file can be cut back
-        to its last complete record. A last line that does parse but has
-        lost only its newline is a complete record, and is NOT refused --
-        the backend writes the missing newline before the next line.
+        to its last complete record. For a day file it names
+        `sqt audit repair-tail`, which makes exactly that cut under this
+        writer's lock and keeps the fragment in a side file; the chain
+        index has no such command and names the manual cut. A last line
+        that does parse but has lost only its newline is a complete record,
+        and is NOT refused -- the backend writes the missing newline before
+        the next line.
         """
         try:
             tail = self._last_line(path)
         except ValueError as exc:  # UnicodeDecodeError: bytes that are not text
+            # A write cut short inside a multi-byte character leaves this
+            # too, and then the repair command applies; it refuses a line
+            # that has its newline, so naming it cannot cut a whole line.
+            remedy = (
+                "If the line has no newline after it, `sqt audit repair-tail "
+                f"{path.stem}` shows it and cuts it with --confirm; otherwise "
+                "copy the file somewhere safe, remove the damaged line, and "
+                "run `sqt verify`."
+                if what == "record"
+                else "Copy the file somewhere safe, remove the damaged line, "
+                "and run `sqt verify`."
+            )
             raise AuditIntegrityError(
                 f"audit chain is corrupt: the last line of {path} is not "
                 f"UTF-8 text ({exc}). Refusing to append — extending a chain "
                 "whose tail cannot be read would restart it and destroy the "
-                "trail's evidential value. Copy the file somewhere safe, "
-                "remove the damaged line, and run `sqt verify`."
+                f"trail's evidential value. {remedy}"
             ) from exc
         if tail.text is None:
             return None
@@ -119,16 +134,28 @@ class AuditWriter:
                     if tail.offset is not None
                     else ""
                 )
+                by_hand = (
+                    "copy the file somewhere safe, truncate it to the byte "
+                    "where the fragment starts (the end of the last complete "
+                    "line), and run `sqt verify`."
+                )
+                remedy = (
+                    f"To continue, run `sqt audit repair-tail {path.stem}` to "
+                    "see the fragment, then again with --confirm to cut "
+                    "exactly those bytes under this writer's lock; they are "
+                    "kept in a side file beside the day, which then verifies "
+                    "as it did before the interrupted write. By hand: " + by_hand
+                    if what == "record"
+                    else "To continue: " + by_hand
+                )
                 raise AuditIntegrityError(
                     f"audit chain is corrupt: the last line of {path} was cut "
                     f"off mid-{what} — it has no newline and does not parse "
                     f"({exc}), which is what a crash or a full disk during a "
                     f"write leaves behind.{where} Refusing to append, because "
-                    "nothing can chain onto a fragment. To continue: copy the "
-                    "file somewhere safe, truncate it to the byte where the "
-                    "fragment starts (the end of the last complete line), and "
-                    "run `sqt verify`. The fragment was never a whole "
-                    f"{what}, so no complete {what} is lost by removing it."
+                    f"nothing can chain onto a fragment. {remedy} The "
+                    f"fragment was never a whole {what}, so no complete "
+                    f"{what} is lost by removing it."
                 ) from exc
             raise AuditIntegrityError(
                 f"audit chain is corrupt: the last line of {path} is not valid "

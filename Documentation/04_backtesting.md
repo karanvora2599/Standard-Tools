@@ -31,7 +31,7 @@ The optional per-trade log (`include_trade_log=True`) still runs in Python — i
 
 Agreement is now **confirmed against a real compiled `_sqt_core`**: all three tests in `tests/backtest/test_backtest.py::TestNativeTradeStatsCorrectness` pass with the extension built, covering the single-call path, the batch path, and a native-vs-Python-recomputation cross-check. (An earlier revision of this section deferred that confirmation to CI because the fix had been written without a C++ toolchain available; that is no longer the case.)
 
-**What counts as one trade.** A trade is one **lot**: from the moment exposure leaves zero until it returns to zero. Same-sign resizes and partial reductions happen *inside* a trade rather than ending one, and cost is charged per event on the amount actually transacted — the same `sum(abs(pos_diff))` the equity curve charges. For a lot that was resized, `entry_price` is the weighted-average cost basis across the whole lot and `position_size` is its peak exposure.
+**What counts as one trade.** A trade is one **lot**: from the moment exposure leaves zero until it returns to zero. Same-sign resizes and partial reductions happen *inside* a trade rather than ending one, and cost is charged per event on the amount actually transacted — the same `sum(abs(pos_diff))` the equity curve charges. For a lot that was resized, `entry_price` is the weighted-average cost basis across the whole lot and `position_size` is its peak exposure. A lot's return is its share of the equity curve, so the lots multiply back to the curve exactly — see [Trade Log](#trade-log).
 
 Both implementations now share that definition. They did not always: `backtest.cpp` moved to weighted-average cost basis in the earlier C++ pass while `engine.py`'s `_build_trade_log` emitted a completed trade for *every* position-changing event, so one result dict could report `num_trades=1` beside a two-row `trade_log`. On a 1.0 → 2.5 → 0 sequence that was native 1 trade averaging 17.4492% against a Python log of 2 trades averaging 8.5113%, from identical inputs.
 
@@ -99,7 +99,7 @@ same three values:
 `hold` deliberately does **not** back-fill before the first signal. No view
 had been expressed yet, and back-filling one would be look-ahead.
 
-**Cross-backend parity generally.** Both audit passes (see `CHANGELOG.md`) specifically hunted for cases where the same call returns a different answer depending on whether `_sqt_core` is built. Four were found and fixed — `stochastic_oscillator` on a zero-range window, `cointegration_test`'s `autolag` handling, `hurst_exponent`'s regime post-processing, and `rolling_factor_loadings` on an underdetermined window — plus `profit_factor`'s 0/0 case described under [Understanding the Output](#understanding-the-output) below. Each is now pinned by a test asserting the two backends against *each other* rather than against a constant, since a test pinning only one side cannot see a divergence.
+**Cross-backend parity generally.** Both audit passes (see `CHANGELOG.md`) specifically hunted for cases where the same call returns a different answer depending on whether `_sqt_core` is built. Four were found and fixed — `stochastic_oscillator` on a zero-range window, `cointegration_test`'s `autolag` handling, `hurst_exponent`'s regime post-processing, and `rolling_factor_loadings` on an underdetermined window — plus `profit_factor`'s 0/0 case (now `nan` on both, see [Understanding the Output](#understanding-the-output) below) and the trade log's reconciliation with the equity curve (exact on both, see [Trade Log](#trade-log)). Each is now pinned by a test asserting the two backends against *each other* rather than against a constant, since a test pinning only one side cannot see a divergence.
 
 | Scenario | Python (pandas) | C++ single calls | C++ batch kernel | Speedup (batch) |
 |---|---|---|---|---|
@@ -483,21 +483,21 @@ reference price (`Open`/HL2), so no shift is needed there — `entry_price`/
 For a lot that changed size during its life, `entry_price` is the
 **weighted-average cost basis** across the whole lot rather than any single
 bar's reference price — see [What counts as one trade](#c-acceleration)
-above. That is the price its `return_pct` is actually measured against, but
-it is a computed basis, not a level that necessarily ever traded: a lot
-opened at 100 and doubled at 110 reports `entry_price` 105 even though no
-bar printed 105. Read it as a basis, not as a fill.
+above. It is a computed basis, not a level that necessarily ever traded: a
+lot opened at 100 and doubled at 110 reports `entry_price` 105 even though
+no bar printed 105. Read it as a label, not as a fill — `return_pct` is not
+measured against it (see [Trade Log](#trade-log)).
 
-`return_pct` is also net of commission+slippage: `cost_per_unit` is charged
-per position-changing event on `abs(pos_diff)`, the amount actually
-transacted, which is the same total the equity curve deducts. For a simple
-open-and-close lot that is the familiar 2× `abs(position_size)`; for a lot
-that resized or was partially trimmed it is the sum over its events, and
-for a position still open at the final bar the closing charge is absent
-entirely, since no real exit event/cost was ever applied to the equity
-curve either. The result matches, up to a small second-order compounding
-residual, the equity curve's own return over the trade's span. A position still open at the final bar (no
-exit signal) is marked at that bar's `Close` regardless of `fill_price`,
+`return_pct` is net of commission+slippage: `cost_per_unit` is charged per
+position-changing event on `abs(pos_diff)`, the amount actually transacted,
+which is exactly what the equity curve deducts, and it is charged the way
+the curve charges it — against the equity of the bar it is paid on. For a
+simple open-and-close lot that is `abs(position_size)` on entry and again on
+exit; for a lot that resized or was partially trimmed it is its events'
+amounts; for a position still open at the final bar the closing charge is
+absent entirely, since no real exit event/cost was ever applied to the
+equity curve either. A position still open at the final bar (no exit
+signal) is marked at that bar's `Close` regardless of `fill_price`,
 matching how the equity curve itself is always marked to `Close`.
 
 On the agent-tool side, `fill_price` is exposed on `BacktestInput`,
@@ -571,26 +571,50 @@ trade_log['holding_days'] = (pd.to_datetime(trade_log['exit_date'])
 print(f"Avg holding: {trade_log['holding_days'].mean():.0f} days")
 ```
 
-**`position_size`:** the actual signal value held during the trade (its
+**`position_size`:** the peak signal value held during the trade (its
 sign gives `direction`) — exactly `1.0`/`-1.0` for a `DIRECTION`-type
 signal, but a fractional or leveraged number (e.g. `2.5`) for a `SCORE`-type
 signal, since `run_strategy` multiplies the signal value directly into
-`strategy_return = lagged_signal * market_return`. `return_pct` already
-scales with `position_size` — it is not silently treated as if every trade
-were exactly 1x/-1x.
+`strategy_return = lagged_signal * market_return`. `return_pct` scales with
+it — it is not silently treated as if every trade were exactly 1x/-1x.
 
-**How exactly the log reconciles with the equity curve.** At zero cost, a
-unit-size lot's `return_pct` is exactly the curve's growth over the lot's
-bars, under every `fill_price`. With costs they agree to first order only:
-`return_pct` charges each event's cost as a simple fraction of the lot's
-notional, while the curve deducts it from that bar's equity and compounds, so
-an entry cost forgoes the lot's growth and an exit cost is charged on the
-drifted notional. The gap is about `cost × |lot return|` per lot — at 15 bps
-over five years of daily bars, at most 0.11 points on one lot and 0.07–0.15
-points over the whole log, the log on the high side. A lot sized other than
-1 also differs at zero cost, because a fractional position compounds
-differently from its simple return. Read performance from the curve and
-attribution from the log; do not expect their sums to match to the cent.
+**The log reconciles with the equity curve exactly.** A lot's `return_pct`
+is its share of the curve: the equity when the lot ends over the equity
+when it began, minus one. So the product of `(1 + return_pct / 100)` over
+the log is the curve's final equity over its initial capital, costs
+included, under every `fill_price`, at every size, on both engines — flat
+bars contribute exactly 1. The native kernel's `num_trades`, `win_rate`,
+`profit_factor` and `avg_trade_return_pct` read the same lots off the same
+curve.
+
+```python
+import numpy as np
+log = result["trade_log"]
+np.prod(1 + log["return_pct"] / 100)   # == 1 + result["total_return"],
+                                       #    to the log's 4-decimal rounding
+```
+
+Three consequences worth knowing:
+
+- **A position is a fraction of equity, re-marked every bar**, which is
+  what the curve compounds. A unit long lot at zero cost still returns
+  exactly its fill-to-fill move (`exit / entry − 1`); a short, or a 2.5x
+  lot, returns the compounded path of that fraction of equity, not
+  `size × (exit / entry − 1)`.
+- **Costs compound as the curve charges them.** A round trip at cost `c`
+  on a +20% move is `(1 − c) × 1.2 × (1 − c) − 1`, not `0.20 − 2c`.
+- **A flip bar is split.** When one event closes a lot and opens the
+  opposite one, the curve charges that bar once. The closing lot ends once
+  it has earned the leg it still held — nothing under `fill_price="close"`,
+  whose exit is at the previous close; the overnight leg under the two-leg
+  fills, held to the open — and paid its exit cost; the new lot begins
+  there and ends the bar at the curve's own equity.
+
+Before the CHANGELOG entry of 2026-09-28 the log priced each lot
+fill-to-fill and charged its costs as simple fractions of notional, which
+agreed with the curve to first order only: at 15 bps over five years of
+daily bars it overstated cumulative P&L by 0.07–0.15 points, and a lot sized
+other than 1 differed even at zero cost.
 
 ---
 
@@ -1356,9 +1380,9 @@ cost = per_share_commission(shares=500, rate_per_share=0.005, minimum=1.0)
 | Function | Signature | Behavior |
 |---|---|---|
 | `adv_participation` | `(notional, avg_dollar_volume)` | Fraction of average dollar volume a trade's notional represents; `NaN` ("not estimable") when `avg_dollar_volume` is non-positive or non-finite, which the simulator refuses rather than reads as zero. What `max_adv_participation` above checks under the hood. |
-| `days_to_liquidate` | `(shares, avg_daily_volume, max_participation)` | Estimated trading days to unwind a position without exceeding `max_participation` of average daily volume. Raises `ValidationError` if `avg_daily_volume <= 0` or `max_participation <= 0`. |
-| `sector_exposure` | `(weights, sectors)` | Aggregate portfolio weight by sector; tickers missing from `sectors` are bucketed into `"Unknown"` rather than dropped. |
-| `capacity_report` | `(tickers, avg_dollar_volumes, target_weights, max_participation)` | Per-ticker max account size deployable at `max_participation` of its own ADV, given its target weight. Returns `per_ticker`, `binding_ticker` (tightest constraint, `None` if every weight is 0), `max_account_size`. Raises `ValidationError` on missing tickers or `max_participation <= 0`. |
+| `days_to_liquidate` | `(shares, avg_daily_volume, max_participation)` | Estimated trading days to unwind a position without exceeding `max_participation` of average daily volume. Raises `ValidationError` if `avg_daily_volume <= 0` or `max_participation <= 0`, or if `shares` is not a finite number (a NaN or infinite count used to come back as a NaN or infinite number of days). |
+| `sector_exposure` | `(weights, sectors)` | Aggregate portfolio weight by sector; tickers missing from `sectors` are bucketed into `"Unknown"` rather than dropped. A weight that is not finite is refused by name; one NaN made its whole sector NaN. |
+| `capacity_report` | `(tickers, avg_dollar_volumes, target_weights, max_participation)` | Per-ticker max account size deployable at `max_participation` of its own ADV, given its target weight. Returns `per_ticker`, `binding_ticker` (tightest constraint, `None` if every weight is 0), `max_account_size`. Raises `ValidationError` on missing tickers, a ticker listed twice, a target weight that is not finite, or `max_participation` that is not finite and `> 0` -- the rules `get_capacity_report`'s schema applies. A NaN weight used to become a NaN capacity chosen as the binding constraint, and an infinite one a capacity of exactly 0.0. |
 
 ```python
 from standard_quant_tools.backtest.constraints import capacity_report
@@ -1576,9 +1600,9 @@ trial in one call.
 | `max_drawdown` | float | Worst peak-to-trough decline (negative) |
 | `calmar_ratio` | float | CAGR / \|max drawdown\|. `inf` with no drawdown and a positive CAGR; `nan` when the curve never moved |
 | `win_rate` | float | Fraction of profitable trades |
-| `profit_factor` | float | Gross profit / gross loss. `nan` when nothing traded (it used to read `0.0`, the value "every trade lost" produces). `inf` whenever gross loss is zero (no losing trades) — including the degenerate case where gross profit is *also* zero, e.g. every trade returning exactly 0.00%. Both backends agree on this; the C++ kernel previously returned `0.0` for that 0/0 case while Python returned `inf`. |
+| `profit_factor` | float | Gross profit / gross loss (a trade of exactly 0.00% counts on the loss side). `inf` when gross loss is zero and gross profit is positive (no losing trade). `nan` when nothing traded (it used to read `0.0`, the value "every trade lost" produces) and when every trade returned exactly 0.00% — 0/0 is undefined, the same rule as a Sharpe without dispersion. That case used to read `inf` on both backends, which ranked a run of do-nothing trades first under `sort_by="profit_factor"`; before that the C++ kernel returned `0.0` while Python returned `inf`. |
 | `num_trades` | int | Number of completed round-trips |
-| `avg_trade_return_pct` | float | Average trade P&L in % |
+| `avg_trade_return_pct` | float | Average trade P&L in %: the mean of the trade log's `return_pct`, each lot's share of the equity curve |
 | `turnover` | float | Position changed, summed over bars, in signal units — a flat→long→flat round trip is 2.0 |
 | `realized_cost_pct` | float | `turnover × (commission_pct + slippage_pct)`: exactly what the returns were reduced by |
 | `equity_curve` | pd.Series | Day-by-day portfolio value |

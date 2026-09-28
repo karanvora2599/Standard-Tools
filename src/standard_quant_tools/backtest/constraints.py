@@ -16,6 +16,22 @@ from standard_quant_tools.error import ValidationError
 logger = logging.getLogger(__name__)
 
 
+def _finite_weights(weights: Dict[str, float], field: str, who: str) -> None:
+    """Refuse a weight that is not a finite number, by name.
+
+    A NaN weight made its ticker's capacity NaN, reported as a number and
+    chosen as the binding constraint; an infinite one made the capacity
+    exactly 0.0, a portfolio that supposedly cannot be deployed at all. The
+    tool door refuses both in its schema; this is the same rule for a
+    direct caller."""
+    bad = [name for name, value in weights.items() if not math.isfinite(value)]
+    if bad:
+        raise ValidationError(
+            f"{who}: {field} is not finite at {bad[:10]}; every entry must be "
+            "a finite number."
+        )
+
+
 def adv_participation(notional: float, avg_dollar_volume: float) -> float:
     """
     Fraction of average dollar volume a trade's notional represents.
@@ -53,8 +69,17 @@ def days_to_liquidate(
         ValidationError: avg_daily_volume <= 0, or max_participation <= 0
         (both would make the estimate either undefined or infinite in a
         way that's more useful to surface as an error than silently return
-        inf for).
+        inf for), or a share count that is not a finite number.
     """
+    # A share count past the float range, or NaN, gave an infinite or NaN
+    # number of days that read as a measurement; the count is refused the
+    # same way the volume beside it is.
+    if not math.isfinite(shares):
+        raise ValidationError(
+            f"shares must be a finite number of shares, got {shares}. A "
+            "position past the float range is a unit error upstream -- a "
+            "notional divided by a price that is not on the same scale."
+        )
     # isfinite first: NaN satisfies neither `<= 0` nor `> 0`, so a NaN volume
     # sailed through the guard below and produced a NaN answer that looked
     # like a computed number of days.
@@ -78,7 +103,11 @@ def sector_exposure(
     (or whose sector is the "Unknown" yfinance falls back to — see
     data/base.py's TickerInfo) are bucketed into "Unknown" rather than
     being silently dropped from the totals.
+
+    A weight that is not finite is refused by name: one NaN made its whole
+    sector's total NaN.
     """
+    _finite_weights(weights, "weights", "sector_exposure")
     totals: Dict[str, float] = {}
     for ticker, weight in weights.items():
         sector = sectors.get(ticker, "Unknown")
@@ -117,10 +146,22 @@ def capacity_report(
 
     Raises:
         ValidationError: any ticker missing from avg_dollar_volumes or
-        target_weights, or max_participation <= 0.
+        target_weights, a ticker listed twice, a target weight that is not
+        finite, or max_participation not finite and > 0.
     """
-    if max_participation <= 0:
-        raise ValidationError(f"max_participation must be > 0, got {max_participation}")
+    # isfinite first, as in days_to_liquidate: a NaN passes `<= 0`.
+    if not math.isfinite(max_participation) or max_participation <= 0:
+        raise ValidationError(
+            f"max_participation must be finite and > 0, got {max_participation}"
+        )
+    # The result is keyed by ticker, so a repeat collapsed into one entry
+    # while the universe still read as longer than it was.
+    repeated = sorted({t for t in tickers if tickers.count(t) > 1})
+    if repeated:
+        raise ValidationError(
+            f"capacity_report: tickers repeats {repeated}; list each once."
+        )
+    _finite_weights(target_weights, "target_weights", "capacity_report")
     missing_adv = [t for t in tickers if t not in avg_dollar_volumes]
     if missing_adv:
         raise ValidationError(

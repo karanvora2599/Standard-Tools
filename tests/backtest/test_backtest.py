@@ -202,6 +202,19 @@ class TestTransactionCosts:
         assert result["num_trades"] > 0
 
 
+#: The 2.5x lot on close=[100,102,104,103,105,106], signals=[2.5,2.5,2.5,0,0,0]
+#: at 15 bps: bar 1 earns 2.5 * 2% and pays the entry cost, bars 2-3 carry
+#: 2.5x to 103, bar 4 pays the exit cost -- the equity curve's own product.
+_C = 0.0015
+_LEVERED_LOT_PCT = (
+    (1.0 + 2.5 * 0.02 - 2.5 * _C)
+    * (1.0 + 2.5 * (104.0 / 102.0 - 1.0))
+    * (1.0 + 2.5 * (103.0 / 104.0 - 1.0))
+    * (1.0 - 2.5 * _C)
+    - 1.0
+) * 100.0
+
+
 class TestTradeLog:
     def test_include_trade_log_flag(self, simple_ohlcv):
         signals = pd.Series(
@@ -295,20 +308,18 @@ class TestTradeLog:
         # entry event at bar 1 -> Close[0]=100.0; exit event at bar 4 -> Close[3]=103.0.
         assert row["entry_price"] == pytest.approx(100.0)
         assert row["exit_price"] == pytest.approx(103.0)
-        # raw price return (100 -> 103) = 3.0%, minus 2 * cost_per_unit
-        # (0.001 + 0.0005 = 0.0015, entry + exit) = 0.3% -> 2.7%.
-        assert row["return_pct"] == pytest.approx(2.7, abs=1e-9)
-        # Reconcile against the equity curve's own compounded return over
-        # the trade's actual bar span (bars 1..4) -- small residual (~0.006
-        # points here) is expected: return_pct subtracts cost as a simple
-        # fraction, while the equity curve compounds (1 + return - cost) at
-        # each bar, so cost/return cross terms create a tiny difference,
-        # same second-order approximation already documented for the
-        # next_open/hl2_exploratory two-leg decomposition.
+        # The lot is the curve over its bars: bar 1 earns 100 -> 102 and
+        # pays the entry cost, bars 2-3 carry it to 103, bar 4 pays the exit
+        # cost -- each cost against the equity of the bar it is paid on.
+        # This pinned 2.7 (3.0% minus 2 * 0.15% as simple fractions), which
+        # sat ~0.006 points above the curve it was meant to reconcile with.
+        c = 0.0015
+        expected = ((1.02 - c) * (103.0 / 102.0) * (1.0 - c) - 1.0) * 100.0
+        assert row["return_pct"] == pytest.approx(expected, abs=5e-5)
         equity = result["equity_curve"]
         span_multiplier = float(equity.iloc[4] / equity.iloc[0])
         assert row["return_pct"] == pytest.approx(
-            (span_multiplier - 1.0) * 100, abs=0.05
+            (span_multiplier - 1.0) * 100, abs=5e-5
         )
 
     def test_trade_log_return_scales_with_leveraged_position_size(self):
@@ -322,11 +333,12 @@ class TestTradeLog:
         magnitude via the position_size column, not just a "long"/"short"
         label. Same 6-bar deterministic series as the close-mode
         reconciliation test above, but signals=[2.5,2.5,2.5,0,0,0] instead
-        of [1,1,1,0,0,0]: raw price return 100->103 is still 3.0%, but the
-        trade's realized return is 3.0% * 2.5 = 7.5%, minus
-        2 * abs(position_size) * cost_per_unit (2 * 2.5 * 0.15% = 0.75%,
-        cost scaled by position size the same way raw_pnl is -- a 2.5x
-        trade must pay 2.5x the cost a 1x trade pays) = 6.75%.
+        of [1,1,1,0,0,0]: each bar the lot earns 2.5x the bar's move, and
+        each event pays 2.5 * cost_per_unit (a 2.5x trade pays 2.5x the
+        cost a 1x trade pays), compounded as the equity curve compounds
+        them. This pinned 6.75 (7.5% minus 0.75%, simple fractions); a
+        constant 2.5x of equity re-marked every bar is not 2.5x the 100 ->
+        103 move, and the curve is what the account earned.
         """
         dates = pd.date_range("2023-01-02", periods=6, freq="B")
         close = [100.0, 102.0, 104.0, 103.0, 105.0, 106.0]
@@ -353,7 +365,12 @@ class TestTradeLog:
         row = trade_log.iloc[0]
         assert row["position_size"] == pytest.approx(2.5)
         assert row["direction"] == "long"
-        assert row["return_pct"] == pytest.approx(6.75, abs=1e-9)
+        assert row["return_pct"] == pytest.approx(_LEVERED_LOT_PCT, abs=5e-5)
+        assert row["return_pct"] == pytest.approx(
+            result["total_return"] * 100, abs=5e-4
+        )
+        # Scaled by the size: well over twice the 1x lot on the same bars.
+        assert row["return_pct"] > 2.0 * 2.694
 
     def test_trade_log_cost_scales_with_leveraged_position_size(self):
         """
@@ -365,11 +382,12 @@ class TestTradeLog:
         position, not just resize sequences. signals=[size,0,0]: a real
         close event at bar 2 (pos_diff=-size), not a final-bar flush --
         both entry and exit legs are costed at abs(position_size)*
-        cost_per_unit each. This is the review's own repro case: before
-        this fix, r1=8.0 and r5=48.0 (a 6x ratio, from a flat 2*cost_per_unit
-        applied regardless of size); after the fix, both pnl and cost are
-        linear in position size for a single trade, so r5 is now exactly 5x
-        r1 (40.0 vs 8.0).
+        cost_per_unit each.
+
+        Each cost is charged as the curve charges it, against the equity of
+        the bar it is paid on: (1 + 0.1s - sc)(1 - sc) - 1. These pinned
+        8.0 and 40.0 while the log charged costs as simple fractions
+        (0.1s - 2sc), which overstated each lot against the curve.
         """
         prices = np.array([100.0, 110.0, 121.0])
         signals_1x = pd.Series([1.0, 0.0, 0.0])
@@ -385,15 +403,23 @@ class TestTradeLog:
         )
         r1 = run_strategy(df, signals_1x, commission_pct=0.01, slippage_pct=0.0)
         r5 = run_strategy(df, signals_5x, commission_pct=0.01, slippage_pct=0.0)
-        expected_1x = ((110.0 - 100.0) / 100.0 * 1.0 - 2.0 * 1.0 * 0.01) * 100.0
-        expected_5x = ((110.0 - 100.0) / 100.0 * 5.0 - 2.0 * 5.0 * 0.01) * 100.0
-        assert expected_1x == pytest.approx(8.0, abs=1e-9)
-        assert expected_5x == pytest.approx(40.0, abs=1e-9)
-        assert r1["avg_trade_return_pct"] == pytest.approx(expected_1x, abs=1e-9)
-        assert r5["avg_trade_return_pct"] == pytest.approx(expected_5x, abs=1e-9)
-        assert r5["avg_trade_return_pct"] == pytest.approx(
-            5.0 * r1["avg_trade_return_pct"], abs=1e-9
+        c = 0.01
+        expected_1x = ((1.0 + 0.1 - c) * (1.0 - c) - 1.0) * 100.0
+        expected_5x = ((1.0 + 0.5 - 5 * c) * (1.0 - 5 * c) - 1.0) * 100.0
+        assert expected_1x == pytest.approx(7.91, abs=1e-9)
+        assert expected_5x == pytest.approx(37.75, abs=1e-9)
+        assert r1["avg_trade_return_pct"] == pytest.approx(expected_1x, abs=5e-5)
+        assert r5["avg_trade_return_pct"] == pytest.approx(expected_5x, abs=5e-5)
+        # Each lot is the whole curve here.
+        assert r1["avg_trade_return_pct"] == pytest.approx(
+            r1["total_return"] * 100, abs=5e-4
         )
+        assert r5["avg_trade_return_pct"] == pytest.approx(
+            r5["total_return"] * 100, abs=5e-4
+        )
+        # A size-blind cost would have charged 5x the move but 1x the cost.
+        size_blind = ((1.0 + 0.5 - c) * (1.0 - c) - 1.0) * 100.0
+        assert abs(r5["avg_trade_return_pct"] - size_blind) > 1.0
 
     def test_trade_log_resize_is_one_trade_reconciling_with_equity_costs(self):
         """
@@ -438,17 +464,28 @@ class TestTradeLog:
             "they are two views of one run, not two independent estimates"
         )
 
-        # Weighted-average cost basis across the lot's life.
+        # Weighted-average cost basis across the lot's life: the label.
         basis = (1.0 * 100.0 + 1.5 * 105.0) / 2.5
         assert basis == pytest.approx(103.0, abs=1e-12)
         # Cost is charged per event on the amount actually transacted --
-        # the same 1.0 + 1.5 + 2.5 the equity curve charges.
-        total_cost = (1.0 + 1.5 + 2.5) * 0.01
-        expected_pct = ((108.0 - basis) / basis * 2.5 - total_cost) * 100.0
+        # the same 1.0 + 1.5 + 2.5 the equity curve charges -- and the lot
+        # IS the curve over its bars. This pinned (108/103 - 1) * 2.5 minus
+        # 5 * c as simple fractions, 7.1359%, while the curve made less.
+        c = 0.01
+        expected_pct = (
+            (1.0 + 0.05 - c)
+            * (1.0 + 2.5 * (110.0 / 105.0 - 1.0) - 1.5 * c)
+            * (1.0 + 2.5 * (108.0 / 110.0 - 1.0))
+            * (1.0 - 2.5 * c)
+            - 1.0
+        ) * 100.0
 
         row = trade_log.iloc[0]
         # _build_trade_log rounds return_pct to 4 decimal places for display.
         assert row["return_pct"] == pytest.approx(expected_pct, abs=5e-5)
+        assert row["return_pct"] == pytest.approx(
+            result["total_return"] * 100, abs=5e-4
+        )
         assert row["entry_price"] == pytest.approx(basis, abs=1e-9)
         assert row["exit_price"] == pytest.approx(108.0, abs=1e-9)
         # Reported size is the lot's PEAK exposure, not its opening leg.
@@ -493,8 +530,9 @@ class TestTradeLog:
         assert row["exit_price"] == pytest.approx(104.0)  # Open[4]
         equity = result["equity_curve"]
         span_multiplier = float(equity.iloc[4] / equity.iloc[0])
+        # Exact, to the display rounding: the lot is the curve's share.
         assert row["return_pct"] == pytest.approx(
-            (span_multiplier - 1.0) * 100, abs=0.05
+            (span_multiplier - 1.0) * 100, abs=5e-5
         )
 
 
@@ -574,13 +612,15 @@ class TestCppTradeStatsParity:
         assert result["profit_factor"] == pytest.approx(0.0)
         assert result["avg_trade_return_pct"] == pytest.approx(-50.0)
         # The Python trade_log is still built (include_trade_log=True) from
-        # the real (non-mocked) price/signal data -- its own contents
-        # reflect the real 6-bar scenario (entry at Close[0]=100, exit at
-        # Close[3]=103, return_pct=2.7%), independent of and unreconciled
-        # with the fake summary stats above -- proving the two are no
-        # longer coupled the way they used to be.
+        # the real price/signal events (entry at Close[0]=100, exit at
+        # Close[3]=103) and reconciled with the curve the kernel returned --
+        # here a fake one that never moved, so the lot's share of it is
+        # exactly 0.0 -- independent of the fake summary stats above,
+        # proving the two are not coupled.
         row = result["trade_log"].iloc[0]
-        assert row["return_pct"] == pytest.approx(2.7, abs=1e-9)
+        assert row["entry_price"] == pytest.approx(100.0)
+        assert row["exit_price"] == pytest.approx(103.0)
+        assert row["return_pct"] == pytest.approx(0.0, abs=1e-12)
         assert result["avg_trade_return_pct"] != pytest.approx(row["return_pct"])
 
 
@@ -609,11 +649,10 @@ class TestNativeTradeStatsCorrectness:
     compiled kernel directly (bypassing engine.py's Python override entirely)
     with the same hand-verified 6-bar leveraged scenario as
     test_trade_log_return_scales_with_leveraged_position_size: signal
-    magnitude 2.5, raw price return 100->103 = 3.0%, realized trade return
-    3.0% * 2.5 - 2*2.5*0.15% cost (cost scaled by position size, not flat)
-    = 6.75%. Cannot run without a compiled _sqt_core (no C++ toolchain
-    available in the environment that wrote this fix) -- verified by CI's
-    build-cpp.yml instead.
+    magnitude 2.5, each event costed at 2.5 * 0.15%, compounded as the
+    equity curve compounds it (_LEVERED_LOT_PCT). It pinned 6.75 while
+    costs were simple fractions of notional. Cannot run without a compiled
+    _sqt_core -- verified by CI's build-cpp.yml instead.
     """
 
     @requires_cpp_ext
@@ -623,7 +662,10 @@ class TestNativeTradeStatsCorrectness:
         r = _cpp.run_strategy(close, signals, 10_000.0, 0.001, 0.0005)
         assert r["num_trades"] == 1
         assert r["win_rate"] == pytest.approx(1.0)
-        assert r["avg_trade_return_pct"] == pytest.approx(6.75, abs=1e-9)
+        assert r["avg_trade_return_pct"] == pytest.approx(_LEVERED_LOT_PCT, abs=1e-9)
+        assert r["avg_trade_return_pct"] == pytest.approx(
+            r["total_return"] * 100, abs=1e-9
+        )
 
     @requires_cpp_ext
     def test_batch_run_strategy_native_avg_trade_return_matches_hand_computed(self):
@@ -642,7 +684,9 @@ class TestNativeTradeStatsCorrectness:
         r = results[0]
         assert r[9] == 1  # num_trades
         assert r[7] == pytest.approx(1.0)  # win_rate
-        assert r[10] == pytest.approx(6.75, abs=1e-9)  # avg_trade_return_pct
+        assert r[10] == pytest.approx(
+            _LEVERED_LOT_PCT, abs=1e-9
+        )  # avg_trade_return_pct
 
     @requires_cpp_ext
     def test_run_strategy_native_matches_python_recomputed_stats(self, simple_ohlcv):

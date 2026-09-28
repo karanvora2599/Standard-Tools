@@ -41,6 +41,7 @@ import contextlib
 import hashlib
 import json
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -48,6 +49,9 @@ from typing import Any, Dict, Optional, Tuple
 import pandas as pd
 
 from standard_quant_tools.artifact_store import (
+    _FIRST_REPLACE_WAIT,
+    _REPLACE_ATTEMPTS,
+    _TRANSIENT_WINERRORS,
     write_bytes_atomically,
     write_bytes_exclusively,
 )
@@ -434,6 +438,40 @@ def publish(
     return f"{SCHEME}://{kind}/{run_id}/{name}"
 
 
+def _read_text_when_free(sidecar: Path) -> str:
+    """
+    The sidecar's text, waiting out a Windows sharing violation.
+
+    A sidecar is replaced with `os.replace` (`write_bytes_atomically`), and
+    on Windows a read that meets the replace, or a writer holding the file
+    open, fails with access denied or a sharing violation. Both clear
+    within milliseconds, and reporting either as a damaged sidecar told the
+    caller to publish again under a fresh name when nothing was wrong. The
+    read is retried with the bounds `write_bytes_atomically` retries its
+    rename with; a refusal that outlasts them is said as what it is. Any
+    other error is left to the caller.
+    """
+    wait = _FIRST_REPLACE_WAIT
+    for attempt in range(_REPLACE_ATTEMPTS):
+        try:
+            return sidecar.read_text(encoding="utf-8")
+        except PermissionError as exc:
+            # `winerror` exists only on Windows, so elsewhere a permission
+            # error is not transient and goes straight to the caller.
+            if getattr(exc, "winerror", None) not in _TRANSIENT_WINERRORS:
+                raise
+            if attempt == _REPLACE_ATTEMPTS - 1:
+                raise ValidationError(
+                    f"{sidecar} could not be read: another process kept it "
+                    f"open, or kept replacing it, through {_REPLACE_ATTEMPTS} "
+                    "attempts. The record is not known to be damaged; retry "
+                    "once whatever holds it has closed it."
+                ) from exc
+        time.sleep(wait)
+        wait *= 2
+    raise AssertionError("unreachable")  # pragma: no cover - the loop returns
+
+
 def _read_sidecar(run_id: str, name: str) -> Dict[str, Any]:
     """
     What was recorded beside a published value; an empty dict when nothing
@@ -449,9 +487,11 @@ def _read_sidecar(run_id: str, name: str) -> Dict[str, Any]:
     if not sidecar.exists():
         return {}
     try:
-        loaded = json.loads(sidecar.read_text(encoding="utf-8"))
+        loaded = json.loads(_read_text_when_free(sidecar))
         problem = None if isinstance(loaded, dict) else "it is not a JSON object"
     except (OSError, ValueError) as exc:
+        if isinstance(exc, ValidationError):
+            raise
         problem = f"it cannot be read as JSON ({type(exc).__name__})"
     if problem is not None:
         raise ValidationError(

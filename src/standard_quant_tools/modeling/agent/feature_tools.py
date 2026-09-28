@@ -32,6 +32,11 @@ from typing import Any, Dict, List, Sequence
 
 import pandas as pd
 
+from standard_quant_tools._jsonsafe import sanitize_for_json
+from standard_quant_tools.audit.dispatch import (
+    _forget_last_request_id,
+    _run_and_record,
+)
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.modeling.agent.feature_models import (
     AnalyzeFeatureInput,
@@ -1357,7 +1362,20 @@ def feature_dispatch(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
     Refuses anything it does not own, by name, for the same reason every
     other runtime dispatcher does: a scoped agent that hallucinates a tool
     must get an error rather than a successful result from somewhere else.
+
+    Runs on the path every other dispatcher runs on (`_run_and_record`,
+    then the JSON-safety boundary), as `modeling_dispatch` does. It used to
+    call the tool and return its dump, so a direct Python caller wrote no
+    decision record -- `last_request_id()` named nothing and there was no
+    call for `explain_decision` to explain -- a NaN or infinite scalar
+    argument reached the analysis instead of being refused by name, and a
+    non-finite statistic left as NaN rather than null. The MCP route
+    already took the audited path; this closes the other door. See the
+    CHANGELOG entry of 2026-09-28.
     """
+    # A call refused before it runs writes no record; clear the previous
+    # call's id so last_request_id() does not name it.
+    _forget_last_request_id()
     entry = FEATURE_TOOL_DISPATCH.get(name)
     if entry is None:
         raise ValidationError(
@@ -1365,4 +1383,4 @@ def feature_dispatch(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
             f"{sorted(FEATURE_TOOL_DISPATCH)}"
         )
     fn, model = entry
-    return fn(model(**arguments)).model_dump()
+    return sanitize_for_json(_run_and_record(name, fn, model(**arguments)))

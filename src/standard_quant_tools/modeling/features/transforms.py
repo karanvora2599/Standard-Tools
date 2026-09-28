@@ -88,6 +88,47 @@ def _native_matrix(frame: pd.DataFrame) -> Optional[np.ndarray]:
 # and the NaN rule that make it correct on a real panel.
 
 
+def _refuse_infinite_training_values(train: pd.DataFrame, func: str) -> None:
+    """
+    Refuse +/-inf in the rows a fit is computed from, on both backends.
+
+    NaN is a missing value and the fit skips it. An infinity is not: it is
+    an order statistic with no finite neighbour to interpolate towards and
+    a value with no z-score. Whenever it sat at or next to a winsorize
+    quantile the fitted bound came out infinite on one backend and NaN on
+    the other -- the kernel's quantile answers +inf, pandas 2.x's
+    interpolation forms inf - inf -- and either way the clipped mean was
+    infinite, the scale fell back to 1.0 and every transformed value was
+    -inf or NaN. That holds at the default 0.99 as well as at 1.0: one
+    infinity among 50 rows sits in the interpolation bracket.
+
+    Refusing is within the transform's contract: build_model_dataset
+    already refuses an infinite feature ("a degenerate computation, not a
+    missing one"), so no fold of a built dataset can hold one; this closes
+    the same door for a frame handed to the fit directly.
+    """
+    numeric = train.select_dtypes(include="number")
+    if numeric.shape[1] == 0:
+        return
+    bad = np.isinf(numeric.to_numpy(dtype=np.float64))
+    if not bad.any():
+        return
+    per_column = bad.sum(axis=0)
+    named = [
+        f"{col!r} ({int(count)})"
+        for col, count in zip(numeric.columns, per_column)
+        if count
+    ]
+    raise ValidationError(
+        f"{func}: the training rows hold infinite values in column(s) "
+        f"{', '.join(named[:5])}{' and more' if len(named) > 5 else ''}. An "
+        "infinity has no quantile to winsorize to and no z-score, so the "
+        "fitted bounds, mean and scale would be infinite or undefined. Mark "
+        "the value missing with NaN, which the fit skips, or repair or drop "
+        "the rows."
+    )
+
+
 def fit_preprocessing(train: pd.DataFrame) -> Dict[str, Dict[str, float]]:
     """
     Fit per-column winsorize bounds (1st/99th percentile) + zscore
@@ -95,7 +136,11 @@ def fit_preprocessing(train: pd.DataFrame) -> Dict[str, Dict[str, float]]:
     engine.py exists to enforce: these stats are computed once per fold
     from the training rows, then the SAME stats are applied to both train
     and test via apply_preprocessing, never refit on test.
+
+    NaN is skipped. An infinite training value is refused on both backends
+    -- see `_refuse_infinite_training_values`.
     """
+    _refuse_infinite_training_values(train, "fit_preprocessing")
     matrix = _native_matrix(train) if HAS_CPP else None
     if matrix is not None:
         native = _cpp_core.fit_preprocess_stats(matrix, _WINSOR_LOW, _WINSOR_HIGH)
@@ -280,6 +325,7 @@ def _fit_and_apply_with_stats(
     the one function that provides both, and `fit_and_apply_preprocessing`
     is the public view of it.
     """
+    _refuse_infinite_training_values(train, "fit_and_apply_preprocessing")
     train_matrix = _native_matrix(train) if HAS_CPP else None
     test_matrix = _native_matrix(test) if HAS_CPP else None
     same_columns = list(train.columns) == list(test.columns)

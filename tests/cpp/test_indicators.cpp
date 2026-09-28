@@ -941,6 +941,123 @@ static void test_stochastic_all_nan_series_is_all_nan_not_a_crash() {
 }
 
 
+// ── Missing bars in the Wilder recursions ─────────────────────────────────────
+//
+// A non-finite bar is skipped: the recursion's answer is the indicator of the
+// series with that bar dropped, reported at the bars that remain, NaN at the
+// dropped one. The RSI used to sum a NaN in its seed window into both
+// averages and stay NaN to the last bar, and to read one in the forward pass
+// as an unchanged price.
+
+static std::vector<double> drop_at(const std::vector<double>& v,
+                                   const std::vector<std::size_t>& gaps) {
+    std::vector<double> out;
+    for (std::size_t i = 0; i < v.size(); ++i)
+        if (std::find(gaps.begin(), gaps.end(), i) == gaps.end()) out.push_back(v[i]);
+    return out;
+}
+
+static std::vector<double> nan_at(std::vector<double> v,
+                                  const std::vector<std::size_t>& gaps,
+                                  double fill = std::numeric_limits<double>::quiet_NaN()) {
+    for (std::size_t g : gaps) v[g] = fill;
+    return v;
+}
+
+static bool is_gap(const std::vector<std::size_t>& gaps, std::size_t i) {
+    return std::find(gaps.begin(), gaps.end(), i) != gaps.end();
+}
+
+static void test_rsi_skips_a_missing_bar() {
+    const auto close = pseudo_random(120, 11);
+    const std::vector<std::vector<std::size_t>> cases = {{0}, {5}, {40, 41}, {119}};
+    for (const auto& gaps : cases) {
+        const auto full = sqt::rsi(nan_at(close, gaps).data(), close.size(), 14);
+        const auto kept = drop_at(close, gaps);
+        const auto ref  = sqt::rsi(kept.data(), kept.size(), 14);
+        std::size_t k = 0;
+        for (std::size_t i = 0; i < close.size(); ++i) {
+            if (is_gap(gaps, i)) { CHECK_NAN(full[i]); continue; }
+            CHECK((std::isnan(full[i]) && std::isnan(ref[k])) || full[i] == ref[k]);
+            ++k;
+        }
+    }
+    // The case that used to end the series: a NaN inside the seed window.
+    const auto seeded = sqt::rsi(nan_at(close, {5}).data(), close.size(), 14);
+    CHECK_NOT_NAN(seeded.back());
+}
+
+static void test_rsi_treats_an_infinity_as_missing() {
+    const auto close = pseudo_random(80, 12);
+    const double inf = std::numeric_limits<double>::infinity();
+    const auto a = sqt::rsi(nan_at(close, {30}, inf).data(), close.size(), 14);
+    const auto b = sqt::rsi(nan_at(close, {30}).data(), close.size(), 14);
+    for (std::size_t i = 0; i < close.size(); ++i)
+        CHECK((std::isnan(a[i]) && std::isnan(b[i])) || a[i] == b[i]);
+    CHECK_NOT_NAN(a.back());
+}
+
+static void test_wilder_atr_and_adx_skip_a_missing_bar() {
+    auto close = pseudo_random(150, 13);
+    std::vector<double> high, low;
+    ohlc_from_prices(close, high, low);
+    const std::vector<std::size_t> gaps = {3, 70, 71};
+    const auto gapped_low = nan_at(low, gaps);
+    const auto atr_full = sqt::wilder_atr(high.data(), gapped_low.data(), close.data(),
+                                          close.size(), 14);
+    const auto adx_full = sqt::adx(high.data(), gapped_low.data(), close.data(),
+                                   close.size(), 14);
+    const auto h = drop_at(high, gaps), l = drop_at(low, gaps), c = drop_at(close, gaps);
+    const auto atr_ref = sqt::wilder_atr(h.data(), l.data(), c.data(), c.size(), 14);
+    const auto adx_ref = sqt::adx(h.data(), l.data(), c.data(), c.size(), 14);
+    std::size_t k = 0;
+    for (std::size_t i = 0; i < close.size(); ++i) {
+        if (is_gap(gaps, i)) {
+            CHECK_NAN(atr_full[i]);
+            for (int f = 0; f < 3; ++f) CHECK_NAN(adx_full[i * 3 + f]);
+            continue;
+        }
+        CHECK((std::isnan(atr_full[i]) && std::isnan(atr_ref[k])) || atr_full[i] == atr_ref[k]);
+        for (int f = 0; f < 3; ++f) {
+            const double a = adx_full[i * 3 + f], b = adx_ref[k * 3 + f];
+            CHECK((std::isnan(a) && std::isnan(b)) || a == b);
+        }
+        ++k;
+    }
+    CHECK_NOT_NAN(atr_full.back());
+    CHECK_NOT_NAN(adx_full.back());
+}
+
+static void test_stochastic_d_recovers_after_an_infinite_close() {
+    // An infinite %K entered %D's running sum, and inf - inf left every
+    // later %D NaN. It is now a missing close: %K NaN at that bar only.
+    auto close = pseudo_random(60, 14);
+    std::vector<double> high, low;
+    ohlc_from_prices(close, high, low);
+    close[30] = std::numeric_limits<double>::infinity();
+    const auto out = sqt::stochastic_oscillator(high.data(), low.data(), close.data(),
+                                                close.size(), 5, 3);
+    CHECK_NAN(out[30 * 2]);
+    CHECK_NOT_NAN(out[31 * 2]);
+    CHECK_NAN(out[32 * 2 + 1]);
+    CHECK_NOT_NAN(out[33 * 2 + 1]);
+    CHECK_NOT_NAN(out[59 * 2 + 1]);
+}
+
+static void test_stochastic_missing_close_over_a_flat_window_is_nan() {
+    // A flat window reports %K = 0.0; a bar whose close is missing reports
+    // nothing, flat window or not.
+    const std::size_t n = 12;
+    std::vector<double> high(n, 10.0), low(n, 10.0), close(n, 10.0);
+    close[8] = std::numeric_limits<double>::quiet_NaN();
+    const auto out = sqt::stochastic_oscillator(high.data(), low.data(), close.data(),
+                                                n, 5, 3);
+    CHECK_EQ(out[7 * 2], 0.0);
+    CHECK_NAN(out[8 * 2]);
+    CHECK_EQ(out[9 * 2], 0.0);
+}
+
+
 // ── Fused technical_indicators() tests ────────────────────────────────────────
 
 static void test_technical_indicators_matches_individual_functions() {
@@ -1097,6 +1214,13 @@ int main() {
     test_stochastic_nan_low_only_still_yields_the_right_max();
     test_stochastic_nan_k_does_not_poison_every_later_d();
     test_stochastic_all_nan_series_is_all_nan_not_a_crash();
+
+    // Missing bars
+    test_rsi_skips_a_missing_bar();
+    test_rsi_treats_an_infinity_as_missing();
+    test_wilder_atr_and_adx_skip_a_missing_bar();
+    test_stochastic_d_recovers_after_an_infinite_close();
+    test_stochastic_missing_close_over_a_flat_window_is_nan();
 
     // Fused technical_indicators()
     test_technical_indicators_matches_individual_functions();

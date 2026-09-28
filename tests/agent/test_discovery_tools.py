@@ -54,17 +54,25 @@ class TestListStrategies:
     def test_window_parameters_report_the_look_ahead_floor(self):
         """A window's real floor is 1, and the reason is not stylistic:
         pandas reads a negative period as a FORWARD window, so a caller who
-        believes 0 or -20 is merely unusual would be writing look-ahead."""
+        believes 0 or -20 is merely unusual would be writing look-ahead.
+        One window declares a higher floor and is reported with it:
+        bollinger_reversion's period is at least 2, because one bar has no
+        sample standard deviation to build bands from."""
         result = dispatch("list_strategies", {})
         windows = [
-            p
+            (s["name"], p)
             for s in result["strategies"]
             for p in s["parameters"]
             if p["kind"] == "window"
         ]
         assert windows, "no window parameters found — the fixture is wrong"
-        for param in windows:
-            assert param["minimum"] == 1.0
+        for strategy, param in windows:
+            floor = (
+                2.0
+                if (strategy, param["name"]) == ("bollinger_reversion", "period")
+                else 1.0
+            )
+            assert param["minimum"] == floor
             assert param["maximum"] == float(_MAX_WINDOW_BARS)
 
     def test_relations_match_the_declared_ones(self):

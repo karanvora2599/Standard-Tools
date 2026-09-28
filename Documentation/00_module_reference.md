@@ -644,4 +644,6 @@ actually exposed to.
 | `liquidity_adjusted_var(...)` | VaR that admits you cannot exit at the mark |
 | `portfolio_scenarios(...)` | Named shocks rather than a distribution |
 
+`standard_quant_tools.portfolio.position_sizing.size_position(account_equity, last_close, last_atr, ...)` sizes one position behind an ATR stop, with half-Kelly when the win statistics are given; it is the arithmetic `get_position_size` calls, and refuses a stop, share count or position value past the float range by name.
+
 Deep guide: [05_portfolio.md](05_portfolio.md#allocation-without-expected-returns)

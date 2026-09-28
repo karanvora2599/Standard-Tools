@@ -57,7 +57,7 @@ from ..features.registry import list_features as _list_features
 from ..monitoring import THRESHOLDS, drift_report, prediction_drift, realized_ic
 from ..portfolio_eval import evaluate_model_portfolio as _evaluate_model_portfolio
 from ..registry import signing as _signing
-from ..registry.lifecycle import current_stage, promote, promotions
+from ..registry.lifecycle import current_stage, promote, promotions, torn_fragments
 from ..registry.model_registry import load_manifest, load_monitoring_reference
 from ..registry.package import PackageVerification, verify_model_package
 from ..scoring import score_model as _score_model
@@ -970,6 +970,11 @@ def inspect_model(input_data: InspectModelInput) -> InspectModelResult:
             # moved it, read off the append-only log beside the manifest.
             "stage": current_stage(input_data.model_id),
             "promotions": [p.to_dict() for p in promotions(input_data.model_id)],
+            # A fragment an interrupted append left at the end of that log
+            # is cut off and kept beside it by whichever call reads the log
+            # first. It is named here, with its side file, because the
+            # history above may be missing the decision it was the start of.
+            "promotion_log_repairs": torn_fragments(input_data.model_id),
         }
     elif input_data.view == "feature_importance":
         data = {
@@ -1524,6 +1529,7 @@ def promote_model(input_data: PromoteModelInput) -> PromoteModelResult:
         history=[p.to_dict() for p in promotions(input_data.model_id)],
         manifest_sha256=manifest_sha256,
         package_ok=report.ok,
+        promotion_log_repairs=torn_fragments(input_data.model_id),
     )
 
 

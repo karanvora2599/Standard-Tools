@@ -40,7 +40,10 @@ import numpy as np
 import pandas as pd
 
 from standard_quant_tools.error import ValidationError
-from standard_quant_tools.indicators.volatility import collapse_flat_windows
+from standard_quant_tools.indicators.volatility import (
+    collapse_flat_windows,
+    require_bollinger_period,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -158,9 +161,12 @@ def _refuse_infinities(tickers: Sequence[str], **columns: Optional[np.ndarray]) 
     numbers. So the same universe was refused without the extension and
     answered with it -- by NaN from the inf bar to the end of the history.
 
-    NaN is not refused here. It is how a missing bar is spelled, and the
-    kernel treats it as a gap: the windows that contain it are NaN and the
-    indicator resumes after it.
+    NaN is not refused here. It is how a missing bar is spelled, and every
+    indicator treats it as a gap on both backends -- the Wilder recursions
+    skip it, the windowed indicators are NaN over the windows that hold it
+    and resume after. The per-ticker wrappers refuse an infinity with the
+    same rule, so this is the one policy of `indicators/_missing.py`, not a
+    panel-only one.
     """
     for column, matrix in columns.items():
         if matrix is None:
@@ -225,10 +231,12 @@ def technical_indicators_panel(
 
     Raises:
         ValidationError: on an unknown indicator name, an empty universe, a
-            missing OHLC(V) column, tickers with no bars in common, or a
-            +/-inf value on the shared bars. NaN is not refused by that
-            check: it marks a missing bar, which the native kernel treats
-            as a gap.
+            missing OHLC(V) column, tickers with no bars in common, a
+            +/-inf value on the shared bars, or a Bollinger period below 2
+            when "bollinger_bands" is requested. NaN is not refused by that
+            check: it marks a missing bar, which rsi, atr, adx,
+            bollinger_bands and stochastic_oscillator treat as a gap on
+            either backend (see `indicators/_missing.py`).
 
     Five of these run in the native kernel over the whole matrix; the rest
     loop the per-ticker wrappers, which is the same arithmetic and the same
@@ -248,6 +256,11 @@ def technical_indicators_panel(
         return {}
 
     wanted = set(indicators)
+    if "bollinger_bands" in wanted:
+        # Before either path: the kernel answers all-NaN for a period below
+        # 2 and the per-ticker wrapper refuses it, so without this the
+        # panel's answer would depend on the build.
+        require_bollinger_period(bollinger_period, "technical_indicators_panel")
     index, high, low, close, volume = _stack_panel(
         ohlcv_by_ticker,
         tickers,
@@ -366,6 +379,12 @@ def _panel_fallback(
 
     Loops the existing per-ticker wrappers -- the point of the module is the
     API shape, which should not disappear just because the fast path did.
+
+    A NaN bar reaches the wrappers and is read as a gap there, exactly as
+    the kernel reads it: the Wilder recursions skip it, the windowed
+    indicators are NaN over the windows that hold it. The wrappers used to
+    refuse NaN outright, so a universe with one missing bar was answered by
+    the native panel and refused by this one.
     """
     from standard_quant_tools.indicators.momentum import rsi as _rsi
     from standard_quant_tools.indicators.momentum import stochastic_oscillator as _stoch

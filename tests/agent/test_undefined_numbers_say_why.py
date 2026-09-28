@@ -193,8 +193,8 @@ class TestBacktestRatios:
             in lines
         )
         assert (
-            "profit_factor is null: no trade closed, so there is no gross profit or loss to divide."
-            in lines
+            "profit_factor is null: no trade closed, or every trade returned "
+            "exactly zero, so there is no gross profit or loss to divide." in lines
         )
 
     def test_a_strategy_that_traded_has_numbers_and_no_null_lines(self):

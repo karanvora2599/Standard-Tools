@@ -53,7 +53,8 @@ _MAX_WINDOW_BARS = 100_000
 
 class _Param:
     """One parameter's contract. `kind` is 'window' (a positive integer bar
-    count) or 'number' (a finite float within an optional range)."""
+    count, optionally with a larger `minimum` and the reason for it in
+    `why_minimum`) or 'number' (a finite float within an optional range)."""
 
     def __init__(
         self,
@@ -61,11 +62,13 @@ class _Param:
         default: Any,
         minimum: Optional[float] = None,
         maximum: Optional[float] = None,
+        why_minimum: str = "",
     ) -> None:
         self.kind = kind
         self.default = default
         self.minimum = minimum
         self.maximum = maximum
+        self.why_minimum = why_minimum
 
 
 # Relations that must hold BETWEEN parameters, as (left, right, why).
@@ -113,7 +116,15 @@ STRATEGY_PARAM_SCHEMA: Dict[str, Dict[str, _Param]] = {
         "signal": _Param("window", 9),
     },
     "bollinger_reversion": {
-        "period": _Param("window", 20),
+        # The bands are a sample standard deviation either side of the mean;
+        # one bar has none, and bollinger_bands refuses that period.
+        "period": _Param(
+            "window",
+            20,
+            minimum=2,
+            why_minimum="One bar has no sample standard deviation, so there "
+            "are no bands to revert to.",
+        ),
         # A negative multiplier puts the "upper" band below the "lower" one,
         # inverting every entry and exit while still producing plausible
         # output. Zero collapses both bands onto the mean.
@@ -263,6 +274,11 @@ def resolve_strategy_params(
         value = supplied[name]
         if spec.kind == "window":
             resolved[name] = _resolve_window(strategy, name, value)
+            if spec.minimum is not None and resolved[name] < spec.minimum:
+                raise ValidationError(
+                    f"{strategy}: {name} must be at least {int(spec.minimum)} "
+                    f"bars, got {resolved[name]}. {spec.why_minimum}"
+                )
         else:
             resolved[name] = _resolve_number(strategy, name, value, spec)
 

@@ -1,10 +1,12 @@
 import logging
+import math
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
 from standard_quant_tools.error import ValidationError
+from standard_quant_tools.indicators._missing import refuse_infinities
 from standard_quant_tools.validation import require_finite_array, validate_series
 
 logger = logging.getLogger(__name__)
@@ -103,76 +105,96 @@ def _adx_numba(
     high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int
 ) -> np.ndarray:
     """
-    Wilder's ADX using the same smoothing as RSI.
+    Wilder's ADX using the same smoothing as RSI -- the fallback for
+    adx_into in indicators.cpp, operation for operation.
     Returns a (n, 3) array: [:, 0] = DI+, [:, 1] = DI-, [:, 2] = ADX.
+
+    A bar whose high, low or close is not finite is a missing bar and is
+    skipped: DM and TR are measured against the last PRESENT bar, every
+    Wilder state is carried across the gap, and the row is NaN there. The
+    warm-up thresholds count present bars. On a series with no gap that is
+    the single pass the kernel always made. (The former four-array version
+    carried a NaN into every later row, where the kernel's max() quietly
+    dropped it -- the two backends disagreed about every bar after a gap.)
     """
     n = len(close)
     result = np.full((n, 3), np.nan)
 
-    # Wilder's seed needs `period` bars of DM/TR before the first DI can be
-    # written at row `period`. With n <= period every write below
-    # (result[period], dx_vals[period], result[2*period-1]) indexes past the
-    # end of an n-row array -- and @njit compiles without bounds checking, so
-    # that is an out-of-bounds heap write, not an IndexError. Return the
-    # all-NaN warm-up result before any of them, matching what the C++ kernel
-    # already does for this case.
-    if n <= period:
+    # Wilder's seed needs `period` moves before the first DI. With
+    # n <= period there cannot be that many, and returning here keeps every
+    # write below inside the array (@njit compiles without bounds checking).
+    if period <= 0 or n <= period:
         return result
 
-    dm_plus = np.zeros(n)
-    dm_minus = np.zeros(n)
-    tr = np.zeros(n)
+    adx_start = 2 * period - 1
+    atr_s = 0.0
+    dmp_s = 0.0
+    dmm_s = 0.0
+    dx_seed_sum = 0.0
+    adx_val = 0.0
+    j = 0  # position among the PRESENT bars
+    have_prev = False
+    prev_high = 0.0
+    prev_low = 0.0
+    prev_close = 0.0
 
-    # Step 1: raw DM and TR per bar
-    for i in range(1, n):
-        up_move = high[i] - high[i - 1]
-        down_move = low[i - 1] - low[i]
+    for i in range(n):
+        if not (
+            math.isfinite(high[i]) and math.isfinite(low[i]) and math.isfinite(close[i])
+        ):
+            continue
+        if not have_prev:
+            prev_high = high[i]
+            prev_low = low[i]
+            prev_close = close[i]
+            have_prev = True
+            continue
+        j += 1
 
-        dm_plus[i] = up_move if (up_move > down_move and up_move > 0) else 0.0
-        dm_minus[i] = down_move if (down_move > up_move and down_move > 0) else 0.0
-
-        tr[i] = max(
+        up_move = high[i] - prev_high
+        down_move = prev_low - low[i]
+        dm_plus = up_move if (up_move > down_move and up_move > 0.0) else 0.0
+        dm_minus = down_move if (down_move > up_move and down_move > 0.0) else 0.0
+        tr = max(
             high[i] - low[i],
-            abs(high[i] - close[i - 1]),
-            abs(low[i] - close[i - 1]),
+            abs(high[i] - prev_close),
+            abs(low[i] - prev_close),
         )
+        prev_high = high[i]
+        prev_low = low[i]
+        prev_close = close[i]
 
-    # Step 2: Wilder's initial sums (first `period` bars)
-    atr_s = np.sum(tr[1 : period + 1])
-    dmp_s = np.sum(dm_plus[1 : period + 1])
-    dmm_s = np.sum(dm_minus[1 : period + 1])
+        if j <= period:
+            # Wilder's seed sums over the first `period` moves.
+            atr_s += tr
+            dmp_s += dm_plus
+            dmm_s += dm_minus
+        else:
+            # Wilder's smooth forward.
+            atr_s = atr_s - (atr_s / period) + tr
+            dmp_s = dmp_s - (dmp_s / period) + dm_plus
+            dmm_s = dmm_s - (dmm_s / period) + dm_minus
 
-    di_plus_0 = 100.0 * dmp_s / atr_s if atr_s != 0 else 0.0
-    di_minus_0 = 100.0 * dmm_s / atr_s if atr_s != 0 else 0.0
-    result[period, 0] = di_plus_0
-    result[period, 1] = di_minus_0
+        if j < period:
+            continue
 
-    di_sum = di_plus_0 + di_minus_0
-    dx_0 = 100.0 * abs(di_plus_0 - di_minus_0) / di_sum if di_sum != 0 else 0.0
-
-    # Step 3: Wilder's smooth forward
-    dx_vals = np.zeros(n)
-    dx_vals[period] = dx_0
-
-    for i in range(period + 1, n):
-        atr_s = atr_s - (atr_s / period) + tr[i]
-        dmp_s = dmp_s - (dmp_s / period) + dm_plus[i]
-        dmm_s = dmm_s - (dmm_s / period) + dm_minus[i]
-
-        di_p = 100.0 * dmp_s / atr_s if atr_s != 0 else 0.0
-        di_m = 100.0 * dmm_s / atr_s if atr_s != 0 else 0.0
+        di_p = 100.0 * dmp_s / atr_s if atr_s != 0.0 else 0.0
+        di_m = 100.0 * dmm_s / atr_s if atr_s != 0.0 else 0.0
         result[i, 0] = di_p
         result[i, 1] = di_m
 
         di_sum = di_p + di_m
-        dx_vals[i] = 100.0 * abs(di_p - di_m) / di_sum if di_sum != 0 else 0.0
+        dx = 100.0 * abs(di_p - di_m) / di_sum if di_sum != 0.0 else 0.0
 
-    # Step 4: ADX = Wilder's smooth of DX (needs `period` DX values to initialise)
-    adx_start = 2 * period - 1
-    if adx_start < n:
-        result[adx_start, 2] = np.mean(dx_vals[period : adx_start + 1])
-        for i in range(adx_start + 1, n):
-            result[i, 2] = (result[i - 1, 2] * (period - 1) + dx_vals[i]) / period
+        # ADX = Wilder's smooth of DX; `period` DX values initialise it.
+        if j <= adx_start:
+            dx_seed_sum += dx
+            if j == adx_start:
+                adx_val = dx_seed_sum / period
+                result[i, 2] = adx_val
+        else:
+            adx_val = (adx_val * (period - 1) + dx) / period
+            result[i, 2] = adx_val
 
     return result
 
@@ -189,6 +211,11 @@ def adx(
     ADX > 25 indicates a strong trend; direction determined by DI+/DI-.
     Uses C++ fast path when built, then Numba JIT, then pure Python fallback.
     Returns DataFrame with columns ['DI_Plus', 'DI_Minus', 'ADX'].
+
+    A bar with a NaN high, low or close is a missing bar: the recursions
+    skip it, so the result is the ADX of the series with that bar dropped,
+    and NaN at the bar itself. An infinite value is refused. See
+    `indicators/_missing.py`.
     """
     if period <= 0:
         raise ValidationError(f"period must be > 0, got {period}")
@@ -210,9 +237,9 @@ def adx(
     h = high.to_numpy(dtype=np.float64)
     l = low.to_numpy(dtype=np.float64)
     c = close.to_numpy(dtype=np.float64)
-    require_finite_array(h, "high", "adx")
-    require_finite_array(l, "low", "adx")
-    require_finite_array(c, "close", "adx")
+    refuse_infinities(h, "high", "adx")
+    refuse_infinities(l, "low", "adx")
+    refuse_infinities(c, "close", "adx")
 
     if HAS_CPP and _cpp_core is not None:
         raw = _cpp_core.adx(h, l, c, period)

@@ -1841,11 +1841,28 @@ PYBIND11_MODULE(_sqt_core, m) {
                                      a_mean.mutable_data(), a_std.mutable_data()};
             const double* ptr = values.data();
             bool ok = true;
+            // An infinity is refused, not fitted. It has no finite neighbour
+            // to interpolate a quantile towards and no z-score: the kernel's
+            // bound came out +inf where pandas' came out NaN, and either way
+            // the clipped mean was infinite and every transformed value -inf
+            // or NaN. NaN stays a missing value the fit skips. Scanned
+            // without the GIL; the refusal is raised once it is held again.
+            std::size_t inf_col = n_cols;
             {
                 py::gil_scoped_release release;
-                ok = sqt::fit_preprocess_stats(ptr, n_rows, n_cols,
-                                               q_low, q_high, out);
+                for (std::size_t k = 0; k < n_rows * n_cols; ++k) {
+                    if (std::isinf(ptr[k])) { inf_col = k % n_cols; break; }
+                }
+                if (inf_col == n_cols)
+                    ok = sqt::fit_preprocess_stats(ptr, n_rows, n_cols,
+                                                   q_low, q_high, out);
             }
+            if (inf_col != n_cols)
+                throw std::invalid_argument(
+                    "fit_preprocess_stats: column " + std::to_string(inf_col) +
+                    " holds an infinite value. An infinity has no quantile to "
+                    "winsorize to and no z-score; mark it missing with NaN, "
+                    "which the fit skips, or repair or drop the row");
             if (!ok)
                 throw std::runtime_error(
                     "fit_preprocess_stats: could not allocate a column buffer");
@@ -1865,8 +1882,9 @@ PYBIND11_MODULE(_sqt_core, m) {
         "Reproduces pandas exactly, including the conventions that are\n"
         "pandas' choice rather than mathematical necessity: quantiles are\n"
         "LINEARLY INTERPOLATED at h=(n-1)*q, the standard deviation is\n"
-        "ddof=1, and NaN is skipped rather than propagated. Infinities are\n"
-        "not skipped -- pandas treats only NaN as missing.\n\n"
+        "ddof=1, and NaN is skipped rather than propagated. An infinite\n"
+        "value raises ValueError naming its column: it has no quantile to\n"
+        "winsorize to and no z-score.\n\n"
         "A column with no finite values returns NaN bounds and mean with\n"
         "std=1.0; so does a constant column, so the caller's division stays\n"
         "defined.");

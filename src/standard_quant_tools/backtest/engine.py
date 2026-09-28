@@ -76,40 +76,105 @@ except ImportError:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
+def _strategy_bar_returns(
+    close_prices: pd.Series,
+    executed: pd.Series,
+    cost_per_unit: float,
+    fill_prices: Optional[pd.Series] = None,
+) -> Tuple[pd.Series, pd.Series, pd.Series, pd.Series]:
+    """
+    The per-bar pieces of the equity curve: (net strategy return, held leg,
+    position change, transaction cost).
+
+    One definition, shared by run_strategy's Python path and the trade log,
+    so a lot's return is read off exactly the arithmetic the curve uses.
+
+    `fill_prices` is None for fill_price="close", where a change transacts at
+    the previous close and a bar earns executed * close-to-close return. For
+    the two-leg fills it is that bar's Open or (High + Low) / 2: the
+    overnight leg (previous close -> fill) at YESTERDAY's position, the
+    intraday leg (fill -> close) at TODAY's, compounded, so an unchanged
+    position earns exactly the close-to-close move. backtest.cpp's
+    gross_return_at compounds them identically.
+
+    The held leg is what the position held INTO a bar earns before that
+    bar's change -- 1.0 under a close fill, 1 + yesterday's position *
+    overnight leg under a two-leg fill -- which is where the trade log splits
+    a flip bar between the lot that closes and the lot that opens.
+    """
+    pos_diff = executed.diff().fillna(executed.iloc[0])
+    transaction_costs = pos_diff.abs() * cost_per_unit
+    if fill_prices is not None:
+        prev_close = close_prices.shift(1)
+        overnight_leg = ((fill_prices - prev_close) / prev_close).fillna(0.0)
+        intraday_leg = (close_prices - fill_prices) / fill_prices
+        executed_prev = executed.shift(1).fillna(0.0)
+        held_leg = 1.0 + executed_prev * overnight_leg
+        gross_returns = held_leg * (1.0 + executed * intraday_leg) - 1.0
+    else:
+        returns = close_prices.pct_change(fill_method=None).fillna(0.0)
+        held_leg = pd.Series(1.0, index=close_prices.index)
+        gross_returns = executed * returns
+    return gross_returns - transaction_costs, held_leg, pos_diff, transaction_costs
+
+
 def _build_trade_log(
     ref_prices: pd.Series,
     close_prices: pd.Series,
     executed: pd.Series,
     cost_per_unit: float = 0.0,
+    *,
+    two_leg: bool = False,
+    equity_curve: Optional[pd.Series] = None,
 ) -> pd.DataFrame:
     """
-    Build a per-trade log from the same events and prices the equity curve
-    uses.
+    Build a per-trade log from the same events, legs and costs the equity
+    curve uses -- and reconcile with it exactly.
 
-    How far the two reconcile, exactly. At zero cost a unit-size lot's
-    return_pct equals the equity curve's growth over the lot's bars under
-    every fill_price (the next_open / hl2_exploratory legs compound, so a
-    held bar earns the full close-to-close move). With costs they agree to
-    first order only: return_pct charges each event's cost as a simple
-    fraction of the lot's notional, while the equity curve deducts it from
-    that bar's equity and compounds, so an entry cost forgoes the lot's
-    growth and an exit cost is charged on the drifted notional. The gap is
-    about cost * |lot return| per lot -- measured at 15 bps over five years
-    of daily bars, at most 0.11 points on one lot and 0.07-0.15 points over
-    the whole log, with the log on the high side. A lot sized other than 1
-    also differs at zero cost, because a fractional position compounds
-    differently from its simple return. Read performance from the equity
-    curve; read the log for attribution.
+    return_pct IS THE LOT'S SHARE OF THE EQUITY CURVE: the equity when the
+    lot ends over the equity when it began, minus one. So the product of
+    (1 + return_pct/100) over the log equals the curve's final equity over
+    its initial capital, costs included, under every fill_price and at every
+    position size; a flat bar contributes exactly 1. Before the CHANGELOG
+    entry of 2026-09-28 each lot was priced fill-to-fill with its costs
+    charged as a simple fraction of notional, which matched the curve to
+    first order only -- the log overstated cumulative P&L by 0.07-0.15
+    points over five years of daily bars at 15 bps, and a lot sized other
+    than 1 differed even at zero cost.
+
+    Two consequences worth knowing. A position of size s is a constant
+    fraction s of equity, re-marked every bar, which is what the curve
+    compounds; for a unit LONG lot at zero cost return_pct is still exactly
+    the fill-to-fill move (exit / entry - 1), but a short or any other size
+    returns the compounded path, not s * (exit / entry - 1). And costs enter
+    as the curve
+    charges them -- a fraction of the equity of the bar they are paid on --
+    so a round trip at cost c on a +20% move is (1 - c) * 1.2 * (1 - c) - 1,
+    not 0.20 - 2c.
+
+    A FLIP bar closes one lot and opens the opposite one, and the curve
+    charges it once: gross factor minus both costs, as fractions of the
+    equity the bar started with. The closing lot ends once it has earned the
+    leg it still held (nothing under fill_price="close", whose exit is at the
+    previous close; the overnight leg under the two-leg fills, held to the
+    open) and paid its exit cost; the opening lot begins there and ends the
+    bar at the curve's own equity. The two factors multiply back to the bar.
+
+    `equity_curve` is the curve to reconcile with -- the native kernel's
+    when it produced the result. Without one, the curve is built here from
+    `_strategy_bar_returns`, the same arithmetic run_strategy's Python path
+    uses. `two_leg` says whether `ref_prices` are the bars' own fill prices
+    (next_open / hl2_exploratory) rather than the previous close.
 
     entry_price/exit_price use ref_prices — the same reference price series
     run_strategy's return calculation uses: Close[i-1] under
     fill_price="close" (since executed[i] = signals[i-1], a position that
     "appears" in `executed` at event date i actually earns its first
     return over Close[i-1] -> Close[i], so i-1's close is its true economic
-    entry/exit point — the review's finding), or Open[i] / (High[i]+Low[i])/2
-    directly under "next_open"/"hl2_exploratory", where the two-leg
-    decomposition already prices entries/exits at that bar's own reference
-    price (no shift needed there).
+    entry/exit point), or Open[i] / (High[i]+Low[i])/2 directly under
+    "next_open"/"hl2_exploratory", where the two-leg decomposition already
+    prices entries/exits at that bar's own reference price (no shift
+    needed there). They label the lot; its return is read off the curve.
 
     A "trade" is one LOT: from the moment exposure leaves zero until it
     returns to zero. Same-sign resizes and partial reductions happen
@@ -123,38 +188,24 @@ def _build_trade_log(
     fix on a 1.0 -> 2.5 -> 0 sequence: native 1 trade / 17.4492% average,
     Python log 2 trades / 8.5113% average, from the identical inputs.
 
-    Cost accounting follows the same shared model. Each position-changing
-    event is charged abs(pdiff) * cost_per_unit — the amount actually
-    transacted at that event, which is what run_strategy deducts from the
-    equity curve. The old close-and-reopen reading of a resize charged
-    2*(1.0 + 2.5) = 7 units of cost where the equity curve charged
-    1.0 + 1.5 + 2.5 = 5, so trade-log P&L and equity P&L could not be
-    reconciled for any strategy that scales a position. cost_per_unit is a
-    cost per unit of *notional exposure traded*, so a 5x-leveraged trade
-    pays 5x what a 1x trade pays.
+    Costs follow the same shared model: each position-changing event is
+    charged abs(pdiff) * cost_per_unit, the amount actually transacted,
+    which is what run_strategy deducts from the curve -- so a resize
+    1.0 -> 2.5 -> 0 pays 1.0 + 1.5 + 2.5 = 5 units, not the 7 an old
+    close-and-reopen reading charged. cost_per_unit is a cost per unit of
+    *notional exposure traded*, so a 5x-leveraged trade pays 5x what a 1x
+    trade pays.
 
     A lot still open at the final bar is flushed as a synthesized
     mark-to-market exit at the final Close (equity is marked to Close
-    regardless of fill_price). No exit cost is charged for it, because no
-    exit event occurred and the equity curve never deducted one either.
+    regardless of fill_price), ending at the curve's final equity. No exit
+    cost is charged for it, because no exit event occurred and the equity
+    curve never deducted one either.
 
-    entry_price/exit_price use ref_prices — the same reference price series
-    run_strategy's return calculation uses: Close[i-1] under
-    fill_price="close" (since executed[i] = signals[i-1], a position that
-    "appears" in `executed` at event date i actually earns its first
-    return over Close[i-1] -> Close[i], so i-1's close is its true economic
-    entry/exit point), or Open[i] / (High[i]+Low[i])/2 directly under
-    "next_open"/"hl2_exploratory", where the two-leg decomposition already
-    prices entries/exits at that bar's own reference price (no shift
-    needed there). For a lot that was resized, entry_price is the
-    weighted-average cost basis across the whole lot rather than the price
-    of its first leg — that is the price its reported return is actually
-    measured against.
-
+    For a lot that was resized, entry_price is the weighted-average cost
+    basis across the whole lot rather than the price of its first leg.
     position_size is the signed peak exposure the lot ever carried (2.5 for
-    a lot that went 1.0 -> 2.5), not just its sign: run_strategy's own
-    return calculation multiplies the raw price return by the executed
-    signal value, so return_pct scales with size too. direction
+    a lot that went 1.0 -> 2.5), not just its sign. direction
     ("long"/"short") is a readable label derived from its sign.
 
     Vectorized detection of position changes; only iterates over trade
@@ -162,9 +213,10 @@ def _build_trade_log(
     """
     pos_diff = executed.diff()
     pos_diff.iloc[0] = executed.iloc[0]
+    diffs = pos_diff.to_numpy(dtype=np.float64)
 
-    trade_event_idx = pos_diff[pos_diff != 0].index
-    if len(trade_event_idx) == 0:
+    events = np.flatnonzero(diffs != 0)
+    if len(events) == 0:
         return pd.DataFrame(
             columns=[
                 "entry_date",
@@ -177,20 +229,46 @@ def _build_trade_log(
             ]
         )
 
+    index = executed.index
+
+    def _aligned(series: pd.Series) -> np.ndarray:
+        # Positional arrays on `executed`'s bars. Every caller passes series
+        # on the same index; the reindex is for one that does not.
+        if not series.index.equals(index):
+            series = series.reindex(index)
+        return series.to_numpy(dtype=np.float64)
+
+    positions = executed.to_numpy(dtype=np.float64)
+    refs = _aligned(ref_prices)
+    closes = _aligned(close_prices)
+    fills = ref_prices if two_leg else None
+    strategy_returns, held_leg, _, _ = _strategy_bar_returns(
+        close_prices.reindex(index), executed, cost_per_unit, fills
+    )
+    held = held_leg.to_numpy(dtype=np.float64)
+    if equity_curve is None:
+        # run_strategy's own Python curve, from 1.0: the same floor at zero
+        # for a bar that loses everything.
+        equity = (1.0 + strategy_returns).clip(lower=0.0).cumprod().to_numpy()
+        initial = 1.0
+    else:
+        equity = _aligned(equity_curve)
+        # run_strategy never has an event on bar 0 (executed[0] is always
+        # 0), so the curve's first value is the equity every lot starts from.
+        initial = float(equity[0])
+
     records: List[Dict[str, Any]] = []
     # The open lot: None when flat. Mirrors backtest.cpp's PositionState,
-    # plus the reporting fields (entry_date / peak_size) the C++ side has
-    # no need for because it only accumulates scalar stats.
+    # plus the reporting fields (entry_date / peak_size / cost_basis) the
+    # C++ side has no need for because it only accumulates scalar stats.
     lot: Optional[Dict[str, Any]] = None
 
-    def _close_record(exit_date: Any, exit_price: float, extra_pnl: float) -> None:
-        """Emit the finished lot. extra_pnl is the P&L of the closing leg
-        for a real exit (already folded into realized_pnl by the caller,
-        so 0.0 there) or the mark-to-market P&L of the still-open remainder
-        for the final-bar flush."""
+    def _close_record(exit_date: Any, exit_price: float, end_equity: float) -> None:
+        """Emit the finished lot, ending at `end_equity`."""
         assert lot is not None
         peak = lot["peak_size"]
-        net_pnl = lot["realized_pnl"] + extra_pnl - lot["cost_accrued"]
+        start = lot["start_equity"]
+        growth = end_equity / start - 1.0 if start > 0.0 else -1.0
         records.append(
             {
                 "entry_date": lot["entry_date"],
@@ -199,68 +277,65 @@ def _build_trade_log(
                 "entry_price": round(float(lot["cost_basis"]), 4),
                 "exit_price": round(float(exit_price), 4),
                 "position_size": round(float(peak), 4),
-                "return_pct": round(float(net_pnl) * 100, 4),
+                "return_pct": round(float(growth) * 100, 4),
             }
         )
 
-    for date in trade_event_idx:
-        # .loc, not []: bare [] on a Series is positional for an integer
-        # index and label-based otherwise, so it silently changed meaning
-        # with the index type pandas happened to infer.
-        ref_price = float(ref_prices.loc[date])
-        new_pos = float(executed.loc[date])
-        pdiff = float(pos_diff.loc[date])
+    for p in events:
+        date = index[p]
+        ref_price = float(refs[p])
+        new_pos = float(positions[p])
+        pdiff = float(diffs[p])
+        before = float(equity[p - 1]) if p > 0 else initial
+        after = float(equity[p])
 
+        split: Optional[float] = None
         if lot is not None and (pdiff > 0) != (lot["size"] > 0):
             # Opposite sign: reduce, fully close, or close-then-flip. Only
             # the quantity that actually offsets existing exposure is
             # closed here; a flip's fresh leg is opened by the block below.
             pos_sign = 1.0 if lot["size"] > 0 else -1.0
             closing_qty = min(abs(pdiff), abs(lot["size"]))
-            lot["cost_accrued"] += closing_qty * cost_per_unit
-            basis = lot["cost_basis"]
-            if basis != 0.0:
-                lot["realized_pnl"] += (
-                    (ref_price - basis) / basis * (closing_qty * pos_sign)
-                )
             lot["size"] -= closing_qty * pos_sign
 
             if lot["size"] == 0.0:
-                _close_record(date, ref_price, 0.0)
+                # A plain close ends at the bar's own equity. A flip ends at
+                # the split point -- the leg the lot still held, less its
+                # exit cost -- where the opposite lot begins.
+                if new_pos == 0.0:
+                    end = after
+                else:
+                    end = before * (float(held[p]) - closing_qty * cost_per_unit)
+                    split = end
+                _close_record(date, ref_price, end)
                 lot = None
         elif lot is not None:
-            # Same sign: a resize/add. Blend the cost basis and charge only
-            # the incremental amount transacted. This does NOT complete a
-            # trade — the lot lives on.
+            # Same sign: a resize/add. Blend the cost basis for the label.
+            # This does NOT complete a trade — the lot lives on.
             old_notional = lot["size"] * lot["cost_basis"]
             lot["size"] += pdiff
             lot["cost_basis"] = (old_notional + pdiff * ref_price) / lot["size"]
-            lot["cost_accrued"] += abs(pdiff) * cost_per_unit
             if abs(lot["size"]) > abs(lot["peak_size"]):
                 lot["peak_size"] = lot["size"]
             continue
 
         if lot is None and new_pos != 0.0:
-            # Opening a fresh lot — either already flat, or the branch
-            # above just fully closed the prior one (a flip). Uses the raw
-            # target position, not a delta-derived value.
+            # Opening a fresh lot — from flat at the bar's starting equity,
+            # or on a flip at the split point. Uses the raw target position,
+            # not a delta-derived value.
             lot = {
                 "entry_date": date,
                 "size": new_pos,
                 "peak_size": new_pos,
                 "cost_basis": ref_price,
-                "cost_accrued": abs(new_pos) * cost_per_unit,
-                "realized_pnl": 0.0,
+                "start_equity": split if split is not None else before,
             }
 
     # Flush a lot still open at the last bar (buy-and-hold, trend
-    # strategies that never exit). Marked to the final Close, not
-    # ref_prices, and charged no exit cost.
+    # strategies that never exit): marked to the final Close, ending at the
+    # final equity, with no exit cost.
     if lot is not None:
-        last_price = float(close_prices.iloc[-1])
-        basis = lot["cost_basis"]
-        mtm = (last_price - basis) / basis * lot["size"] if basis != 0.0 else 0.0
-        _close_record(close_prices.index[-1], last_price, mtm)
+        _close_record(index[-1], float(closes[-1]), float(equity[-1]))
 
     return pd.DataFrame(records)
 
@@ -283,7 +358,18 @@ def _compute_trade_stats(trade_log: pd.DataFrame) -> Dict[str, float]:
     win_rate = len(winners) / num_trades
     gross_profit = float(winners["return_pct"].to_numpy(dtype=float).sum())
     gross_loss = float(np.abs(losers["return_pct"].to_numpy(dtype=float)).sum())
-    profit_factor = gross_profit / gross_loss if gross_loss != 0 else np.inf
+    # x/0 with x > 0 is +inf, the "never lost" reading. 0/0 -- every trade
+    # returned exactly 0.0, so there is neither a gross profit nor a gross
+    # loss -- is undefined, and NaN like every other 0/0 ratio in this
+    # library (a Sharpe without dispersion, a Sortino or Calmar of a book
+    # that never moved). It was +inf, which ranked such a run first under
+    # sort_by="profit_factor". backtest.cpp's profit_factor_of is the same.
+    if gross_loss > 0:
+        profit_factor = gross_profit / gross_loss
+    elif gross_profit > 0:
+        profit_factor = np.inf
+    else:
+        profit_factor = float("nan")
 
     return {
         "win_rate": round(win_rate, 4),
@@ -318,6 +404,7 @@ def _undefined_ratios_as_nan(
     annualized_vol: Any,
     num_trades: Any,
     risk_free_rate: float,
+    win_rate: Any = None,
 ) -> tuple:
     """
     The 0/0 convention for a native result, applied at the boundary.
@@ -334,7 +421,10 @@ def _undefined_ratios_as_nan(
     A Sortino is 0/0 only when every excess return is exactly zero: a book
     that never moved under a zero rate (a positive rate makes the first bar
     downside; a negative one makes every flat bar a gain, and +inf is right).
-    A Calmar over no drawdown is 0/0 when the curve did not grow.
+    A Calmar over no drawdown is 0/0 when the curve did not grow. A profit
+    factor of +inf is 0/0 when no trade won (`win_rate` 0): +inf means there
+    was no gross loss, and with no winner there was no gross profit either --
+    every trade returned exactly zero.
     """
     total_return = np.asarray(total_return, dtype=float)
     no_motion = (total_return == 0.0) & (np.asarray(annualized_vol, dtype=float) == 0.0)
@@ -344,9 +434,13 @@ def _undefined_ratios_as_nan(
         np.isinf(sortino) & no_motion & (risk_free_rate >= 0.0), np.nan, sortino
     )
     calmar = np.where(np.isinf(calmar) & (total_return <= 0.0), np.nan, calmar)
-    profit_factor = np.where(
-        np.asarray(num_trades) == 0, np.nan, np.asarray(profit_factor, dtype=float)
-    )
+    profit_factor = np.asarray(profit_factor, dtype=float)
+    undefined = np.asarray(num_trades) == 0
+    if win_rate is not None:
+        undefined = undefined | (
+            np.isinf(profit_factor) & (np.asarray(win_rate, dtype=float) == 0.0)
+        )
+    profit_factor = np.where(undefined, np.nan, profit_factor)
     return sortino, calmar, profit_factor
 
 
@@ -432,7 +526,11 @@ def run_strategy(
         look-ahead-bias caveat (see below). sortino_ratio and calmar_ratio
         are +inf over an empty denominator with a positive numerator and
         NaN when both are zero (a book that never moved); profit_factor is
-        NaN when nothing traded.
+        +inf when no trade lost and some trade won, and NaN when nothing
+        traded or every trade returned exactly zero (0/0). The trade log's
+        return_pct is each lot's share of the equity curve, so the log
+        compounds to exactly the curve's total return -- see
+        _build_trade_log.
 
     Raises:
         ValidationError: fill_price is not one of "close", "next_open",
@@ -697,23 +795,23 @@ def run_strategy(
             r["annualized_volatility"],
             r["num_trades"],
             risk_free_rate,
+            win_rate=r["win_rate"],
         )
         r["sortino_ratio"] = float(sortino_v)
         r["calmar_ratio"] = float(calmar_v)
         r["profit_factor"] = float(pf_v)
         # win_rate/profit_factor/num_trades/avg_trade_return_pct: read
         # straight from the native result. backtest.cpp's own trade-log
-        # logic uses the identical convention _build_trade_log does
-        # (entry_price = prices[i-1], entry_size = signal magnitude, cost
-        # scaled by position size) and this session's own CI verification
-        # work (TestNativeTradeStatsCorrectness, run against a real
-        # compiled _sqt_core on live CI, not just locally) already
-        # confirmed native and Python trade stats agree exactly -- so
-        # rebuilding the full Python trade log here just to recompute
-        # numbers the C++ kernel already returned was pure redundant work,
-        # not a correctness requirement. The Python trade log itself is
-        # still built below, but only when include_trade_log actually asks
-        # for the DataFrame, not for its stats.
+        # logic uses the identical convention _build_trade_log does (one
+        # lot per excursion from zero, its return read off the equity curve
+        # it shares, a flip bar split at the leg the old lot still held),
+        # and TestNativeTradeStatsCorrectness pins native and Python trade
+        # stats against each other -- so rebuilding the full Python trade
+        # log here just to recompute numbers the C++ kernel already
+        # returned would be redundant work, not a correctness requirement.
+        # The Python trade log itself is still built below, but only when
+        # include_trade_log actually asks for the DataFrame, not for its
+        # stats.
         result: Dict[str, Any] = {
             "final_equity": round(float(r["final_equity"]), 2),
             "total_return": round(float(r["total_return"]), 6),
@@ -750,11 +848,15 @@ def run_strategy(
                 ) / 2.0
             else:
                 ref_for_log = prices.shift(1)
+            # Reconciled with THIS curve -- the kernel's -- so the log's lots
+            # multiply back to exactly the equity the result reports.
             result["trade_log"] = _build_trade_log(
                 ref_for_log,
                 prices,
                 executed,
                 commission_pct + slippage_pct,
+                two_leg=fill_price != "close",
+                equity_curve=equity_curve,
             )
         logger.debug(
             "[run_strategy] C++  return=%.2f%%  sharpe=%.3f  trades=%d  maxdd=%.2f%%",
@@ -767,11 +869,8 @@ def run_strategy(
 
     # ── Python fallback ───────────────────────────────────────────────────────
     logger.debug("[run_strategy] using Python fallback  fill_price=%s", fill_price)
-    returns = prices.pct_change(fill_method=None).fillna(0.0)
     executed = signals.shift(1).fillna(0.0)
     cost_per_unit = commission_pct + slippage_pct
-    pos_diff = executed.diff().fillna(executed.iloc[0])
-    transaction_costs = pos_diff.abs() * cost_per_unit
 
     if fill_price in ("next_open", "hl2_exploratory"):
         # Two-leg decomposition, correct for entries, continuations, exits,
@@ -801,15 +900,13 @@ def run_strategy(
             ref_prices = (
                 price_data.loc[idx, "High"] + price_data.loc[idx, "Low"]
             ) / 2.0
-        overnight_leg = ((ref_prices - prices.shift(1)) / prices.shift(1)).fillna(0.0)
-        intraday_leg = (prices - ref_prices) / ref_prices
-        executed_prev = executed.shift(1).fillna(0.0)
-        gross_returns = (1.0 + executed_prev * overnight_leg) * (
-            1.0 + executed * intraday_leg
-        ) - 1.0
-        strategy_returns = gross_returns - transaction_costs
+        strategy_returns, _, pos_diff, transaction_costs = _strategy_bar_returns(
+            prices, executed, cost_per_unit, ref_prices
+        )
     else:
-        strategy_returns = executed * returns - transaction_costs
+        strategy_returns, _, pos_diff, transaction_costs = _strategy_bar_returns(
+            prices, executed, cost_per_unit
+        )
         # executed[i] = signals[i-1], so a position "appearing" in `executed`
         # at bar i actually earns its first return over Close[i-1] -> Close[i]
         # — Close[i-1] is its true economic entry/exit reference, not Close[i]
@@ -871,7 +968,14 @@ def run_strategy(
         "periods_per_year_source": ppy_source,
     }
 
-    trade_log = _build_trade_log(ref_prices, prices, executed, cost_per_unit)
+    trade_log = _build_trade_log(
+        ref_prices,
+        prices,
+        executed,
+        cost_per_unit,
+        two_leg=fill_price != "close",
+        equity_curve=equity_curve,
+    )
     result.update(_compute_trade_stats(trade_log))
 
     if include_trade_log:
@@ -1419,6 +1523,7 @@ def backtest_grid(
                 metrics_df["annualized_volatility"],
                 metrics_df["num_trades"],
                 risk_free_rate,
+                win_rate=metrics_df["win_rate"],
             )
             metrics_df["final_equity"] = metrics_df["final_equity"].round(2)
             metrics_df["total_return"] = metrics_df["total_return"].round(6)

@@ -175,4 +175,6 @@ user-supplied strategy code (custom signal callables passed to
   placeholder is not brute-forceable offline for a small value space — an
   unset salt still redacts and logs a one-time warning. It's intended for
   values you want comparable-but-hidden (account IDs, SSNs), not secret
-  material where guessability matters.
+  material where guessability matters. A path reaches fields inside lists,
+  and a segment ending in `{}` (`positions{}`) redacts a mapping's KEYS,
+  salted the same way, for inputs keyed by the value being hidden.
