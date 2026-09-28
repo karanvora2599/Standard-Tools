@@ -1,5 +1,38 @@
 # Changelog
 
+## An option chain prices in one call
+
+The options path priced a chain one contract and one Python call at a time:
+476 implied-volatility solves were 476 boundary crossings, and greeks over a
+spot grid were one call per leg per spot. The per-call cost was small; the
+count was not, and it is what kept a solved delta too expensive to use where
+a moneyness proxy stood in for it.
+
+- **`implied_volatility_batch`** solves every contract of a chain in one
+  native call, with the scalar solver's own steps — bound check, Newton on
+  the volatility step, bisection over the same bracket, the same ceiling at
+  intrinsic — so the volatility, iteration count, method and price error
+  match `implied_volatility` bit for bit. A quote no volatility can
+  reproduce comes back per contract with a reason (`below_lower_bound`,
+  `above_upper_bound`, `no_root_in_bracket`, ...) and a NaN volatility
+  instead of refusing the chain; an input outside the pricing domain still
+  refuses the batch, naming the contract. A 476-contract chain takes about
+  0.25 ms instead of 14-27 ms.
+- **`black_scholes_greeks_batch`** returns `option_greeks`' full set, in its
+  units, per contract or on a contracts-by-spots grid: a 61 x 476 grid in
+  about 0.35 ms instead of 100-200 ms.
+- **`zero_gamma_spot`** finds where a book's net signed gamma changes sign,
+  refining each crossing with Brent's method, and says so when the book is
+  long or short gamma across the whole bracket rather than inventing a
+  crossing.
+- **The delta-hedge simulation and the scenario grid price through the
+  batch**, with identical results, refusal messages included; the default
+  hedge simulation runs in about 4 ms instead of 80. A vectorised fallback
+  gives the same doubles without the extension.
+- **The build digest reads CRLF as LF.** A checkout that only rewrote line
+  endings made a correct build read as stale and sent every kernel to its
+  slower Python path.
+
 ## The extension says which sources it was built from, and a stale one is not used
 
 An editable install keeps its own copy of the compiled extension while its

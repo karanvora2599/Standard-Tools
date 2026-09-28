@@ -169,6 +169,27 @@ class TestTheDigest:
         target.write_bytes(original)
         assert source_digest(str(native)) == (before, count)
 
+    def test_line_endings_alone_do_not_change_it(self, tmp_path):
+        """A checkout that only rewrote line endings -- git normalising on
+        checkout, an editor saving CRLF -- is the same code, so the build
+        from it is not stale. Only CRLF pairs are folded: a lone carriage
+        return is still a changed byte."""
+        native = _tree(tmp_path)
+        before = source_digest(str(native))
+        for path in native.rglob("*"):
+            if path.is_file():
+                data = path.read_bytes().replace(b"\r\n", b"\n")
+                path.write_bytes(data.replace(b"\n", b"\r\n"))
+        assert source_digest(str(native)) == before
+        for path in native.rglob("*"):
+            if path.is_file():
+                path.write_bytes(path.read_bytes().replace(b"\r\n", b"\n"))
+        assert source_digest(str(native)) == before
+
+        target = native / "src" / "a.cpp"
+        target.write_bytes(target.read_bytes().replace(b"\n", b"\r"))
+        assert source_digest(str(native)) != before
+
     def test_a_renamed_or_added_file_changes_it(self, tmp_path):
         native = _tree(tmp_path)
         before, count = source_digest(str(native))

@@ -101,6 +101,53 @@ The rolling Hurst gain is the most significant and the most robust to how you me
 See the CHANGELOG for the full methodology, every number above with its exact benchmark script, and a running log of real edge-case bugs found and fixed while actually building, running, and benchmarking this codebase — not assumed from reading the code (a degenerate-input NaN in the cointegration ADF test, a half-life NaN-vs-inf gap, an input-validation gap in the Monte Carlo binding, incorrect hand-written C++ test expectations that had never been compiled before, and a Linux-CI-only flake in an audit-trail test caused by an unfiltered directory glob, among others).
 
 ---
+## Option chains
+
+`analysis.options_batch` prices a chain in one call (see
+[12_options.md](12_options.md#whole-chains-in-one-call)). One solve or one
+greek is cheap — 30–55 µs for an implied volatility and 3.5 µs for
+`black_scholes_greeks` on this machine — so the cost of a chain was never
+the formula; it was one Python call, one validation and one dict per
+contract, hundreds or tens of thousands of times. Measured with
+[`tests/bench/bench_options.py`](../tests/bench/bench_options.py), min of 7
+warm runs, three runs on 2026-09-28 (the ranges are run-to-run spread on a
+shared workstation, not error bars):
+
+| Workload | Scalar loop | Batch, C++ (16 threads) | Batch, C++ (`SQT_NUM_THREADS=1`) | Batch, numpy fallback |
+|---|---|---|---|---|
+| Implied vol, 476-contract chain (17 expiries × 14 strikes × call/put, 36 quotes refused) | 14–27 ms (`implied_volatility` per contract) | **0.21–0.28 ms** (60–95×) | 0.39 ms | 3.8–10 ms |
+| Greeks, 61 spots × 476 contracts = 29,036 valuations | 100–109 ms (`black_scholes_greeks`); 196–208 ms (`option_greeks`, the full set the batch returns) | **0.32–0.37 ms** (~300×) | 1.7 ms | 10–11 ms |
+| `zero_gamma_spot`, 476 legs, 61-spot scan + 5 Brent steps | — | 0.7–1.0 ms | 2.0 ms | 11–14 ms |
+| `simulate_delta_hedge`, default 500 paths × 21 rebalances | 79–85 ms | **3.5–4.1 ms** (21×) | — | 9–11.5 ms |
+| `option_risk_scenarios`, 61 spot × 21 vol shocks | 3.6–3.8 ms | 0.66–0.90 ms (4–5.5×) | — | 2.0–2.3 ms |
+| `option_risk_scenarios`, default 7 × 5 grid | 0.11–0.13 ms | 0.09 ms (1.3–1.5×) | — | 0.23–0.26 ms |
+
+Every batched number is the same result as the loop beside it, not an
+approximation of it: the tests hold the kernel, the fallback and the scalar
+functions to each other on randomized chains, and the hedge simulation and
+the scenario grid to their old per-contract loops double for double.
+
+**Three honest findings.**
+
+- **Threads buy little on one chain's implied volatility.** 476 solves are
+  0.39 ms serial and 0.21–0.28 ms on 16 threads: a solve is ~0.8 µs of work,
+  so thread start-up and guided scheduling eat most of the split. The greek
+  grid, 29,036 valuations, is where OpenMP pays — 1.7 ms to 0.3 ms. Both go
+  through the same work gate as every other kernel (`omp_policy.hpp`).
+- **The numpy fallback is 1.5–10×, not 50×.** It takes `exp`, `log`, `pow`
+  and `erf` from `math`, one Python-level call per element, because numpy's
+  own vectorised transcendentals may round the last bit differently on some
+  CPUs and the batch is held to the scalar's doubles. Exactness was chosen
+  over speed on the path that only runs without the extension.
+- **A small grid does not pay, and one caller was left alone because of
+  it.** The default 7 × 5 scenario grid is 35 valuations; the batch's
+  validation and array set-up cost about as much as the loop, so it is
+  1.3× on the kernel and 2× *slower* on the fallback. `analyze_strategy`
+  prices one leg per contract of a structure — two to four, typically — and
+  batching them measured 270 µs → 305 µs on a four-leg condor, so it keeps
+  its per-leg loop.
+
+---
 ## Python-Level Optimisations
 
 Confirmed benchmarks on a 2 000-bar series (Python 3.12, NumPy 2.4):

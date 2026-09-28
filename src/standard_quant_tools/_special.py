@@ -54,6 +54,7 @@ __all__ = [
     "norm_cdf",
     "norm_cdf_array",
     "norm_pdf",
+    "norm_pdf_array",
     "norm_ppf",
 ]
 
@@ -75,21 +76,42 @@ def norm_pdf(x: float) -> float:
     return math.exp(-0.5 * x * x) / _SQRT_2PI
 
 
+_erf_each = np.frompyfunc(math.erf, 1, 1)
+_exp_each = np.frompyfunc(math.exp, 1, 1)
+
+
 def norm_cdf_array(x: Any) -> np.ndarray:
     """
-    `norm_cdf` over an array. `math.erf` is scalar and numpy has no erf, so
-    this is a vectorize wrapper -- the same one `multi_factor` used.
+    `norm_cdf` over an array, element for element the double `norm_cdf`
+    returns.
 
-    The empty case is handled explicitly because `np.vectorize` infers its
-    output dtype by calling the function once, and on a size-0 input there
-    is nothing to call it with: it raises `ValueError: cannot call
-    vectorize on size 0 inputs unless otypes is set`. The CDF of no
-    observations is no observations, not an error.
+    numpy has no erf, so `math.erf` is applied per element and the rest of
+    the formula -- `0.5 * (1 + erf(x / sqrt(2)))` -- is numpy arithmetic,
+    which rounds exactly as the scalar's does. This was
+    `np.vectorize(norm_cdf)`: the same numbers, with the whole formula run
+    as a Python call per element. The option-chain batch in
+    `analysis.options_batch` evaluates two of these per contract.
+
+    The empty case is handled explicitly: the CDF of no observations is no
+    observations, not an error. (`np.vectorize` raised on a size-0 input,
+    which is why this guard exists.)
     """
     values = np.asarray(x, dtype=float)
     if values.size == 0:
         return np.empty(values.shape, dtype=float)
-    return np.vectorize(norm_cdf)(values).astype(float)
+    erf = np.asarray(_erf_each(values / _SQRT2), dtype=float)
+    return np.asarray(0.5 * (1.0 + erf), dtype=float)
+
+
+def norm_pdf_array(x: Any) -> np.ndarray:
+    """`norm_pdf` over an array, element for element the scalar's double:
+    the exponential is `math.exp` per element, since numpy's own `exp` may
+    round the last bit differently on some CPUs."""
+    values = np.asarray(x, dtype=float)
+    if values.size == 0:
+        return np.empty(values.shape, dtype=float)
+    exp = np.asarray(_exp_each(-0.5 * values * values), dtype=float)
+    return np.asarray(exp / _SQRT_2PI, dtype=float)
 
 
 def norm_ppf(p: float) -> float:

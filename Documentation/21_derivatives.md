@@ -245,6 +245,42 @@ way.** Equity vol rises when spot falls, reliably enough that "spot −20%,
 vol unchanged" is a cell in the table and not a state of the world. Read the
 down-spot/up-vol diagonal rather than a row.
 
+## Chains, grids and the gamma flip
+
+Everything above prices one contract per call. A chain is hundreds of
+contracts and a gamma profile is a chain on a grid of spots, so
+`analysis.options_batch` prices them in one call —
+`implied_volatility_batch`, `black_scholes_greeks_batch` (per contract, or
+every contract at every spot with `grid=True`) and `zero_gamma_spot`. They
+are library functions, not tools; [12_options.md](12_options.md#whole-chains-in-one-call)
+is their reference. Their contract, in brief:
+
+- **The same numbers.** Each contract gets exactly what
+  `implied_volatility`, `option_greeks` and `price_option` return for it —
+  the same volatility, iteration count, converged flag, greek set and units —
+  from a compiled kernel or, without the extension, a numpy fallback held to
+  the same results.
+- **A bad quote is a reason, a bad input is a refusal.** A price of zero, a
+  missing (NaN) price, one outside the no-arbitrage bounds or one only a
+  volatility past 500% reproduces comes back as that contract's `reason`
+  with a NaN volatility; the rest of the chain is solved. A spot, strike,
+  time or rate outside the pricing domain refuses the batch with the scalar
+  function's own `ValidationError`, naming the contract.
+- **The gamma flip is found or declared absent.** `zero_gamma_spot` scans
+  the book's net signed gamma (`Σ quantity × gamma`, signs the caller's
+  convention) across a bracket, refines each sign change by Brent's method,
+  and returns `zero_gamma_spot=None` with the reason when the book is long
+  or short gamma everywhere in the bracket — it does not invent a crossing.
+
+`simulate_delta_hedge` and `get_option_risk_scenarios` now price through
+the batch, with identical results. The hedge values every path's delta at a
+rebalance in one call — 21 calls for the default run where it made 10,500,
+79 ms to 3.5 ms — and the scenario grid is revalued in one. The normals are
+still drawn path-major and each path's arithmetic is the old loop's, so a
+seed reproduces the P&L it always did. `analyze_option_strategy` keeps one
+call per leg: a structure has too few legs for a batch to pay. Numbers:
+[16_performance.md](16_performance.md#option-chains).
+
 ## The tools
 
 | Tool | Answers |

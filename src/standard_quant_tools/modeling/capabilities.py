@@ -325,8 +325,10 @@ def modeling_capabilities() -> Dict[str, Any]:
 #: asserts the two agree, so it cannot drift quietly.
 #:
 #: 42 until the six `_zerocopy` bindings came out; they had no caller in
-#: `src/` and wiring them was measured at a mean saving of zero.
-_EXPECTED_NATIVE_EXPORTS = 36
+#: `src/` and wiring them was measured at a mean saving of zero. 38 with
+#: the two option-chain kernels, implied_volatility_batch and
+#: black_scholes_greeks_batch.
+_EXPECTED_NATIVE_EXPORTS = 38
 
 
 def _importable(module: str) -> bool:

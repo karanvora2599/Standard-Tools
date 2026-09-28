@@ -112,7 +112,7 @@ asserts a floor multiple, so the claim and the check are the same artifact.
 
 ## Layer 1c — the configuration that could not be run
 
-Seventeen modules each decide `HAS_CPP` for themselves by probing
+Eighteen modules each decide `HAS_CPP` for themselves by probing
 `_sqt_core`. That is the right design — a kernel added later falls back on
 its own rather than all-or-nothing — but for a long time it meant the
 **no-extension configuration could not be executed at all**. Every fallback
@@ -123,7 +123,7 @@ roughly half the C++-adjacent code had no end-to-end coverage.
 SQT_DISABLE_NATIVE=1 pytest        # every kernel on its Python path
 ```
 
-One name made unimportable flips all seventeen, because they all import the
+One name made unimportable flips all eighteen, because they all import the
 same one, and each takes the `except ImportError` branch it already had. No
 module needed changing.
 
@@ -142,7 +142,7 @@ the run that introduced it, 6,514 passed and 519 skipped — the extra skips
 are the parity and benchmark tests that `importorskip` the extension,
 correctly — and it took 11:22 against 6:54, which is the compiled path's
 contribution measured at suite scale rather than per kernel. The suite is
-11,839 tests now (11,683 passed, 78 skipped in 10:41 with the extension and `SQT_EXPECT_NATIVE=1`), so
+11,986 tests now (11,830 passed, 78 skipped in 10:19 with the extension and `SQT_EXPECT_NATIVE=1`), so
 that pair of clocks is a ratio to re-measure, not a figure to quote.
 
 ### Why this is a testing concern and not a packaging one

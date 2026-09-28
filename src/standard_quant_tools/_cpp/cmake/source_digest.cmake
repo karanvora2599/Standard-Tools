@@ -59,7 +59,13 @@ list(SORT _files)
 set(_manifest "")
 set(_count 0)
 foreach(_rel IN LISTS _files)
-    file(SHA256 "${SQT_NATIVE_DIR}/${_rel}" _file_hash)
+    # CRLF is read as LF, as the Python side does: a checkout that only
+    # rewrote line endings is the same code, and hashing raw bytes called a
+    # correct build stale. Text-mode READ keeps the bytes as they are (the
+    # sources hold no NUL), and the quoted expansions keep any `;` intact.
+    file(READ "${SQT_NATIVE_DIR}/${_rel}" _content)
+    string(REPLACE "\r\n" "\n" _content "${_content}")
+    string(SHA256 _file_hash "${_content}")
     string(APPEND _manifest "${_file_hash}  ${_rel}\n")
     math(EXPR _count "${_count} + 1")
 endforeach()

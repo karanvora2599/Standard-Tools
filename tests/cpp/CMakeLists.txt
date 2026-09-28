@@ -270,6 +270,39 @@ endif()
 
 add_test(NAME cpp_rolling_regression COMMAND test_rolling_regression)
 
+add_library(sqt_options_impl STATIC
+    ${CMAKE_SOURCE_DIR}/src/standard_quant_tools/_cpp/src/options.cpp
+)
+target_include_directories(sqt_options_impl PUBLIC
+    ${CMAKE_SOURCE_DIR}/src/standard_quant_tools/_cpp/include
+)
+target_compile_features(sqt_options_impl PUBLIC cxx_std_17)
+# The same no-contraction rule the extension compiles options.cpp under
+# (see src/standard_quant_tools/_cpp/CMakeLists.txt): the tests below pin
+# the kernel to exact values, and a fused multiply-add moves the last bit.
+if(MSVC)
+    target_compile_options(sqt_options_impl PRIVATE /O2 /W3 /fp:precise)
+else()
+    target_compile_options(sqt_options_impl PRIVATE -O2 -Wall -Wextra -ffp-contract=off)
+endif()
+# Linked with OpenMP when there is one, so the batch-equals-one-contract
+# test below exercises the parallel path it exists to check.
+find_package(OpenMP)
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(sqt_options_impl PUBLIC OpenMP::OpenMP_CXX)
+endif()
+
+add_executable(test_options test_options.cpp)
+target_link_libraries(test_options PRIVATE sqt_options_impl)
+target_compile_features(test_options PRIVATE cxx_std_17)
+if(MSVC)
+    target_compile_options(test_options PRIVATE /O2 /W3)
+else()
+    target_compile_options(test_options PRIVATE -O2 -Wall -Wextra)
+endif()
+
+add_test(NAME cpp_options COMMAND test_options)
+
 # ── Fuzz/property harness (correctness/portability pass item 20a) ────────────
 # Randomized-input stress test for cointegration.cpp's gauss_elim (via
 # ols2/adf_test/engle_granger) and rolling_regression.cpp's cholesky_solve

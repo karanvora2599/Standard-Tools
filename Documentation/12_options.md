@@ -94,6 +94,97 @@ except ValidationError as e:
 
 ---
 
+## Whole Chains in One Call
+
+`standard_quant_tools.analysis.options_batch` — the functions above over a
+whole chain: one call per chain instead of one per contract. Every argument
+broadcasts, numpy-style, so what varies across the chain is an array and
+what the chain shares is a scalar. `is_call` is `True` for a call and
+`False` for a put (0/1 accepted); for `option_type` strings pass
+`is_call=(np.asarray(option_types) == "call")`.
+
+```python
+import numpy as np
+from standard_quant_tools.analysis.options_batch import (
+    implied_volatility_batch, black_scholes_greeks_batch, zero_gamma_spot,
+)
+
+strikes = np.array([90.0, 95.0, 100.0, 105.0, 110.0])
+quotes = np.array([11.2, 7.1, 3.9, 1.8, 0.0])        # the last one underflowed
+iv = implied_volatility_batch(quotes, 100.0, strikes, 0.25, 0.04, 0.01, True)
+iv["implied_volatility"]   # array; NaN where refused
+iv["reason"]               # ["solved", ..., "price_not_positive"]
+iv["refusals"]             # {"price_not_positive": 1}
+
+greeks = black_scholes_greeks_batch(100.0, strikes[:4], 0.25, iv["implied_volatility"][:4], 0.04, 0.01)
+greeks["delta"], greeks["gamma"], greeks["theta"]   # per contract, option_greeks' units
+
+grid = black_scholes_greeks_batch(np.linspace(80, 120, 61), strikes[:4], 0.25, 0.2, 0.04, grid=True)
+grid["gamma"].shape        # (4, 61): every contract at every spot
+```
+
+**The same numbers, contract for contract.** `implied_volatility_batch` is
+`implied_volatility`'s algorithm — the bound check with `BOUND_TOLERANCE`,
+Newton on vega converged on `tol_sigma`, the bisection over `[1e-6, 5.0]`,
+the at-intrinsic ceiling flagged `at_bound`, the same keyword defaults — and
+returns the volatility, `converged`, `iterations`, `method`, `price_error`
+and `at_bound` the scalar returns for each contract. `black_scholes_greeks_batch`
+returns `analysis.derivatives.option_greeks`' full set in its units — vega
+and vanna per volatility point, volga per point squared, theta and charm per
+calendar day, rho per rate point, speed, `d1`, `d2` — and `price_option`'s
+price. Both run as a compiled kernel with OpenMP across contracts (gated on
+total work, like every kernel here) and fall back to numpy under
+`SQT_DISABLE_NATIVE=1` or a stale extension; `path` says which ran. The
+fallback takes `exp`, `log`, `pow` and `erf` from `math` rather than numpy,
+because numpy's vectorised transcendentals can round differently in the last
+bit on some CPUs and a last-bit difference in a price is enough to change an
+iteration count. The tests hold all three — kernel, fallback and scalar —
+to the same results on randomized chains (1e-12 relative on every value,
+identical flags, iteration counts and reasons); on this machine they agree
+to the bit.
+
+**A quote that cannot be solved is reported; an input that cannot be priced
+refuses the batch.** A chain routinely holds quotes no volatility can
+reproduce, and one of them must not take the other 475 with it:
+
+| `reason` | The quote | The scalar |
+|---|---|---|
+| `solved` | a volatility was found | returns it |
+| `price_not_positive` | `<= 0`, what an option so far out that its value underflows is quoted at | raises |
+| `price_not_finite` | NaN or +inf — a missing quote | raises (as outside the range) |
+| `below_lower_bound` / `above_upper_bound` | outside what any volatility produces | raises |
+| `no_root_in_bracket` | inside the bounds, but only a volatility past 500% reproduces it | raises |
+
+Those contracts come back with NaN volatility and `converged=False`. An
+input outside the pricing domain — spot, strike or time not positive or past
+its magnitude limit, a rate or yield past `MAX_RATE`, `rate × time` past
+`MAX_EXPONENT`, a discounted strike past a double — is a unit error in the
+arrays rather than a fact about one quote, and raises the scalar function's
+own `ValidationError`, prefixed with the contract it found it in
+(`"implied_volatility_batch: contract 3: strike must be > 0, got -5.0"`, or
+`contract (1, 2)` for a 2-D chain).
+
+**`zero_gamma_spot(strike, time_to_expiry, volatility, quantity, spot_low=,
+spot_high=)`** is where a book's aggregate signed gamma, `Σ quantity × gamma`,
+changes sign inside a bracket. `quantity` carries sign and size (multipliers
+folded in; a dealer-positioning convention is a choice of signs the caller
+makes); gamma is the same for a call and a put, so the type is not an input,
+and dollar gamma crosses at the same spot. The book is valued on `n_grid`
+spots (default 201) in one grid call, and each sign change is refined by
+Brent's method — one batched evaluation of the whole book per step, about
+five steps where bisection needs thirty. **No crossing is invented**: a book
+that is long (or short) gamma across the whole bracket returns
+`zero_gamma_spot=None` with a `reason` saying which side of zero it sits on,
+and a bracket where every gamma underflows to exactly zero — far from the
+strikes, close to expiry — is gamma being absent, not a crossing. Every
+crossing found is in `crossings`; `zero_gamma_spot` is the one nearest
+`reference_spot` (default: the bracket's midpoint). Two crossings closer than
+one grid step cancel and are not seen, which is why `grid_step` is returned.
+
+Measured throughput is in [16_performance.md](16_performance.md#option-chains).
+
+---
+
 ## Via Agent Tools
 
 Two tools carry this module onto the agent surface, registered in

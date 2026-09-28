@@ -21,6 +21,7 @@
 #include "sqt/garch.hpp"
 #include "sqt/signal_state_machines.hpp"
 #include "sqt/numerics.hpp"
+#include "sqt/options.hpp"
 #include "sqt/panel_stats.hpp"
 #include "sqt/build_info.hpp"
 
@@ -2277,4 +2278,212 @@ PYBIND11_MODULE(_sqt_core, m) {
         "not also rescale the effective regularization strength.\n\n"
         "All three arrays are 1-D integer arrays; entity_codes must lie in\n"
         "[0, n_entities). Anything else raises ValueError.");
+
+    // ── Options over a chain ──────────────────────────────────────────────────
+    //
+    // One call per chain rather than one per contract. The per-contract DATA
+    // (a price outside the no-arbitrage range, a spot of zero) is not
+    // validated here: it comes back as a reason code or NaN for that contract
+    // alone, and analysis/options_batch.py decides which of those refuse the
+    // whole batch. Only the solver's scalar configuration is checked.
+
+    m.def(
+        "implied_volatility_batch",
+        [](Array1D price,
+           Array1D spot,
+           Array1D strike,
+           Array1D time_to_expiry,
+           Array1D rate,
+           Array1D dividend_yield,
+           py::array_t<std::uint8_t, py::array::c_style | py::array::forcecast> is_call,
+           double initial_guess,
+           double tol,
+           int max_iterations,
+           double tol_sigma) -> py::dict
+        {
+            constexpr const char* fn = "implied_volatility_batch";
+            require_1d(price, "price");
+            require_1d(spot, "spot");
+            require_1d(strike, "strike");
+            require_1d(time_to_expiry, "time_to_expiry");
+            require_1d(rate, "rate");
+            require_1d(dividend_yield, "dividend_yield");
+            require_1d(is_call, "is_call");
+            const py::ssize_t n = price.size();
+            for (py::ssize_t size : {spot.size(), strike.size(), time_to_expiry.size(),
+                                     rate.size(), dividend_yield.size(), is_call.size()}) {
+                if (size != n)
+                    throw std::invalid_argument(
+                        std::string(fn) + ": every array must have one entry per "
+                        "contract (the Python wrapper broadcasts scalars)");
+            }
+            // The volatility the first Newton step is priced at: the
+            // scalar's pricer refuses one outside (0, 100].
+            if (!(initial_guess > 0.0) || !(initial_guess <= 100.0))
+                throw std::invalid_argument(
+                    std::string(fn) + ": initial_guess must be a volatility in "
+                    "(0, 100], got " + std::to_string(initial_guess));
+            require_non_negative(tol, "tol", fn);
+            require_non_negative(tol_sigma, "tol_sigma", fn);
+            if (max_iterations < 0)
+                throw std::invalid_argument(
+                    std::string(fn) + ": max_iterations must be >= 0, got " +
+                    std::to_string(max_iterations));
+
+            py::array_t<double> vol(n);
+            py::array_t<double> price_error(n);
+            py::array_t<std::int32_t> iterations(n);
+            py::array_t<std::int8_t> method(n);
+            py::array_t<std::int8_t> reason(n);
+            py::array_t<std::uint8_t> converged(n);
+            py::array_t<std::uint8_t> at_bound(n);
+
+            sqt::ImpliedVolSettings settings;
+            settings.initial_guess = initial_guess;
+            settings.tol = tol;
+            settings.max_iterations = max_iterations;
+            settings.tol_sigma = tol_sigma;
+            sqt::ImpliedVolBatchOut out{vol.mutable_data(), price_error.mutable_data(),
+                                        iterations.mutable_data(), method.mutable_data(),
+                                        reason.mutable_data(), converged.mutable_data(),
+                                        at_bound.mutable_data()};
+            const double* p = price.data();
+            const double* s = spot.data();
+            const double* k = strike.data();
+            const double* t = time_to_expiry.data();
+            const double* r = rate.data();
+            const double* q = dividend_yield.data();
+            const std::uint8_t* c = is_call.data();
+            {
+                py::gil_scoped_release release;
+                sqt::implied_volatility_batch(p, s, k, t, r, q, c,
+                                              static_cast<std::size_t>(n), settings, out);
+            }
+            py::dict d;
+            d["implied_volatility"] = vol;
+            d["price_error"] = price_error;
+            d["iterations"] = iterations;
+            d["method"] = method;
+            d["reason"] = reason;
+            d["converged"] = converged;
+            d["at_bound"] = at_bound;
+            return d;
+        },
+        py::arg("price"),
+        py::arg("spot"),
+        py::arg("strike"),
+        py::arg("time_to_expiry"),
+        py::arg("rate"),
+        py::arg("dividend_yield"),
+        py::arg("is_call"),
+        py::arg("initial_guess") = 0.2,
+        py::arg("tol") = 1e-6,
+        py::arg("max_iterations") = 100,
+        py::arg("tol_sigma") = 1e-8,
+        "Black-Scholes-Merton implied volatility for every contract of a chain.\n\n"
+        "The algorithm of analysis.options.implied_volatility, contract for\n"
+        "contract: the no-arbitrage bound check, Newton on vega converged on\n"
+        "the volatility step, and the bisection over [1e-6, 5.0], including\n"
+        "the at-intrinsic bisection that reports a ceiling (at_bound).\n\n"
+        "Returns a dict of 1-D arrays: implied_volatility, price_error,\n"
+        "iterations (int32), method (0 none, 1 newton, 2 bisection), reason\n"
+        "(0 solved, 1 price <= 0, 2 price not finite, 3 below the lower bound,\n"
+        "4 above the upper bound, 5 no root in the bracket, 6 the model price\n"
+        "is not finite, 7 an input outside the pricing domain), converged and\n"
+        "at_bound (uint8). A refused contract has NaN volatility and\n"
+        "price_error. Every array is 1-D with one entry per contract;\n"
+        "anything else raises ValueError.");
+
+    m.def(
+        "black_scholes_greeks_batch",
+        [](Array1D spot,
+           Array1D strike,
+           Array1D time_to_expiry,
+           Array1D volatility,
+           Array1D rate,
+           Array1D dividend_yield,
+           py::array_t<std::uint8_t, py::array::c_style | py::array::forcecast> is_call,
+           bool grid) -> py::dict
+        {
+            constexpr const char* fn = "black_scholes_greeks_batch";
+            require_1d(spot, "spot");
+            require_1d(strike, "strike");
+            require_1d(time_to_expiry, "time_to_expiry");
+            require_1d(volatility, "volatility");
+            require_1d(rate, "rate");
+            require_1d(dividend_yield, "dividend_yield");
+            require_1d(is_call, "is_call");
+            const py::ssize_t n_contracts = strike.size();
+            for (py::ssize_t size : {time_to_expiry.size(), volatility.size(),
+                                     rate.size(), dividend_yield.size(),
+                                     is_call.size()}) {
+                if (size != n_contracts)
+                    throw std::invalid_argument(
+                        std::string(fn) + ": every contract array must have one "
+                        "entry per contract");
+            }
+            const py::ssize_t n_spots = spot.size();
+            if (!grid && n_spots != n_contracts)
+                throw std::invalid_argument(
+                    std::string(fn) + ": without grid=True, spot needs one entry "
+                    "per contract");
+            if (grid && n_spots > 0 &&
+                n_contracts > std::numeric_limits<py::ssize_t>::max() / n_spots)
+                throw std::invalid_argument(
+                    std::string(fn) + ": contracts x spots overflows an array size");
+
+            std::vector<py::ssize_t> shape;
+            if (grid) {
+                shape = {n_contracts, n_spots};
+            } else {
+                shape = {n_contracts};
+            }
+            const char* names[] = {"price", "delta", "gamma", "vega",  "theta", "rho",
+                                   "vanna", "volga", "charm", "speed", "d1",    "d2"};
+            std::vector<py::array_t<double>> arrays;
+            arrays.reserve(12);
+            for (int i = 0; i < 12; ++i) arrays.emplace_back(shape);
+            sqt::BlackScholesGreeksOut out{
+                arrays[0].mutable_data(), arrays[1].mutable_data(),
+                arrays[2].mutable_data(), arrays[3].mutable_data(),
+                arrays[4].mutable_data(), arrays[5].mutable_data(),
+                arrays[6].mutable_data(), arrays[7].mutable_data(),
+                arrays[8].mutable_data(), arrays[9].mutable_data(),
+                arrays[10].mutable_data(), arrays[11].mutable_data()};
+            const double* s = spot.data();
+            const double* k = strike.data();
+            const double* t = time_to_expiry.data();
+            const double* v = volatility.data();
+            const double* r = rate.data();
+            const double* q = dividend_yield.data();
+            const std::uint8_t* c = is_call.data();
+            {
+                py::gil_scoped_release release;
+                sqt::black_scholes_greeks_batch(
+                    s, static_cast<std::size_t>(n_spots), k, t, v, r, q, c,
+                    static_cast<std::size_t>(n_contracts), grid, out);
+            }
+            py::dict d;
+            for (int i = 0; i < 12; ++i) d[names[i]] = arrays[static_cast<std::size_t>(i)];
+            return d;
+        },
+        py::arg("spot"),
+        py::arg("strike"),
+        py::arg("time_to_expiry"),
+        py::arg("volatility"),
+        py::arg("rate"),
+        py::arg("dividend_yield"),
+        py::arg("is_call"),
+        py::arg("grid") = false,
+        "Black-Scholes-Merton price and greeks for every contract of a batch.\n\n"
+        "The numbers analysis.derivatives.option_greeks returns, in its units:\n"
+        "vega and vanna per volatility point, volga per point squared, theta\n"
+        "and charm per calendar day, rho per rate point, and the price\n"
+        "analysis.pricing.price_option gives for model='black_scholes'.\n\n"
+        "grid=False: spot has one entry per contract and every output is 1-D.\n"
+        "grid=True: every contract is valued at every spot and every output is\n"
+        "(n_contracts, n_spots). A contract or spot outside the pricing domain\n"
+        "gives NaN in its cells. Returns a dict: price, delta, gamma, vega,\n"
+        "theta, rho, vanna, volga, charm, speed, d1, d2. Every array is 1-D;\n"
+        "anything else raises ValueError.");
 }

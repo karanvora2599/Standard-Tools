@@ -7,7 +7,7 @@ __version__ = "0.1.0"
 
 #: Environment variable that forces every kernel onto its Python fallback.
 #:
-#: WHY THIS EXISTS. Seventeen modules each decide `HAS_CPP` for themselves by
+#: WHY THIS EXISTS. Eighteen modules each decide `HAS_CPP` for themselves by
 #: probing `_sqt_core`, which is the right design -- a kernel added later
 #: falls back per-symbol rather than all-or-nothing. The cost was that the
 #: no-extension configuration could not be RUN. Every fallback was reachable
@@ -47,7 +47,7 @@ def native_disabled() -> bool:
 _native_off = native_disabled()
 if _native_off:
     # `None` in sys.modules makes `import` raise ImportError, which is the
-    # exact signal all seventeen call sites already handle. Set before any
+    # exact signal all eighteen call sites already handle. Set before any
     # submodule is imported, so nothing has cached a reference to the real
     # extension by the time it is asked for.
     sys.modules.setdefault(f"{__name__}._sqt_core", None)  # type: ignore[assignment]

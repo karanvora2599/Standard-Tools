@@ -10,6 +10,10 @@ run by hand (or by a dedicated CI job), not as part of the suite.
     # universe-scale: pair scan, portfolio simulation, panel transform, Monte Carlo
     python tests/bench/bench_universe.py
 
+    # option chains: implied vol over 476 contracts, greeks on a 61-spot grid,
+    # the zero-gamma search -- one call per contract against one per chain
+    python tests/bench/bench_options.py
+
     # the modeling pipeline: IC, dataset build, walk-forward, estimators
     python tests/bench/bench_modeling.py
     python tests/bench/bench_modeling.py ic build      # or one section at a time
@@ -19,6 +23,8 @@ The baseline these produced on 2026-08-21 is what
 reports: every kernel and universe-scale figure there comes from
 `bench_kernels.py` or `bench_universe.py`, so a published number can be
 re-measured rather than taken on trust.
+
+`bench_options.py` backs the option-chain table in the same document.
 
 `bench_universe.py` measures per-unit costs on a small universe and multiplies
 out to 500/2,000 tickers. The multiplication is printed alongside the measured

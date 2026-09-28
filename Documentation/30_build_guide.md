@@ -393,6 +393,10 @@ command at *build* time) hashes every C++ source and CMake file under
 `src/standard_quant_tools/_cpp/` — `.cpp`, `.hpp`, `.h` and the other C/C++
 suffixes, `.cmake`, and each `CMakeLists.txt` — as one SHA-256 over the
 sorted relative paths and each file's SHA-256 (the `sha256sum` line format).
+Each file is hashed with CRLF read as LF, on both the CMake and the Python
+side, so a checkout that only rewrote line endings — git normalising on
+checkout, an editor saving with the platform's convention — is the same code
+and does not make a correct build read as stale; any other byte still counts.
 Because the step depends on every file it hashes, an edit followed by a plain
 `cmake --build` restamps; no reconfigure is needed. The same header records
 the build facts that change results or speed: build type, whether
@@ -424,7 +428,7 @@ loading the extension) and reaches one verdict:
 
 A refused build is refused the same way `SQT_DISABLE_NATIVE` works — the
 module is made unimportable once, before any module probes it — so all
-seventeen native-aware modules fall back together. The Python paths match the
+eighteen native-aware modules fall back together. The Python paths match the
 sources, so **results are correct, only slower**. The check never raises: a
 failure inside it becomes the `unverified` verdict, not an import error.
 

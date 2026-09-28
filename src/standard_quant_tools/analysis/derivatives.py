@@ -50,6 +50,7 @@ from standard_quant_tools._special import (
     norm_cdf_array,
     norm_pdf,
 )
+from standard_quant_tools.analysis.options_batch import black_scholes_greeks_batch
 from standard_quant_tools.analysis.pricing import price_option
 from standard_quant_tools.constants import TRADING_DAYS_PER_YEAR
 from standard_quant_tools.error import ValidationError
@@ -1404,6 +1405,53 @@ def expected_move(
     return result
 
 
+_exp_each = np.frompyfunc(math.exp, 1, 1)
+
+
+def _math_exp(x: np.ndarray) -> np.ndarray:
+    """
+    `math.exp` elementwise. The per-path loop grew each spot with
+    `math.exp`; numpy's exp can differ from it in the last bit on some
+    CPUs, and a path is a product of every step's factor.
+    """
+    return np.asarray(_exp_each(np.asarray(x, dtype=float)), dtype=float)
+
+
+def _require_hedgeable_spots(
+    spots: np.ndarray,
+    strike: float,
+    time_to_expiry: float,
+    volatility: float,
+    risk_free_rate: float,
+    option_type: str,
+) -> None:
+    """
+    The spots `option_greeks` would price, or its own refusal of the first
+    one it would not.
+
+    The rebalance is batched across paths, so the bound is checked across
+    paths at once; a spot outside it is handed to `option_greeks`, which
+    says what is wrong in the words a single call uses.
+    """
+    with np.errstate(invalid="ignore"):
+        bad = ~(np.isfinite(spots) & (spots >= 1e-8) & (spots <= MAX_PRICE))
+    if not bad.any():
+        return
+    i = int(np.flatnonzero(bad)[0])
+    option_greeks(
+        spot=float(spots[i]),
+        strike=strike,
+        time_to_expiry=time_to_expiry,
+        volatility=volatility,
+        risk_free_rate=risk_free_rate,
+        option_type=option_type,
+    )
+    raise ValidationError(  # pragma: no cover - option_greeks refuses first
+        f"simulate_delta_hedge: path {i} reached spot {float(spots[i])!r}, "
+        "outside what the hedge can be priced at."
+    )
+
+
 def simulate_delta_hedge(
     *,
     spot: float,
@@ -1479,40 +1527,42 @@ def simulate_delta_hedge(
 
     # Short the option, hedge it long delta. The sign convention is stated
     # because the P&L flips with it and "the hedged P&L" is ambiguous.
-    pnl = np.zeros(n_paths)
+    #
+    # EVERY PATH STEPS TOGETHER. The hedge at step k needs each path's delta
+    # at its own spot, and those are independent across paths, so one
+    # batched greek call per rebalance replaces one option_greeks call per
+    # path per rebalance -- 21 calls for the default run instead of 10,500.
+    # Nothing else moves: the normals are drawn path-major in one block,
+    # which is the order the per-path loop drew them in, and each path's
+    # arithmetic is the loop's, elementwise, with the exponential taken from
+    # `math` as the loop did.
+    shocks = rng.standard_normal((n_paths, n_hedges))
+    drift = (risk_free_rate - 0.5 * rv * rv) * dt
+    scale = rv * math.sqrt(dt)
+    s = np.full(n_paths, spot)
+    cash = np.full(n_paths, premium)  # sold the option
+    shares = np.zeros(n_paths)
     costs = np.zeros(n_paths)
-    for p in range(n_paths):
-        s = spot
-        cash = premium  # sold the option
-        shares = 0.0
-        path_cost = 0.0
-        for step in range(n_hedges):
-            remaining = t - step * dt
-            greeks = option_greeks(
-                spot=s,
-                strike=strike,
-                time_to_expiry=max(remaining, 1e-8),
-                volatility=iv,
-                risk_free_rate=risk_free_rate,
-                option_type=option_type,
-            )
-            target = greeks["delta"]  # long delta hedges the short option
-            trade = target - shares
-            traded_value = abs(trade) * s
-            path_cost += traded_value * cost_rate
-            cash -= trade * s + traded_value * cost_rate
-            shares = target
-            # Advance one step under the REALIZED vol, not the implied one.
-            z = rng.standard_normal()
-            s *= math.exp(
-                (risk_free_rate - 0.5 * rv * rv) * dt + rv * math.sqrt(dt) * z
-            )
-            cash *= math.exp(risk_free_rate * dt)
-        intrinsic = (
-            max(s - strike, 0.0) if option_type == "call" else max(strike - s, 0.0)
+    for step in range(n_hedges):
+        remaining = max(t - step * dt, 1e-8)
+        _require_hedgeable_spots(s, strike, remaining, iv, risk_free_rate, option_type)
+        greeks = black_scholes_greeks_batch(
+            s, strike, remaining, iv, risk_free_rate, 0.0, option_type == "call"
         )
-        pnl[p] = cash + shares * s - intrinsic
-        costs[p] = path_cost
+        target = greeks["delta"]  # long delta hedges the short option
+        trade = target - shares
+        traded_value = np.abs(trade) * s
+        costs += traded_value * cost_rate
+        cash -= trade * s + traded_value * cost_rate
+        shares = target
+        # Advance one step under the REALIZED vol, not the implied one.
+        s = s * _math_exp(drift + scale * shocks[:, step])
+        cash *= math.exp(risk_free_rate * dt)
+    if option_type == "call":
+        intrinsic = np.maximum(s - strike, 0.0)
+    else:
+        intrinsic = np.maximum(strike - s, 0.0)
+    pnl = cash + shares * s - intrinsic
 
     # The continuous-hedging expectation, for comparison. Approximated at
     # the initial dollar gamma, which is exact only if spot does not move --
@@ -1560,6 +1610,53 @@ def simulate_delta_hedge(
         ),
         "warnings": warnings,
     }
+
+
+def _scenario_prices(
+    spots: Sequence[float],
+    volatilities: Sequence[float],
+    *,
+    strike: float,
+    time_to_expiry: float,
+    risk_free_rate: float,
+    option_type: str,
+    dividend_yield: float,
+) -> np.ndarray:
+    """
+    `price_option` at every (volatility, spot) cell, as an
+    (n_volatilities, n_spots) array.
+
+    The batch applies the bounds `price_option` applies, so it refuses
+    exactly the grids the cell-by-cell loop refused. When it does, the
+    cells are handed to `price_option` in the order the grid is read, and
+    the refusal is the one that loop gave.
+    """
+    if not spots or not volatilities:
+        return np.empty((len(volatilities), len(spots)))
+    try:
+        return black_scholes_greeks_batch(
+            list(spots),
+            strike,
+            time_to_expiry,
+            list(volatilities),
+            risk_free_rate,
+            dividend_yield,
+            option_type == "call",
+            grid=True,
+        )["price"]
+    except ValidationError:
+        for shocked_spot in spots:
+            for shocked_vol in volatilities:
+                price_option(
+                    spot=shocked_spot,
+                    strike=strike,
+                    time_to_expiry=time_to_expiry,
+                    volatility=shocked_vol,
+                    risk_free_rate=risk_free_rate,
+                    option_type=option_type,
+                    dividend_yield=dividend_yield,
+                )
+        raise
 
 
 def option_risk_scenarios(
@@ -1636,29 +1733,36 @@ def option_risk_scenarios(
     )["price"]
     base_value = quantity * base
 
+    # The whole grid revalued in one batch: each volatility shock is a
+    # contract and each shocked spot a grid point, so every cell is the
+    # price price_option gives for it, from one call instead of one per cell.
+    # Skipped exactly when the loop skipped them -- `not <= 0`, so a NaN
+    # shock still reaches the pricer and is refused there rather than
+    # silently dropped.
+    rows = [
+        (float(ds), spot * (1.0 + float(ds)))
+        for ds in spot_shocks
+        if not spot * (1.0 + float(ds)) <= 0
+    ]
+    columns = [
+        (float(dv), vol + float(dv)) for dv in vol_shocks if not vol + float(dv) <= 0
+    ]
+    prices = _scenario_prices(
+        [shocked for _, shocked in rows],
+        [shocked for _, shocked in columns],
+        strike=strike,
+        time_to_expiry=remaining,
+        risk_free_rate=risk_free_rate,
+        option_type=option_type,
+        dividend_yield=dividend_yield,
+    )
+
     grid: List[Dict[str, Any]] = []
     worst = None
-    for ds in spot_shocks:
-        shocked_spot = spot * (1.0 + float(ds))
-        if shocked_spot <= 0:
-            continue
-        row: Dict[str, Any] = {"spot_shock_pct": float(ds) * 100.0, "cells": []}
-        for dv in vol_shocks:
-            shocked_vol = vol + float(dv)
-            if shocked_vol <= 0:
-                continue
-            value = (
-                quantity
-                * price_option(
-                    spot=shocked_spot,
-                    strike=strike,
-                    time_to_expiry=remaining,
-                    volatility=shocked_vol,
-                    risk_free_rate=risk_free_rate,
-                    option_type=option_type,
-                    dividend_yield=dividend_yield,
-                )["price"]
-            )
+    for i, (ds, _) in enumerate(rows):
+        row: Dict[str, Any] = {"spot_shock_pct": ds * 100.0, "cells": []}
+        for j, (dv, _) in enumerate(columns):
+            value = quantity * float(prices[j, i])
             pnl = value - base_value
             cell = {
                 "vol_shock": float(dv),

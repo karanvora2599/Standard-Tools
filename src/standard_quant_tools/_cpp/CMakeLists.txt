@@ -19,11 +19,26 @@ set(SQT_SOURCES
     src/isa_dispatch.cpp
     src/rolling_beta_avx2.cpp
     src/panel_stats.cpp
+    src/options.cpp
     src/build_info.cpp
     bindings/bindings.cpp
 )
 
 pybind11_add_module(_sqt_core MODULE ${SQT_SOURCES})
+
+# ── Options: the scalar formulas' arithmetic, operation for operation ────────
+# options.cpp is held to the Python option formulas result for result -- a
+# converged flag and an iteration count are only comparable between the two
+# if every price along the way is the same double. That rules out fusing
+# a*b+c into one rounding: Clang contracts within an expression by default
+# and GCC does under -std=gnu++*, and either would do so under
+# -march=native. MSVC's /fp:precise does not contract since VS 2022; it is
+# stated here so a change of default cannot quietly alter it.
+if(MSVC)
+    set_source_files_properties(src/options.cpp PROPERTIES COMPILE_OPTIONS "/fp:precise")
+else()
+    set_source_files_properties(src/options.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+endif()
 
 # ── AVX2+FMA translation unit (item L: runtime ISA dispatch demo) ────────────
 # rolling_beta_avx2.cpp uses AVX2/FMA intrinsics directly and must always be
@@ -164,8 +179,9 @@ else()
 endif()
 
 # ── OpenMP (optional) ─────────────────────────────────────────────────────────
-# Used by monte_carlo.cpp's simulate_forward_paths and backtest.cpp's
-# batch_run_strategy, where each simulated path / test index is independent
+# Used by monte_carlo.cpp's simulate_forward_paths, backtest.cpp's
+# batch_run_strategy and options.cpp's chain kernels, where each simulated
+# path / test index / contract is independent
 # (no shared mutable state) so the loop can run on multiple threads with no
 # locking. Not REQUIRED: a build without an OpenMP runtime (e.g. default
 # Apple Clang, which ships no OpenMP support) must still succeed —

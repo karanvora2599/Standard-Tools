@@ -230,6 +230,29 @@ class TestTheConsolidatedHelpersOnDegenerateInput:
         xs = np.random.default_rng(0).normal(0, 3, 200)
         assert np.allclose(norm_cdf_array(xs), [norm_cdf(x) for x in xs])
 
+    def test_the_array_forms_are_the_scalar_to_the_bit(self):
+        """The option-chain batch is held to the scalar option formulas
+        result for result, and these are two of the terms it is built from:
+        an array CDF or density that differed in the last bit would move an
+        implied-volatility iteration count."""
+        from standard_quant_tools._special import (
+            norm_cdf,
+            norm_cdf_array,
+            norm_pdf,
+            norm_pdf_array,
+        )
+
+        xs = np.concatenate(
+            [
+                np.random.default_rng(1).normal(0, 4, 5000),
+                [0.0, -0.0, 40.0, -40.0, np.inf, -np.inf],
+            ]
+        )
+        assert norm_cdf_array(xs).tolist() == [norm_cdf(x) for x in xs]
+        assert norm_pdf_array(xs).tolist() == [norm_pdf(x) for x in xs]
+        assert norm_pdf_array([]).shape == (0,)
+        assert norm_cdf_array(np.zeros((2, 3))).shape == (2, 3)
+
     @pytest.mark.parametrize("block_size", [0, -1, -3])
     def test_block_indices_refuses_a_block_size_below_one(self, block_size):
         """It used to clamp up to 1, which is an IID resample returned under

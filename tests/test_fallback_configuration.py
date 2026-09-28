@@ -1,7 +1,7 @@
 """
 The configuration this package could not run, and the surveys it broke.
 
-Seventeen modules each decide `HAS_CPP` for themselves by probing
+Eighteen modules each decide `HAS_CPP` for themselves by probing
 `_sqt_core`. That per-symbol design is right -- a kernel added later falls
 back on its own rather than all-or-nothing -- but it meant the NO-EXTENSION
 configuration could not be executed. Every fallback was reachable only by
@@ -36,6 +36,7 @@ NATIVE_AWARE_MODULES = (
     "analysis.garch",
     "analysis.hurst",
     "analysis.multi_factor",
+    "analysis.options_batch",
     "analysis.regression",
     "backtest.engine",
     "backtest.monte_carlo",
@@ -85,7 +86,7 @@ _FLAGS = """
 
 class TestTheSwitchReachesEveryModule:
     def test_all_of_them_fall_back_together(self):
-        """One name made unimportable flips all seventeen, because they all
+        """One name made unimportable flips all eighteen, because they all
         import the same one. No module needed changing."""
         import json
 
@@ -172,6 +173,34 @@ class TestTheFallbackActuallyComputes:
         assert fallback["has_cpp"] is False and native["has_cpp"] is True
         assert fallback["n"] == native["n"]
         assert fallback["checksum"] == pytest.approx(native["checksum"], rel=1e-9)
+
+    def test_an_option_chain_solves_the_same_on_both_paths(self):
+        """The chain kernels are held to the scalar option functions result
+        for result; the switch must reach them and the fallback must give
+        the same volatilities and iteration counts."""
+        script = """
+            import json, numpy as np
+            from standard_quant_tools.analysis import options_batch as ob
+            k = np.linspace(80.0, 120.0, 41)
+            fair = ob.black_scholes_greeks_batch(100.0, k, 0.5, 0.3, 0.02)["price"]
+            out = ob.implied_volatility_batch(fair, 100.0, k, 0.5, 0.02)
+            print(json.dumps({"path": out["path"],
+                              "vols": out["implied_volatility"].tolist(),
+                              "iterations": out["iterations"].tolist()}))
+        """
+        import json
+
+        fallback = json.loads(_run(script, disable=True))
+        native = json.loads(_run(script, disable=False))
+        assert fallback["path"] == "python"
+        try:
+            from standard_quant_tools import _sqt_core  # noqa: F401
+        except ImportError:
+            pass
+        else:
+            assert native["path"] == "C++"
+        assert fallback["iterations"] == native["iterations"]
+        assert fallback["vols"] == pytest.approx(native["vols"], rel=1e-12)
 
 
 class TestTheSwitchIsReadableFromCode:

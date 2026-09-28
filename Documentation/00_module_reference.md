@@ -109,7 +109,7 @@ Computed entirely from data a backtest already produces (`equity_curve`, `trade_
 
 ## Analysis (`standard_quant_tools.analysis`)
 
-16 functions plus the options module. Several have a **C++ fast path** via `_sqt_core` — numbers below are measured, not projected (see the CHANGELOG for the full methodology and an earlier round of unmeasured projections that turned out to overstate several of these, since corrected):
+16 functions plus the options modules. Several have a **C++ fast path** via `_sqt_core` — numbers below are measured, not projected (see the CHANGELOG for the full methodology and an earlier round of unmeasured projections that turned out to overstate several of these, since corrected):
 - `calculate_beta` — 2-variable OLS via closed-form normal equations (1.4× vs. `np.linalg.lstsq` — a real but modest win, not the 10–20× originally projected before this was actually benchmarked)
 - `rolling_beta` — incremental O(1)-per-bar sum updates (4.7× vs. two pandas rolling passes), plus a further ~1.1–1.5× from an optional runtime AVX2+FMA dispatch path
 - `half_life` / `compute_spread` — same OLS kernel, same modest (~1.1×) speedup
@@ -133,6 +133,18 @@ print(iv["implied_volatility"], iv["converged"], iv["method"])  # 0.20, True, "n
 ```
 
 `implied_volatility` solves via Newton-Raphson (vega as the derivative) and declares convergence on the **volatility step** it just took (`tol_sigma`, the price tolerance scaled by vega), handing over to a bisection over `[1e-6, 5.0]` when vega falls below a floor or a step leaves the bracket. It used to test an absolute price tolerance *before* taking a step, so where vega is small it returned its initial guess as "converged" — 0.2 for true vols of 3.00, 1.20 and 0.45 on short-dated puts. The result reports `price_error` and `at_bound`; a price bit-for-bit at intrinsic (which the pricer itself produces deep in the money) is admitted and returned as the largest volatility that still reproduces it, with `at_bound=True`, and a price of 0.0 is refused as underflow rather than searched. See [Documentation/12_options.md](12_options.md) for the full reference, including unit conventions for `vega`/`theta` and the no-arbitrage bound check `implied_volatility` runs before solving.
+
+#### Whole chains (`standard_quant_tools.analysis.options_batch`)
+
+The same functions over a chain, in one call, with a **C++ fast path** (OpenMP across contracts) and a numpy fallback that returns the same results. Arguments broadcast; `is_call` is a boolean per contract.
+
+| Function | Description |
+|---|---|
+| `implied_volatility_batch(option_price, spot, strike, time_to_expiry, risk_free_rate, dividend_yield=0.0, is_call=True, ...)` | `implied_volatility`, contract for contract — same algorithm, bounds, tolerances and results. A quote no volatility reproduces is a per-contract `reason` (`price_not_positive`, `price_not_finite`, `below_lower_bound`, `above_upper_bound`, `no_root_in_bracket`) with NaN volatility; an input outside the pricing domain refuses the batch naming the contract |
+| `black_scholes_greeks_batch(spot, strike, time_to_expiry, volatility, risk_free_rate, dividend_yield=0.0, is_call=True, *, grid=False)` | `option_greeks`' price and full greek set in its units, per contract or, with `grid=True`, every contract at every spot — `(contracts, spots)` |
+| `zero_gamma_spot(strike, time_to_expiry, volatility, quantity, *, spot_low, spot_high, ...)` | Where the book's net signed gamma crosses zero in the bracket (grid scan, then Brent), or `None` with the reason when it does not |
+
+476 implied vols in 0.2–0.3 ms against 14–27 ms one call at a time, and 29,036 greeks (61 spots × 476 contracts) in 0.3 ms against 100 ms — see [16_performance.md](16_performance.md#option-chains).
 
 ### Regression
 
@@ -546,8 +558,8 @@ What you do with an option price once you have one. `pricing.py` answers
 | `check_put_call_parity(...)` | The model-free identity, with the implied dividend and forward for diagnosis |
 | `implied_forward_price(...)` | Carry forward with financing, dividend and borrow separated |
 | `expected_move(...)` | One-sd move and the straddle approximation, with the historical exceedance rate |
-| `simulate_delta_hedge(...)` | Hedged P&L distribution; error scales as 1/sqrt(n_hedges) |
-| `option_risk_scenarios(...)` | Full revaluation over spot x vol |
+| `simulate_delta_hedge(...)` | Hedged P&L distribution; error scales as 1/sqrt(n_hedges). Every path's delta at a rebalance comes from one batched greek call |
+| `option_risk_scenarios(...)` | Full revaluation over spot x vol, the whole grid in one batched call |
 
 Deep guide: [21_derivatives.md](21_derivatives.md)
 

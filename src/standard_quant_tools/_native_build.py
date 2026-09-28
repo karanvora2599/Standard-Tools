@@ -221,12 +221,19 @@ def source_digest(native_dir: str) -> Tuple[str, int]:
     one `"<sha256 of the file's bytes>  <relative path>\\n"` line per file,
     in sorted path order, hashed together. Raises OSError when a file or
     directory cannot be read; the caller decides what that means.
+
+    CRLF is read as LF before hashing, on both sides. The digest answers
+    "was this built from this code", and a checkout that only rewrote line
+    endings -- git normalising on checkout, an editor saving with the
+    platform's convention -- is the same code; hashing raw bytes called a
+    correct build stale and sent every kernel to its slower Python path.
     """
     manifest = hashlib.sha256()
     files = native_sources(native_dir)
     for rel in files:
         with open(os.path.join(native_dir, *rel.split("/")), "rb") as handle:
-            file_hash = hashlib.sha256(handle.read()).hexdigest()
+            content = handle.read().replace(b"\r\n", b"\n")
+        file_hash = hashlib.sha256(content).hexdigest()
         manifest.update(f"{file_hash}  {rel}\n".encode("utf-8"))
     return manifest.hexdigest(), len(files)
 

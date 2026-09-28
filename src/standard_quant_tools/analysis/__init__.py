@@ -4,6 +4,11 @@ from .garch import garch_volatility_forecast
 from .hurst import hurst_exponent, rolling_hurst
 from .multi_factor import multi_factor_regression, rolling_factor_loadings
 from .options import black_scholes_greeks, black_scholes_price, implied_volatility
+from .options_batch import (
+    black_scholes_greeks_batch,
+    implied_volatility_batch,
+    zero_gamma_spot,
+)
 from .pca import factor_contributions, pca_returns
 from .rally import detect_rally
 from .regression import calculate_beta, rolling_beta
