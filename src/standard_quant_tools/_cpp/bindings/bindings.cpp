@@ -329,6 +329,9 @@ PYBIND11_MODULE(_sqt_core, m) {
         stamp["openmp"] = (info.openmp[0] != '\0')
                               ? py::object(py::str(info.openmp))
                               : py::object(py::none());
+        stamp["openmp_runtime"] = (info.openmp_runtime[0] != '\0')
+                                      ? py::object(py::str(info.openmp_runtime))
+                                      : py::object(py::none());
         stamp["pgo"] = info.pgo;
         m.attr("__build_info__") =
             py::module_::import("types").attr("MappingProxyType")(stamp);

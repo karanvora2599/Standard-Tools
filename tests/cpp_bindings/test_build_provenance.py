@@ -18,6 +18,8 @@ the package recomputes it at import and refuses a mismatch. This file pins:
     That test FAILS rather than skips: a refused extension makes every
     `@requires_cpp` test skip, and a suite that skips its way to green on a
     stale build is the failure this file exists to end;
+  - the build facts name the OpenMP runtime the extension links, which on
+    Windows is checked against the DLL it imports;
   - the digest itself: stable, sensitive to a byte, blind to everything
     outside the native tree, and the same in Python as in the CMake step
     that stamps it;
@@ -36,6 +38,7 @@ import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import textwrap
@@ -91,11 +94,13 @@ class TestTheExtensionInUseMatchesThisCheckout:
             "native_arch",
             "compiler",
             "openmp",
+            "openmp_runtime",
             "pgo",
         }
         assert re.fullmatch(r"[0-9a-f]{64}", info["source_digest"])
         assert info["source_files"] > 20
         assert info["compiler"]
+        assert info["pgo"] in ("off", "generate", "use")
         with pytest.raises(TypeError):
             info["source_digest"] = "0" * 64  # type: ignore[index]
 
@@ -106,6 +111,115 @@ class TestTheExtensionInUseMatchesThisCheckout:
         assert not re.search(r"\d{4}-\d{2}-\d{2}", text)
         assert str(PACKAGE_DIR.parent) not in text
         assert ":\\\\" not in text and '"/' not in text
+
+
+# ── Which OpenMP runtime the build linked ────────────────────────────────────
+
+
+def _pe_imports(path: Path) -> set:
+    """The DLL names a Windows PE image imports, lower-cased, read from its
+    import directory -- what `dumpbin /dependents` prints, without needing
+    a Visual Studio prompt to run."""
+    data = path.read_bytes()
+    pe = struct.unpack_from("<I", data, 0x3C)[0]
+    assert data[pe : pe + 4] == b"PE\0\0", f"{path} is not a PE image"
+    (n_sections,) = struct.unpack_from("<H", data, pe + 6)
+    (optional_size,) = struct.unpack_from("<H", data, pe + 20)
+    optional = pe + 24
+    (magic,) = struct.unpack_from("<H", data, optional)
+    directories = optional + (112 if magic == 0x20B else 96)
+    (import_rva,) = struct.unpack_from("<I", data, directories + 8)
+    sections = []
+    for i in range(n_sections):
+        vsize, vaddr, raw_size, raw_ptr = struct.unpack_from(
+            "<IIII", data, optional + optional_size + 40 * i + 8
+        )
+        sections.append((vaddr, max(vsize, raw_size), raw_ptr))
+
+    def offset(rva: int) -> int:
+        for vaddr, size, raw_ptr in sections:
+            if vaddr <= rva < vaddr + size:
+                return rva - vaddr + raw_ptr
+        raise ValueError(f"RVA {rva:#x} is in no section of {path}")
+
+    names = set()
+    descriptor = offset(import_rva)
+    while True:
+        (name_rva,) = struct.unpack_from("<I", data, descriptor + 12)
+        if name_rva == 0:
+            return names
+        start = offset(name_rva)
+        names.add(data[start : data.index(b"\0", start)].decode("ascii").lower())
+        descriptor += 20
+
+
+#: The runtime MSVC links for each value the build facts can name.
+_MSVC_RUNTIME_DLL = {
+    "vcomp": "vcomp140.dll",
+    "vcomp-experimental": "vcomp140.dll",
+    "libomp": "libomp140.x86_64.dll",
+}
+
+
+class TestTheStampNamesTheOpenMPRuntime:
+    """MSVC reports OpenMP "2.0" for vcomp140 and for LLVM's libomp140
+    alike (/openmp:llvm leaves _OPENMP at 200203), so the version alone
+    cannot tell a default build from an SQT_OPENMP_LLVM one -- and the two
+    differ in speed and in whether the extension loads on a machine without
+    Visual Studio. The stamp names the runtime itself."""
+
+    def test_a_build_with_openmp_names_its_runtime_and_one_without_names_none(self):
+        _sqt_core = pytest.importorskip("standard_quant_tools._sqt_core")
+        info = _sqt_core.__build_info__
+        if info["openmp"] is None:
+            assert info["openmp_runtime"] is None
+        else:
+            assert info["openmp_runtime"] in _MSVC_RUNTIME_DLL or re.fullmatch(
+                r"lib\w+", info["openmp_runtime"]
+            ), info["openmp_runtime"]
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="reads a PE import table")
+    def test_the_named_runtime_is_the_dll_the_extension_imports(self):
+        _sqt_core = pytest.importorskip("standard_quant_tools._sqt_core")
+        info = _sqt_core.__build_info__
+        if info["openmp_runtime"] not in _MSVC_RUNTIME_DLL:
+            pytest.skip(f"not an MSVC OpenMP build ({info['openmp_runtime']})")
+        imports = _pe_imports(Path(_sqt_core.__file__))
+        expected = _MSVC_RUNTIME_DLL[info["openmp_runtime"]]
+        assert expected in imports, sorted(imports)
+        others = set(_MSVC_RUNTIME_DLL.values()) - {expected}
+        assert not others & imports, sorted(imports)
+
+    @pytest.mark.skipif(shutil.which("cmake") is None, reason="needs cmake")
+    def test_the_recipe_stamps_the_runtime_it_is_given(self, tmp_path):
+        """The configure step hands the runtime to the stamp through the
+        facts file; a fact it dropped would read as "no OpenMP at all"."""
+        native = _tree(tmp_path)
+        facts = tmp_path / "facts.cmake"
+        facts.write_text(
+            'set(SQT_FACT_OPENMP "2.0")\nset(SQT_FACT_OPENMP_RUNTIME "libomp")\n'
+            'set(SQT_FACT_PGO "use")\n',
+            encoding="utf-8",
+        )
+        header = tmp_path / "stamp.hpp"
+        done = subprocess.run(
+            [
+                "cmake",
+                f"-DSQT_NATIVE_DIR={native.as_posix()}",
+                f"-DSQT_OUTPUT={header.as_posix()}",
+                f"-DSQT_FACTS_FILE={facts.as_posix()}",
+                "-P",
+                str(RECIPE),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert done.returncode == 0, done.stderr
+        text = header.read_text(encoding="utf-8")
+        assert '#define SQT_BUILD_OPENMP_RUNTIME "libomp"' in text
+        assert '#define SQT_BUILD_OPENMP "2.0"' in text
+        assert '#define SQT_BUILD_PGO "use"' in text
 
 
 # ── The digest ───────────────────────────────────────────────────────────────

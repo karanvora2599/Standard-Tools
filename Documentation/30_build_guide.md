@@ -400,9 +400,14 @@ and does not make a correct build read as stale; any other byte still counts.
 Because the step depends on every file it hashes, an edit followed by a plain
 `cmake --build` restamps; no reconfigure is needed. The same header records
 the build facts that change results or speed: build type, whether
-`SQT_NATIVE_ARCH` was on, compiler id and version, the OpenMP version linked,
-and the PGO mode. It holds no timestamp and no path, so two checkouts of one
-commit stamp the same digest. Read it as a read-only mapping:
+`SQT_NATIVE_ARCH` was on, compiler id and version, the OpenMP version linked
+and the runtime library that provides it (`openmp_runtime`: `vcomp`,
+`libomp`, `libgomp`, ...), and the PGO mode (`off`, `generate` or `use`).
+The runtime is named separately because the version cannot tell MSVC's two
+apart: `/openmp` (vcomp140) and `/openmp:llvm` (libomp140, see
+`SQT_OPENMP_LLVM` below) both report OpenMP 2.0. It holds no timestamp and
+no path, so two checkouts of one commit stamp the same digest. Read it as a
+read-only mapping:
 
 ```
 python -c "from standard_quant_tools import _sqt_core as m; print(dict(m.__build_info__))"
@@ -475,8 +480,8 @@ failure.
 **What the digest does not cover.** Only the package directory travels with a
 wheel or an editable install, so the root `CMakeLists.txt` and flags passed on
 the command line are not hashed. What they change that matters — build type,
-host-CPU codegen, compiler, OpenMP, PGO — is recorded in the build facts and
-reported beside the verdict rather than compared.
+host-CPU codegen, compiler, OpenMP version and runtime, PGO — is recorded in
+the build facts and reported beside the verdict rather than compared.
 
 ---
 
@@ -518,6 +523,7 @@ pytest tests/cpp_bindings/test_cpp_garch.py -v                  # garch11_varian
 pytest tests/cpp_bindings/test_cpp_signals.py -v                # kalman_filter_1state/2state, donchian/vwap-reversion state machines
 pytest tests/cpp_bindings/test_cpp_array1d_validation.py -v     # 1-D array validation across every Array1D binding
 pytest tests/cpp_bindings/test_cpp_gil_release.py -v            # GIL is actually released around every pure-C++ kernel call
+pytest tests/cpp_bindings/test_thread_count_determinism.py -v   # every parallel kernel bit-identical at 1, 2, 4 and 8 threads
 ```
 
 The directory holds more than these — the panel-indicator parity tests, the
@@ -654,7 +660,7 @@ Standard Tools/
 │   └── standard_quant_tools/
 │       ├── _sqt_core.cp3XX-*.[pyd|so]       ← Compiled output, one per Python ABI (generated, gitignored)
 │       └── _cpp/                            ← All C++ sources
-│           ├── CMakeLists.txt               ← Extension build rules (LTO/IPO, PGO options, OpenMP, AVX2 file override, build stamp)
+│           ├── CMakeLists.txt               ← Extension build rules (LTO/IPO, PGO options, OpenMP and its MSVC runtime option, AVX2 file override, build stamp)
 │           ├── cmake/
 │           │   └── source_digest.cmake      ← Build-time `cmake -P` step: SHA-256 of the native tree + build facts → generated stamp header
 │           ├── include/sqt/
@@ -767,16 +773,21 @@ tolerance instead of the usual `atol=1e-10`.
 
 **Monte Carlo OpenMP note:** `simulate_forward_paths`'s per-simulation loop
 is optionally parallelized via `#pragma omp parallel for`, gated on
-`SQT_HAS_OPENMP` (defined only if CMake's `find_package(OpenMP)` succeeds —
-not `REQUIRED`, so a build without an OpenMP runtime, e.g. default Apple
-Clang, still succeeds and just runs the identical loop serially). Each
+`_OPENMP` (defined by the compiler only when an OpenMP flag is in effect;
+CMake's `find_package(OpenMP)` is not `REQUIRED`, so a build without an
+OpenMP runtime, e.g. default Apple Clang, still succeeds and just runs the
+identical loop serially). Each
 simulated path is fully independent — its own per-thread RNG state derived
 from the base seed and path index, no shared mutable state, no locking —
 so this is safe by construction, not by careful scheduling. Verified by
 `test_result_independent_of_thread_count` in both
-`tests/cpp/test_monte_carlo.cpp` and `tests/cpp_bindings/test_cpp_monte_carlo.py`
-(same seed + inputs must give bit-identical output whether forced to 1
-thread or left unconstrained).
+`tests/cpp/test_monte_carlo.cpp` and `tests/cpp_bindings/test_cpp_monte_carlo.py`,
+and — for it and every other parallel kernel — by
+`tests/cpp_bindings/test_thread_count_determinism.py`, which runs each at
+1, 2, 4 and 8 threads in separate interpreters and requires bit-identical
+output. Separate interpreters because OpenMP reads `OMP_NUM_THREADS` once,
+when its thread pool starts, and `SQT_NUM_THREADS` is cached on first use:
+changing either inside one process changes nothing.
 
 **Trade-stat parity (`run_strategy` vs. `batch_run_strategy`) — fix confirmed correct against a real compiled `_sqt_core`:**
 `sqt::run_strategy`'s own trade-log logic in `backtest.cpp` used to record entry
@@ -921,14 +932,53 @@ breakdown in [Which copy are you importing?](#which-copy-are-you-importing).
 
 **OpenMP (optional)**  
 `_cpp/CMakeLists.txt` calls `find_package(OpenMP)` (not `REQUIRED`) to
-parallelize `monte_carlo.cpp`'s `simulate_forward_paths` loop and
-`backtest.cpp`'s `batch_run_strategy` loop. Linux (`libgomp`, ships with
-`build-essential`/`gcc`) and Windows (MSVC's built-in `/openmp` support)
-pick this up automatically with no extra install step. Default Apple Clang
-on macOS ships no OpenMP support — the build still succeeds either way
-(`SQT_HAS_OPENMP` just won't be defined, and the affected loops run their
-identical serial fallback). To get the parallel path on macOS, install
-LLVM's OpenMP runtime (`brew install libomp`) before configuring.
+parallelize the batched kernels — `batch_run_strategy`,
+`batch_backtest_crossover`, `rolling_hurst`, `batch_engle_granger`,
+`technical_indicators_panel`, `simulate_forward_paths`, the panel statistics
+and the option-chain kernels. Linux (`libgomp`, ships with
+`build-essential`/`gcc`) and Windows (MSVC's `/openmp`: OpenMP 2.0 on
+`vcomp140.dll`, which the Visual C++ Redistributable installs) pick this up
+automatically with no extra install step. Default Apple Clang on macOS ships
+no OpenMP support — the build still succeeds either way (`_OPENMP` is then
+undefined, and the affected loops run their identical serial code). To get
+the parallel path on macOS, install LLVM's OpenMP runtime
+(`brew install libomp`) before configuring. `__build_info__` names the
+runtime a build linked (`openmp_runtime`).
+
+**`SQT_OPENMP_LLVM` (MSVC only, off by default)**  
+`-DSQT_OPENMP_LLVM=ON` compiles with `/openmp:llvm`, which links LLVM's
+OpenMP runtime, `libomp140.x86_64.dll`, in place of `vcomp140.dll`. The build
+facts say which one a binary carries — `openmp_runtime` reads `libomp`
+against `vcomp`, while `openmp` reads `2.0` for both — and so does
+`dumpbin /dependents`. Switching the option in an existing build tree
+re-detects OpenMP (the flag FindOpenMP cached is dropped), and the C++ tests
+link the same runtime as the extension. It stays off, for three reasons
+that were each checked rather than assumed:
+
+- **Its DLL is not redistributable.** The Visual C++ Redistributable installs
+  `vcomp140.dll` and not `libomp140`: the file table of the installed 14.50
+  redistributable lists `vcomp140.dll` and no libomp. Visual Studio ships
+  `libomp140.x86_64.dll` only under
+  `VC\Redist\MSVC\<version>\debug_nonredist\x64\Microsoft.VC143.OpenMP.LLVM`,
+  and on a developer machine it reaches `System32` through Visual Studio's
+  own debug-runtime package. On a machine with the redistributable and no
+  Visual Studio, an extension built with it does not load —
+  `native_build_status()` reports `unloadable` and every kernel runs its
+  Python path. Never use it for a wheel or a binary that leaves the machine.
+- **It is not consistently faster.** Against vcomp on the same machine,
+  warm calls on all 16 threads were within 0.99–1.08× on six of eight
+  parallel kernels (the greek grid 1.25× faster, a 476-contract
+  implied-volatility solve 0.76×); capped at 8 threads libomp was 1.04–1.29×
+  faster; and every cold call — one made after the workers have gone to
+  sleep, the usual case between stretches of Python — was slower,
+  0.58–0.98× ([16_performance.md](16_performance.md#build-variants-openmp-runtime-and-profile-guided-optimization)).
+- **It does not enable `omp simd`.** `/openmp:llvm` changes the runtime and
+  admits unsigned loop counters; `#pragma omp simd` is still error C7660
+  under it. Only `/openmp:experimental` compiles that directive, and it
+  drops the `reduction` clause (warning C4849), so the vectorization hint in
+  `rolling_regression.cpp` stays scoped to GCC and Clang. On x86 that loop
+  only runs on a CPU without AVX2 and FMA anyway; every other one takes the
+  intrinsics path.
 
 **PGO (Profile-Guided Optimization, opt-in, local-only, `SQT_PGO_GENERATE`/`SQT_PGO_USE`)**  
 Same "opt-in for local max speed, off by default" philosophy as
@@ -936,11 +986,16 @@ Same "opt-in for local max speed, off by default" philosophy as
 flag: you build an instrumented binary, run it against a representative
 workload to collect a profile, then rebuild using that profile. Both
 options default `OFF` and are mutually exclusive (a `FATAL_ERROR` if both
-are set at once). **Deliberately not wired into any CI workflow** — a
-simple `cmake -B build && cmake --build build` pipeline has no natural
-place for the extra training run between the two builds, and the profile
-itself is workload- and machine-specific (a profile trained on one
-machine's realistic data isn't guaranteed to transfer cleanly to another).
+are set at once). **Deliberately not the default and not wired into any CI
+workflow** — a simple `cmake -B build && cmake --build build` pipeline has
+no natural place for the extra training run between the two builds, the
+profile is workload- and machine-specific, and a build anyone can reproduce
+from the sources alone cannot depend on a profile only one machine has.
+Measured, a trained profile made a single backtest 1.9× faster, the
+Donchian and VWAP-reversion state machines 1.5× and 1.2×, and the batch
+backtest grid 1.2–1.27×; the arithmetic kernels moved within their noise,
+and `batch_backtest_crossover` and `simulate_forward_paths` got 8% slower
+([16_performance.md](16_performance.md#build-variants-openmp-runtime-and-profile-guided-optimization)).
 
 ⚠️ **Every CMake build directory in this repo writes `_sqt_core` to the
 same absolute package path** (`src/standard_quant_tools/`), regardless of
@@ -949,50 +1004,85 @@ the *output*, only of intermediate object files. Building an instrumented
 or PGO-optimized extension **overwrites your normal working extension** in
 place. (A tree configured against a *different Python version* is the
 exception — the ABI tag differs, so it writes a differently named file. A
-PGO tree normally uses the same interpreter, so it does collide.) Use a separate build directory for PGO experiments
-(`build-pgo` below) and rebuild your normal `build/` directory afterward
-to restore it — don't assume the two build dirs are independent just
-because their *names* differ.
+PGO tree normally uses the same interpreter, so it does collide.) Use a
+separate build directory for PGO experiments (`build-pgo` below) and restore
+your normal extension afterwards as step 4 says — rebuilding the normal
+tree on its own does not.
+
+The workflow below is the MSVC one, run end to end on this project. On
+Windows, configure from a Visual Studio developer prompt (`vcvars64.bat`),
+which is where the build finds the toolset's `pgort140.dll` and `pgomgr`.
 
 Step 1 — instrumented build:
 ```
-cmake -B build-pgo -DCMAKE_BUILD_TYPE=Release -DSQT_PGO_GENERATE=ON
+cmake -S . -B build-pgo -DCMAKE_BUILD_TYPE=Release -DSQT_PGO_GENERATE=ON -DSQT_PGO_USE=OFF
 cmake --build build-pgo --config Release
 ```
+The instrumented extension depends on `pgort140.dll`, and Python (3.8+) does
+not search `PATH` for an extension's DLLs, so the build copies it beside the
+extension (the next build that is not instrumented removes it again).
+Without that copy the import failed, the package fell back to Python for
+every kernel, and a training run exercised none of the instrumented code —
+check `_sqt_core.__build_info__["pgo"] == "generate"` and
+`standard_quant_tools.native_build_status().used` before training.
 
-Step 2 — train it. Run a workload that's representative of real usage
-across the functions that matter most — the existing benchmark binaries are
-a reasonable starting point, but for a real profile also exercise the
-Python-level call paths (`run_strategy`, `batch_run_strategy`,
-`rolling_hurst`, `rolling_factor_loadings`, `rolling_beta`,
-`simulate_forward_paths`, the technical indicators) across realistic
-size/parameter ranges, not just the benchmark binaries' own fixed inputs:
+Step 2 — train it, through Python:
 ```
-./build-pgo/tests/cpp/bench_backtest    # or.exe on Windows
-./build-pgo/tests/cpp/bench_hurst
-python -c "
-from standard_quant_tools import _sqt_core as c
-import numpy as np
-rng = np.random.default_rng(0)
-prices = 100 + np.cumsum(rng.normal(0, 1, 2000))
-signals = rng.choice([-1.0, 0.0, 1.0], size=(2000, 2000))
-c.batch_run_strategy(prices, signals, 10000.0, 0.001, 0.0005)
-c.rolling_hurst(rng.normal(0, 1, 2000), 200, 1, 'dfa', 10)
-"
+python tests/bench/pgo_training.py
 ```
-MSVC writes profile data to a `.pgd` file next to the `.pyd`/import
-library in the build tree (merged automatically across runs by the
-`/LTCG:PGInstrument` runtime); GCC/Clang write `.gcda` files next to each
-translation unit's object file, merged automatically when the same build
-tree is reused for step 3.
+It calls every kernel family — indicators, single and batched backtests,
+the signal state machines, the portfolio bar loop, rolling regression,
+Hurst, cointegration, Monte Carlo, GARCH, Kalman, the panel statistics and
+the option chains — over a spread of sizes, and refuses to run against
+anything but an instrumented build. Add your own workload the same way: each
+process that loads the instrumented extension writes its counts beside it as
+`_sqt_core!N.pgc` when it exits, and every count file is folded in at step 3.
+The C++ benchmark binaries (`tests/cpp/bench_backtest`, `bench_hurst`) train
+nothing: they link their own copies of the sources, not the extension. The
+script runs single-threaded, because the instrumented counters are shared by
+every thread — on 16 threads a 2,000 × 2,000 `batch_run_strategy` grid ran
+3.5× slower than on one — and the thread count does not change which paths
+a kernel takes.
 
 Step 3 — optimized rebuild using the collected profile:
 ```
-cmake -B build-pgo -DCMAKE_BUILD_TYPE=Release -DSQT_PGO_USE=ON
+cmake -S . -B build-pgo -DSQT_PGO_GENERATE=OFF -DSQT_PGO_USE=ON
 cmake --build build-pgo --config Release
 ```
+Pass `-DSQT_PGO_GENERATE=OFF` explicitly: the tree still holds `ON` from
+step 1, and the two options are mutually exclusive. The configure merges
+every count file into this tree's profile
+(`build-pgo/src/standard_quant_tools/_cpp/_sqt_core.pgd`) with `pgomgr`,
+deletes them, and prints how many it merged. It does so itself because the
+linker only folds in count files lying beside the profile, and the counts
+land beside the extension: left to the linker, a USE build linked against an
+empty profile and said nothing. A USE configure with no profile in the tree
+is refused. The build then only relinks. Check
+`__build_info__["pgo"] == "use"`.
 
-Then restore your normal working extension:
+Step 4 — restore your normal working extension. Building the normal tree
+again is not enough: its record of the extension is older than the file the
+PGO build wrote over it, so Ninja reports nothing to do and the PGO
+extension stays in place. Remove it first, then build:
 ```
+cmake -E rm -f src/standard_quant_tools/_sqt_core.cp312-win_amd64.pyd   # this interpreter's file
 cmake --build build --config Release
 ```
+and check `__build_info__["pgo"] == "off"`.
+
+**What it costs**, measured on the machine in
+[16_performance.md](16_performance.md): the instrumented build is a full
+build (18 s with Ninja on 16 threads), training 5 s, and the USE configure
+and relink 7 s. The profile goes stale with the code: after a C++ change the
+counts of every function whose code changed no longer apply to it, and the
+source digest changes, so the previous PGO extension is refused at import
+until it is rebuilt — retrain after every change you want optimized.
+
+GCC and Clang use `-fprofile-generate`/`-fprofile-use`; that path is wired
+but was not exercised in the measurement above. GCC writes `.gcda` files
+beside each object in the build tree and reads them back from the same tree
+at step 3. Clang writes `.profraw` files into the working directory of the
+process that ran the training, and they must be merged with
+`llvm-profdata merge -o default.profdata` into the directory the compiler
+runs in at step 3 — `-fprofile-use` without a path reads
+`default.profdata` from there.

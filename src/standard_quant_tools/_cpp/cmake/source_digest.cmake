@@ -45,6 +45,7 @@ endif()
 set(SQT_FACT_COMPILER "unknown")
 set(SQT_FACT_NATIVE_ARCH 0)
 set(SQT_FACT_OPENMP "")
+set(SQT_FACT_OPENMP_RUNTIME "")
 set(SQT_FACT_PGO "off")
 if(SQT_FACTS_FILE AND EXISTS "${SQT_FACTS_FILE}")
     include("${SQT_FACTS_FILE}")
@@ -78,6 +79,7 @@ set(_header "// Generated at build time by _cpp/cmake/source_digest.cmake. Do no
 #define SQT_BUILD_COMPILER \"${SQT_FACT_COMPILER}\"
 #define SQT_BUILD_NATIVE_ARCH ${SQT_FACT_NATIVE_ARCH}
 #define SQT_BUILD_OPENMP \"${SQT_FACT_OPENMP}\"
+#define SQT_BUILD_OPENMP_RUNTIME \"${SQT_FACT_OPENMP_RUNTIME}\"
 #define SQT_BUILD_PGO \"${SQT_FACT_PGO}\"
 ")
 

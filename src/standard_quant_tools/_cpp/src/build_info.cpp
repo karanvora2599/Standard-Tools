@@ -22,6 +22,7 @@ BuildInfo build_info() noexcept {
         SQT_BUILD_NATIVE_ARCH != 0,
         SQT_BUILD_COMPILER,
         SQT_BUILD_OPENMP,
+        SQT_BUILD_OPENMP_RUNTIME,
         SQT_BUILD_PGO,
     };
 }

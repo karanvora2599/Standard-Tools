@@ -239,14 +239,17 @@ void rolling_beta_into(
         } else {
             Sx = Sy = Sxy = Sxx = Syy = 0.0;
             // Vectorization hint only, not a functional requirement -- a
-            // 4-accumulator reduction the compiler may already auto-vectorize
-            // at -O3/-march=native without it. MSVC's default /openmp only
-            // implements OpenMP 2.0, which doesn't recognize `omp simd` (that's
-            // 4.0+) -- confirmed this is a hard C7660 compile error there
-            // (requires /openmp:experimental), not a silent no-op as initially
-            // assumed, so this pragma is scoped to non-MSVC compilers only
-            // rather than pulling in a project-wide experimental-flag change
-            // for one vectorization hint.
+            // 5-accumulator reduction the compiler may already auto-vectorize
+            // at -O3/-march=native without it -- and on x86 only a CPU
+            // without AVX2+FMA reaches this loop; every other one takes the
+            // intrinsics path above. Scoped to non-MSVC compilers because no
+            // MSVC OpenMP mode honours it as written (checked on MSVC
+            // 19.44): `omp simd` is a hard C7660 under /openmp (OpenMP 2.0)
+            // and equally under /openmp:llvm (SQT_OPENMP_LLVM), which changes
+            // the runtime and admits unsigned loop counters but not this
+            // directive; the one mode that compiles it, /openmp:experimental,
+            // drops the reduction clause with C4849. See the CHANGELOG entry
+            // of 2026-09-28.
 #if defined(_OPENMP) && !defined(_MSC_VER)
             #pragma omp simd reduction(+:Sx,Sy,Sxy,Sxx,Syy)
 #endif

@@ -601,9 +601,9 @@ static void test_run_strategy_summary_multi_trade_count() {
 // be exactly reproducible regardless of how many threads actually ran it.
 // This test doesn't control OMP_NUM_THREADS itself (that's an environment
 // variable read once at OpenMP thread-pool creation, not something a single
-// process can usefully vary mid-run) -- the Python-level
-// tests/test_cpp_backtest.py test suite covers the OMP_NUM_THREADS=1/2/4+
-// comparison via separate process invocations instead. This test's job is
+// process can usefully vary mid-run) --
+// tests/cpp_bindings/test_thread_count_determinism.py covers the 1/2/4/8
+// thread comparison, one interpreter per count, instead. This test's job is
 // simpler: prove the batch path's output matches calling
 // run_strategy_summary() directly, test by test, in this process as-built.
 

@@ -1,5 +1,35 @@
 # Changelog
 
+## The profile-guided build works, and the extension names its OpenMP runtime
+
+Two build options were wired and never exercised. Run end to end, one of
+them failed silently at every step and the other turned out to depend on a
+runtime user machines do not have.
+
+- **Profile-guided optimisation works end to end.** Three silent failures
+  are fixed: the instrumented extension could not import (Python does not
+  search `PATH` for `pgort140.dll`, so training ran the Python fallbacks
+  and profiled nothing); the training counts landed where the linker does
+  not look, so the optimised build linked an empty profile without a word;
+  and the documented optimise and restore steps did not run as written. The
+  optimise step now merges the counts and refuses to proceed without a
+  profile. Trained on `tests/bench/pgo_training.py`, a single backtest runs
+  1.9 times faster and the signal state machines 1.2 to 1.5 times; it stays
+  off by default, because a profile belongs to one workload on one machine.
+- **`SQT_OPENMP_LLVM`** (MSVC, off by default) links LLVM's OpenMP runtime
+  instead of `vcomp`. It stays off: `libomp140.x86_64.dll` is not in the
+  Visual C++ redistributable, so an extension built with it does not load
+  on a machine without Visual Studio, and measured it is not consistently
+  faster (1.03-1.25 times on warm parallel kernels, 0.6-0.9 times cold). It
+  also does not unlock `omp simd` under MSVC, as had been assumed.
+- **The extension names its OpenMP runtime.** `__build_info__` gains
+  `openmp_runtime` (`vcomp`, `libomp`, `libgomp`), because MSVC reports
+  version 2.0 for both of its runtimes and the version alone could not tell
+  the builds apart.
+- **Every parallel kernel is bit-identical at 1, 2, 4 and 8 threads**, checked
+  in a fresh interpreter per thread count; the earlier tests changed the
+  thread count inside one process, where it has no effect.
+
 ## An option chain prices in one call
 
 The options path priced a chain one contract and one Python call at a time:

@@ -10,6 +10,11 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+# Profile-guided optimization: training counts an instrumented extension
+# writes beside itself, and the runtime DLL copied there for it to load.
+*.pgc
+*.pgd
+pgort140.dll
 .ruff_cache/
 .mypy_cache/
 .pytest_cache/

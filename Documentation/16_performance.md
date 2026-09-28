@@ -63,7 +63,7 @@ the size named:
 
 **Two honest findings from actually measuring this**, worth calling out rather than hiding:
 - **`run_strategy` originally showed only ~1.0× end-to-end**, not the then-documented 3–8×, even though the raw C++ kernel genuinely was faster in isolation (confirmed by `tests/cpp/bench_backtest.cpp`'s native-only numbers below). The gap was never the kernel — it was the Python wrapper: `pct_change`/`shift` computed unconditionally before the C++ dispatch check even though the C++ path never used them, and an unconditional Python trade-log rebuild that overwrote already-correct native stats every call. **Since fixed** (removing both, and only building the Python trade log when a caller actually asks for it via `include_trade_log=True`) — the real, current number is **~58×** (26.8ms → 0.46ms), reflected in the table above. `batch_run_strategy` never had this specific bug (its consumer already read native stats directly), but has since gained its own further ~6–11× from an allocation-free summary kernel plus OpenMP across the parameter grid.
-- **OpenMP's measured speedup for `simulate_forward_paths` is ~2.0–2.4×** on this 16-core machine (min-of-7-runs across separate process invocations, `n_simulations=200 000`) — not the near-linear-with-cores scaling the per-path independence would suggest in theory. MSVC's OpenMP support here is version 2.0 (an older spec) — some of that gap was expected going in. A later pass eliminating each path's small per-path RNG/buffer allocations moved this scaling ratio only within noise (~2.4×→~2.1×, both real measurements) — the allocation being eliminated turned out not to be the dominant cost at this problem size, a legitimate change worth keeping regardless (fewer allocations is never worse) but not the win that framing initially suggested.
+- **OpenMP's measured speedup for `simulate_forward_paths` is ~2.0–2.4×** on this 16-core machine (min-of-7-runs across separate process invocations, `n_simulations=200 000`) — not the near-linear-with-cores scaling the per-path independence would suggest in theory. MSVC's OpenMP support here is version 2.0 (an older spec) — some of that gap was expected going in, though the spec was not the cause: linking LLVM's newer runtime instead left this kernel where it was on 16 threads (0.99×, [Build variants](#build-variants-openmp-runtime-and-profile-guided-optimization) below). A later pass eliminating each path's small per-path RNG/buffer allocations moved this scaling ratio only within noise (~2.4×→~2.1×, both real measurements) — the allocation being eliminated turned out not to be the dominant cost at this problem size, a legitimate change worth keeping regardless (fewer allocations is never worse) but not the win that framing initially suggested.
 
 **A third honest finding, from the modeling kernels.** That work opened by
 stating a *ceiling* rather than a target: feature preprocessing was 47–56%
@@ -146,6 +146,145 @@ the scenario grid to their old per-contract loops double for double.
   prices one leg per contract of a structure — two to four, typically — and
   batching them measured 270 µs → 305 µs on a four-leg condor, so it keeps
   its per-leg loop.
+
+---
+## Build variants: OpenMP runtime and profile-guided optimization
+
+Two build options measured against the default build: linking LLVM's
+OpenMP runtime in place of MSVC's (`SQT_OPENMP_LLVM`), and a profile-guided
+build (`SQT_PGO_GENERATE` / `SQT_PGO_USE`). Neither is the default, and this
+is the evidence. How to build either is in
+[30_build_guide.md](30_build_guide.md#9-notes).
+
+**Method.** Three builds of one commit — the same source digest — identical
+except for the option under test: Release, `SQT_NATIVE_ARCH=ON`, LTO, Ninja,
+MSVC 19.44.35228, Python 3.12.1, NumPy 2.0.2. The machine is an Intel Core
+i7-13620H laptop (6 performance and 4 efficiency cores, 16 threads) on AC
+power under its "Silent" power profile, Windows 11 build 26200, with nothing
+else heavy running; measured 2026-09-28. The harness is
+[`tests/bench/bench_build.py`](../tests/bench/bench_build.py), on the raw
+bindings: in each process every kernel is called back to back for 0.25 s and
+then timed 15 times, and that process's median is one sample. Each build and
+thread setting got ten processes, interleaved across builds (vcomp, libomp,
+PGO, then libomp, PGO, vcomp, ...). Every cell is the **median of the ten
+per-process medians, in ms, with their range**; a ratio is default ÷
+variant, so above 1 means the variant is faster. A *cold* call is a single
+call after 0.3 s without work — a kernel called between stretches of Python,
+once the runtime's workers have gone to sleep — six per process. Which build
+a result came from is in the file: the harness prints `__build_info__`.
+
+### OpenMP runtime: vcomp (default) against LLVM's libomp
+
+16 threads (the OpenMP default here):
+
+| Kernel | vcomp, warm | libomp, warm | ratio | vcomp, cold | libomp, cold | ratio |
+|---|---|---|---|---|---|---|
+| `batch_run_strategy`, 2,000 bars × 2,000 | 9.90 [9.35–11.09] | 9.65 [9.14–10.74] | 1.03× | 10.46 [7.55–11.19] | 11.65 [9.56–12.87] | 0.90× |
+| `batch_run_strategy`, 500 bars × 5,000 | 6.13 [5.67–7.12] | 5.68 [5.51–7.64] | 1.08× | 8.64 [6.36–9.46] | 9.28 [7.87–9.94] | 0.93× |
+| `batch_backtest_crossover`, 2,000 × 2,450 pairs | 4.34 [4.02–5.10] | 4.20 [4.05–4.69] | 1.03× | 7.43 [4.76–8.06] | 9.53 [6.86–11.92] | 0.78× |
+| `technical_indicators_panel`, 500 × 1,000 | 14.61 [13.96–15.44] | 14.01 [12.50–16.17] | 1.04× | 14.03 [12.17–15.09] | 16.31 [15.07–17.83] | 0.86× |
+| `implied_volatility_batch`, 476 contracts | 0.063 [0.057–0.082] | 0.083 [0.077–0.099] | 0.76× | 0.61 [0.32–0.77] | 1.06 [0.50–1.46] | 0.58× |
+| `black_scholes_greeks_batch`, 61 × 476 | 0.93 [0.76–1.15] | 0.74 [0.55–0.82] | 1.25× | 2.64 [0.95–3.02] | 3.26 [2.47–4.02] | 0.81× |
+| `rolling_hurst`, n = 5,000, window 252 | 6.60 [6.24–10.87] | 6.35 [6.00–6.98] | 1.04× | 9.32 [5.58–9.65] | 13.25 [10.33–16.39] | 0.70× |
+| `simulate_forward_paths`, 20,000 × 252 | 7.08 [6.74–7.41] | 7.13 [6.31–7.81] | 0.99× | 10.05 [8.13–10.76] | 11.83 [7.72–13.23] | 0.85× |
+
+8 threads (`SQT_NUM_THREADS=8`, six processes per build):
+
+| Kernel | vcomp, warm | libomp, warm | ratio | vcomp, cold | libomp, cold | ratio |
+|---|---|---|---|---|---|---|
+| `batch_run_strategy`, 2,000 bars × 2,000 | 15.22 [14.00–16.38] | 13.15 [12.83–13.91] | 1.16× | 13.56 [12.87–14.33] | 14.00 [13.46–15.09] | 0.97× |
+| `batch_run_strategy`, 500 bars × 5,000 | 8.50 [7.71–9.13] | 8.17 [7.60–8.76] | 1.04× | 10.40 [10.08–11.07] | 10.74 [10.32–11.61] | 0.97× |
+| `batch_backtest_crossover`, 2,000 × 2,450 pairs | 5.98 [5.69–6.67] | 4.81 [4.61–5.30] | 1.24× | 8.83 [8.25–9.34] | 10.79 [9.42–11.94] | 0.82× |
+| `technical_indicators_panel`, 500 × 1,000 | 17.89 [16.60–19.42] | 17.18 [16.21–18.94] | 1.04× | 17.78 [17.08–18.20] | 18.58 [18.01–19.22] | 0.96× |
+| `implied_volatility_batch`, 476 contracts | 0.072 [0.058–0.076] | 0.067 [0.064–0.072] | 1.07× | 0.56 [0.50–0.67] | 0.83 [0.38–0.90] | 0.67× |
+| `black_scholes_greeks_batch`, 61 × 476 | 0.90 [0.75–1.05] | 0.70 [0.61–0.92] | 1.28× | 2.38 [2.00–2.75] | 3.43 [3.33–3.70] | 0.69× |
+| `rolling_hurst`, n = 5,000, window 252 | 8.92 [8.34–9.58] | 6.90 [6.34–8.15] | 1.29× | 10.55 [10.12–10.86] | 12.19 [11.08–13.11] | 0.87× |
+| `simulate_forward_paths`, 20,000 × 252 | 7.58 [7.13–8.92] | 6.88 [6.63–7.47] | 1.10× | 10.98 [9.83–11.42] | 11.25 [10.27–11.88] | 0.98× |
+
+With `SQT_NUM_THREADS=1` no region goes parallel and the runtime is never
+asked to do anything: all seventeen kernels agree within 0.96–1.04×,
+including `rolling_beta` and `rolling_factor_loadings` (1.00–1.01×), which
+`/openmp:llvm` was expected to help through the `omp simd` hint. It cannot:
+the directive is still a compile error under `/openmp:llvm`, and the loop it
+annotates only runs on CPUs without AVX2 and FMA.
+
+**Findings.**
+
+- **Warm, it depends on the thread count.** On all 16 threads six of eight
+  parallel kernels land within 0.99–1.08× of each other, inside their own
+  ranges; the greek grid is 1.25× faster on libomp and the 476-contract
+  implied-volatility solve — 60 µs of work — 0.76×, a costlier fork and
+  join. Capped at 8 threads, the way a process pool would run it, libomp is
+  faster on every parallel kernel, 1.04–1.29×.
+- **Cold, libomp is slower on every parallel kernel at both counts**
+  (0.58–0.93× on 16 threads, 0.67–0.98× on 8): its sleeping workers take
+  longer to wake. For a library whose kernels are called between stretches
+  of Python, that is the common case.
+- **vcomp's idle workers cost the caller**: they keep spinning for about
+  100 ms after a parallel region, and serial work on the calling thread runs
+  about a third slower inside that window. Measured with
+  `donchian_state_machine` right after a 2,000 × 2,000 grid: 1.16–1.31 ms in
+  the first 100 ms against 0.91 ms steady on vcomp, 0.81–0.86 ms in the same
+  window on libomp. It is a cost of a serial kernel following a parallel
+  one, not of either kernel, and it is why the harness warms each kernel for
+  0.25 s: with a single warm-up call the serial kernels measured up to 1.6×
+  slower on vcomp purely because of where they sat in the list.
+- **The decision does not rest on the speed.** `libomp140.x86_64.dll` is not
+  in the Visual C++ Redistributable, so a build that needs it does not load
+  on a machine without Visual Studio. With a gain in one regime and a loss
+  in another to weigh against that, `SQT_OPENMP_LLVM` stays an
+  off-by-default option for local builds.
+
+### Profile-guided optimization against the plain build
+
+Both builds link vcomp; the PGO build was trained with
+[`tests/bench/pgo_training.py`](../tests/bench/pgo_training.py), five rounds
+single-threaded, about 5 s. The training calls the same kernels the table
+measures but with its own seeds, sizes and parameters, so this is the
+favourable case of a profile trained on the workload it is judged on — a
+workload the profile never saw gains less.
+
+| Kernel | plain, 1 thread | PGO, 1 thread | ratio | plain, 16 threads | PGO, 16 threads | ratio |
+|---|---|---|---|---|---|---|
+| `run_strategy`, 5,000 bars | 0.079 [0.072–0.129] | 0.041 [0.033–0.043] | **1.92×** | 0.076 [0.071–0.091] | 0.041 [0.033–0.047] | **1.87×** |
+| `donchian_state_machine`, 200,000 bars | 0.94 [0.87–1.11] | 0.62 [0.56–0.73] | **1.52×** | 0.94 [0.82–1.00] | 0.62 [0.57–0.80] | **1.53×** |
+| `vwap_reversion_state_machine`, 200,000 bars | 1.03 [0.93–1.09] | 0.84 [0.76–0.91] | **1.23×** | 1.02 [0.90–1.12] | 0.84 [0.74–1.00] | **1.22×** |
+| `batch_run_strategy`, 2,000 bars × 2,000 | 64.4 [61.1–68.0] | 53.8 [51.5–55.6] | **1.20×** | 9.90 [9.35–11.09] | 7.82 [7.62–9.07] | **1.27×** |
+| `batch_run_strategy`, 500 bars × 5,000 | 40.1 [38.2–44.4] | 33.4 [30.9–34.3] | **1.20×** | 6.13 [5.67–7.12] | 5.00 [4.68–6.31] | **1.23×** |
+| `rolling_beta`, 200,000, window 60 | 4.30 [3.78–5.05] | 4.05 [3.77–4.91] | 1.06× | 4.37 [4.15–4.88] | 4.00 [3.74–4.23] | 1.09× |
+| `rolling_beta`, 200,000, window 252 | 4.07 [3.76–4.45] | 3.80 [3.64–3.96] | 1.07× | 4.07 [3.66–4.48] | 3.80 [3.48–3.96] | 1.07× |
+| `parabolic_sar`, 200,000 | 1.98 [1.79–2.40] | 1.87 [1.69–1.94] | 1.06× | 1.88 [1.76–2.01] | 1.86 [1.77–2.59] | 1.01× |
+| `technical_indicators`, 200,000, all five | 31.7 [30.2–32.5] | 30.8 [30.3–32.2] | 1.03× | 31.5 [30.4–33.6] | 30.7 [29.4–32.3] | 1.03× |
+| `technical_indicators_panel`, 500 × 1,000 | 68.0 [67.0–112.7] | 66.6 [64.0–68.3] | 1.02× | 14.61 [13.96–15.44] | 14.00 [13.56–16.84] | 1.04× |
+| `rolling_factor_loadings`, 5,000, window 252, k = 3 | 28.4 [27.9–29.2] | 28.3 [27.9–29.5] | 1.00× | 28.4 [27.3–29.2] | 28.0 [27.5–29.6] | 1.01× |
+| `implied_volatility_batch`, 476 contracts | 0.190 [0.175–0.208] | 0.189 [0.175–0.203] | 1.01× | 0.063 [0.057–0.082] | 0.065 [0.060–0.082] | 0.97× |
+| `black_scholes_greeks_batch`, 61 × 476 | 2.57 [2.26–2.77] | 2.60 [2.53–2.85] | 0.99× | 0.93 [0.76–1.15] | 0.90 [0.76–1.36] | 1.03× |
+| `run_portfolio_simulation` kernel, 1,000 × 2,000 | 2.43 [2.36–2.63] | 2.52 [2.38–2.85] | 0.96× | 2.49 [2.30–2.79] | 2.57 [2.35–2.77] | 0.97× |
+| `rolling_hurst`, n = 5,000, window 252 | 31.2 [30.2–34.9] | 32.5 [31.9–33.7] | 0.96× | 6.60 [6.24–10.87] | 6.75 [6.55–7.86] | 0.98× |
+| `batch_backtest_crossover`, 2,000 × 2,450 pairs | 21.5 [20.3–38.9] | 23.4 [23.0–23.7] | **0.92×** | 4.34 [4.02–5.10] | 4.69 [4.46–5.79] | **0.92×** |
+| `simulate_forward_paths`, 20,000 × 252 | 24.9 [24.3–30.3] | 27.1 [26.4–27.5] | **0.92×** | 7.08 [6.74–7.41] | 7.20 [6.96–7.54] | 0.98× |
+
+**Findings.**
+
+- **The gain is where branches are, and it is larger than the usual
+  5–15% there.** A single backtest 1.9×, the Donchian state machine 1.5×,
+  VWAP reversion 1.2×, and the batch grid — the same per-combination
+  summary loop, run 2,000 or 5,000 times — 1.2–1.27× at either thread count.
+- **Arithmetic kernels gain nothing that clears their spread**: rolling
+  regression, the indicators and the option formulas are 0.97–1.09×, most of
+  them inside the range of the plain build; the portfolio bar loop and
+  rolling Hurst are 0.96–0.98×.
+- **Two kernels got slower**, and consistently so — in all ten processes,
+  with ranges that do not overlap at one thread: `batch_backtest_crossover`
+  and `simulate_forward_paths`, 8% each, serially. Both were in the
+  training; the profile moved inlining and layout decisions against them. A
+  profile is a trade, not a free speed-up.
+- **It stays off by default.** A profile is a statement about one workload
+  on one machine, the build it makes cannot be reproduced from the sources
+  alone, and it goes stale with every C++ change (the digest then refuses
+  the old extension anyway). For a fixed local workload dominated by single
+  backtests and signal state machines it is worth the 30 s it costs; the
+  workflow is in [30_build_guide.md](30_build_guide.md#9-notes).
 
 ---
 ## Python-Level Optimisations

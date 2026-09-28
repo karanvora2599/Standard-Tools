@@ -22,6 +22,10 @@ struct BuildInfo {
     bool        native_arch;    // host-CPU codegen was requested
     const char* compiler;       // compiler id and version
     const char* openmp;         // OpenMP version linked, "" when none
+    const char* openmp_runtime; // the runtime library itself ("vcomp",
+                                // "libomp", "libgomp", ...), "" when none;
+                                // MSVC reports version 2.0 for vcomp and
+                                // libomp alike, so only this tells them apart
     const char* pgo;            // "off", "generate" or "use"
 };
 
