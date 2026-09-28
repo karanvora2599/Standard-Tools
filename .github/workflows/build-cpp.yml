@@ -87,8 +87,13 @@ jobs:
         # --parallel with no explicit job count (not $(nproc), which is
         # Linux-only) -- CMake auto-detects available cores on every
         # platform this matrix runs on.
+        #
+        # SQT_REQUIRE_NATIVE=ON: without it CMakeLists.txt downgrades a
+        # missing compiler or pybind11 to a warning and configures a
+        # pure-Python build, so this job -- whose whole purpose is the
+        # extension -- could go green having built nothing.
         run: |
-          cmake -B build -DCMAKE_BUILD_TYPE=Release -DSQT_BUILD_TESTS=ON
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DSQT_BUILD_TESTS=ON -DSQT_REQUIRE_NATIVE=ON
           cmake --build build --config Release --parallel
 
       - name: Run native C++ test suite
@@ -136,7 +141,7 @@ jobs:
           CXXFLAGS: "-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -g -O1"
           LDFLAGS: "-fsanitize=address,undefined"
         run: |
-          cmake -B build -DCMAKE_BUILD_TYPE=Debug -DSQT_BUILD_TESTS=ON
+          cmake -B build -DCMAKE_BUILD_TYPE=Debug -DSQT_BUILD_TESTS=ON -DSQT_REQUIRE_NATIVE=ON
           cmake --build build --config Debug --parallel $(nproc)
 
       - name: Run native C++ test suite under ASan/UBSan
@@ -210,7 +215,7 @@ jobs:
 
       - name: Build C++ extension
         run: |
-          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DSQT_REQUIRE_NATIVE=ON
           cmake --build build --config Release --parallel $(nproc)
 
       - name: Verify extension loaded

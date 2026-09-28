@@ -55,7 +55,7 @@ jobs:
           CXXFLAGS: "-fsanitize=thread -fno-omit-frame-pointer -g -O1"
           LDFLAGS: "-fsanitize=thread"
         run: |
-          cmake -B build -DCMAKE_BUILD_TYPE=Debug -DSQT_BUILD_TESTS=ON
+          cmake -B build -DCMAKE_BUILD_TYPE=Debug -DSQT_BUILD_TESTS=ON -DSQT_REQUIRE_NATIVE=ON
           cmake --build build --config Debug --parallel
 
       - name: Run native C++ test suite under ThreadSanitizer
