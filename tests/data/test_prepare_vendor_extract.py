@@ -64,7 +64,9 @@ def raw_book(mid):
     # 1970. Say the unit rather than inheriting it.
     frame = {
         "ts_recv": stamps.astype("datetime64[ns]").astype("int64"),
-        "ts_event": (stamps - pd.Timedelta("3ms")).astype("datetime64[ns]").astype("int64"),
+        "ts_event": (stamps - pd.Timedelta("3ms"))
+        .astype("datetime64[ns]")
+        .astype("int64"),
     }
     for level in range(VENDOR_LEVELS):
         live = level < LIVE_LEVELS
@@ -448,3 +450,60 @@ class TestTheWholeChain:
         result = _prepare(runtime, tmp_path, raw_book)
         assert "register_external_dataset" in result["next_step"]
         assert result["kind"] in result["next_step"]
+
+
+class TestTheOutputAppearsWholeOrNotAtAll:
+    """A conversion streams batch by batch, so the name it writes to used to
+    hold a partial Parquet while it ran and after it failed -- a readable,
+    SHORT file that blocked the name for good -- and a file that appeared
+    under the name mid-run was overwritten. The output is now staged beside
+    the target and published only when complete, and never over anything."""
+
+    def test_a_conversion_that_fails_part_way_leaves_nothing(
+        self, runtime, tmp_path, raw_book, monkeypatch
+    ):
+        from standard_quant_tools.agent.runtimes.data import tools as data_tools
+
+        real = data_tools._normalize_batch
+        calls = {"n": 0}
+
+        def interrupted(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 3:
+                raise RuntimeError("interrupted part-way through the extract")
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(data_tools, "_normalize_batch", interrupted)
+        with pytest.raises(Exception, match="interrupted"):
+            _prepare(
+                runtime, tmp_path, raw_book, batch_rows=500, keep_empty_levels=True
+            )
+        assert calls["n"] == 3
+        assert not (tmp_path / "out.parquet").exists()
+        assert not list(tmp_path.glob(".*.tmp"))
+
+    def test_a_file_that_appears_while_it_runs_is_not_replaced(
+        self, runtime, tmp_path, raw_book, monkeypatch
+    ):
+        from standard_quant_tools.data import external
+
+        out = tmp_path / "out.parquet"
+        real_inspect = external.inspect
+
+        def another_conversion_lands_first(*args, **kwargs):
+            # After the early exists() check, before a byte is written.
+            out.write_bytes(b"another conversion's output")
+            return real_inspect(*args, **kwargs)
+
+        monkeypatch.setattr(external, "inspect", another_conversion_lands_first)
+        with pytest.raises(ValidationError, match="already exists"):
+            _prepare(runtime, tmp_path, raw_book)
+        assert out.read_bytes() == b"another conversion's output"
+        assert not list(tmp_path.glob(".*.tmp"))
+
+    def test_a_completed_conversion_leaves_only_its_output(
+        self, runtime, tmp_path, raw_book
+    ):
+        result = _prepare(runtime, tmp_path, raw_book, batch_rows=500)
+        assert pd.read_parquet(result["out_path"]).shape[0] == ROWS
+        assert not list(tmp_path.glob(".*.tmp"))

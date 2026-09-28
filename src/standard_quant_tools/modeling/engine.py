@@ -50,7 +50,8 @@ from .validation.metrics import (
     average_fold_metrics,
     classification_metrics,
     cross_sectional_ic,
-    effective_sample_size,
+    effective_sample_size_report,
+    label_cross_sectional_corr,
     positive_class_proba,
     regression_metrics,
     summarize_cross_sectional_ic,
@@ -61,7 +62,11 @@ from .validation.ranking import (
     ranking_metrics,
     relevance_grades,
 )
-from .validation.search import require_optuna, search_best_params
+from .validation.search import (
+    grid_duplicates_warning,
+    require_optuna,
+    search_best_params,
+)
 from .validation.survival import EVENT_COL, survival_labels
 from .validation.walk_forward import build_splitter, contiguous_runs
 from .validation.weights import build_sample_weights
@@ -78,6 +83,113 @@ def _target_horizon(target_id: "str | None") -> "int | None":
         return int(target_id.rsplit(":", 1)[1])
     except ValueError:
         return None
+
+
+def refuse_duplicate_entity_dates(panel: pd.DataFrame, where: str) -> None:
+    """
+    Refuse a panel in which an (entity, date) pair appears more than once,
+    naming the count and a sample.
+
+    A repeated row is not a second observation. Every fold would train on
+    it twice and test on it twice, so `n_oos_rows` and the effective sample
+    size double while the metrics barely move -- a panel written out twice
+    reported 960 out-of-sample rows for 480. The predictions frame the
+    bridge reads has always been refused on the same condition.
+    """
+    duplicated = panel.duplicated(subset=["entity", "date"])
+    if duplicated.any():
+        sample = panel.loc[duplicated, ["entity", "date"]].head(3)
+        raise ValidationError(
+            f"{where}: {int(duplicated.sum())} duplicate (entity, date) row(s), "
+            f"e.g. {sample.to_dict('records')}. Each pair must be unique -- a "
+            "repeated row is trained on and tested on twice, which multiplies "
+            "the out-of-sample row count and the effective sample size without "
+            "adding evidence. Drop the repeats (keep one row per entity and "
+            "date) and register or build the panel again."
+        )
+
+
+#: How `validation_report["purge"]` names the label end the purge ran on.
+PURGE_ON_LABEL_END = "label_end"
+PURGE_ON_DERIVED_LABEL_END = "label_end_derived_from_horizon"
+
+
+def panel_with_label_end(
+    panel: pd.DataFrame, target_id: "str | None", where: str
+) -> "tuple[pd.DataFrame, str, List[str]]":
+    """
+    The panel with a `label_end_date` column the purge can read, how that
+    column came to be, and the warning that says so.
+
+    A panel built by `build_dataset` or registered through
+    `register_external_panel` carries the column, and is returned as it
+    came. One without it -- a dataset dict assembled by hand, or a dataset
+    persisted before the column existed -- used to skip the purge with
+    nothing but `purge="not_applicable"` to show for it, although its
+    `target_id` named the horizon the end can be derived from. The end is
+    derived the way the registration derives it: the date `horizon` rows
+    ahead on the entity's own dates, NaT where the panel ends first. Exact
+    for a fixed-horizon label, and a superset for one that can end early,
+    so it purges at least the rows the true end would.
+
+    With no horizon either there is no end to purge on, and the panel is
+    refused rather than validated on training rows whose labels may reach
+    into the test window.
+    """
+    if LABEL_END_COL in panel.columns:
+        return panel, PURGE_ON_LABEL_END, []
+    horizon = _target_horizon(target_id)
+    if horizon is None or horizon < 0:
+        raise ValidationError(
+            f"{where}: the panel has no {LABEL_END_COL!r} column and its "
+            f"target_id {target_id!r} names no horizon, so the purge has no "
+            "label end to run on: training rows whose labels reach into the "
+            "test window would be kept, and the embargo alone does not "
+            f"separate them. Add a {LABEL_END_COL!r} column (the date each "
+            "row's label is finished), or give target_id as "
+            "'<type>:<horizon>' so the end can be derived from the horizon."
+        )
+    from .dataset.external_panel import _label_end_from_horizon
+
+    derived = panel.assign(
+        **{LABEL_END_COL: _label_end_from_horizon(panel, int(horizon)).to_numpy()}
+    )
+    warning = (
+        f"the panel carries no {LABEL_END_COL!r} column, so each row's label "
+        f"end was derived from target_id {target_id!r}: the date {horizon} "
+        "row(s) ahead on the entity's own dates, NaT where the panel ends "
+        "first. The label-overlap purge and label-uniqueness weighting read "
+        "those ends (a run reports validation_report.purge="
+        f"{PURGE_ON_DERIVED_LABEL_END!r}). Exact for a fixed-horizon label; "
+        "for a label that can end early it purges a superset of the "
+        "overlapping rows. Record the column to use the true ends."
+    )
+    return derived, PURGE_ON_DERIVED_LABEL_END, [warning]
+
+
+def _oos_effective_sample_size(
+    panel: pd.DataFrame,
+    tested_rows: np.ndarray,
+    n_oos_rows: int,
+    n_oos_dates: int,
+    horizon: "int | None",
+) -> Dict[str, Any]:
+    """
+    The effective sample size behind the out-of-sample metrics, with the
+    inputs and bounds it was computed from.
+
+    The labels' cross-sectional correlation is measured on the rows that
+    were tested, because those are the rows the metrics are averaged
+    over; see `validation.metrics.effective_sample_size` for why it, and
+    not only the overlap along time, decides how many of those rows are
+    independent.
+    """
+    tested = panel.loc[tested_rows, ["date", "entity", "target"]]
+    labels = pd.to_numeric(tested["target"], errors="coerce").to_numpy(dtype=float)
+    rho = label_cross_sectional_corr(
+        tested["date"].to_numpy(), tested["entity"].to_numpy(), labels
+    )
+    return effective_sample_size_report(n_oos_rows, horizon, n_oos_dates, rho)
 
 
 def _calibrated(estimator, model_spec, n_rows: int):
@@ -657,6 +769,9 @@ def run_experiment(
     # one the run can state before it starts.
     run_warnings: List[str] = []
     run_warnings.extend(_calibration_importance_warning(model_spec, estimator_cls))
+    repeated_grid_values = grid_duplicates_warning(model_spec.search)
+    if repeated_grid_values:
+        run_warnings.append(repeated_grid_values)
 
     # Whether the estimator can fit a quantile at all, before any data is
     # touched: the registry declares the parameter, and an estimator
@@ -676,11 +791,19 @@ def run_experiment(
             )
 
     panel = dataset["panel"]
+    refuse_duplicate_entity_dates(panel, "run_model_experiment")
     _check_task_target_compatibility(model_spec.task, dataset.get("target_id"))
     if model_spec.task == "classification":
         _validate_classification_target(panel)
     if model_spec.task == "survival":
         _validate_survival_target(panel)
+    # The purge needs each row's label end. A panel without the column gets
+    # one derived from the target's horizon, said so in `warnings`, or is
+    # refused when there is no horizon to derive it from.
+    panel, purge_basis, purge_warnings = panel_with_label_end(
+        panel, dataset.get("target_id"), "run_model_experiment"
+    )
+    run_warnings.extend(purge_warnings)
     feature_ids = dataset["feature_ids"]
     dates = pd.Index(sorted(panel["date"].unique()))
 
@@ -711,6 +834,10 @@ def run_experiment(
     model_columns: "List[str] | None" = None
     fold_records: List[Dict[str, Any]] = []
     fold_weights: List[float] = []
+    # The dates some completed fold tested on: the rows the out-of-sample
+    # metrics are averaged over, and so the rows whose labels the effective
+    # sample size is measured on.
+    tested_dates = np.zeros(len(dates), dtype=bool)
     # metric prefix -> list of each fold's per-date IC series.
     pooled_ic: Dict[str, List[pd.Series]] = {}
     oos_prediction_frames = []
@@ -842,6 +969,7 @@ def run_experiment(
             # already seen the inner test window.
             embargo=model_spec.validation.embargo,
             label_end=(frame[LABEL_END_COL].to_numpy() if has_label_end else None),
+            purge_basis=purge_basis,
             max_parallelism=model_spec.budget.max_parallelism,
         )
 
@@ -1113,6 +1241,7 @@ def run_experiment(
         # average_fold_metrics for why equal weighting distorts the
         # headline number when coverage varies across folds.
         fold_weights.append(float(len(test_df)))
+        tested_dates[fold.test_positions] = True
         fold_metrics.append(metrics)
         fold_importance.append(fold_feature_importance(estimator, fold_columns))
         oos_frame = pd.DataFrame(
@@ -1198,13 +1327,25 @@ def run_experiment(
             .shape[0]
         )
     horizon = _target_horizon(dataset.get("target_id"))
-    n_entities = int(panel["entity"].nunique())
     oos_metrics["n_oos_rows"] = float(n_oos_rows)
-    oos_metrics["effective_sample_size"] = (
-        effective_sample_size(n_oos_rows, horizon, n_entities)
-        if horizon is not None
-        else float(n_oos_rows)
+    # And discounted again across entities: rows on one date are one
+    # cluster, and a panel of names that move together holds fewer
+    # independent observations than rows / horizon -- as few as dates /
+    # horizon. The entity count was passed here and cancelled out of the
+    # arithmetic, so the count assumed independent entities without
+    # saying so; the report below says what was measured and assumed.
+    ess_report = _oos_effective_sample_size(
+        panel, tested_dates[date_code], n_oos_rows, int(tested_dates.sum()), horizon
     )
+    oos_metrics["effective_sample_size"] = ess_report["value"]
+    if horizon is None:
+        run_warnings.append(
+            f"target_id {dataset.get('target_id')!r} names no horizon, so "
+            "effective_sample_size is not discounted for label overlap along "
+            "time -- only for the labels' correlation across entities. For an "
+            "h-bar label it overstates the independent observations by up to "
+            "a factor of h."
+        )
 
     paths_report = None
     if is_cpcv:
@@ -1343,13 +1484,19 @@ def run_experiment(
             round(len(fold_metrics) / n_expected_folds, 4) if n_expected_folds else 0.0
         ),
         "skipped_folds": skipped,
-        # The purge runs on each row's recorded label end. Without that
-        # column it cannot run, and 0 was what it reported either way --
-        # the same value a clean run gives -- on a panel with 280 rows
-        # whose label reached the test window. None says it never ran.
-        "purge": "label_end" if has_label_end else "not_applicable",
+        # The purge runs on each row's label end: the recorded one
+        # ('label_end'), or one derived from the target's horizon when the
+        # panel carries none ('label_end_derived_from_horizon', with a
+        # warning). It used to report 'not_applicable' and purge nothing on
+        # such a panel, although the horizon was known; a panel with
+        # neither is now refused before a fold is cut.
+        "purge": purge_basis if has_label_end else "not_applicable",
         "n_train_rows_purged_overlap": n_purged_total if has_label_end else None,
         "target_horizon": horizon,
+        # The count behind every metric above, the two bounds it lies
+        # between and what placed it there: the overlap along time and the
+        # labels' correlation across entities.
+        "effective_sample_size": ess_report,
         # What the plan said this would cost, against the ceiling it was
         # checked against. A fold skipped at run time cost less than
         # planned; nothing costs more.
@@ -1569,8 +1716,16 @@ def run_experiment(
         # prediction that looks point-in-time. Falls back to max(date) only
         # for a panel with no label_end_date column (datasets built before it
         # existed), which is the old, weaker guarantee rather than none.
-        training_information_cutoff=pd.Timestamp(
-            panel[LABEL_END_COL].max() if has_label_end else panel["date"].max()
+        # The later of the two: a label end derived from the horizon is NaT
+        # on every row of an entity shorter than the horizon, and a NaT
+        # maximum has no date to write.
+        training_information_cutoff=max(
+            pd.Timestamp(value)
+            for value in (
+                panel[LABEL_END_COL].max() if has_label_end else pd.NaT,
+                panel["date"].max(),
+            )
+            if pd.notna(value)
         ).strftime("%Y-%m-%d"),
         # Copied into the model directory so the model is self-contained:
         # scoring must not depend on the dataset directory still existing,

@@ -5,14 +5,61 @@ an external auditor."""
 
 import hashlib
 import json
+import os
+import shutil
+import tempfile
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
+from standard_quant_tools.error import ValidationError
+
 from .paths import _INDEX_FILENAME, _audit_dir, _iter_day_files
 from .provenance import _git_sha, _package_version
+
+
+def _exists_refusal(out_path: Path) -> ValidationError:
+    return ValidationError(
+        f"{out_path} already exists, and an audit bundle never replaces a "
+        "file: a bundle is evidence, and silently overwriting one is what "
+        "the audit log exists to make impossible. Choose another name, or "
+        "move that file aside yourself."
+    )
+
+
+def _publish_exclusively(built: Path, out_path: Path) -> None:
+    """Give the finished zip at `built` the name `out_path`, refusing when
+    that name is taken.
+
+    A hard link is created at `out_path`, which the filesystem refuses
+    atomically if anything is already there -- so the check and the create
+    are one step, and a reader never sees a half-written bundle under the
+    final name. A filesystem without hard links gets an exclusive create
+    and a copy instead: still never an overwrite, and a copy that fails
+    removes the file it created.
+    """
+    try:
+        os.link(built, out_path)
+        return
+    except FileExistsError:
+        raise _exists_refusal(out_path) from None
+    except OSError:
+        pass  # no hard links here; fall back to an exclusive create
+    try:
+        target = open(out_path, "xb")
+    except FileExistsError:
+        raise _exists_refusal(out_path) from None
+    try:
+        with target, open(built, "rb") as source:
+            shutil.copyfileobj(source, target)
+            target.flush()
+            os.fsync(target.fileno())
+    except BaseException:
+        out_path.unlink(missing_ok=True)
+        raise
+
 
 _EXPORT_README = """\
 Standard Quant Tools -- exported audit trail bundle
@@ -122,11 +169,22 @@ def export_bundle(
     less than the source system had. The public key is not included and is
     not this library's to distribute.
 
+    AN EXISTING FILE AT `out_path` IS NEVER REPLACED. A bundle is evidence
+    handed to someone else, and this used to open `out_path` for writing
+    and silently overwrite whatever was there -- including an earlier
+    bundle. The zip is built beside the destination under a temporary name
+    and then published with an exclusive create, so the destination either
+    appears complete or not at all, and an existing one, even one that
+    appeared while the zip was being built, is refused with a
+    ValidationError. See the CHANGELOG entry of 2026-09-28.
+
     Returns an `ExportedBundle`: `out_path`, plus the number of day files
     and records it holds.
     """
     directory = Path(audit_dir) if audit_dir else _audit_dir()
     out_path = Path(out_path)
+    if out_path.exists():
+        raise _exists_refusal(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     day_files = [
@@ -165,22 +223,34 @@ def export_bundle(
             "record_count": record_count,
         }
 
-    with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for p in day_files:
-            described = _describe(p)
-            manifest["record_count"] += described["record_count"] or 0
-            manifest["files"].append(described)
-            zf.write(p, arcname=p.name)
-            for sidecar in _checkpoint_sidecars(directory, p.stem):
-                manifest["files"].append(_describe(sidecar))
-                zf.write(sidecar, arcname=sidecar.name)
-        if index_path.exists():
-            manifest["files"].append(_describe(index_path))
-            zf.write(index_path, arcname=index_path.name)
-        if verifier_script.exists():
-            zf.write(verifier_script, arcname="verify_audit_log.py")
-        zf.writestr("manifest.json", json.dumps(manifest, indent=2, sort_keys=True))
-        zf.writestr("README.txt", _EXPORT_README)
+    handle, temporary_name = tempfile.mkstemp(
+        prefix=f".{out_path.name}.", suffix=".partial", dir=out_path.parent
+    )
+    os.close(handle)
+    temporary = Path(temporary_name)
+    try:
+        with zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED) as zf:
+            for p in day_files:
+                described = _describe(p)
+                manifest["record_count"] += described["record_count"] or 0
+                manifest["files"].append(described)
+                zf.write(p, arcname=p.name)
+                for sidecar in _checkpoint_sidecars(directory, p.stem):
+                    manifest["files"].append(_describe(sidecar))
+                    zf.write(sidecar, arcname=sidecar.name)
+            if index_path.exists():
+                manifest["files"].append(_describe(index_path))
+                zf.write(index_path, arcname=index_path.name)
+            if verifier_script.exists():
+                zf.write(verifier_script, arcname="verify_audit_log.py")
+            zf.writestr("manifest.json", json.dumps(manifest, indent=2, sort_keys=True))
+            zf.writestr("README.txt", _EXPORT_README)
+        _publish_exclusively(temporary, out_path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
 
     return ExportedBundle(
         path=out_path,

@@ -37,12 +37,16 @@ import pandas as pd
 
 from standard_quant_tools.error import ValidationError
 
+from ..engine import panel_with_label_end
 from ..plan import plan_experiment
 from ..preprocessing import FoldContext, build_step, fit_and_apply_pipeline
 from ..preprocessing.registry import get_preprocessor
 from ..samples import SampleIndex
-from ..validation.metrics import effective_sample_size
-from ..validation.search import search_candidates
+from ..validation.metrics import (
+    effective_sample_size_report,
+    label_cross_sectional_corr,
+)
+from ..validation.search import grid_duplicates_warning, search_candidates
 from ..validation.weights import build_sample_weights
 from .preview_models import (
     ColumnStats,
@@ -109,6 +113,20 @@ def plan_model_experiment(
         panel, meta, input_data.target, input_data.dataset_id
     )
     warnings: List[str] = list(notes)
+    # The label ends the engine would purge on, derived from the horizon
+    # where the panel records none. A panel with neither is refused by
+    # run_model_experiment; here the refusal is reported and the plan is
+    # drawn without a purge, the way an over-budget plan is reported.
+    try:
+        panel, _purge_basis, derived = panel_with_label_end(
+            panel, _target_id, "plan_model_experiment"
+        )
+        warnings.extend(derived)
+    except ValidationError as exc:
+        warnings.append(
+            f"{exc} This is a dry run, so the plan is drawn without a purge "
+            "rather than refused; run_model_experiment refuses it."
+        )
 
     # The same three arguments the engine passes: its own date axis, the
     # dataset's recorded content hash, and the recorded feature ids. The
@@ -133,6 +151,9 @@ def plan_model_experiment(
             )
 
     search = input_data.spec.search
+    repeated_grid_values = grid_duplicates_warning(search)
+    if repeated_grid_values:
+        warnings.append(repeated_grid_values)
     if search is not None:
         starved = [fold.index for fold in plan.folds if fold.n_inner_folds == 0]
         if starved:
@@ -206,8 +227,11 @@ PREVIEW_SAMPLE_WEIGHTS_DESCRIPTION = (
     "heaviest row to the lightest, the share of total weight sitting on "
     "the newest tenth of the dates, and two effective sample sizes that "
     "measure different things: the Kish size sum(w)^2/sum(w^2), which is "
-    "these weights' own dispersion, beside the overlap-based count that "
-    "every out-of-sample metric is already reported against. A weighting "
+    "these weights' own dispersion, beside the count every out-of-sample "
+    "metric is already reported against -- rows discounted for label "
+    "overlap along time and for the labels' measured correlation across "
+    "entities, with the two bounds it lies between (dates / horizon and "
+    "rows / horizon) and the correlation that placed it. A weighting "
     "whose max/min is 30 is not a correction, it is a re-selection of the "
     "sample under another name, and that is visible here and in no result "
     "afterwards. method='none' is summarized as the flat weights it is "
@@ -240,6 +264,18 @@ def preview_sample_weights(
             f"dataset {input_data.dataset_id!r} has no rows under the chosen "
             "label, so there are no training weights to describe."
         )
+
+    # The label ends the engine would weight with: derived from the horizon
+    # where the panel records none, as run_model_experiment derives them.
+    # With no horizon either the panel is left as it is, so uniqueness
+    # weighting meets the builder's own refusal below.
+    try:
+        panel, _purge_basis, derived = panel_with_label_end(
+            panel, target_id, "preview_sample_weights"
+        )
+        warnings.extend(derived)
+    except ValidationError:
+        pass
 
     method = input_data.weighting.method
     decays = method in ("time_decay", "uniqueness_and_time_decay")
@@ -280,21 +316,47 @@ def preview_sample_weights(
     share = float(weights[newest].sum() / total) if total > 0 else None
 
     horizon = _target_horizon(target_id)
-    n_entities = int(pd.Series(index.entities).nunique())
-    overlap_ess = (
-        float(effective_sample_size(n_rows, horizon, n_entities))
-        if horizon is not None
-        else None
-    )
+    # The count every out-of-sample metric is reported against, computed
+    # the way the engine computes it: the overlap along time AND the
+    # labels' correlation across entities. The entity count alone used to
+    # be passed here and cancelled out of the arithmetic, so this reported
+    # the independent-entities ceiling as though it were the count.
+    ess_report: Optional[Dict[str, Any]] = None
+    if horizon is not None:
+        ess_report = effective_sample_size_report(
+            n_rows,
+            horizon,
+            int(unique_dates.size),
+            label_cross_sectional_corr(
+                index.dates,
+                index.entities,
+                pd.to_numeric(panel["target"], errors="coerce").to_numpy(dtype=float),
+            ),
+        )
+    overlap_ess = ess_report["value"] if ess_report is not None else None
     warnings.append(
         "effective_sample_size_kish and effective_sample_size are not two "
         "estimates of one quantity. The first counts the rows these WEIGHTS "
         "leave, from their dispersion alone; the second counts the "
         "independent observations the LABELS leave, from the overlap a "
         f"{horizon if horizon is not None else 'h'}-bar forward return "
-        "generated every bar creates. A weighting that fixes the second is "
-        "still measured by the first, and neither bounds the other."
+        "generated every bar creates and from how closely the entities' "
+        "labels move together on a date. A weighting that fixes the second "
+        "is still measured by the first, and neither bounds the other."
     )
+    if ess_report is not None and ess_report["mean_entities_per_date"] > 1.0:
+        warnings.append(
+            f"effective_sample_size={ess_report['value']:,.0f} lies between "
+            f"{ess_report['floor']:,.0f} (dates / horizon: every entity's "
+            f"label the same) and {ess_report['ceiling']:,.0f} (rows / "
+            "horizon: every entity's label independent), placed by the "
+            "labels' measured cross-sectional correlation of "
+            f"{ess_report['label_cross_sectional_corr']:.3f} over "
+            f"{ess_report['mean_entities_per_date']:.1f} entities a date "
+            f"(design effect {ess_report['design_effect']:.2f}). The "
+            "cross-sectional IC is one number per date, so the floor is the "
+            "count behind it."
+        )
 
     if ratio is not None and ratio > 10:
         warnings.append(
@@ -336,6 +398,15 @@ def preview_sample_weights(
         ratio_max_min=ratio,
         effective_sample_size_kish=kish,
         effective_sample_size=overlap_ess,
+        effective_sample_size_floor=(
+            ess_report["floor"] if ess_report is not None else None
+        ),
+        effective_sample_size_ceiling=(
+            ess_report["ceiling"] if ess_report is not None else None
+        ),
+        label_cross_sectional_corr=(
+            ess_report["label_cross_sectional_corr"] if ess_report is not None else None
+        ),
         weight_share_newest_decile=share,
         n_zero_weight=int((weights == 0.0).sum()),
         warnings=warnings,

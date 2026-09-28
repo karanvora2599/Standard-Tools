@@ -10,7 +10,8 @@ tests here reproduce each defect's shape offline and pin the fix:
   D19   check_leakage runs the empirical screen when it has a panel
   CPCV  the paired comparison refuses a cpcv model; a fold record names
         its test blocks
-  purge the report says when the purge could not run, and an external
+  purge a panel with no label end is purged on one derived from its
+        horizon, and refused with no horizon either; an external
         panel's label end is derived from its horizon
   ties  a paired comparison counts ties instead of scoring them as losses
 """
@@ -434,27 +435,77 @@ def _unlabelled_dataset(n: int = 200) -> dict:
     }
 
 
+def _purge_spec(search: bool = True) -> ModelSpec:
+    return ModelSpec(
+        task="regression",
+        estimator=EstimatorSpec(type="ridge", params={"alpha": 1.0}),
+        validation=ValidationSpec(train_window=60, test_window=20, embargo=0),
+        search=(
+            SearchSpec(param_grid={"alpha": [0.1, 1.0]}, inner_splits=2)
+            if search
+            else None
+        ),
+        random_seed=1,
+    )
+
+
 class TestThePurgeReportSaysWhetherItRan:
     """Without a label_end_date column the purge was a no-op and wrote 0,
     the same value a clean run gives -- on a panel with 280 rows whose
-    label reached the test window."""
+    label reached the test window.
 
-    def test_no_label_end_is_not_applicable_not_zero(self):
-        spec = ModelSpec(
-            task="regression",
-            estimator=EstimatorSpec(type="ridge", params={"alpha": 1.0}),
-            validation=ValidationSpec(train_window=60, test_window=20, embargo=0),
-            search=SearchSpec(param_grid={"alpha": [0.1, 1.0]}, inner_splits=2),
-            random_seed=1,
-        )
-        result = run_experiment(_unlabelled_dataset(), spec, "ds", register=False)
+    That was then reported as `not_applicable`, which was honest but still
+    skipped the purge on a panel whose target_id named the horizon the
+    label end can be derived from. This test used to pin that
+    `not_applicable`; the end is now derived from the horizon and the
+    purge runs, and only a panel with no horizon either is refused."""
+
+    def test_no_label_end_is_derived_from_the_horizon(self):
+        dataset = _unlabelled_dataset()
+        result = run_experiment(dataset, _purge_spec(), "ds", register=False)
         report = result["validation_report"]
-        assert report["purge"] == "not_applicable"
-        assert report["n_train_rows_purged_overlap"] is None
-        assert result["n_train_rows_purged_overlap"] is None
+        assert report["purge"] == "label_end_derived_from_horizon"
+        assert report["n_train_rows_purged_overlap"] > 0
+        assert result["n_train_rows_purged_overlap"] > 0
         assert all(
-            r["purge"] == "not_applicable" for r in report["hyperparameter_search"]
+            r["purge"] == "label_end_derived_from_horizon"
+            for r in report["hyperparameter_search"]
         )
+        derived = [w for w in result["warnings"] if "label_end_date" in w]
+        assert len(derived) == 1 and "forward_return:5" in derived[0]
+        # The caller's frame is not given a column it did not have.
+        assert "label_end_date" not in dataset["panel"].columns
+
+    def test_and_it_purges_what_the_recorded_column_would(self):
+        """The same panel with the column written by hand: the same rows
+        purged, the same out-of-sample metrics, and no warning."""
+        unlabelled = _unlabelled_dataset()
+        labelled = _unlabelled_dataset()
+        panel = labelled["panel"].sort_values(["entity", "date"])
+        panel["label_end_date"] = panel.groupby("entity")["date"].shift(-5)
+        labelled["panel"] = panel.sort_index()
+
+        derived = run_experiment(unlabelled, _purge_spec(False), "ds", register=False)
+        recorded = run_experiment(labelled, _purge_spec(False), "ds", register=False)
+        assert recorded["validation_report"]["purge"] == "label_end"
+        assert (
+            derived["n_train_rows_purged_overlap"]
+            == recorded["n_train_rows_purged_overlap"]
+            > 0
+        )
+        for key in ("r2", "mae", "cs_ic_mean"):
+            assert derived["oos_metrics"][key] == pytest.approx(
+                recorded["oos_metrics"][key]
+            )
+        assert not [w for w in recorded["warnings"] if "label_end_date" in w]
+
+    def test_no_label_end_and_no_horizon_is_refused(self):
+        """The null case: nothing to derive the end from, so no purge could
+        run, and the panel is refused by name rather than validated on
+        training rows whose labels may reach the test window."""
+        dataset = {**_unlabelled_dataset(), "target_id": "custom_label"}
+        with pytest.raises(ValidationError, match="label_end_date"):
+            run_experiment(dataset, _purge_spec(), "ds", register=False)
 
     def test_a_built_dataset_purges_on_its_label_end(self, patched_multi_factory):
         dataset = build_dataset(_dataset_spec())

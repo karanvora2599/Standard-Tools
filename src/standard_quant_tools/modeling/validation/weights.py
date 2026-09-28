@@ -18,7 +18,11 @@ sit under fewer, and are correspondingly MORE informative per row. Weighting
 by average uniqueness -- the mean of 1/concurrency over the bars a row's own
 label spans (Lopez de Prado, Advances in Financial Machine Learning, ch. 4)
 -- is the standard correction, and it is computed per entity because two
-entities' labels are different series that do not make each other redundant.
+entities' labels are different series whose bars do not overlap. They can
+still move together on a date, which makes them partly redundant as
+evidence; that is a property of the whole cross-section rather than of any
+one row, so it enters the effective sample size (as the design effect of
+the labels' cross-sectional correlation) and not these weights.
 
 TIME DECAY. Separately from redundancy, older evidence is less relevant when
 the relationship being estimated drifts. An exponential half-life is the

@@ -30,10 +30,11 @@ from ._cache import (
     _norm_cache_bound,
     _norm_date,
     _normalize_ohlcv_index,
+    _read_cached_ohlcv,
     _safe_parquet_path,
     _session_cache_get,
     _session_cache_set,
-    _write_parquet_atomic,
+    _write_cached_ohlcv,
     inclusive_end_timestamp,
     trim_to_inclusive_end,
 )
@@ -184,22 +185,15 @@ class YFinanceProvider(DataProvider):
         pq_path = _safe_parquet_path(
             symbol, start_str, end_str, interval, provider="yfinance"
         )
-        if pq_path is not None and _is_historical(end_date) and pq_path.exists():
-            try:
-                # interval passed through: without it an intraday cache read
-                # normalized every bar to midnight, so the same request
-                # answered differently served from cache than served live.
-                cached_df = _normalize_ohlcv_index(pd.read_parquet(pq_path), interval)
-            except Exception as exc:
-                logger.warning(
-                    "[cache] disk read failed for %s (%s) — evicting and "
-                    "refetching: %s",
-                    symbol,
-                    pq_path.name,
-                    exc,
-                )
-                pq_path.unlink(missing_ok=True)
-            else:
+        if pq_path is not None and _is_historical(end_date):
+            # The shared read: the same column, null-Close and window checks
+            # this method makes on a live answer below, and a Windows
+            # sharing violation treated as a miss rather than as corruption.
+            # interval passed through: without it an intraday cache read
+            # normalized every bar to midnight, so the same request
+            # answered differently served from cache than served live.
+            cached_df = _read_cached_ohlcv(pq_path, interval, start_str, end_str)
+            if cached_df is not None:
                 logger.debug(
                     "[cache] disk hit  %s  %s → %s  (%s)",
                     symbol,
@@ -292,7 +286,7 @@ class YFinanceProvider(DataProvider):
 
         # ── Persist to Parquet for future sessions ─────────────────────────
         if pq_path is not None and _is_historical(end_date):
-            _write_parquet_atomic(pq_path, result)
+            _write_cached_ohlcv(pq_path, result, interval, start_str, end_str)
 
         return result
 

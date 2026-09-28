@@ -292,13 +292,42 @@ class PreviewSampleWeightsResult(BaseModel):
     effective_sample_size: Stat = Field(
         None,
         description=(
-            "The overlap-based count reported beside every out-of-sample "
-            "metric: rows discounted for the fact that a horizon-bar forward "
-            "return generated every bar produces labels sharing horizon-1 of "
-            "their bars. A DIFFERENT quantity from the Kish number above -- "
-            "that one measures weight dispersion and this one measures label "
-            "redundancy -- and the two are not comparable. None when the "
-            "label's horizon cannot be read from the dataset."
+            "The count reported beside every out-of-sample metric: rows "
+            "discounted for label overlap along time (a horizon-bar forward "
+            "return generated every bar shares horizon-1 of its bars with the "
+            "next row's label) and for label correlation across entities (the "
+            "Kish design effect 1 + (m-1)*rho, m entities a date, rho the "
+            "labels' measured cross-sectional correlation). It lies between "
+            "effective_sample_size_floor and effective_sample_size_ceiling. A "
+            "DIFFERENT quantity from the Kish number above -- that one measures "
+            "weight dispersion and this one label redundancy -- and the two are "
+            "not comparable. None when the label's horizon cannot be read from "
+            "the dataset."
+        ),
+    )
+    effective_sample_size_floor: Stat = Field(
+        None,
+        description=(
+            "dates / horizon: the count if every entity carried the same label "
+            "on a date (rho = 1). Also the count behind a statistic computed "
+            "once per date, such as the cross-sectional IC."
+        ),
+    )
+    effective_sample_size_ceiling: Stat = Field(
+        None,
+        description=(
+            "rows / horizon: the count if every entity's label were an "
+            "independent draw (rho = 0). What effective_sample_size used to "
+            "report whatever the entities' correlation."
+        ),
+    )
+    label_cross_sectional_corr: Stat = Field(
+        None,
+        description=(
+            "The rho the design effect used: the mean correlation between two "
+            "entities' labels on the same date, each entity standardized over "
+            "its own rows, clipped to [0, 1]; 0.0 when it cannot be measured "
+            "(one entity, or no date with two)."
         ),
     )
     weight_share_newest_decile: Stat = Field(

@@ -48,7 +48,6 @@ through one would land in all three.
 from __future__ import annotations
 
 import logging
-import os
 import re
 import threading
 import uuid
@@ -58,6 +57,7 @@ from typing import (
     Callable,
     Dict,
     List,
+    Mapping,
     NamedTuple,
     Optional,
     Sequence,
@@ -66,17 +66,20 @@ from typing import (
     Union,
 )
 
+import numpy as np
 import pandas as pd
 
 from standard_quant_tools import audit
+from standard_quant_tools._env import env_str
 from standard_quant_tools.data._cache import (
     _is_historical,
     _norm_cache_bound,
     _normalize_ohlcv_index,
+    _read_cached_ohlcv,
     _safe_parquet_path,
     _session_cache_get,
     _session_cache_set,
-    _write_parquet_atomic,
+    _write_cached_ohlcv,
     trim_to_inclusive_end,
 )
 from standard_quant_tools.data._retry import retry
@@ -95,9 +98,17 @@ from standard_quant_tools.data.databento import (
     normalize_mbo,
     normalize_quotes,
     normalize_trades,
+    print_counts,
+    timestamp_source,
 )
 from standard_quant_tools.data.metadata import DataSetMetadata
-from standard_quant_tools.error import APIError, ValidationError
+from standard_quant_tools.error import (
+    APIError,
+    DataNotFoundError,
+    InvalidSymbolError,
+    NonRetryableAPIError,
+    ValidationError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -174,7 +185,12 @@ _US_RIC_SUFFIXES: Dict[str, str] = {"N": "NYSE", "O": "Nasdaq", "OQ": "Nasdaq"}
 #: this grammar exists to refuse rather than resolve.
 _CONTINUOUS_RE = re.compile(r"^([A-Z0-9]{1,4})\.([CNV])\.(\d{1,2})$")
 _PARENT_RE = re.compile(r"^([A-Z0-9]{1,4})\.(FUT|OPT)$")
-_CONTRACT_RE = re.compile(r"^([A-Z]{1,3}[0-9]?)([FGHJKMNQUVXZ])(\d{1,2})$")
+#: A contract: root, month code, year. The root may START with a digit (the
+#: CME currency roots `6E`, `6J`, `6B`, ...) or carry one inside (`M2K`,
+#: `SR3`); it used to have to start with a letter, so `6EZ5` and `M2KZ5`
+#: were refused while `6E.c.0` resolved -- with a message naming "a
+#: contract like 'ESZ6'", the shape that had just been given.
+_CONTRACT_RE = re.compile(r"^([0-9]?[A-Z][A-Z0-9]{0,3})([FGHJKMNQUVXZ])(\d{1,2})$")
 _OSI_RE = re.compile(r"^([A-Z]{1,6})\s*(\d{6})([CP])(\d{8})$")
 #: Futures roots that are also plausible equity tickers. A bare one of these
 #: is refused as ambiguous; `ES~equity` names the equity reading on purpose.
@@ -243,16 +259,113 @@ class SymbolRoute(NamedTuple):
     family: str
 
 
-#: Substrings that mean "your subscription does not cover this", as opposed
-#: to "this request was wrong". The distinction matters because the first
-#: is worth remembering and the second is not.
-_DENIAL_MARKERS = ("403", "license", "entitlement", "auth", "not_entitled")
+#: How a vendor failure is read when it carries no HTTP status -- a stub, or
+#: an error raised before a response. The client's HTTP errors carry
+#: `http_status`, and that is read first: matching words in the message
+#: made a 401 an entitlement denial (the marker "auth"), and a 500 whose
+#: request id happened to contain "403" a permanent one. Whole words only,
+#: for the same reason. See the CHANGELOG entry of 2026-09-28.
+_AUTH_TEXT_RE = re.compile(
+    r"\b401\b|\bunauthori[sz]ed\b|\bauth_authentication_failed\b"
+    r"|\bauthentication failed\b"
+)
+_DENIAL_TEXT_RE = re.compile(
+    r"\b403\b|\bforbidden\b|\bnot_entitled\b|\bentitlement\b|\blicen[cs]e\b"
+)
 
 #: The daily-schema finalization error, by the text Databento returns.
 _UNFINALIZED_MARKERS = ("available_end", "not_fully_available")
 
 #: How many days to walk the end back before giving up on the daily lag.
 _FINALIZATION_ATTEMPTS = 6
+
+#: The width of one intraday bar. The vendor's range is half-open and this
+#: library's end is inclusive, so an explicit intraday end is extended by
+#: one bar before it is sent: a 14:00 to 14:10 request at one minute used
+#: to stop at 14:09, because the 14:10 bar lies at the excluded edge, and
+#: no trim can restore a bar the vendor never sent. A bare-date end is
+#: already pushed to the next midnight and needs nothing. Tick schemas stay
+#: half-open, as documented.
+_BAR_WIDTH: Dict[str, timedelta] = {
+    "ohlcv-1s": timedelta(seconds=1),
+    "ohlcv-1m": timedelta(minutes=1),
+    "ohlcv-1h": timedelta(hours=1),
+}
+
+#: CME Globex trade dates. The trading day opens at 17:00 Chicago time on
+#: the evening before the date it belongs to and closes by 16:00 on it, so
+#: shifting a Chicago instant forward seven hours lands every print on its
+#: trade date, across both daylight-saving transitions.
+_CME_TIMEZONE = "America/Chicago"
+_CME_ROLL = pd.Timedelta(hours=7)
+_CME_SESSION_LABEL = (
+    "CME trade date: 17:00 America/Chicago on the prior evening to 16:00 "
+    "on the date, aggregated from hourly bars"
+)
+
+
+def _failure_kind(exc: BaseException) -> str:
+    """
+    'auth', 'denied' or 'other' for a failed vendor call.
+
+    A 401 is a bad credential and fails every dataset alike, so it is
+    raised at once and named. A 403 is the subscription declining one
+    dataset, which is worth remembering so the next request goes straight
+    to a feed that answers. Everything else -- a 5xx, a timeout, a 422 --
+    says nothing permanent, and remembering it as a denial would retire a
+    healthy feed for the life of the provider.
+    """
+    status = getattr(exc, "http_status", None)
+    try:
+        code = int(status) if status is not None else None
+    except (TypeError, ValueError):
+        code = None
+    if code == 401:
+        return "auth"
+    if code == 403:
+        return "denied"
+    if code is not None:
+        return "other"
+    text = str(exc).lower()
+    if _AUTH_TEXT_RE.search(text):
+        return "auth"
+    if _DENIAL_TEXT_RE.search(text):
+        return "denied"
+    return "other"
+
+
+def _rejected_key(exc: BaseException, where: str) -> NonRetryableAPIError:
+    """The refusal for a credential the vendor rejected, naming the variable."""
+    return NonRetryableAPIError(
+        f"Databento rejected DATABENTO_API_KEY (HTTP 401) on {where}: {exc}. "
+        "The key is missing, mistyped, revoked or expired; set a valid one "
+        "in the environment. This is not a coverage or entitlement answer "
+        "-- no dataset was judged -- and retrying with the same key cannot "
+        "succeed."
+    )
+
+
+def _not_found_symbols(store: Any) -> Set[str]:
+    """The request's symbols the vendor's symbology could not resolve.
+
+    Read from the store's own symbology report, which the client keeps
+    beside the records and which this provider used to discard with the
+    store. Defensive, because a stub or an older client may carry neither
+    `symbology` nor `metadata.not_found`.
+    """
+    found: Any = None
+    try:
+        symbology = getattr(store, "symbology", None)
+        if isinstance(symbology, Mapping):
+            found = symbology.get("not_found")
+        if found is None:
+            found = getattr(getattr(store, "metadata", None), "not_found", None)
+    except Exception:  # noqa: BLE001 - a report that cannot be read says nothing
+        return set()
+    try:
+        return {str(s) for s in (found or ())}
+    except TypeError:
+        return set()
 
 
 def _to_utc(value: Union[str, datetime], *, end_of_day: bool) -> datetime:
@@ -356,6 +469,49 @@ def _with_attrs(frame: pd.DataFrame, attrs: Dict[str, Any]) -> pd.DataFrame:
     return frame
 
 
+def _cme_trade_date_bars(hourly: pd.DataFrame) -> pd.DataFrame:
+    """
+    Hourly bars (a tz-aware UTC index) aggregated into CME trade dates.
+
+    The vendor's `ohlcv-1d` is a UTC day, and a Globex session is not one:
+    it opens at 17:00 Chicago on the evening before its date and closes by
+    16:00, so a UTC day holds the tail of one session and the start of the
+    next. A week came back as six bars -- a Sunday-evening fragment at a
+    couple of percent of a day's volume among them -- and each close was
+    the price two or three hours into the following session, not the
+    session's last trade. A continuous series rolled on a Sunday.
+
+    Each hourly bar is placed on its trade date by shifting its Chicago
+    wall-clock time forward seven hours (so 17:00 opens the next date,
+    across both daylight-saving changes), and a Saturday or Sunday date --
+    a print after Friday's close -- is carried to Monday, the date that
+    session belongs to. A holiday's abbreviated session keeps the date the
+    clock gives it. Open is the first bar's open, High and Low the extremes,
+    Close the LAST TRADE of the date -- not the settlement price, which is
+    a separate publication -- and Volume the sum.
+    """
+    if hourly.empty:
+        return hourly
+    local = pd.DatetimeIndex(hourly.index).tz_convert(_CME_TIMEZONE).tz_localize(None)
+    dates = (local + _CME_ROLL).normalize()
+    weekday = np.asarray(dates.weekday)
+    carry = np.where(weekday == 5, 2, np.where(weekday == 6, 1, 0))
+    dates = dates + pd.to_timedelta(carry, unit="D")
+    grouped = hourly.groupby(dates, sort=True)
+    out = pd.DataFrame(
+        {
+            "Open": grouped["Open"].first(),
+            "High": grouped["High"].max(),
+            "Low": grouped["Low"].min(),
+            "Close": grouped["Close"].last(),
+            "Volume": grouped["Volume"].sum(),
+        }
+    )
+    out.index = pd.DatetimeIndex(out.index)
+    out.index.name = None
+    return out
+
+
 class DatabentoProvider(DataProvider):
     """Databento Historical, honouring this library's provider contract."""
 
@@ -366,7 +522,10 @@ class DatabentoProvider(DataProvider):
         dataset: Optional[str] = None,
         depth_dataset: Optional[str] = None,
     ) -> None:
-        self._api_key = api_key or os.environ.get("DATABENTO_API_KEY", "").strip()
+        # The settings below are read through env_str, like every setting in
+        # the library: blank is unset, and a local .env is loaded first, so
+        # a key or dataset supplied there is honoured here too.
+        self._api_key = api_key or env_str("DATABENTO_API_KEY") or ""
         # Injectable so the operational logic above -- dataset preference,
         # the finalization walk-back, denial memory, symbol mapping -- is
         # testable without a key, a network or an entitlement. Those are
@@ -378,22 +537,16 @@ class DatabentoProvider(DataProvider):
         self._lock = threading.Lock()
         self._ranges: Dict[str, Tuple[datetime, datetime]] = {}
         self._denied: Set[str] = set()
-        self._dataset = (
-            dataset
-            or os.environ.get("DATABENTO_DATASET", "").strip()
-            or DATASET_NASDAQ_BASIC
-        )
+        # Why a range lookup last failed, per dataset: a refusal that says
+        # "no dataset covers that range" when the lookup itself failed is
+        # the wrong answer to act on.
+        self._range_errors: Dict[str, str] = {}
+        self._dataset = dataset or env_str("DATABENTO_DATASET") or DATASET_NASDAQ_BASIC
         self._depth_dataset = (
-            depth_dataset
-            or os.environ.get("DATABENTO_DEPTH_DATASET", "").strip()
-            or DATASET_DEPTH
+            depth_dataset or env_str("DATABENTO_DEPTH_DATASET") or DATASET_DEPTH
         )
-        self._futures_dataset = (
-            os.environ.get("DATABENTO_FUTURES_DATASET", "").strip() or DATASET_FUTURES
-        )
-        self._options_dataset = (
-            os.environ.get("DATABENTO_OPTIONS_DATASET", "").strip() or DATASET_OPTIONS
-        )
+        self._futures_dataset = env_str("DATABENTO_FUTURES_DATASET") or DATASET_FUTURES
+        self._options_dataset = env_str("DATABENTO_OPTIONS_DATASET") or DATASET_OPTIONS
         # The session cache is keyed per instance, like yfinance's: a fresh
         # provider never reuses another's result, which is what lets a
         # replay construct one to re-read from disk and detect tampering.
@@ -458,8 +611,9 @@ class DatabentoProvider(DataProvider):
 
     @staticmethod
     def _is_denial(exc: Exception) -> bool:
-        text = f"{type(exc).__name__}: {exc}".lower()
-        return any(marker in text for marker in _DENIAL_MARKERS)
+        """Whether a failure is the subscription declining the dataset (a
+        403), the only failure worth remembering. See `_failure_kind`."""
+        return _failure_kind(exc) == "denied"
 
     def _available_range(self, dataset: str) -> Optional[Tuple[datetime, datetime]]:
         """
@@ -469,6 +623,12 @@ class DatabentoProvider(DataProvider):
         wall-clock `now` asks for data Databento has not published -- which
         is every request made on a weekend, and it fails rather than
         returning the last session.
+
+        A REJECTED KEY IS RAISED HERE, BY NAME. This free lookup is the
+        first call every fetch makes, and it used to swallow every failure:
+        a 401 was remembered as an entitlement denial on each dataset in
+        turn and the caller was told "No dataset covers that range" -- the
+        commonest misconfiguration, reported as a date problem.
         """
         with self._lock:
             if dataset in self._ranges:
@@ -477,19 +637,26 @@ class DatabentoProvider(DataProvider):
         try:
             meta = client.metadata.get_dataset_range(dataset=dataset)
         except Exception as exc:  # noqa: BLE001
+            kind = _failure_kind(exc)
+            if kind == "auth":
+                raise _rejected_key(exc, f"the range lookup for {dataset}") from exc
             logger.warning("databento range lookup failed for %s: %s", dataset, exc)
-            if self._is_denial(exc):
-                with self._lock:
+            with self._lock:
+                if kind == "denied":
                     self._denied.add(dataset)
+                self._range_errors[dataset] = str(exc)
             return None
         try:
             start = datetime.fromisoformat(str(meta["start"]).replace("Z", "+00:00"))
             end = datetime.fromisoformat(str(meta["end"]).replace("Z", "+00:00"))
         except (KeyError, TypeError, ValueError) as exc:
             logger.warning("databento range for %s is unreadable: %s", dataset, exc)
+            with self._lock:
+                self._range_errors[dataset] = f"an unreadable range ({exc})"
             return None
         with self._lock:
             self._ranges[dataset] = (start, end)
+            self._range_errors.pop(dataset, None)
         return (start, end)
 
     def _bar_datasets(
@@ -506,7 +673,7 @@ class DatabentoProvider(DataProvider):
         one window come from ONE tape (D11) -- the sample feed is not a tape
         and a minute of it reconciles with nothing.
         """
-        override = os.environ.get("DATABENTO_OHLCV_DATASET", "").strip()
+        override = env_str("DATABENTO_OHLCV_DATASET")
         if override:
             candidates = [override, self._depth_dataset]
         elif schema in SUMMARY_SCHEMAS:
@@ -743,7 +910,8 @@ class DatabentoProvider(DataProvider):
             f"{symbol!r} is not a symbol this provider can map to a Databento "
             "raw_symbol. Expected a 1-5 letter ticker, a share class like "
             "'BRK.B', a continuous future like 'ES.c.0', a contract like "
-            "'ESZ6', a parent like 'ES.FUT', or an OSI option string."
+            "'ESZ6' or '6EZ5', a parent like 'ES.FUT', or an OSI option "
+            "string."
         )
 
     @staticmethod
@@ -788,8 +956,15 @@ class DatabentoProvider(DataProvider):
         start: datetime,
         end: datetime,
         stype_in: str = "raw_symbol",
+        not_found: Optional[Set[str]] = None,
     ) -> Optional[pd.DataFrame]:
-        """One request, with the daily-finalization walk-back."""
+        """One request, with the daily-finalization walk-back.
+
+        `not_found`, when given, collects the symbols the vendor's
+        symbology reported it could not resolve for this request -- the
+        one fact that tells an empty answer about a bad symbol from an
+        empty answer about a quiet window.
+        """
         client = self._get_client()
 
         def _call(request_end: datetime, fmt: str) -> pd.DataFrame:
@@ -801,6 +976,8 @@ class DatabentoProvider(DataProvider):
                 start=start.strftime(fmt),
                 end=request_end.strftime(fmt),
             )
+            if not_found is not None:
+                not_found.update(_not_found_symbols(store))
             return store.to_df()
 
         if schema == "ohlcv-1d":
@@ -863,8 +1040,16 @@ class DatabentoProvider(DataProvider):
                 f"{end_date!r} (the end date is INCLUSIVE, so a same-day "
                 "request is valid and this is not one)."
             )
+        width = _BAR_WIDTH.get(schema)
+        if width is not None and end == _to_utc(end_date, end_of_day=False):
+            # An explicit intraday end, sent to a half-open range: one bar
+            # more, so the bar AT the end is served (see `_BAR_WIDTH`). It
+            # is added before the edge clamp in `_range`, which still pulls
+            # it back to what the dataset has published.
+            end = end + width
 
         tried: List[str] = []
+        passed: Dict[str, str] = {}
         candidates = (
             datasets
             if datasets is not None
@@ -872,42 +1057,104 @@ class DatabentoProvider(DataProvider):
         )
         for dataset in candidates:
             if dataset in self._denied:
+                passed[dataset] = "declined by the subscription (HTTP 403)"
                 continue
             if not self._window_admits(dataset, schema, start):
                 continue
             window = self._range(dataset, start, end)
             if window is None:
+                passed[dataset] = self._why_passed_over(dataset)
                 continue
             if stored is not None:
                 answer = stored(dataset)
                 if answer is not None:
                     return answer, dataset
             tried.append(dataset)
+            unresolved: Set[str] = set()
             try:
                 frame = self._get_range(
-                    dataset, schema, raw, *window, stype_in=route.stype_in
+                    dataset,
+                    schema,
+                    raw,
+                    *window,
+                    stype_in=route.stype_in,
+                    not_found=unresolved,
                 )
             except Exception as exc:  # noqa: BLE001
+                kind = _failure_kind(exc)
+                if kind == "auth":
+                    raise _rejected_key(
+                        exc, f"a {schema} request to {dataset}"
+                    ) from exc
                 logger.warning(
                     "databento %s %s on %s failed: %s", symbol, schema, dataset, exc
                 )
-                if self._is_denial(exc):
+                if kind == "denied":
                     with self._lock:
                         self._denied.add(dataset)
+                    passed[dataset] = "declined by the subscription (HTTP 403)"
                 continue
             if frame is not None and len(frame):
                 return frame, dataset
+            if raw in unresolved:
+                # THE VENDOR SAID THE SYMBOL DOES NOT EXIST, and asking the
+                # next feed, then the retry layer asking all of them twice
+                # more, turned that one answer into a dozen requests and a
+                # generic error. The US equity feeds share one symbology,
+                # and every other family has a single dataset.
+                raise InvalidSymbolError(
+                    f"{symbol!r} (sent to Databento as {raw!r}, symbology "
+                    f"{route.stype_in}) did not resolve on {dataset} between "
+                    f"{start:%Y-%m-%d} and {end:%Y-%m-%d}: the vendor's "
+                    "symbology reports it not found. Check the spelling -- a "
+                    "share class is dotted ('BRK.B'), a futures contract "
+                    "carries a one-digit year ('ESZ6') -- and that the "
+                    "instrument was listed in that window."
+                )
 
+        span = f"({schema}) between {start:%Y-%m-%d} and {end:%Y-%m-%d}"
+        reasons = "; ".join(f"{name}: {why}" for name, why in passed.items())
+        if tried:
+            raise APIError(
+                f"Databento returned no {what} for {symbol} {span}. Datasets "
+                f"tried: {tried}." + (f" Passed over: {reasons}." if reasons else "")
+            )
+        if passed and all("HTTP 403" in why for why in passed.values()):
+            # An entitlement answer, not a coverage one, and asking again
+            # cannot change it: every dataset that could answer is one the
+            # subscription has declined.
+            raise NonRetryableAPIError(
+                f"Databento's subscription declined every dataset that could "
+                f"serve {what} for {symbol} {span}: {sorted(passed)} (HTTP "
+                "403). This is an entitlement problem, not a date-range one: "
+                "add the dataset to the subscription, or point the provider "
+                "at one it includes (DATABENTO_DATASET, "
+                "DATABENTO_DEPTH_DATASET, DATABENTO_OHLCV_DATASET)."
+            )
         raise APIError(
-            f"Databento returned no {what} for {symbol} "
-            f"({schema}) between {start:%Y-%m-%d} and {end:%Y-%m-%d}. "
+            f"Databento returned no {what} for {symbol} {span}. "
             + (
-                f"Datasets tried: {tried}."
-                if tried
-                else "No dataset covers that range, or every one was declined "
-                "by the subscription."
+                f"No dataset was asked: {reasons}."
+                if reasons
+                else "No dataset covers that range."
             )
         )
+
+    def _why_passed_over(self, dataset: str) -> str:
+        """Why `_range` declined a dataset, for the refusal that names it."""
+        with self._lock:
+            span = self._ranges.get(dataset)
+            error = self._range_errors.get(dataset)
+            denied = dataset in self._denied
+        if denied:
+            return "declined by the subscription (HTTP 403)"
+        if span is not None:
+            first, last = span
+            return (
+                f"it publishes {first:%Y-%m-%d} to {last:%Y-%m-%d}, which does "
+                "not contain the window's start"
+            )
+        return f"its coverage could not be looked up ({error or 'no answer'})"
 
     # ── the contract ─────────────────────────────────────────────────
     def get_ohlcv(
@@ -1004,27 +1251,37 @@ class DatabentoProvider(DataProvider):
 
         A window before `SUMMARY_START` is served by the sample feed by
         policy, every time: its file is the preferred feed's entry for that
-        window, and reading it is not a fallback.
+        window, and reading it is not a fallback. It is disclosed, though,
+        when the summary feed covers part of it (see `_disclose`).
+
+        A FUTURE'S DAILY BAR IS A CME TRADE DATE, built from hourly bars
+        (see `_cme_trade_date_bars`), because the vendor's `ohlcv-1d` is a
+        UTC day: six bars a week, one of them a Sunday-evening fragment, and
+        every close taken two or three hours into the next session.
         """
         route = self.resolve_symbol(symbol)
         start = _to_utc(start_date, end_of_day=False)
         end = _to_utc(end_date, end_of_day=True)
+        trade_dates = route.family == "future" and interval == "1d"
+        request_schema = "ohlcv-1h" if trade_dates else schema
+        # A trade date opens at 17:00 Chicago on the evening before it,
+        # which is the previous UTC day: ask from a day earlier and cut the
+        # partial first date off after aggregating.
+        fetch_start = start - timedelta(days=1) if trade_dates else start_date
         served: Dict[str, pd.DataFrame] = {}
+
+        def _disclosed(frame: pd.DataFrame, dataset: str) -> pd.DataFrame:
+            return self._disclose(
+                frame, symbol, route, interval, schema, start, end, dataset
+            )
 
         def _stored(dataset: str) -> Optional[pd.DataFrame]:
             path = self._bar_cache_path(route, dataset, start_str, end_str, interval)
-            if path is None or not path.exists():
-                return None
-            try:
-                frame = _normalize_ohlcv_index(pd.read_parquet(path), interval)
-            except Exception as exc:  # noqa: BLE001 - a bad file is evicted
-                logger.warning(
-                    "[cache] databento disk read failed for %s: %s", path, exc
-                )
-                try:
-                    path.unlink()
-                except OSError:
-                    pass
+            # The shared read: an entry that is not a plausible answer is
+            # evicted, and a Windows sharing violation is a miss, not a
+            # reason to delete a valid entry (see _cache._read_cached_ohlcv).
+            frame = _read_cached_ohlcv(path, interval, start_str, end_str)
+            if frame is None:
                 return None
             frame.attrs["dataset"] = dataset
             frame.attrs["provider"] = "databento"
@@ -1036,9 +1293,9 @@ class DatabentoProvider(DataProvider):
 
         first = self._first_to_ask(route.family, schema, start, end)
         if first is not None and _stored(first) is not None:
-            return served[first], True
+            return _disclosed(served[first], first), True
         raw_frame, dataset = self._fetch(
-            schema, symbol, start_date, end_date, what="bars", stored=_stored
+            request_schema, symbol, fetch_start, end_date, what="bars", stored=_stored
         )
         # Asked again after the fetch, which has learned denials and
         # coverage: a feed passed over for either is not a failure, and the
@@ -1056,10 +1313,24 @@ class DatabentoProvider(DataProvider):
                 preferred,
             )
         if dataset in served:
-            return served[dataset], dataset == preferred
-        out = self._shape_bars(raw_frame, symbol, interval, end_date)
+            return _disclosed(served[dataset], dataset), dataset == preferred
+        out = self._shape_bars(
+            raw_frame,
+            symbol,
+            interval,
+            end_date,
+            trade_dates_from=start_date if trade_dates else None,
+        )
+        if trade_dates and out.empty:
+            raise DataNotFoundError(
+                f"Databento served hourly {symbol} bars around {start_date} to "
+                f"{end_date}, and no CME trade date falls inside that window: "
+                "a trade date runs from 17:00 Chicago on the evening before "
+                "it, so a window of a weekend or a holiday holds none."
+            )
         out.attrs["dataset"] = dataset
         out.attrs["provider"] = "databento"
+        _disclosed(out, dataset)
         # Into the open decision record, like every other provider's bars.
         _record(symbol, start_date, end_date, interval, dataset, out)
         # Written under the dataset that answered, even when it answered in
@@ -1068,12 +1339,8 @@ class DatabentoProvider(DataProvider):
         # that would answer.
         path = self._bar_cache_path(route, dataset, start_str, end_str, interval)
         if path is not None and _is_historical(end_date):
-            try:
-                _write_parquet_atomic(path, out)
-            except Exception as exc:  # noqa: BLE001 - caching is an optimisation
-                logger.warning(
-                    "[cache] databento disk write failed for %s: %s", path, exc
-                )
+            # Never raises: a failed write is logged and its temp removed.
+            _write_cached_ohlcv(path, out, interval, start_str, end_str)
         return out, dataset == preferred
 
     @staticmethod
@@ -1099,16 +1366,139 @@ class DatabentoProvider(DataProvider):
             provider=f"databento-{dataset}",
         )
 
+    def _known_start(self, dataset: str, schema: str) -> Optional[datetime]:
+        """The first instant a dataset can answer `schema`, from what this
+        instance knows without a network call: the two fixed start dates,
+        and a published coverage it has already looked up."""
+        starts: List[datetime] = []
+        if dataset == DATASET_SUMMARY:
+            if schema not in SUMMARY_SCHEMAS:
+                return None
+            starts.append(SUMMARY_START.to_pydatetime())
+        if dataset == DATASET_CONSOLIDATED:
+            starts.append(CONSOLIDATED_START.to_pydatetime())
+        with self._lock:
+            span = self._ranges.get(dataset)
+        if span is not None:
+            starts.append(span[0])
+        return max(starts) if starts else None
+
+    def _coverage_downgrade(
+        self,
+        family: str,
+        schema: str,
+        start: datetime,
+        end: datetime,
+        served: str,
+    ) -> Optional[Dict[str, str]]:
+        """
+        The better feed a window was passed over for, because it starts
+        inside the window -- or None.
+
+        ONE FEED PER FRAME, AND THE WINDOW'S START CHOOSES IT. A feed that
+        begins after the window's start is not asked at all, so a window
+        opening one week before the summary feed's first date was served
+        whole by the sample feed: the same symbol over overlapping dates,
+        27x apart in volume, chosen by where the window started and with
+        nothing said. The answer is not changed here -- clamping the start
+        would return a shorter window than was asked, silently, and
+        stitching the two would put a volume step at the seam -- but it is
+        disclosed, with the date to split the request at.
+        """
+        for dataset in self._datasets_for(family, schema, None):
+            if dataset == served:
+                return None
+            if dataset in self._denied:
+                continue
+            first = self._known_start(dataset, schema)
+            if first is not None and start < first < end:
+                return {
+                    "preferred": dataset,
+                    "covers_from": first.date().isoformat(),
+                    "served": served,
+                    "advice": (
+                        f"split the request at {first.date().isoformat()}: "
+                        f"{dataset} answers from that date on, and {served} "
+                        "answered the whole window because it starts before"
+                    ),
+                }
+        return None
+
+    def coverage_downgrade(
+        self,
+        symbol: str,
+        schema: str,
+        start_date: Union[str, datetime],
+        end_date: Union[str, datetime],
+        served: str,
+    ) -> Optional[Dict[str, str]]:
+        """
+        Whether a request served by `served` passes over a better feed that
+        covers part of its window -- the disclosure a fetch attaches as
+        `attrs["coverage_downgrade"]`, askable before the fetch is made.
+        """
+        route = self.resolve_symbol(symbol)
+        start = _to_utc(start_date, end_of_day=False)
+        end = _to_utc(end_date, end_of_day=True)
+        return self._coverage_downgrade(route.family, schema, start, end, served)
+
+    def _disclose(
+        self,
+        frame: pd.DataFrame,
+        symbol: str,
+        route: SymbolRoute,
+        interval: str,
+        schema: str,
+        start: datetime,
+        end: datetime,
+        dataset: str,
+    ) -> pd.DataFrame:
+        """What a bar frame is, on the frame, however it was served: the
+        session a futures daily bar spans, and a coverage downgrade."""
+        if route.family == "future" and interval == "1d":
+            frame.attrs["session"] = _CME_SESSION_LABEL
+            frame.attrs["bars_from"] = "ohlcv-1h"
+        downgrade = self._coverage_downgrade(route.family, schema, start, end, dataset)
+        if downgrade is None:
+            frame.attrs.pop("coverage_downgrade", None)
+            return frame
+        frame.attrs["coverage_downgrade"] = downgrade
+        logger.warning(
+            "databento %s %s: the window starts before %s covers it (from %s), "
+            "so %s answered all of it; %s",
+            symbol,
+            schema,
+            downgrade["preferred"],
+            downgrade["covers_from"],
+            dataset,
+            downgrade["advice"],
+        )
+        return frame
+
     def _shape_bars(
         self,
         raw_frame: pd.DataFrame,
         symbol: str,
         interval: str,
         end_date: Union[str, datetime],
+        *,
+        trade_dates_from: Optional[Union[str, datetime]] = None,
     ) -> pd.DataFrame:
         """The library's column contract, a naive index, integer volume, and
-        the inclusive end enforced -- the same shaping every provider does."""
-        out = _normalize_ohlcv_index(self._to_ohlcv(raw_frame, symbol), interval)
+        the inclusive end enforced -- the same shaping every provider does.
+
+        With `trade_dates_from`, `raw_frame` holds hourly bars that are
+        aggregated into CME trade dates, and the dates before that start --
+        the partial one the widened request reached into -- are cut off.
+        """
+        bars = self._to_ohlcv(raw_frame, symbol)
+        if trade_dates_from is not None:
+            bars = _cme_trade_date_bars(bars)
+            first_date = pd.Timestamp(
+                _to_utc(trade_dates_from, end_of_day=False).date()
+            )
+            bars = bars[bars.index >= first_date]
+        out = _normalize_ohlcv_index(bars, interval)
         # What the venue published: no split or dividend adjustment. The
         # backtest engine's split screen reads this to phrase its warning.
         out.attrs["adjusted"] = False
@@ -1173,27 +1563,19 @@ class DatabentoProvider(DataProvider):
         start_date: Union[str, datetime],
         end_date: Union[str, datetime],
         limit: Optional[int] = None,
+        dataset: Optional[str] = None,
     ) -> pd.DataFrame:
-        """Individual trades, in this library's `price`/`size` contract."""
-        frame, _dataset = self._fetch(
-            "trades",
-            symbol,
-            start_date,
-            end_date,
-            datasets=self._tick_datasets(symbol),
-            what="trades",
-        )
-        out, _notes = normalize_trades(frame)
-        if limit is not None and len(out) > limit:
-            out = out.head(int(limit))
-        out = out.set_index("timestamp") if "timestamp" in out.columns else out
-        _record(symbol, start_date, end_date, "trades", _dataset, out)
-        # WHICH TAPE ANSWERED, on the frame, the way the bars path does it.
-        # The tick datasets are single-venue, so a volume here is that
-        # venue's share and not the market's -- and which venue it was is
-        # chosen by the request rather than by the caller.
-        return _with_attrs(
-            out, {"dataset": _dataset, "provider": "databento", "adjusted": False}
+        """
+        Individual trades, in this library's `price`/`size` contract.
+
+        Indexed by `timestamp`, which is `ts_recv` when the feed carries it
+        (`attrs["timestamp_source"]` says which); both vendor stamps are
+        kept as columns. `dataset` pins the venue -- pass the same one to
+        `get_quotes` for a same-venue pair. Zero-size and sub-penny prints
+        are kept and counted in `attrs["print_counts"]`.
+        """
+        return self._tape(
+            "trades", normalize_trades, symbol, start_date, end_date, limit, dataset
         )
 
     def get_quotes(
@@ -1202,24 +1584,102 @@ class DatabentoProvider(DataProvider):
         start_date: Union[str, datetime],
         end_date: Union[str, datetime],
         limit: Optional[int] = None,
+        dataset: Optional[str] = None,
     ) -> pd.DataFrame:
-        """Top-of-book quotes, in this library's `bid_price`/`ask_price` contract."""
-        frame, _dataset = self._fetch(
-            "mbp-1",
-            symbol,
-            start_date,
-            end_date,
-            datasets=self._tick_datasets(symbol),
-            what="quotes",
+        """Top-of-book quotes, in this library's `bid_price`/`ask_price`
+        contract. `dataset` pins the venue, as on `get_trades`."""
+        return self._tape(
+            "mbp-1", normalize_quotes, symbol, start_date, end_date, limit, dataset
         )
-        out, _notes = normalize_quotes(frame)
-        if limit is not None and len(out) > limit:
-            out = out.head(int(limit))
+
+    def _tape(
+        self,
+        schema: str,
+        normalize: Callable[..., Tuple[pd.DataFrame, List[str]]],
+        symbol: str,
+        start_date: Union[str, datetime],
+        end_date: Union[str, datetime],
+        limit: Optional[int],
+        dataset: Optional[str],
+    ) -> pd.DataFrame:
+        """
+        Trades or quotes, with what the vendor frame said kept on the result.
+
+        THE TWO ARE ROUTED SEPARATELY, and that is the hazard. Each takes
+        the first dataset that answers ITS schema, so a venue feed that
+        serves trades but not top-of-book quotes answers the tape while the
+        next feed answers the quotes, and a spread computed from the pair
+        compares one venue's trades with another's quotes. Nothing said so:
+        both frames carried a dataset name that no consumer compared. Now a
+        frame answered by any dataset but the first the routing asks
+        carries a WARNING saying the pair may be cross-venue, and `dataset`
+        pins both to one venue. The default routing is unchanged.
+
+        THE VENDOR'S NOTES ARE KEPT. The normalizer reports the flag
+        warnings (`F_MAYBE_BAD_BOOK` among them), the sentinel count, the
+        price-scale decision and the timestamp it used, and this used to
+        discard all of them. They are on `attrs["vendor_notes"]`, and each
+        WARNING is logged, the way the depth path does it.
+        """
+        what = "trades" if schema == "trades" else "quotes"
+        if dataset is not None:
+            name = str(dataset).strip()
+            if not name:
+                raise ValidationError(
+                    "dataset='' names no dataset. Pass a Databento dataset "
+                    f"such as {self._dataset!r} or {self._depth_dataset!r}, "
+                    "or leave it unset for the default routing."
+                )
+            candidates = [name]
+        else:
+            candidates = self._tick_datasets(symbol)
+        frame, served = self._fetch(
+            schema, symbol, start_date, end_date, datasets=candidates, what=what
+        )
+        if limit is not None and len(frame) > limit:
+            # Cut BEFORE normalizing, so the counts and warnings the
+            # normalizer reports describe the rows that are returned.
+            frame = frame.head(int(limit))
+        stamp = timestamp_source(frame)
+        out, notes = normalize(frame)
+        notes = list(notes)
         out = out.set_index("timestamp") if "timestamp" in out.columns else out
-        _record(symbol, start_date, end_date, "quotes", _dataset, out)
-        return _with_attrs(
-            out, {"dataset": _dataset, "provider": "databento", "adjusted": False}
-        )
+        attrs: Dict[str, Any] = {
+            "dataset": served,
+            "provider": "databento",
+            "adjusted": False,
+            "schema": schema,
+            "timestamp_source": stamp,
+        }
+        if dataset is None and candidates and served != candidates[0]:
+            skipped = candidates[: candidates.index(served)]
+            attrs["fallback_from"] = skipped
+            other = "quotes" if what == "trades" else "trades"
+            notes.append(
+                f"WARNING: these {what} come from {served}, not {skipped[0]}, "
+                f"the first dataset the tape and quote fetches ask: "
+                f"{skipped[0]} did not serve {schema} for this window. The "
+                f"{other} for the same window are answered by the first "
+                f"dataset that serves them, which may be {skipped[0]} -- and a "
+                "spread measured across two venues compares prices that never "
+                f"met in one book. Pass dataset={served!r} to both fetches for "
+                "a same-venue pair."
+            )
+        if schema == "trades":
+            counts = print_counts(out)
+            attrs["print_counts"] = {
+                key: value for key, value in counts.items() if key != "n"
+            }
+        attrs["vendor_notes"] = notes
+        for note in notes:
+            if note.startswith("WARNING"):
+                logger.warning("databento %s %s: %s", what, symbol, note)
+        _record(symbol, start_date, end_date, what, served, out)
+        # WHICH TAPE ANSWERED, on the frame, the way the bars path does it.
+        # The tick datasets are single-venue, so a volume here is that
+        # venue's share and not the market's -- and which venue it was is
+        # chosen by the request unless the caller pins it.
+        return _with_attrs(out, attrs)
 
     def get_order_book(
         self,
@@ -1256,6 +1716,7 @@ class DatabentoProvider(DataProvider):
             datasets=self._depth_datasets(symbol),
             what="depth",
         )
+        stamp = timestamp_source(frame)
         out, notes = normalize_book(frame, levels=levels)
         for note in notes:
             if note.startswith("WARNING"):
@@ -1264,7 +1725,17 @@ class DatabentoProvider(DataProvider):
             out = out.head(int(limit))
         _record(symbol, start_date, end_date, f"mbp-10:{int(levels)}", _dataset, out)
         return _with_attrs(
-            out, {"dataset": _dataset, "provider": "databento", "adjusted": False}
+            out,
+            {
+                "dataset": _dataset,
+                "provider": "databento",
+                "adjusted": False,
+                "schema": "mbp-10",
+                "timestamp_source": stamp,
+                # Kept on the frame, not only logged: the fetch tools read
+                # them into their results, where an agent can see them.
+                "vendor_notes": list(notes),
+            },
         )
 
     def get_order_events(
@@ -1297,6 +1768,7 @@ class DatabentoProvider(DataProvider):
             datasets=self._depth_datasets(symbol),
             what="order events",
         )
+        stamp = timestamp_source(frame)
         out, notes = normalize_mbo(frame)
         for note in notes:
             if note.startswith("WARNING"):
@@ -1305,7 +1777,15 @@ class DatabentoProvider(DataProvider):
             out = out.head(int(limit))
         _record(symbol, start_date, end_date, "mbo", _dataset, out)
         return _with_attrs(
-            out, {"dataset": _dataset, "provider": "databento", "adjusted": False}
+            out,
+            {
+                "dataset": _dataset,
+                "provider": "databento",
+                "adjusted": False,
+                "schema": "mbo",
+                "timestamp_source": stamp,
+                "vendor_notes": list(notes),
+            },
         )
 
     def get_dataset_coverage(
@@ -1375,8 +1855,15 @@ class DatabentoProvider(DataProvider):
             if dataset
             else self.datasets_for_schema(symbol, schema, start_date)
         )
+        # What the fetch would actually send: a future's daily bars are
+        # built from hourly bars over a window a day wider (see
+        # `_cme_trade_date_bars`), so that is the request priced.
+        request_schema = schema
+        if route.family == "future" and schema == "ohlcv-1d":
+            request_schema = "ohlcv-1h"
+            start = start - timedelta(days=1)
         client = self._get_client()
-        fmt = "%Y-%m-%d" if schema == "ohlcv-1d" else "%Y-%m-%dT%H:%M:%S"
+        fmt = "%Y-%m-%d" if request_schema == "ohlcv-1d" else "%Y-%m-%dT%H:%M:%S"
         refused: List[str] = []
         for name in candidates:
             if not name or name in self._denied:
@@ -1385,13 +1872,18 @@ class DatabentoProvider(DataProvider):
             try:
                 size = client.metadata.get_billable_size(
                     dataset=name,
-                    schema=schema,
+                    schema=request_schema,
                     symbols=[route.raw],
                     stype_in=route.stype_in,
                     start=window[0].strftime(fmt),
                     end=window[1].strftime(fmt),
                 )
             except Exception as exc:  # noqa: BLE001 - one refusal, not a trace
+                kind = _failure_kind(exc)
+                if kind == "auth":
+                    raise _rejected_key(
+                        exc, f"the billable-size lookup for {name}"
+                    ) from exc
                 logger.warning(
                     "databento billable size for %s (%s) on %s failed: %s",
                     symbol,
@@ -1399,7 +1891,7 @@ class DatabentoProvider(DataProvider):
                     name,
                     exc,
                 )
-                if self._is_denial(exc):
+                if kind == "denied":
                     with self._lock:
                         self._denied.add(name)
                 refused.append(f"{name}: {exc}")
@@ -1454,7 +1946,18 @@ class DatabentoProvider(DataProvider):
         except ValidationError:
             family = "unknown"
         if family == "future":
-            feed = f"{self._futures_dataset} (CME Globex; continuous, parent and contract symbols)"
+            feed = (
+                f"{self._futures_dataset} (CME Globex; continuous, parent and "
+                "contract symbols)"
+            )
+            if interval == "1d":
+                feed += (
+                    ". A daily bar is a CME TRADE DATE -- 17:00 Chicago on the "
+                    "prior evening to 16:00 on the date -- aggregated from "
+                    "hourly bars, not the vendor's UTC-day bar; Close is the "
+                    "date's last trade, not the settlement price, which the "
+                    "statistics schema publishes separately"
+                )
         elif family == "option":
             feed = f"{self._options_dataset} (OPRA; OSI option symbols)"
         elif interval == "1d":

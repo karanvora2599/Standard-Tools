@@ -33,7 +33,7 @@ downstream estimate toward looking more informed than it was.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -514,6 +514,27 @@ def _session_minutes(session) -> "tuple[int, int]":
     return lo, hi
 
 
+def _bucket_seconds(freq: str) -> float:
+    """A bucket width as seconds, refused by name when it is not a fixed,
+    positive duration."""
+    try:
+        width = pd.Timedelta(freq)
+    except (TypeError, ValueError) as exc:
+        raise ValidationError(
+            f"freq={freq!r} is not a fixed duration such as '15min' or '1h': " f"{exc}"
+        ) from exc
+    seconds = float(width.total_seconds())
+    if not np.isfinite(seconds) or seconds <= 0:
+        raise ValidationError(f"freq={freq!r} must be a positive duration.")
+    return seconds
+
+
+def _clock_seconds(seconds: float) -> str:
+    """Seconds after midnight as HH:MM:SS."""
+    whole = int(round(seconds))
+    return f"{whole // 3600:02d}:{(whole // 60) % 60:02d}:{whole % 60:02d}"
+
+
 def intraday_volume_profile(
     trades: pd.DataFrame,
     freq: str = "30min",
@@ -529,22 +550,41 @@ def intraday_volume_profile(
     is famously U-shaped, so the same order is a far larger share of the
     book at midday than at the close. This reports the actual shape rather
     than assuming one.
+
+    EVERY BUCKET IS REPORTED, EMPTY ONES INCLUDED, and the buckets divide
+    the session: bucket 0 starts at the session's open and each is `freq`
+    wide, the last cut at the close. Only the buckets some print fell in
+    used to come back, labelled by the clock, so a tape from the open and
+    the close alone had no midday at all -- the trough the U is measured
+    against was missing, and nothing said so. An empty bucket now has a
+    zero share, `trough_bucket` is a bucket id (the first of the smallest),
+    and the empty ones are counted and named -- as the bar-based profile in
+    `microstructure_estimators` does. See the CHANGELOG entry of
+    2026-09-28.
+
+    A tape stamped with a timezone is profiled over the REGULAR SESSION in
+    `exchange_timezone`, with the extended-hours share beside it. A naive
+    index is taken as already in session time; when a print falls outside
+    the session that assumption is broken, the buckets are extended on the
+    session's grid to cover every print, and a warning says so.
     """
     trades = _require_frame(trades, _TRADE_COLUMNS, "trades")
     size = trades["size"].astype(float)
+    step = _bucket_seconds(freq)
+    lo_m, hi_m = _session_minutes(session)
+    lo, hi = lo_m * 60.0, hi_m * 60.0
     # A tape stamped with a timezone is bucketed over the REGULAR SESSION
     # in the exchange's clock, and the extended-hours share is reported
     # beside it. Bucketing over the observed range of a live feed put the
     # open at 4am and the close at 8pm, reported a 0% open and close, and
-    # warned the caller that THEIR data was unusual (findings). A naive
-    # index is taken as already in session time and profiled as given.
+    # warned the caller that THEIR data was unusual (findings).
     extended_share: Optional[float] = None
-    index = trades.index
-    if isinstance(index, pd.DatetimeIndex) and index.tz is not None:
-        local = index.tz_convert(exchange_timezone)
-        minutes = local.hour * 60 + local.minute
-        lo_m, hi_m = _session_minutes(session)
-        regular = (minutes >= lo_m) & (minutes < hi_m)
+    warnings: List[str] = []
+    index = pd.DatetimeIndex(trades.index)
+    if index.tz is not None:
+        local = index.tz_convert(exchange_timezone).tz_localize(None)
+        of_day = (local - local.normalize()).total_seconds().to_numpy()
+        regular = (of_day >= lo) & (of_day < hi)
         total_all = float(size.sum())
         extended_share = (
             float(size.to_numpy()[~regular].sum() / total_all)
@@ -556,22 +596,69 @@ def intraday_volume_profile(
                 f"no trades inside the {session[0]}-{session[1]} session in "
                 f"{exchange_timezone}; every print is extended hours."
             )
-        size = pd.Series(
-            size.to_numpy()[regular], index=local.tz_localize(None)[regular]
-        )
-        index = size.index
-    by_bucket = size.groupby(index.floor(freq).time).sum()
-    total = float(by_bucket.sum())
+        volume = size.to_numpy()[regular]
+        of_day = of_day[regular]
+    else:
+        volume = size.to_numpy()
+        of_day = (index - index.normalize()).total_seconds().to_numpy()
+        outside = (of_day < lo) | (of_day >= hi)
+        if outside.any():
+            # The session's grid, extended both ways far enough to hold
+            # every print, so the labels still line up with the open.
+            lo = lo - np.ceil(max(lo - float(of_day.min()), 0.0) / step) * step
+            reach = float(of_day.max()) - hi
+            hi = hi + (np.floor(reach / step) + 1) * step if reach >= 0 else hi
+            warnings.append(
+                f"{int(outside.sum())} of {len(of_day)} prints fall outside "
+                f"the {session[0]}-{session[1]} session, and with no zone to "
+                "place them they are profiled as given: the buckets span "
+                f"{_clock_seconds(lo)}-{_clock_seconds(hi)} instead of the "
+                "session. If these stamps are UTC or carry extended hours, "
+                "stamp them with their zone and only the session is profiled."
+            )
+    # A masked size is a print of unknown size: counted, carrying nothing.
+    volume = np.where(np.isfinite(volume), volume, 0.0)
+    n_buckets = max(1, int(np.ceil((hi - lo) / step - 1e-9)))
+    bucket = np.clip(np.floor((of_day - lo) / step).astype(int), 0, n_buckets - 1)
+    sums = np.bincount(bucket, weights=volume, minlength=n_buckets)
+    counts = np.bincount(bucket, minlength=n_buckets)
+    total = float(sums.sum())
     if total <= 0:
         raise ValidationError("no positive volume to profile")
+    shares = sums / total
+    rows = [
+        {
+            "bucket": k,
+            "time": _clock_seconds(lo + k * step),
+            "volume_fraction": round(float(shares[k]), 6),
+            "n_trades": int(counts[k]),
+        }
+        for k in range(n_buckets)
+    ]
+    empty = [row["bucket"] for row in rows if row["n_trades"] == 0]
+    if empty:
+        warnings.append(
+            f"{len(empty)} of {n_buckets} buckets hold no trades at all "
+            f"(bucket(s) {empty}). They are reported with a zero share rather "
+            "than dropped, so an empty bucket IS the trough when there is "
+            "one. Check whether each is real -- a halt, a thin name -- or a "
+            "gap in the tape."
+        )
+    peak = int(np.argmax(shares))
+    trough = int(np.argmin(shares))
     return {
         "freq": freq,
         "session": list(session),
+        "bucket_span": [_clock_seconds(lo), _clock_seconds(hi)],
         "extended_hours_share": extended_share,
-        "buckets": [
-            {"time": str(when), "volume_fraction": round(float(volume / total), 6)}
-            for when, volume in by_bucket.items()
-        ],
-        "peak_time": str(by_bucket.idxmax()),
-        "peak_volume_fraction": round(float(by_bucket.max() / total), 6),
+        "n_buckets": n_buckets,
+        "n_empty_buckets": len(empty),
+        "buckets": rows,
+        "peak_bucket": peak,
+        "peak_time": rows[peak]["time"],
+        "peak_volume_fraction": round(float(shares[peak]), 6),
+        "trough_bucket": trough,
+        "trough_time": rows[trough]["time"],
+        "trough_volume_fraction": round(float(shares[trough]), 6),
+        "warnings": warnings,
     }

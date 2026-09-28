@@ -1,7 +1,6 @@
 """Standard quantitative finance tools for backtesting, analysis, and agent-based trading."""
 
 import logging
-import os
 import sys
 
 __version__ = "0.1.0"
@@ -30,12 +29,19 @@ __version__ = "0.1.0"
 #: them at once.
 DISABLE_NATIVE_ENV = "SQT_DISABLE_NATIVE"
 
-_TRUTHY = {"1", "true", "yes", "on"}
-
 
 def native_disabled() -> bool:
-    """Whether the compiled extension has been switched off deliberately."""
-    return os.environ.get(DISABLE_NATIVE_ENV, "").strip().lower() in _TRUTHY
+    """Whether the compiled extension has been switched off deliberately.
+
+    Read through the library's one flag reader, the same one the audit
+    switches use, so a word means one thing everywhere: 1/true/yes/on and
+    0/false/no/off in any case and padding, blank for the default (the
+    extension is used), and any other word refused by name. A local `.env`
+    is not loaded for this one read -- it runs while the package imports.
+    """
+    from standard_quant_tools._env import env_flag
+
+    return env_flag(DISABLE_NATIVE_ENV, False, load=False)
 
 
 if native_disabled():

@@ -442,12 +442,8 @@ class TestTheWeightsAreDescribedBeforeTheyAreApplied:
         assert result.half_life_days is None
         assert any("every row enters the fit at weight 1" in w for w in result.warnings)
 
-    def test_uniqueness_without_label_end_dates_gets_the_library_refusal(
-        self, monkeypatch
-    ):
-        """A panel built before label end dates were recorded carries no
-        column for the purge or the uniqueness to read, and the remedy is
-        the library's own: rebuild, or weight by time alone."""
+    @staticmethod
+    def _no_label_end(monkeypatch, target_id):
         panel = pd.DataFrame(
             {
                 "date": np.repeat(pd.date_range("2022-01-03", periods=20), 2),
@@ -458,7 +454,7 @@ class TestTheWeightsAreDescribedBeforeTheyAreApplied:
         )
         meta = {
             "feature_ids": ["technical.rsi"],
-            "target_id": "forward_return:5",
+            "target_id": target_id,
             "data_hash": "unused",
         }
         monkeypatch.setattr(
@@ -466,6 +462,68 @@ class TestTheWeightsAreDescribedBeforeTheyAreApplied:
             "_load_dataset_panel",
             lambda dataset_id: (panel, meta, None),
         )
+
+    def test_uniqueness_without_label_end_dates_reads_ends_from_the_horizon(
+        self, monkeypatch
+    ):
+        """A panel built before label end dates were recorded carries no
+        column for the purge or the uniqueness to read. This used to get
+        the builder's refusal; run_model_experiment now derives the ends
+        from the target's horizon, and the preview derives the same ones,
+        so it describes the weights the engine would actually fit under."""
+        self._no_label_end(monkeypatch, "forward_return:5")
+        result = preview_sample_weights(
+            PreviewSampleWeightsInput(
+                dataset_id="ds_no_label_end",
+                weighting=WeightingSpec(method="label_uniqueness"),
+            )
+        )
+        assert result.n_rows == 40
+        assert result.ratio_max_min > 1.0
+        assert any("derived from target_id" in w for w in result.warnings)
+
+    def test_the_overlap_count_is_discounted_for_entities_that_move_together(
+        self, monkeypatch
+    ):
+        """The entity count was passed and cancelled out of the arithmetic,
+        so two entities carrying the SAME label reported twice the
+        independent observations one did. Planted: identical labels are
+        one observation a date, the floor dates / horizon."""
+        shared = pd.DataFrame(
+            {
+                "date": np.repeat(pd.date_range("2022-01-03", periods=20), 2),
+                "entity": np.tile(["AAA", "BBB"], 20),
+                "technical.rsi": np.linspace(0.0, 1.0, 40),
+                "target": np.repeat(np.sin(np.arange(20.0)), 2),
+            }
+        )
+        meta = {
+            "feature_ids": ["technical.rsi"],
+            "target_id": "forward_return:5",
+            "data_hash": "unused",
+        }
+        monkeypatch.setattr(
+            modeling_tools,
+            "_load_dataset_panel",
+            lambda dataset_id: (shared, meta, None),
+        )
+        result = preview_sample_weights(
+            PreviewSampleWeightsInput(
+                dataset_id="ds_shared", weighting=WeightingSpec(method="none")
+            )
+        )
+        assert result.label_cross_sectional_corr == pytest.approx(1.0)
+        assert result.effective_sample_size_floor == pytest.approx(20 / 5)
+        assert result.effective_sample_size_ceiling == pytest.approx(40 / 5)
+        assert result.effective_sample_size == pytest.approx(20 / 5)
+        assert any("lies between" in w for w in result.warnings)
+
+    def test_uniqueness_with_no_label_end_and_no_horizon_gets_the_library_refusal(
+        self, monkeypatch
+    ):
+        """With no horizon either there is no end to derive, and the remedy
+        is the library's own: rebuild, or weight by time alone."""
+        self._no_label_end(monkeypatch, "custom_label")
         with pytest.raises(ValidationError, match="label end date"):
             preview_sample_weights(
                 PreviewSampleWeightsInput(

@@ -36,6 +36,7 @@ from standard_quant_tools.agent.runtimes._json_safe import (
     finite_or_none as _finite_or_none,
 )
 from standard_quant_tools.analysis import microstructure as lib
+from standard_quant_tools.data.databento import cross_venue_warning
 from standard_quant_tools.error import ValidationError
 
 from ..handoff import publish, resolve
@@ -134,6 +135,12 @@ def classify_trade_direction(input_data: ClassifyTradesInput) -> SignedTapeResul
 
     method = "lee_ready" if quotes is not None else "tick_rule"
     warnings: List[str] = []
+    # Two references fetched separately can come from two venues, and a
+    # Lee-Ready sign read off another venue's midpoint is a comparison of
+    # prices that never met in one book. The datasets travel on the frames.
+    mismatch = cross_venue_warning(trades, quotes) if quotes is not None else None
+    if mismatch:
+        warnings.append(mismatch)
     if quotes is None:
         warnings.append(
             "TICK RULE, not Lee-Ready: no quote panel was given, so the "
@@ -343,6 +350,9 @@ def get_effective_spread_series(
         "EFFECTIVE is what trades paid against the prevailing midpoint, and "
         "it is the number a backtest should charge -- not the quoted spread."
     ]
+    mismatch = cross_venue_warning(trades, quotes)
+    if mismatch:
+        warnings.insert(0, mismatch)
     if horizon is None:
         warnings.append(
             "No realized_horizon_seconds, so the effective spread is NOT "

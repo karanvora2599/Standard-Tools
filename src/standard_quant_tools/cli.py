@@ -23,7 +23,10 @@ Command-line interface for the audit trail's JSONL decision records
                                             audit.verify_audit_log_integrity().
                                             Exit code: 0 = clean, 1 = one or
                                             more problems found (printed to
-                                            stdout, one per line).
+                                            stdout, one per line). The last
+                                            line names the head the check
+                                            ran through, to be recorded
+                                            somewhere else.
     sqt hold <date> [--reason TEXT]      — place a legal/retention hold on
                                             a calendar day (YYYY-MM-DD),
                                             protecting it from `sqt gc`.
@@ -32,7 +35,16 @@ Command-line interface for the audit trail's JSONL decision records
                                             SQT_AUDIT_RETENTION_DAYS,
                                             excluding held days. Dry-run
                                             (lists candidates only) unless
-                                            --confirm is passed.
+                                            --confirm is passed. A negative
+                                            window is refused.
+    sqt runs gc [--confirm]
+                [--older-than HOURS]     — list what interrupted writes
+                                            left in SQT_RUNS_DIR (temp
+                                            files; model/dataset directories
+                                            with no commit file), older than
+                                            24 hours by default. Dry-run
+                                            unless --confirm. Published
+                                            values are never collected.
     sqt seal <date>                      — chmod a day file read-only
                                             (not WORM — see
                                             audit.seal_day's docstring).
@@ -40,6 +52,8 @@ Command-line interface for the audit trail's JSONL decision records
                                             end] plus the chain index, a
                                             manifest, and the standalone
                                             verifier into one zip bundle.
+                                            An existing file at F is
+                                            refused, never replaced.
     sqt keygen [--out DIR]                — generate an Ed25519 signing
                                             keypair. Local development only
                                             — not production key custody.
@@ -84,17 +98,26 @@ def _iter_records(audit_dir: Optional[Path] = None) -> Iterator[Dict[str, Any]]:
     (_chain_index.jsonl, see the audit package's paths module), which lives
     in the same directory
     and matches the same *.jsonl glob but holds index entries, not
-    decision records."""
+    decision records. A line that is not a record is skipped: finding one
+    record must not fail on another's damage, which is `sqt verify`'s to
+    report."""
     directory = audit_dir if audit_dir is not None else audit._audit_dir()
     if not directory.exists():
         return
     for path in sorted(directory.glob("*.jsonl")):
         if not audit._DAY_FILE_RE.match(path.name):
             continue
-        for line in path.read_text(encoding="utf-8").splitlines():
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for line in text.splitlines():
             line = line.strip()
-            if line:
-                yield json.loads(line)
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(record, dict):
+                yield record
 
 
 def find_record(request_id: str, audit_dir: Optional[Path] = None) -> Dict[str, Any]:
@@ -207,6 +230,7 @@ def cmd_verify(
     file: Optional[Path] = None,
     audit_dir: Optional[Path] = None,
     notes: Optional[List[str]] = None,
+    head: Optional[Dict[str, Any]] = None,
 ) -> List[str]:
     """
     Check hash-chain integrity. `file` (a single day's .jsonl) checks just
@@ -214,14 +238,19 @@ def cmd_verify(
     (every day file plus the chain index) rooted at `audit_dir`.
 
     Returns a list of human-readable problems (empty if clean). `notes`,
-    when given, receives what was found and is not a problem.
+    when given, receives what was found and is not a problem; `head`, when
+    given, what the check ran through (see `audit.describe_head`).
     """
     if file is not None:
-        return audit.verify_audit_log_integrity(file, notes=notes)
-    return audit.verify_audit_trail_integrity(audit_dir, notes=notes)
+        return audit.verify_audit_log_integrity(file, notes=notes, head=head)
+    return audit.verify_audit_trail_integrity(audit_dir, notes=notes, head=head)
 
 
-def _format_verify(problems: List[str], notes: Optional[List[str]] = None) -> str:
+def _format_verify(
+    problems: List[str],
+    notes: Optional[List[str]] = None,
+    head: Optional[Dict[str, Any]] = None,
+) -> str:
     if not problems:
         lines = ["OK — no integrity problems found."]
     else:
@@ -230,6 +259,11 @@ def _format_verify(problems: List[str], notes: Optional[List[str]] = None) -> st
     if notes:
         lines.append(f"{len(notes)} note(s), not problems:")
         lines.extend(f"  - {n}" for n in notes)
+    if head is not None:
+        # The last line names where the check ran through, so it can be
+        # recorded somewhere this directory cannot reach: a newest day cut
+        # short verifies clean against the files alone.
+        lines.append(audit.describe_head(head))
     return "\n".join(lines)
 
 
@@ -258,16 +292,55 @@ def cmd_gc(
 
 def cmd_cache_gc(confirm: bool = False) -> List[Path]:
     """Dry-run (the default) lists the OHLCV cache files of a dead format
-    generation; confirm=True deletes them. Nothing else is evicted: the
-    current generation is the cache, and files without a generation prefix
-    are not this cache's to remove."""
-    from standard_quant_tools.data._cache import dead_generations
+    generation, then the temp files a cache write left behind and nobody
+    can still own (older than an hour); confirm=True deletes them. Nothing
+    else is evicted: the current generation is the cache, and files without
+    a generation prefix are not this cache's to remove."""
+    dead, orphans = _cache_gc(confirm)
+    return dead + orphans
 
-    return dead_generations(dry_run=not confirm)
+
+def _cache_gc(confirm: bool) -> "tuple[List[Path], List[Path]]":
+    from standard_quant_tools.data._cache import dead_generations, orphaned_temps
+
+    return dead_generations(dry_run=not confirm), orphaned_temps(dry_run=not confirm)
 
 
 def cmd_seal(date: str, audit_dir: Optional[Path] = None) -> Path:
     return audit.seal_day(date, audit_dir=audit_dir)
+
+
+def cmd_runs_gc(confirm: bool = False, older_than_hours: Optional[float] = None):
+    """Dry-run (the default) lists what interrupted writes left in the runs
+    directory -- temp files, and model or dataset directories whose
+    registration never committed -- older than the threshold; confirm=True
+    deletes them. A published value is never a candidate: deleting one
+    would break every reference to it (`_runspath.sweep`)."""
+    from standard_quant_tools._runspath import DEFAULT_SWEEP_HOURS, sweep
+
+    hours = DEFAULT_SWEEP_HOURS if older_than_hours is None else older_than_hours
+    return sweep(older_than_hours=hours, dry_run=not confirm)
+
+
+def _print_runs_gc(report, confirm: bool) -> None:
+    if not report.candidates:
+        print(
+            f"Nothing to collect in {report.root} older than "
+            f"{report.older_than_hours:g} hour(s)."
+        )
+    verb = "Deleted" if confirm else "Would delete (dry-run; pass --confirm)"
+    for label, paths in (
+        ("temp file(s) left by interrupted writes", report.temp_files),
+        ("model/dataset director(ies) never registered", report.partial_directories),
+    ):
+        if paths:
+            print(f"{verb}: {len(paths)} {label}")
+            for path in paths:
+                print(f"  - {path.relative_to(report.root)}")
+    print(
+        "Published values are never collected: deleting one breaks every "
+        "reference to it."
+    )
 
 
 def cmd_export(
@@ -408,13 +481,42 @@ def main(argv: Optional[List[str]] = None) -> int:
         "cache",
         help="Maintain the OHLCV disk cache. `cache gc` lists (or with "
         "--confirm deletes) files of a dead format generation, which are "
-        "never read again; nothing else is evicted.",
+        "never read again, and temp files an interrupted write left behind "
+        "over an hour ago; nothing else is evicted.",
     )
-    p_cache.add_argument("action", choices=["gc"], help="gc: dead generations.")
+    p_cache.add_argument(
+        "action",
+        choices=["gc"],
+        help="gc: dead generations and orphaned temp files.",
+    )
     p_cache.add_argument(
         "--confirm",
         action="store_true",
         help="Actually delete. Without this flag, only lists the files.",
+    )
+
+    p_runs = sub.add_parser(
+        "runs",
+        help="Maintain the runs directory. `runs gc` lists (or with --confirm "
+        "deletes) what interrupted writes left there: temp files, and model or "
+        "dataset directories whose registration never committed. Published "
+        "values are never collected.",
+    )
+    p_runs.add_argument(
+        "action", choices=["gc"], help="gc: leftovers of interrupted writes."
+    )
+    p_runs.add_argument(
+        "--confirm",
+        action="store_true",
+        help="Actually delete. Without this flag, only lists what would go.",
+    )
+    p_runs.add_argument(
+        "--older-than",
+        type=float,
+        default=None,
+        metavar="HOURS",
+        help="Only leftovers untouched for this many hours (default 24), so "
+        "a registration or conversion in progress is never collected.",
     )
 
     p_seal = sub.add_parser(
@@ -477,16 +579,18 @@ def main(argv: Optional[List[str]] = None) -> int:
                 # named `verify` should not be able to pass a trail that
                 # `sqt verify` fails. See the CHANGELOG entry of 2026-09-27.
                 notes: List[str] = []
-                problems = cmd_verify(notes=notes)
-                print(_format_verify(problems, notes))
+                head: Dict[str, Any] = {}
+                problems = cmd_verify(notes=notes, head=head)
+                print(_format_verify(problems, notes, head))
                 found = cmd_verify_checkpoint(args.checkpoint, args.pubkey)
                 print(_format_checkpoint(args.checkpoint, found))
                 if problems:
                     return 1
                 return _CHECKPOINT_EXIT_CODES.get(found.state, 1)
             notes = []
-            problems = cmd_verify(file=args.file, notes=notes)
-            print(_format_verify(problems, notes))
+            head = {}
+            problems = cmd_verify(file=args.file, notes=notes, head=head)
+            print(_format_verify(problems, notes, head))
             return 1 if problems else 0
         elif args.command == "hold":
             path = cmd_hold(args.date, reason=args.reason)
@@ -508,15 +612,27 @@ def main(argv: Optional[List[str]] = None) -> int:
                 for d in dates:
                     print(f"  - {d}")
         elif args.command == "cache":
-            paths = cmd_cache_gc(confirm=args.confirm)
-            if not paths:
-                verb = "deleted" if args.confirm else "of a dead generation"
+            dead, orphans = _cache_gc(args.confirm)
+            if not dead and not orphans:
+                verb = "deleted" if args.confirm else "to collect"
                 print(f"No cache files {verb}.")
-            else:
+            if dead:
                 verb = "Deleted" if args.confirm else "Dead generation (dry-run)"
-                print(f"{verb}: {len(paths)} file(s)")
-                for p in paths:
+                print(f"{verb}: {len(dead)} file(s)")
+                for p in dead:
                     print(f"  - {p.name}")
+            if orphans:
+                verb = (
+                    "Deleted orphaned temp files"
+                    if args.confirm
+                    else "Orphaned temp files (dry-run)"
+                )
+                print(f"{verb}: {len(orphans)} file(s)")
+                for p in orphans:
+                    print(f"  - {p.name}")
+        elif args.command == "runs":
+            report = cmd_runs_gc(confirm=args.confirm, older_than_hours=args.older_than)
+            _print_runs_gc(report, args.confirm)
         elif args.command == "seal":
             path = cmd_seal(args.date)
             print(f"Sealed {path} read-only.")

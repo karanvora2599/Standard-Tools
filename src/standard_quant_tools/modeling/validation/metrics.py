@@ -372,24 +372,153 @@ def summarize_cross_sectional_ic(ic_series: pd.Series, prefix: str) -> Dict[str,
     }
 
 
-def effective_sample_size(n_obs: int, horizon: int, n_entities: int = 1) -> float:
+def effective_sample_size(
+    n_obs: int,
+    horizon: "int | None",
+    n_entities: int = 1,
+    *,
+    n_dates: "int | None" = None,
+    cross_sectional_corr: float = 0.0,
+) -> float:
     """
-    Observation count discounted for target overlap.
+    Observation count discounted for target overlap along time and for
+    label correlation across entities.
 
-    A `horizon`-bar forward return generated every bar produces labels that
-    overlap on `horizon - 1` of their bars, so consecutive rows are far from
-    independent. Reporting a raw row count materially overstates how much
-    evidence a metric rests on: 2,000 daily rows of a 20-day forward return
-    carry roughly 100 independent observations per entity, not 2,000.
+    ALONG TIME. A `horizon`-bar forward return generated every bar
+    produces labels that overlap on `horizon - 1` of their bars, so
+    consecutive rows are far from independent: 2,000 daily rows of a
+    20-day forward return carry roughly 100 independent observations per
+    entity, not 2,000. Dividing by the overlap factor is the standard
+    first-order correction, not a full Newey-West adjustment.
 
-    This is the standard first-order correction (divide by the overlap
-    factor), not a full Newey-West style adjustment — enough to stop the
-    headline count being misleading, and labelled as an estimate.
+    ACROSS ENTITIES. Entities observed on the same date are one cluster,
+    and their labels move together to the extent the market moves them
+    together. The Kish design effect `1 + (m - 1) * rho` -- `m` the mean
+    number of entities per date, `rho` the labels' cross-sectional
+    correlation -- is how many rows of such a cluster count as one. The
+    count therefore lies between two bounds:
+
+      - the CEILING `n_obs / horizon`, reached at `rho = 0`, when every
+        entity's label is an independent draw;
+      - the FLOOR `n_dates / horizon`, reached at `rho = 1`, when every
+        entity on a date carries the same label. It is also the count
+        behind a statistic computed once per date, such as the
+        cross-sectional IC.
+
+    At an equity-like `rho = 0.3` an eight-name panel sits at about a
+    third of the ceiling, which is what a simulation of the pooled mean's
+    variance gives too.
+
+    `cross_sectional_corr` is clipped to [0, 1], and a value that could not
+    be measured (NaN) is read as 0: the independence the ceiling assumes.
+    `label_cross_sectional_corr` measures it and `effective_sample_size_report`
+    reports what was assumed beside the bounds. `m` is `n_obs / n_dates`
+    when the dates are given and `n_entities` otherwise; at the default
+    `cross_sectional_corr=0.0` neither changes the result, which is the
+    ceiling.
     """
-    if horizon <= 0:
-        return float(n_obs)
-    per_entity = max(n_obs / max(n_entities, 1), 0.0)
-    return float(max(per_entity / horizon, 0.0) * max(n_entities, 1))
+    overlap = float(horizon) if horizon is not None and horizon > 0 else 1.0
+    ceiling = max(float(n_obs), 0.0) / overlap
+    if n_dates is not None and n_dates > 0:
+        per_date = float(n_obs) / float(n_dates)
+    else:
+        per_date = float(max(n_entities, 1))
+    per_date = max(per_date, 1.0)
+    rho = float(cross_sectional_corr)
+    rho = min(max(rho, 0.0), 1.0) if np.isfinite(rho) else 0.0
+    return float(ceiling / (1.0 + (per_date - 1.0) * rho))
+
+
+def label_cross_sectional_corr(
+    dates: np.ndarray, entities: np.ndarray, labels: np.ndarray
+) -> float:
+    """
+    The mean correlation between two entities' labels on the same date,
+    as the design effect in `effective_sample_size` reads it.
+
+    Each entity's labels are standardized over its own rows (its own mean
+    and scale, so an entity whose labels merely sit higher does not look
+    correlated with anything), and the cross products of every pair of
+    entities on a date are pooled over the dates:
+
+        rho = sum_t sum_{i != j} z_ti z_tj / sum_t m_t (m_t - 1)
+
+    On a balanced panel this is exactly the mean off-diagonal entry of the
+    date x entity correlation matrix; on an unbalanced one each date
+    contributes the pairs it has. One pass over the rows, so it costs the
+    same at 500 entities as at 5.
+
+    NaN when there is nothing to measure: one entity, no date carrying two
+    entities, or no entity whose labels vary. Not clipped; the caller
+    decides what an unmeasurable or negative value means.
+    """
+    labels = np.asarray(labels, dtype=np.float64)
+    usable = np.isfinite(labels)
+    frame = pd.DataFrame(
+        {
+            "date": np.asarray(dates)[usable],
+            "entity": np.asarray(entities)[usable],
+            "y": labels[usable],
+        }
+    )
+    if frame.empty:
+        return float("nan")
+    by_entity = frame.groupby("entity", sort=False)["y"]
+    centred = frame["y"] - by_entity.transform("mean")
+    scale = by_entity.transform("std", ddof=0)
+    keep = (scale > 0).to_numpy()
+    if not keep.any():
+        return float("nan")
+    z = (centred[keep] / scale[keep]).to_numpy()
+    grouped = pd.DataFrame(
+        {"date": frame["date"].to_numpy()[keep], "z": z, "z2": z * z}
+    ).groupby("date", sort=False)
+    sums = grouped["z"].sum().to_numpy()
+    squares = grouped["z2"].sum().to_numpy()
+    counts = grouped["z"].count().to_numpy().astype(np.float64)
+    pairs = float((counts * (counts - 1.0)).sum())
+    if pairs <= 0.0:
+        return float("nan")
+    return float((sums * sums - squares).sum() / pairs)
+
+
+def effective_sample_size_report(
+    n_obs: int,
+    horizon: "int | None",
+    n_dates: int,
+    cross_sectional_corr: float,
+) -> Dict[str, Any]:
+    """
+    The effective sample size with the inputs it was computed from and the
+    two bounds it lies between, so a reader can see what was assumed.
+
+    `label_cross_sectional_corr` is the correlation USED: the measured one
+    clipped to [0, 1], and 0.0 -- the independence the ceiling assumes --
+    when it could not be measured, which `label_cross_sectional_corr_measured`
+    (None then) says. `horizon` None means the overlap along time was not
+    corrected, because the label's horizon is not known.
+    """
+    measured = float(cross_sectional_corr)
+    used = min(max(measured, 0.0), 1.0) if np.isfinite(measured) else 0.0
+    overlap = float(horizon) if horizon is not None and horizon > 0 else 1.0
+    per_date = max(float(n_obs) / float(n_dates), 1.0) if n_dates > 0 else 1.0
+    value = effective_sample_size(
+        n_obs, horizon, n_dates=n_dates, cross_sectional_corr=used
+    )
+    return {
+        "value": value,
+        "floor": float(max(n_dates, 0)) / overlap,
+        "ceiling": float(max(n_obs, 0)) / overlap,
+        "label_cross_sectional_corr": used,
+        "label_cross_sectional_corr_measured": (
+            measured if np.isfinite(measured) else None
+        ),
+        "design_effect": 1.0 + (per_date - 1.0) * used,
+        "mean_entities_per_date": per_date,
+        "n_rows": int(n_obs),
+        "n_dates": int(n_dates),
+        "horizon": None if horizon is None else int(horizon),
+    }
 
 
 def baseline_regression_metrics(

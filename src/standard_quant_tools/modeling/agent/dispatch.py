@@ -10,7 +10,10 @@ DecisionRecord.input payload) without a parallel audit implementation.
 from typing import Any, Dict
 
 from standard_quant_tools._jsonsafe import sanitize_for_json
-from standard_quant_tools.audit.dispatch import _run_and_record
+from standard_quant_tools.audit.dispatch import (
+    _forget_last_request_id,
+    _run_and_record,
+)
 
 from .tools import MODELING_TOOL_DISPATCH
 
@@ -29,6 +32,9 @@ def modeling_dispatch(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, An
         ValueError: unknown tool name.
         pydantic.ValidationError: arguments don't match the tool's input schema.
     """
+    # A call refused before it runs writes no record; clear the previous
+    # call's id so last_request_id() does not name it.
+    _forget_last_request_id()
     if tool_name not in MODELING_TOOL_DISPATCH:
         raise ValueError(
             f"Unknown modeling tool: {tool_name!r}. Available: "

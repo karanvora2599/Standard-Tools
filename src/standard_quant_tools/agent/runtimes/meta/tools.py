@@ -83,6 +83,7 @@ from standard_quant_tools.audit.signing import (
     CHECKPOINT_FAILURES,
     CHECKPOINT_STATE_NOTES,
 )
+from standard_quant_tools.audit.verify import describe_head as _describe_head
 from standard_quant_tools.audit.verify import verify_audit_log_integrity as _verify_day
 from standard_quant_tools.audit.verify import (
     verify_audit_trail_integrity as _verify_trail,
@@ -394,7 +395,9 @@ def _indexed_chain_head(date: str, directory: Path) -> Optional[str]:
     if not index_path.exists():
         return None
     head: Optional[str] = None
-    with open(index_path, "r", encoding="utf-8") as f:
+    # errors="replace": a byte that is not UTF-8 makes its line unparsable
+    # below rather than aborting the read of every line after it.
+    with open(index_path, "r", encoding="utf-8", errors="replace") as f:
         for line in f:
             if not line.strip():
                 continue
@@ -403,6 +406,10 @@ def _indexed_chain_head(date: str, directory: Path) -> Optional[str]:
             except Exception:
                 # A malformed index line is the trail check's finding to
                 # report, not this helper's to raise on.
+                continue
+            if not isinstance(entry, dict):
+                # A line that parses to something other than an entry --
+                # `[1]`, a bare number -- is malformed too, not a crash.
                 continue
             if entry.get("date") == date and entry.get("chain_head"):
                 head = entry["chain_head"]
@@ -457,18 +464,28 @@ def verify_audit_integrity(
     reassuring boolean. `verdict` separates them, `recording_enabled` says
     whether calls made now are recorded at all, and `signature_state`
     names which of eight states the checkpoint check is in.
+
+    THE HEAD IS REPORTED. `head_*` name what the check ran through -- the
+    newest day, its record count and last record_hash, and the chain
+    index's length and last hash. Nothing inside the audit directory can
+    anchor where the trail ENDS: a newest day cut short is a valid earlier
+    state of the log, and deleting it with the index's last line leaves a
+    shorter trail that verifies clean. A head recorded somewhere else, and
+    compared with the next one, is what shows that.
     """
     notes: List[str] = []
     chain_notes: List[str] = []
+    head: Dict[str, Any] = {}
     signature_valid: Optional[bool] = None
     signature_state: Optional[str] = None
     records_after_checkpoint: Optional[int] = None
+    checkpoint_version: Optional[int] = None
     directory = _audit_dir()
     recording_enabled = _audit_enabled()
     day_files = _iter_day_files(directory)
 
     if input_data.date is None:
-        problems = list(_verify_trail(notes=chain_notes))
+        problems = list(_verify_trail(notes=chain_notes, head=head))
         scope = "trail"
     else:
         # Day files are named YYYY-MM-DD.jsonl under the audit dir. Built
@@ -488,7 +505,7 @@ def verify_audit_integrity(
         # the first is called broken.
         expected_head = _indexed_chain_head(input_data.date, directory)
         if expected_head is None:
-            problems = list(_verify_day(path, notes=chain_notes))
+            problems = list(_verify_day(path, notes=chain_notes, head=head))
             notes.append(
                 f"The chain index has no entry for {input_data.date}, so "
                 "this file's first record was checked against the genesis "
@@ -499,7 +516,12 @@ def verify_audit_integrity(
             )
         else:
             problems = list(
-                _verify_day(path, expected_prev_hash=expected_head, notes=chain_notes)
+                _verify_day(
+                    path,
+                    expected_prev_hash=expected_head,
+                    notes=chain_notes,
+                    head=head,
+                )
             )
         scope = input_data.date
         notes.append(
@@ -509,6 +531,8 @@ def verify_audit_integrity(
     # Lines the chain accepted with an explanation -- written by an older
     # writer, not altered -- are named rather than passed over in silence.
     notes.extend(chain_notes)
+    if head.get("records") or head.get("newest_date"):
+        notes.append(_describe_head(head))
 
     if input_data.public_key_path is not None:
         try:
@@ -520,8 +544,17 @@ def verify_audit_integrity(
             )
             signature_state = str(found.state)
             records_after_checkpoint = found.records_after
+            checkpoint_version = found.version
             if found.detail:
                 notes.append(f"checkpoint: {found.detail}.")
+            if found.version == 1:
+                notes.append(
+                    "This checkpoint is format 1: it commits to the day's "
+                    "last 64-bit record_hash and its chain index entry, not "
+                    "to the record count, a full SHA-256 digest of the "
+                    "records or the index's length. Anchoring the day again "
+                    "(`sqt anchor`) writes a format 2 checkpoint that does."
+                )
         except Exception as exc:
             signature_state = "unavailable"
             notes.append(f"checkpoint signature could not be verified: {exc}")
@@ -597,6 +630,13 @@ def verify_audit_integrity(
         checkpoint_signature_valid=signature_valid,
         signature_state=signature_state,
         records_after_checkpoint=records_after_checkpoint,
+        checkpoint_version=checkpoint_version,
+        head_date=head.get("newest_date"),
+        head_record_count=int(head.get("records") or 0),
+        head_record_hash=head.get("record_hash"),
+        total_records=int(head.get("total_records") or 0),
+        index_entries=head.get("index_entries"),
+        index_head_hash=head.get("index_hash"),
         notes=notes,
     )
 
@@ -626,33 +666,98 @@ def _contained_bundle_path(requested: str) -> Path:
          `zzz_not_a_valid_choice` and a Japanese/emoji filename, and they
          were committed. A relative name now resolves under the runs
          directory instead of wherever the process happens to be standing.
+
+    AND AN ABSOLUTE PATH IS FENCED LIKE EVERY OTHER WRITE A TOOL CAN AIM.
+    It used to be taken as given, so a model-chosen path could drop a zip
+    anywhere this process can write. It now has to lie in the runs
+    directory's `bundles` folder or in a directory SQT_EXTERNAL_DIRS lists
+    -- the same operator-set list a converted vendor extract may be written
+    to, read from the environment and never from a tool argument -- and
+    never inside the audit directory, the OHLCV cache or the rest of the
+    runs directory, where a file is read back as something this library
+    wrote. Network and device paths are refused before anything opens
+    them. The existence check here is for the message; the export itself
+    creates the file exclusively, so a file that appears in between is
+    still never replaced. See the CHANGELOG entry of 2026-09-28.
     """
-    candidate = Path(requested)
-    if candidate.is_absolute():
-        resolved = candidate
-        if not resolved.parent.exists():
-            raise ValidationError(
-                f"export_audit_bundle: the directory for out_path "
-                f"{requested!r} does not exist. This tool writes a bundle; "
-                "it does not create the tree around it."
-            )
-    else:
-        root = Path(
-            os.environ.get(
-                "SQT_RUNS_DIR",
-                str(Path.home() / ".cache" / "standard_quant_tools" / "runs"),
-            )
-        ).resolve()
-        bundles = root / "bundles"
+    from standard_quant_tools._containment import is_within, is_within_any
+    from standard_quant_tools._runspath import runs_dir
+    from standard_quant_tools.data.external import configured_external_dirs
+
+    text = str(requested).strip()
+    if not text or "\x00" in text:
+        raise ValidationError(
+            "export_audit_bundle: out_path must be a file name or an "
+            "absolute path, with no NUL character. A bare name lands in the "
+            "runs directory's 'bundles' folder."
+        )
+    if text[:2] in ("\\\\", "//"):
+        raise ValidationError(
+            f"export_audit_bundle: out_path {requested!r} is a network or "
+            "device path. Those are refused before anything opens them, "
+            "because opening one makes this machine authenticate to whatever "
+            "host it names. Give a bare name or a local absolute path."
+        )
+    runs_root = Path(os.path.abspath(runs_dir()))
+    bundles = runs_root / "bundles"
+    candidate = Path(os.path.expanduser(text))
+
+    if not candidate.is_absolute():
         resolved = (bundles / candidate).resolve()
         require_within(
             resolved,
-            bundles,
+            bundles.resolve(),
             f"export_audit_bundle: out_path {requested!r} resolves to "
             f"{resolved}, which escapes {bundles}. Give a name, or an "
             "absolute path if the bundle belongs somewhere specific.",
         )
         resolved.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        listed = configured_external_dirs()
+        allowed = (bundles,) + tuple(listed)
+        spelled = [Path(os.path.abspath(p)) for p in allowed] + [
+            p.resolve() for p in allowed
+        ]
+        refusal = ValidationError(
+            f"export_audit_bundle: out_path {requested!r} is outside the "
+            "directories a bundle may be written to: the runs directory's "
+            f"'bundles' folder ({bundles}), where a bare name lands, and the "
+            "directories SQT_EXTERNAL_DIRS lists ("
+            + (os.pathsep.join(str(p) for p in listed) or "none")
+            + "). That list is read from the environment this process starts "
+            "with and never from a tool argument, so a model-chosen path "
+            "cannot put a file anywhere the process can reach. Give a bare "
+            "name, or add the directory to SQT_EXTERNAL_DIRS."
+        )
+        lexical = Path(os.path.abspath(candidate))
+        if not is_within_any(lexical, spelled):
+            raise refusal
+        if not lexical.parent.exists():
+            raise ValidationError(
+                f"export_audit_bundle: the directory for out_path "
+                f"{requested!r} does not exist. This tool writes a bundle; "
+                "it does not create the tree around it."
+            )
+        resolved = lexical.resolve()
+        if not is_within_any(resolved, [p.resolve() for p in allowed]):
+            raise refusal
+        owned = [(_audit_dir(), "the audit directory")]
+        cache_root = getattr(_cache_module, "_CACHE_ROOT", None)
+        if cache_root is None and callable(getattr(_cache_module, "cache_root", None)):
+            cache_root = _cache_module.cache_root()
+        if cache_root is not None:
+            owned.append((Path(cache_root), "the OHLCV cache directory"))
+        if not is_within(resolved, bundles.resolve()):
+            owned.append((runs_root, "the runs directory outside its 'bundles' folder"))
+        for root, label in owned:
+            if is_within(resolved, Path(os.path.abspath(root)).resolve()):
+                raise ValidationError(
+                    f"export_audit_bundle: out_path {requested!r} lies inside "
+                    f"{label}, which this library owns and reads back as its "
+                    "own, even when SQT_EXTERNAL_DIRS covers it. Give a bare "
+                    f"name, which lands in {bundles}, or a path in another "
+                    "directory SQT_EXTERNAL_DIRS lists."
+                )
 
     if resolved.exists():
         raise ValidationError(

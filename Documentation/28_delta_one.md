@@ -135,8 +135,10 @@ financing as a number. This library has no index-constituent source and no
 dividend calendar, and a tool that pretended otherwise would compute a
 basket that does not exist. Futures bars themselves are reachable —
 Databento serves CME Globex (`GLBX.MDP3`) through `fetch_ohlcv`, one
-contract or continuous symbol at a time — but a curve is an assembled
-object, and assembling it is the caller's.
+contract or continuous symbol at a time, a daily bar being a CME trade date
+(17:00 Chicago on the prior evening to 16:00) rather than a UTC day, and
+`Close` the date's last trade rather than the settlement — but a curve is an
+assembled object, and assembling it is the caller's.
 
 That is the same call the derivatives runtime made about option chains,
 and it has the same side benefit: every tool here works on a hypothetical

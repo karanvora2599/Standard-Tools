@@ -75,7 +75,11 @@ from .signing import (
     verify_checkpoint_state,
 )
 from .storage import AuditStorageBackend, LocalFilesystemBackend
-from .verify import verify_audit_log_integrity, verify_audit_trail_integrity
+from .verify import (
+    describe_head,
+    verify_audit_log_integrity,
+    verify_audit_trail_integrity,
+)
 from .writer import AuditWriter
 
 __all__ = [
@@ -90,6 +94,7 @@ __all__ = [
     "RequestIdFilter",
     "checkpoint_and_sign",
     "configure_logging",
+    "describe_head",
     "export_bundle",
     "gc",
     "gc_candidates",

@@ -129,7 +129,9 @@ TOOL_DEFS = [
         "Needs a provider with a tick feed. A tape is large, so `limit` caps "
         "it -- and when the cap is hit the result says so, because a "
         "truncated tape makes every rate and total computed from it "
-        "understate the real one.",
+        "understate the real one. The tape and the quotes are routed "
+        "separately and can come from different venues; pass the same "
+        "`dataset` here and to fetch_quote_panel for a same-venue pair.",
         FetchTickTapeInput,
     ),
     (
@@ -139,7 +141,8 @@ TOOL_DEFS = [
         "alongside a tape. Top of book ONLY -- depth is a different call, "
         "and provider='databento' serves it through get_order_book. Queue "
         "position is in neither: it needs an order-level feed and cannot be "
-        "inferred from aggregated size at a level.",
+        "inferred from aggregated size at a level. Pass the tape's "
+        "`dataset` to keep the quotes on the tape's venue.",
         FetchQuotePanelInput,
     ),
     (

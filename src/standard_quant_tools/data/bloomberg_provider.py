@@ -33,7 +33,6 @@ import asyncio
 import contextvars
 import functools
 import logging
-import os
 from datetime import date as _date
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Union
@@ -41,7 +40,7 @@ from typing import Any, Dict, List, Optional, Union
 import pandas as pd
 
 from standard_quant_tools import audit
-from standard_quant_tools.config import load_env
+from standard_quant_tools._env import env_int, env_str
 from standard_quant_tools.data.ratios import (
     implausible_value_warnings,
     percent_to_fraction,
@@ -150,22 +149,19 @@ def _resolve_bloomberg_config(
     whether blpapi itself is installed, so it's testable without it.
 
     Raises:
-        ValidationError: SQT_BLOOMBERG_PORT is set but isn't a valid integer.
+        ValidationError: SQT_BLOOMBERG_PORT is set but isn't an integer
+            TCP port (1-65535).
+
+    Both settings are read through `env_str`/`env_int`, which load the
+    `.env` first and read a blank value as unset: `SQT_BLOOMBERG_HOST=`
+    used to be the host `""`, and `SQT_BLOOMBERG_PORT=` a refusal, where
+    each now means the Desktop API default.
     """
-    load_env()
-    resolved_host = host or os.environ.get("SQT_BLOOMBERG_HOST", "localhost")
-    port_str = os.environ.get("SQT_BLOOMBERG_PORT")
+    resolved_host = host or env_str("SQT_BLOOMBERG_HOST") or "localhost"
     if port is not None:
         resolved_port = port
-    elif port_str is not None:
-        try:
-            resolved_port = int(port_str)
-        except ValueError:
-            raise ValidationError(
-                f"SQT_BLOOMBERG_PORT={port_str!r} is not a valid integer port."
-            )
     else:
-        resolved_port = 8194
+        resolved_port = env_int("SQT_BLOOMBERG_PORT", 8194, minimum=1, maximum=65535)
     return resolved_host, resolved_port
 
 

@@ -51,7 +51,11 @@ the only reading under which an as-of date can be reported honestly.
 `YFinanceProvider` requests an exclusive bound past the whole inclusive
 window (over-fetching at most one day, which is harmless — under-fetching
 silently changes the answer) and trims back; Databento's half-open range is
-pushed to the next midnight for the same reason.
+pushed to the next midnight for a bare date, and one bar past an explicit
+intraday end (`14:10` at one minute is sent as `14:11`), for the same reason.
+That second push is new: an explicit intraday end used to be sent as it
+stood, so a 14:00 to 14:10 request stopped at 14:09 — no trim can restore a
+bar the vendor was never asked for. Ticks stay half-open (see below).
 
 **All four trim through the shared `trim_to_inclusive_end`, including the
 two that were already inclusive.** Deliberate: the contract then holds by
@@ -229,12 +233,12 @@ Every `get_ohlcv` call for a **historical date range** (end date before today, o
 
 ```
 ~/.cache/standard_quant_tools/ohlcv/v3_yfinance_AAPL_2020-01-01_2024-01-01_1d.parquet
-~/.cache/standard_quant_tools/ohlcv/v4_databento-EQUS.SUMMARY_AAPL_2024-07-01_2025-06-30_1d.parquet
+~/.cache/standard_quant_tools/ohlcv/v5_databento-EQUS.SUMMARY_AAPL_2024-07-01_2025-06-30_1d.parquet
 ```
 
 The filename carries the format generation, the provider and — for a provider that chooses a dataset per window — the dataset that answered, so two feeds 30x apart in volume never share one file. Such a provider reads only the entry of the dataset that would answer the request now (see the Databento section), never whichever entry it finds first.
 
-**The generation is per provider.** The shared generation (`v3`) moves every provider's files at once; a provider can also be bumped on its own, so a change to what one provider's files mean retires that provider's files and nobody else's — the Polygon cache, on a rate-limited budget, is not refetched because Databento's naming changed. Databento is one bump ahead (`v4`): its files are now named by the symbol as sent to the vendor, and a file of the previous generation named for an exchange-suffixed ticker such as `GOOG.L` holds another company's bars.
+**The generation is per provider.** The shared generation (`v3`) moves every provider's files at once; a provider can also be bumped on its own, so a change to what one provider's files mean retires that provider's files and nobody else's — the Polygon cache, on a rate-limited budget, is not refetched because Databento's naming changed. Databento is two bumps ahead (`v5`). The first (`v4`) came when its files were named by the symbol as sent to the vendor, because a `v3` file named for an exchange-suffixed ticker such as `GOOG.L` holds another company's bars. The second came when an explicit intraday end became inclusive and a future's daily bar became a CME trade date: a `v4` intraday file with an explicit end is one bar short, and a `v4` futures daily file holds UTC days, and both keep their names.
 
 **Why only historical ranges?** "Historical" here means the bar is no longer forming — it does *not* mean the cached values can never change. Data is fetched with `auto_adjust=True`, so a later corporate action (split, special dividend) can retroactively revise the adjusted Close/Open/High/Low for dates already on disk. The cache trades that small staleness risk for avoiding repeated network calls; a symbol with a recent corporate action needs the cache cleared or bypassed (`SQT_CACHE_DIR`) rather than assuming it self-heals. Today's still-forming bar always goes through the in-process session cache instead (for 60 seconds, not the hour a settled window gets), never the disk cache.
 
@@ -255,11 +259,13 @@ df = provider.get_ohlcv("NVDA", "2020-01-01", "2024-01-01")
 print(f"Cached call: {time.perf_counter() - t0:.3f}s")
 ```
 
-**Corrupt cache files evict themselves**: if a Parquet file on disk fails to read (truncated write, disk corruption, etc.), it's logged, deleted, and the data is transparently refetched from yfinance and rewritten — callers never see the corrupt file or an exception because of it.
+**A cache entry is checked like a live answer before it is served.** Every provider reads the disk tier through one shared read, and it applies the checks the live paths make: the five `Open`/`High`/`Low`/`Close`/`Volume` columns, numeric; at least one bar; no null `Close`; and every bar inside the requested window (widened by one bar period for weekly and monthly bars, which are labelled by the start of their period, and by a day for intraday windows, whose bounds are in the caller's zone). A file that fails — truncated, garbage, or a readable Parquet file that is not a plausible answer, such as one holding only a `Close` column or another window's bars — is logged, deleted, and the data is refetched from the provider and rewritten; callers never see it or an exception because of it. A live answer the read would refuse is not written in the first place. Duplicate or out-of-order bar labels are logged rather than evicted: no writer here produces them, so a refetch would bring them back — `get_data_quality_report` reports them.
+
+**A Windows sharing violation is not corruption.** Opening an entry that another process is renaming a new version over, or has open, raises `PermissionError` on Windows. Each provider used to treat that as a corrupt file and delete a valid entry (a metered refetch), and yfinance and Polygon could turn a second refusal on the delete into an `APIError` with no request made. The read is now retried briefly; if it still cannot open, the call is served live and the entry is kept.
 
 **Cache path safety**: `symbol`, `start_date`/`end_date`, and `interval` are all validated (allow-listed characters, `..` rejected) before being used to build the Parquet filename, and the resolved path is checked to still resolve inside the cache root — a malformed or adversarial symbol string (these are LLM-reachable via `get_ohlcv`'s own parameters) can't write outside `SQT_CACHE_DIR`. A symbol that fails this check doesn't cause `get_ohlcv` itself to fail, though: caching is an optimization, not a correctness requirement, so every provider degrades gracefully by skipping the disk cache for that one call (still served live/from the session cache) rather than raising `ValidationError` for a symbol its own live-fetch path can otherwise handle fine.
 
-**Dead generations are collected, not read.** A format bump (see the `v3` note above) leaves the previous generation's files on disk, never looked up again; a live cache held 1,574 files, 501 of them dead. `sqt cache gc` lists them and `sqt cache gc --confirm` deletes them — only files carrying a generation their provider no longer reads, never a provider's current generation and never a file without one. After the Databento bump, its `v3_databento-*` files are listed while `v3_yfinance_*` and `v3_polygon_*` files stay current.
+**Dead generations are collected, not read.** A format bump (see the `v3` note above) leaves the previous generation's files on disk, never looked up again; a live cache held 1,574 files, 501 of them dead. `sqt cache gc` lists them and `sqt cache gc --confirm` deletes them — only files carrying a generation their provider no longer reads, never a provider's current generation and never a file without one. After the Databento bumps, its `v3_databento-*` and `v4_databento-*` files are listed while `v3_yfinance_*` and `v3_polygon_*` files stay current. The same command lists (and with `--confirm` deletes) the temp files an interrupted write left behind: only names a cache writer produces, and only once they are more than an hour old, so a write still in progress in another process is never collected underneath it. The writer before the current one left such a file on every rename that failed, and named it with the current generation, which is why the dead-generation pass never saw them.
 
 **Override the cache directory** via the `SQT_CACHE_DIR` environment variable:
 
@@ -268,7 +274,9 @@ export SQT_CACHE_DIR=/data/market_cache   # Linux/Mac
 set SQT_CACHE_DIR=D:\market_cache         # Windows
 ```
 
-The cache is safe for concurrent access — each write goes to a temp file unique to the process, the thread, and a random suffix, then is atomically renamed into place, so races between workers (e.g. parallel screener) — including multiple threads writing the same symbol/range within one process — are handled correctly.
+The directory is resolved once, at the cache's first use, and fixed for the rest of the process, so changing the variable afterwards does not move a running cache. A value in a local `.env` is honoured (it used to be read at import, before the file was loaded). An empty or whitespace-only value means the default under the home directory — it used to mean the working directory — and a relative path is refused with a `ValidationError` naming the variable, at the first fetch that would use the cache, rather than being read against whatever directory the process happens to be in.
+
+**Concurrent access.** Every write goes through the library's one atomic writer (`artifact_store.write_bytes_atomically`): the bytes go to a uniquely named temp file beside the entry and are renamed over it, so a reader sees the old entry or the new one, never a partial file, and races between workers (e.g. a parallel screener) — including several threads writing the same symbol/range in one process — cannot collide on a temp name. The temp file is removed in a `finally`, so a failed rename or a `KeyboardInterrupt` mid-write leaves nothing behind. On Windows a rename onto an entry a reader has open is refused; it is retried briefly, and if it still fails the write is skipped (logged) — the caller already has its data.
 
 ---
 
@@ -399,7 +407,11 @@ uses:
 | Variable | Default | Meaning |
 |---|---|---|
 | `SQT_BLOOMBERG_HOST` | `localhost` | DAPI server host |
-| `SQT_BLOOMBERG_PORT` | `8194` | DAPI server port |
+| `SQT_BLOOMBERG_PORT` | `8194` | DAPI server port (an integer 1-65535; anything else is refused by name) |
+
+An empty or whitespace-only value is unset and means the default, like every
+setting the library reads: an empty host used to be the host `""`, and an
+empty port a refusal.
 
 **Where these live:** copy [`.env.example`](../.env.example) (repo root) to
 `.env` — already `.gitignore`d — for local development;
@@ -469,7 +481,9 @@ environment variable / CI secret), or pass `api_key=` explicitly to
 [polygon.io/dashboard/api-keys](https://polygon.io/dashboard/api-keys).
 Constructing `PolygonProvider()` (directly or via the factory) with no key
 resolvable anywhere raises a clear `APIError` rather than an opaque
-failure deep inside the first network call.
+failure deep inside the first network call. A whitespace-only
+`SQT_POLYGON_API_KEY` counts as no key; it used to be sent to Polygon and
+answered with a 401.
 
 **Supported intervals:** `"1m"`, `"5m"`, `"15m"`, `"30m"`, `"60m"`/`"1h"`,
 `"1d"`, `"1wk"`, `"1mo"`, `"3mo"` — the subset Polygon's Aggregates (Bars)
@@ -527,7 +541,22 @@ df.attrs["dataset"]                                 # "EQUS.SUMMARY"
 argument. The provider constructs without one and fails on its first fetch,
 naming the variable — which is why `describe_data_capabilities` reports an
 unconfigured Databento as `available=False` rather than taking construction
-for availability.
+for availability. It and the `DATABENTO_*_DATASET` settings are read like
+every other setting: a local `.env` is honoured, and a blank value is unset.
+
+**A rejected key is named, not reported as a date range.** A vendor failure
+is read by its HTTP status. A 401 raises `NonRetryableAPIError` naming
+`DATABENTO_API_KEY` on the first call that meets it — the free range lookup,
+normally — and is never retried. It used to be matched by the word "auth" in
+the message, remembered as an entitlement denial on each dataset in turn, and
+reported as "No dataset covers that range". A 403 is the subscription
+declining one dataset: it is remembered, the next dataset is asked, and when
+every dataset that could answer has been declined the refusal is a
+`NonRetryableAPIError` that says so and names the datasets. Anything else —
+a 5xx, a timeout — is transient and never remembered; a 500 whose request id
+happened to contain "403" used to retire a healthy feed for the life of the
+provider. When no dataset is asked, the refusal names why each was passed
+over (declined, its coverage, or a lookup that failed).
 
 **Which feed answers a daily request, and why it matters.** Databento
 publishes several equity datasets and they are not the same tape:
@@ -564,6 +593,24 @@ feed's entry from disk rather than refetching it. A window before
 served in place of a failing better feed is logged and is not kept in the
 session cache, so the same provider asks the better feed on its next call.
 
+**A window the better feed covers only part of is disclosed.** One dataset
+answers a frame, and a dataset whose coverage begins after the window's
+start is not asked — so a window opening one week before 2024-07-01 was
+served whole by `EQUS.MINI`, 27x below the summary feed's volume on the
+same dates, with nothing said. The answer is unchanged (clamping the start
+would return a shorter window than asked, silently, and stitching two feeds
+would put a volume step at the seam), but the frame now carries
+`attrs["coverage_downgrade"]` — the preferred dataset, the date it covers
+from, the dataset that served, and the advice to split the request there —
+a warning is logged, and `fetch_ohlcv`'s result and
+`preflight_vendor_request` both carry it as a warning.
+
+**A bad symbol fails on the vendor's first answer.** A request whose
+symbology report says the symbol was not found, with no records, raises
+`InvalidSymbolError` naming the symbol, the spelling sent and the dataset —
+one request, never retried. It used to be passed to every other dataset and
+then retried twice more: a dozen requests and a generic `APIError`.
+
 **A daily request no longer returns tomorrow.** The daily request ended one
 day past the inclusive end and nothing trimmed, so every as-of query on this
 provider read the next session's close. `end_date` is inclusive here as
@@ -583,7 +630,27 @@ now refused with the spellings for each reading: `ES.c.0` (front
 continuous), `ESZ6` (a contract), `ES.FUT` (the parent) and OSI option
 strings route to the futures and options datasets (`GLBX.MDP3`,
 `OPRA.PILLAR`; override with `DATABENTO_FUTURES_DATASET` /
-`DATABENTO_OPTIONS_DATASET`), while `ES~equity` names the ticker.
+`DATABENTO_OPTIONS_DATASET`), while `ES~equity` names the ticker. A root
+may start with a digit or carry one — `6EZ5`, `6BH26` and the other CME
+currency roots, `M2KZ5` — which the contract grammar used to refuse while
+`6E.c.0` resolved.
+
+**A future's daily bar is a CME trade date.** The vendor's `ohlcv-1d` is a
+UTC day, and a Globex session is not: it opens at 17:00 Chicago on the
+evening before its date and closes by 16:00. So a week came back as six
+bars — a Sunday-evening fragment at a couple of percent of a day's volume
+among them — each close was the price two or three hours into the next
+session, and a continuous series could roll on a Sunday. A futures daily
+request now fetches hourly bars and aggregates them into trade dates (a
+Chicago instant shifted forward seven hours, so 17:00 opens the next date
+across both daylight-saving changes; a print after Friday's close belongs to
+Monday): five bars a week, `Close` the date's last trade — not the
+settlement price, which the `statistics` schema publishes — and
+`attrs["session"]` saying so, as `get_metadata` does. A holiday's
+abbreviated session keeps the date the clock gives it. The vendor also
+publishes a session-cut daily schema (`ohlcv-eod`); whether this
+entitlement carries it on `GLBX.MDP3` has not been checked against a live
+key, and the live suite holds that confirmation.
 
 **A share class keeps its dot; an exchange suffix is refused by name.**
 Databento's Historical symbology spells a class share with a dot — `BRK.B`
@@ -631,7 +698,7 @@ quotes = provider.get_quotes("AAPL", "2024-01-02", "2024-01-03")
 # bid_price  bid_size  ask_price  ask_size
 ```
 
-Four things worth knowing before you use them:
+Things worth knowing before you use them:
 
 **They are not abstract methods.** yfinance and Bloomberg inherit a base
 implementation that raises `NotImplementedError` naming the provider, naming
@@ -651,6 +718,44 @@ kept deliberately separate.
 clock either double-counts the boundary tick when two windows are
 concatenated or drops it, and which one is invisible until someone
 concatenates.
+
+**On Databento, the tape and the quotes are routed separately — and can
+come from two venues.** Each takes the first dataset that answers its
+schema, so a venue feed that serves trades but not top-of-book quotes
+answers the tape while the next feed answers the quotes, and every spread
+measured from the pair is one venue's trades against another's quotes. Both
+frames carry `attrs["dataset"]`; a frame answered by any dataset but the
+first the routing asks also carries `attrs["fallback_from"]` and a WARNING
+saying the pair may be cross-venue. `get_trades(..., dataset="XNAS.ITCH")`
+and `get_quotes(..., dataset="XNAS.ITCH")` pin both to one venue (the agent
+tools take the same `dataset`), and the tools that pair a tape with quotes —
+`classify_trade_direction`, `get_effective_spread_series`,
+`estimate_kyle_lambda`, `get_microstructure_metrics`, `check_spread_proxy` —
+warn when the two name different datasets. The default routing is
+unchanged.
+
+**The timestamp is `ts_recv`, and both stamps are kept.** `.to_df()` puts
+`ts_recv` on the index, and the normalizer looked for it among the columns
+only, so every tape was stamped by `ts_event` and asking for `ts_recv` by
+name was refused. It is found on the index now; `get_trades` and
+`get_quotes` are indexed by it, say so in `attrs["timestamp_source"]`, and
+keep `ts_recv` and `ts_event` as columns, so their difference — the capture
+latency — can be computed.
+
+**What the vendor frame said is kept.** The flag warnings
+(`F_MAYBE_BAD_BOOK` among them), the sentinel count, the price-scale
+decision and the timestamp used travel on `attrs["vendor_notes"]` for
+trades, quotes, depth and order events, each WARNING is logged, and the
+fetch tools return them as `vendor_notes`, the WARNING ones in `warnings`
+too. The tape and quote paths used to discard them.
+
+**Prints of no size, and at a fraction of a cent, are counted.** A venue
+tape can carry many zero-size prints and sub-penny ones (midpoint or
+price-improved executions, usually off the exchange). Neither is dropped;
+both are counted in `attrs["print_counts"]` (by `publisher_id` when the
+tape carries it) and in a note. A zero-size print has no weight in a VWAP or
+a size-weighted mean, but it counts in the number of trades, in per-print
+rates and in every unweighted mean, and the tick rule reads its price.
 
 **One page per call.** Polygon paginates ticks by cursor and a liquid name
 produces millions of trades a day, so following `next_url` automatically

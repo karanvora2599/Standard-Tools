@@ -1,5 +1,83 @@
 # Changelog
 
+## Each setting is read one way, each write lands once, and each feed says what it is
+
+The plumbing under the numbers had the same failure in many places: a check
+that two callers could pass at the same moment, a setting whose empty value
+meant something different in each module that read it, a cache or a vendor
+that answered without saying what it had answered with, and a log whose
+cost and fragility grew with every call.
+
+- **Settings are read one way.** Every `SQT_*` setting, and the vendor
+  settings, now go through one reading: blank means unset, `~` is home, a
+  relative path or a file where a directory belongs is refused by name, and
+  a flag accepts any spelling of on or off and refuses anything else. An
+  empty `SQT_AUDIT_ENABLED` used to switch the decision log off and a padded
+  `0` left it on; an empty `SQT_RUNS_DIR` or `SQT_CACHE_DIR` re-rooted the
+  store or the cache at the process working directory, which an MCP client
+  chooses. A negative `SQT_AUDIT_RETENTION_DAYS` is refused instead of
+  putting the cutoff in the future and deleting today. `SQT_CACHE_DIR` is
+  resolved at the cache's first use, so a value in `.env` is honoured.
+- **Writes that must be unique are exclusive.** Two publishers racing to one
+  reference can no longer both succeed: `save_artifact`, `publish` and
+  `publish_external` write the value and its sidecar exclusively (a temp
+  file hard-linked into place), sidecars are written whole, and a damaged
+  sidecar is refused instead of resolving an external dataset as a stored
+  one; `prepare_vendor_extract` publishes its output the same way.
+  Promotions are decided one at a time under a cross-process lock shared
+  with the audit writer, and a torn final line is set aside instead of
+  making the stage unreadable. Artifact keys refuse trailing dots, dot runs
+  and device names on every platform, and a second spelling of an existing
+  file is refused. `sqt runs gc` removes only the leftovers of interrupted
+  writes; published values are never collected.
+- **The decision log costs one line per write and survives damage.** The
+  writer reads only a day's last line instead of the whole file under the
+  lock, repairs a lost newline, still refuses a torn record and says where
+  to cut, and never indexes a day it did not write. Both verifiers report a
+  damaged line and keep going, open days that predate the chain index, and
+  print the head they ran through so the newest day can be anchored
+  elsewhere. New checkpoints also commit to the record count, a full SHA-256
+  of the day and the index's length; older checkpoints keep verifying.
+  Redaction reaches fields inside lists and replaces whole tokens,
+  `last_request_id()` names only a record that was written, and an audit
+  bundle never replaces a file and is written only where the operator allows.
+- **The cache checks what it serves.** Every provider reads and writes the
+  OHLCV cache through one path: an entry is checked the way a live answer is
+  (the five columns, no missing close, every bar inside the requested window)
+  and anything else is fetched again; a file momentarily locked by another
+  process's replace is retried and kept rather than deleted; writes leave no
+  temp file behind, and `sqt cache gc` collects old ones. One-second bars
+  keep their timestamps.
+- **Databento says what it serves.** A tape and quotes answered by different
+  venues are named on each frame and warned about wherever they are paired,
+  and `dataset=` pins both to one venue. Zero-size and sub-penny prints are
+  counted, the vendor normaliser's notes reach every fetch result, and tapes
+  are stamped by `ts_recv` with both stamps kept. A rejected key raises at
+  once, naming `DATABENTO_API_KEY`, instead of reading as a date range; an
+  unknown symbol fails after one request. A futures daily bar is a CME trade
+  date — five a week, not six UTC days. A window a better feed covers only in
+  part is disclosed. An explicit intraday end includes its bar, and roots
+  such as `6EZ5` resolve. The Databento cache moves to `v5`.
+- **Data quality reports what a within-frame test cannot.** The report names
+  the dataset that served the bars and flags a sample feed from provenance,
+  which no volume statistic can detect, and reports duplicate timestamps,
+  timestamps out of order and bars whose open, high, low and close
+  contradict each other. The tick trade profile returns every session bucket.
+- **Modeling counts its evidence honestly.** The effective sample size behind
+  every out-of-sample metric is discounted for labels that move together
+  across entities (a Kish design effect from their measured cross-sectional
+  correlation) and is reported with its floor and ceiling; the entity count
+  used to cancel out of the formula. `estimate_feature_warmup` reports the
+  warm-up a recursive smoother needs to converge, and `score_model` warns
+  when its window is shorter. Repeated (entity, date) rows are refused, a
+  repeated search-grid value is one candidate, and a panel without
+  `label_end_date` is purged on ends derived from its horizon instead of not
+  at all.
+- **Smaller doors.** The bearer token is compared as bytes, so a non-ASCII
+  header is a 401 rather than a crash; `calendar_names()` returns a tuple;
+  `all_runtimes()` builds once; `compare_feature_sets` names every missing
+  feature in the caller's order.
+
 ## A strategy that never traded no longer wins, and white noise is no longer a trend
 
 The numerical layer answered questions its inputs could not support and

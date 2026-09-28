@@ -124,6 +124,12 @@ class BearerAuth:
     vulnerable version in a file about exposing a server would be a poor
     advertisement for the rest of it.
 
+    Compared as BYTES. `compare_digest` refuses two `str` values holding
+    anything but ASCII with a TypeError, so one non-ASCII byte in a
+    header from an unauthenticated caller turned the 401 into an
+    unhandled exception and a 500. Bytes compare whatever they hold, so
+    any credential that is not the token is simply a wrong one.
+
     Wraps only the MCP mount. The health route stays open so a load
     balancer does not need the token to decide whether the process is
     alive, and it reports nothing an unauthenticated caller could not learn
@@ -133,21 +139,22 @@ class BearerAuth:
     def __init__(self, app: Any, token: str) -> None:
         self.app = app
         self.token = token
+        self._token_bytes = token.encode("utf-8")
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
 
-        provided = ""
+        provided = b""
         for key, value in scope.get("headers") or ():
             if key == b"authorization":
-                provided = value.decode("latin-1")
+                provided = bytes(value)
                 break
 
-        scheme, _, presented = provided.partition(" ")
-        if scheme.lower() != "bearer" or not hmac.compare_digest(
-            presented.strip(), self.token
+        scheme, _, presented = provided.partition(b" ")
+        if scheme.lower() != b"bearer" or not hmac.compare_digest(
+            presented.strip(), self._token_bytes
         ):
             log.warning(
                 "rejected unauthenticated %s %s from %s",

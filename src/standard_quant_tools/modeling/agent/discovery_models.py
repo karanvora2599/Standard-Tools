@@ -382,6 +382,27 @@ class FeatureWarmup(BaseModel):
             "900."
         ),
     )
+    converged: int = Field(
+        0,
+        description=(
+            "Bars of history after which this feature's value no longer "
+            "depends on where the history started -- the start value's "
+            "weight below warmup_tolerance. Equal to `resolved` for a "
+            "finite-window feature. Longer for a recursive smoother, whose "
+            "first output still carries its start: RSI(14) and ATR(14) take "
+            "139 bars, MACD(12, 26, 9) 188, ADX(14) 187, Parabolic SAR 100. "
+            "Rows between `resolved` and this are not NaN, so nothing drops "
+            "them, and a window started elsewhere gives them other values."
+        ),
+    )
+    recursive: bool = Field(
+        False,
+        description=(
+            "Whether this feature is a recursive smoother (EMA, Wilder) or "
+            "a state machine (Parabolic SAR), for which `converged` exceeds "
+            "`resolved`."
+        ),
+    )
     lags: List[int] = Field(
         default_factory=list,
         description="The lag columns requested for this feature.",
@@ -446,8 +467,45 @@ class EstimateFeatureWarmupResult(BaseModel):
         description=(
             "Bars of history this spec burns before its first usable row: "
             "the deepest RESOLVED lookback plus the deepest lag. This is the "
-            "number that decides where a panel can start, and the one to "
-            "size a scoring history window with."
+            "number that decides where a panel can start. It is NOT enough "
+            "history for a recursive feature's value to stop depending on "
+            "where the history started; bars_required_converged is, and is "
+            "the one to size a scoring history window with."
+        ),
+    )
+    bars_required_converged: int = Field(
+        0,
+        description=(
+            "Bars of history after which every feature in the spec gives "
+            "the value a longer history would give: the deepest `converged` "
+            "warm-up plus the deepest lag. Equal to bars_required when no "
+            "feature is recursive. score_model rebuilds features from "
+            "as_of - lookback_days, a different start than the training "
+            "build's, so a scoring window shorter than this scores a "
+            "recursive feature computed differently from the one the model "
+            "was trained on."
+        ),
+    )
+    converged_binding_feature: Optional[str] = Field(
+        None,
+        description=(
+            "The output name whose converged warm-up set " "bars_required_converged."
+        ),
+    )
+    calendar_days_converged: Stat = Field(
+        None,
+        description=(
+            "bars_required_converged in calendar days -- the smallest "
+            "score_model lookback_days that covers it. None when the "
+            "conversion cannot be made, for the reason calendar_days_estimate "
+            "gives."
+        ),
+    )
+    warmup_tolerance: float = Field(
+        1e-4,
+        description=(
+            "The start value's residual weight at which a recursive "
+            "feature counts as warm, which `converged` is computed at."
         ),
     )
     per_feature: Dict[str, FeatureWarmup] = Field(
@@ -489,8 +547,10 @@ class EstimateFeatureWarmupResult(BaseModel):
         default_factory=list,
         description=(
             "Conditions that change how this reads: features that consume no "
-            "bars at all, output names requested more than once, and a "
-            "conversion to calendar days that could not be made."
+            "bars at all, output names requested more than once, a "
+            "conversion to calendar days that could not be made, and "
+            "recursive features whose values keep depending on the history's "
+            "start for longer than bars_required."
         ),
     )
 

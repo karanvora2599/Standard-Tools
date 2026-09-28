@@ -53,7 +53,7 @@ actually read off the result.
 | `run_pair_trade_backtest` | Backtest a cointegrated pair as one synchronized two-leg trade (reuses `run_portfolio_simulation`) | `n_round_trips`, `entry_spread`, `current_spread`, `sharpe_ratio` |
 | `get_robustness_diagnostics` | Same-sample confidence checks on a grid search's winning combination: parameter sensitivity, Deflated Sharpe Ratio, block-bootstrap CI | `expected_max_sharpe`, `deflated_sharpe_ratio`, `bootstrap_ci_lower`, `bootstrap_ci_upper` |
 | `get_capacity_report` | Max account size a target-weight portfolio can support before positions move their own market | `max_account_size`, `binding_ticker`, `days_to_liquidate_at_capacity` |
-| `get_data_quality_report` | Dataset provenance plus missing-bar/stale-price/price-jump/volume-anomaly detection on fetched OHLCV, against a named exchange calendar | `metadata`, `missing_bars`, `stale_price_runs`, `price_jumps`, `volume_anomalies` |
+| `get_data_quality_report` | Dataset provenance (including the dataset that answered and whether it is a sample feed) plus missing-bar/stale-price/price-jump/volume-anomaly detection and duplicate-timestamp, out-of-order and OHLC-consistency checks on fetched OHLCV, against a named exchange calendar | `metadata`, `missing_bars`, `stale_price_runs`, `price_jumps`, `volume_anomalies`, `served_dataset`, `sample_feed`, `duplicate_timestamps`, `out_of_order_timestamps`, `ohlc_inconsistencies` |
 | `run_backtest_compact` | Any of the eight built-in strategies, as `run_sma_backtest` runs them, but returning a compact summary/risk/exposure/cost result with artifact URIs and references instead of the inline equity curve/trade log | `summary`, `risk`, `exposure`, `costs`, `equity_curve_uri`, `equity_curve_ref` |
 
 **Analytics tools (5)**
@@ -2289,8 +2289,10 @@ for what the names collapse into once they are read as factor bets.
 ## 19. Data Quality Report
 
 `get_data_quality_report` reports what a data provider actually guarantees
-about a symbol's OHLCV, plus missing-bar/stale-price/price-jump/thin-volume
-detection on the fetched data. See [11_data_quality.md](11_data_quality.md)
+about a symbol's OHLCV and which dataset answered, plus missing-bar/
+stale-price/price-jump/thin-volume detection and duplicate-timestamp,
+out-of-order and OHLC-consistency checks on the fetched data. See
+[11_data_quality.md](11_data_quality.md)
 for the full conceptual reference — this section covers the tool's
 input/output shape.
 
@@ -2323,7 +2325,12 @@ for thin in result.volume_anomalies:
 | `missing_bars` | `List[MissingBar]` | `date`, `weekday`, `basis`. Sessions with no bar, judged against the exchange calendar when `exchange_calendars` is installed; `basis` says which rule judged it, and under the `weekday` fallback every market holiday in the range appears as a false positive |
 | `stale_price_runs` | `List[StalePriceRun]` | `start`, `end`, `price`, `run_length` — runs of `stale_run_length`+ consecutive identical `Close` values |
 | `price_jumps` | `List[PriceJump]` | `date`, `pct_change` — single-bar moves exceeding `jump_threshold` |
-| `volume_anomalies` | `List[VolumeAnomaly]` | `date`, `volume`, `trailing_median`, `kind`. Bars with zero volume, or below `thin_fraction` of the trailing `volume_window`-bar median. A *run* of thin bars is the signature of a sample feed rather than the tape |
+| `volume_anomalies` | `List[VolumeAnomaly]` | `date`, `volume`, `trailing_median`, `kind`. Bars with zero volume, or below `thin_fraction` of the trailing `volume_window`-bar median. Judged against the frame's own history, so it cannot find a feed that is thin on every bar — `sample_feed` answers that |
+| `served_dataset` | `Optional[str]` | The vendor dataset that answered, as the provider stamped it on the frame (`attrs["dataset"]`); `None` when the provider names none |
+| `sample_feed` | `bool` | `True` when `served_dataset` is a known sample of the tape (`EQUS.MINI`); read from provenance, since no volume statistic can tell. `sample_feed_note` says what the feed is |
+| `duplicate_timestamps` | `List[DuplicateTimestamp]` | `timestamp`, `count`, `positions` — bar labels that occur more than once |
+| `out_of_order_timestamps` | `List[OutOfOrderTimestamp]` | `position`, `timestamp`, `previous` — rows whose label is earlier than the row before |
+| `ohlc_inconsistencies` | `List[OhlcInconsistency]` | `date`, `position`, `kind` (`low_above_high`, `open_outside_range`, `close_outside_range`), `open`, `high`, `low`, `close` — bars whose prices contradict each other |
 
 **Inputs beyond `symbol`/`start_date`/`end_date`:** `source` picks the
 provider to fetch from (this tool could once check only one provider's data,
@@ -2395,13 +2402,32 @@ equity_curve = load_artifact(result.equity_curve_uri).squeeze("columns")
 
 **Artifact storage:** `SQT_RUNS_DIR` (default
 `~/.cache/standard_quant_tools/runs/`, same env-var-override convention as
-`SQT_AUDIT_DIR`/`SQT_CACHE_DIR`), one subdirectory per `run_id`. Both
+`SQT_AUDIT_DIR`/`SQT_CACHE_DIR`), one subdirectory per `run_id`. A blank
+`SQT_RUNS_DIR` is the default, never the working directory; `~` is expanded;
+a relative path, or one naming a file, is refused by name. Both
 `run_id` and the artifact `name` must match `^[A-Za-z0-9_-]+$` (`save_artifact`/
 `load_artifact` in `backtest/artifacts.py` raise `ValidationError` otherwise)
 — since `run_id` is LLM-reachable, this rejects path separators, `..`, and
 absolute/drive-letter prefixes before they ever reach a filesystem path, with
 a resolved-path containment check against `SQT_RUNS_DIR` as defense in depth.
-Writes are atomic (temp file + `os.replace`).
+A Windows device name (`NUL`, `CON`, `COM1`, ...) is refused on every
+platform, and a name that reaches an existing file under another spelling
+(`RunA` beside `runa` on a case-folding filesystem) is refused rather than
+read or replaced. Writes are atomic (temp file, then rename). Without
+`overwrite=True` they are also exclusive — the temp file is hard-linked into
+place — so of two calls racing to one `(run_id, name)` exactly one succeeds
+and the other is refused with `already exists`.
+
+**Nothing in the runs directory expires.** A published value is never
+collected, because deleting it breaks every reference to it — including
+references an audit record names, which `replay_decision` would then fail
+to resolve — so retention of published values is an operator decision, made
+knowing who holds them. `sqt runs gc` removes only what no reference can
+name: temp files an interrupted write left, and `mdl_…`/`ds_…` directories
+whose registration never wrote its commit file (`manifest.json`,
+`dataset_meta.json`), each older than a threshold (24 hours by default,
+`--older-than HOURS`). It lists them and deletes nothing unless `--confirm`
+is passed.
 
 **Scope, stated explicitly:** there is no `positions_uri` or `orders_uri` —
 this signal-array engine has no per-order or per-position time series to

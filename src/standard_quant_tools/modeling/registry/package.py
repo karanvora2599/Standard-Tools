@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 from standard_quant_tools._runspath import validate_identifier
@@ -28,10 +29,12 @@ from standard_quant_tools.artifact_store import (
     ArtifactStore,
     LocalArtifactStore,
     hash_bytes,
+    validate_key,
+    write_bytes_exclusively,
 )
 from standard_quant_tools.error import ValidationError
 
-from .lifecycle import PROMOTIONS_FILE
+from .lifecycle import PROMOTIONS_FILE, promotions_lock
 from .manifests import ModelManifest
 from .model_registry import load_manifest
 from .signing import (
@@ -198,6 +201,7 @@ def pull_model_package(
     """
     validate_identifier(model_id, "model_id")
     filenames = sorted(key.split("/", 1)[1] for key in store.list(model_id))
+    _refuse_unportable_names(model_id, filenames, store)
     if MANIFEST_FILE not in filenames:
         raise ValidationError(
             f"{store.uri(f'{model_id}/{MANIFEST_FILE}')} does not exist: no "
@@ -255,11 +259,56 @@ def pull_model_package(
                 f"travels with (registered {digest}, found {hash_bytes(data)}); "
                 "nothing was registered locally."
             )
-        local.put(key, data)
-    local.put(f"{model_id}/{MANIFEST_FILE}", manifest_bytes)
+        if filename == PROMOTIONS_FILE:
+            # The same lock `promote` holds, so a promotion made here while
+            # the pull runs is not appended to a log this write then
+            # replaces.
+            with promotions_lock(model_id):
+                local.put(key, data)
+        else:
+            local.put(key, data)
+    manifest_key = f"{model_id}/{MANIFEST_FILE}"
+    if overwrite:
+        local.put(manifest_key, manifest_bytes)
+    elif not write_bytes_exclusively(Path(local.uri(manifest_key)), manifest_bytes):
+        # Two pulls of one id both passed the check above; the manifest is
+        # the commit point, so exactly one of them registers the model.
+        raise ValidationError(
+            f"model {model_id!r} was registered locally while this pull ran; "
+            "pass overwrite=True to replace it with the store's copy."
+        )
     return verify_model_package(
         model_id, require_signature=require_signature, public_key=public_key
     )
+
+
+def _refuse_unportable_names(
+    model_id: str, filenames: List[str], store: ArtifactStore
+) -> None:
+    """
+    Refuse, before anything is written, a package whose file names this
+    machine could not keep apart.
+
+    An object store holds `model.joblib` and `model.joblib.` as two keys;
+    Windows writes them to one file, and the second -- which no manifest
+    digest covers -- replaced the first, leaving an unverified joblib on
+    disk under the registered name. Two names equal once case is folded
+    collide the same way on Windows and macOS.
+    """
+    seen: Dict[str, str] = {}
+    for filename in filenames:
+        folded = filename.rstrip(". ").casefold()
+        if folded in seen:
+            raise ValidationError(
+                f"the store's package for {model_id!r} holds both "
+                f"{seen[folded]!r} and {filename!r}, which name one file on a "
+                "filesystem that folds case or drops a trailing dot, so one "
+                "would silently replace the other. Nothing was registered "
+                f"locally; remove the stray key from {store.uri(model_id)}."
+            )
+        seen[folded] = filename
+    for filename in filenames:
+        validate_key(f"{model_id}/{filename}")
 
 
 __all__ = [

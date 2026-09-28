@@ -78,6 +78,17 @@ class FetchResult(_Result):
             "record can be matched up without re-deriving it."
         ),
     )
+    vendor_notes: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Every judgement the vendor normalizer made about this frame: "
+            "which timestamp became `timestamp`, the price-scale decision, "
+            "how many sentinels became null, the vendor's own flag warnings, "
+            "and the prints counted as zero-size or sub-penny. The WARNING "
+            "ones are in `warnings` too. Empty for a provider that reports "
+            "none."
+        ),
+    )
 
 
 class DepthFetchResult(_Result):
@@ -145,6 +156,16 @@ class DepthFetchResult(_Result):
     )
     provider: Optional[str] = Field(
         None, description="Which provider served it, when the frame records it."
+    )
+    vendor_notes: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Every judgement the vendor normalizer made: the timestamp used, "
+            "the price-scale decision, the sentinels masked, the trailing "
+            "levels dropped, and the vendor's own flag warnings -- "
+            "F_MAYBE_BAD_BOOK among them, the venue saying its book may be "
+            "inconsistent. The WARNING ones are in `warnings` too."
+        ),
     )
 
 

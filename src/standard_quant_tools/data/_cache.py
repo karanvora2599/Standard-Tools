@@ -13,23 +13,33 @@ Every cache key (session and disk) includes an explicit `provider` name so
 providers can never collide on the same entry for the "same" symbol/date/
 interval, even though different providers can have different adjustment
 conventions or data revisions for it.
+
+ONE READ AND ONE WRITE FOR EVERY PROVIDER. `_read_cached_ohlcv` and
+`_write_cached_ohlcv` are the only way a provider touches the disk tier.
+The three providers each carried their own copy of the read, and the copies
+drifted: none of them checked what the live path checks, so a readable
+Parquet file holding the wrong thing was served as a hit, and each treated
+a Windows sharing violation -- a reader opening a file another process is
+replacing -- as corruption and deleted a valid entry.
 """
 
+import contextlib
+import io
 import logging
-import os
 import re
 import threading
 import time
-import uuid
 from datetime import date as _date
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Union
+from typing import List, Optional, Tuple, Union
 
 import pandas as pd
 from cachetools import TTLCache
 
 from standard_quant_tools._containment import require_within
+from standard_quant_tools._env import env_path
+from standard_quant_tools.artifact_store import write_bytes_atomically
 from standard_quant_tools.error import ValidationError
 
 logger = logging.getLogger(__name__)
@@ -88,7 +98,14 @@ _CACHE_FORMAT_VERSION = "v3"
 # ticker, so a file named for `GOOG.L` holds Alphabet class A's bars, and
 # files are now named by the symbol as sent to the vendor rather than as
 # the caller spelled it. See the CHANGELOG entry of 2026-09-27.
-_PROVIDER_GENERATION_BUMPS = {"databento": 1}
+# databento +2: an intraday window with an explicit end was cached one bar
+# short (the vendor's range is half-open and the bar AT the end was never
+# asked for), a future's daily file holds UTC-day bars where a daily bar is
+# now a CME trade date, and one-second bars were read as daily -- their
+# window bounds collapsed to dates and their index to midnights -- until
+# "1s" was counted as intraday. Each keeps its name, so only a bump stops it
+# being served. See the CHANGELOG entry of 2026-09-28.
+_PROVIDER_GENERATION_BUMPS = {"databento": 2}
 
 
 def _provider_family(provider: str) -> str:
@@ -160,12 +177,46 @@ def _session_cache_set(key, value, *, end=None) -> None:
 # post-corporate-action-accurate history for a symbol that's had a recent
 # action should clear/bypass the cache (SQT_CACHE_DIR) rather than assume it
 # self-heals. The cache directory can be overridden with SQT_CACHE_DIR.
-_CACHE_ROOT = Path(
-    os.environ.get(
-        "SQT_CACHE_DIR",
-        str(Path.home() / ".cache" / "standard_quant_tools" / "ohlcv"),
-    )
-)
+
+
+def _default_cache_root() -> Path:
+    return Path.home() / ".cache" / "standard_quant_tools" / "ohlcv"
+
+
+def cache_root() -> Path:
+    """
+    The directory the disk tier reads and writes, resolved once, at first
+    use, and fixed for the rest of the process.
+
+    RESOLVED AT FIRST USE, NOT AT IMPORT. The root used to be read when this
+    module was imported, before a local `.env` had been loaded, so a
+    `SQT_CACHE_DIR` set there was never honoured; and it was read with a
+    bare `os.environ.get`, so `SQT_CACHE_DIR=` (empty) meant the working
+    directory. It now goes through `env_path`: blank is the default under
+    the home directory, a relative path is refused by name rather than
+    anchored to whatever directory the process happens to be in, and the
+    refusal reaches the caller instead of being mistaken for a symbol the
+    cache cannot encode.
+
+    FIXED ONCE RESOLVED, so a later change to the environment does not move
+    the cache under a running process. A test that relocates the cache
+    assigns `_CACHE_ROOT`; that assignment is honoured.
+    """
+    root = globals().get("_CACHE_ROOT")
+    if root is None:
+        root = env_path("SQT_CACHE_DIR", _default_cache_root)
+        globals()["_CACHE_ROOT"] = root
+    return Path(root)
+
+
+def __getattr__(name: str):
+    # `_CACHE_ROOT` is read directly by the tools that describe the cache
+    # and by the external-data fence. Until the first use resolves it, the
+    # name is not bound, and reading it resolves it here -- so every reader
+    # sees the root the cache itself uses, never a placeholder.
+    if name == "_CACHE_ROOT":
+        return cache_root()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def _norm_date(d: Union[str, datetime, _date]) -> str:
@@ -189,15 +240,20 @@ def _norm_date(d: Union[str, datetime, _date]) -> str:
 
 
 # Sub-daily bar intervals, across every provider's own vocabulary
-# (yfinance "1m".."90m"/"1h"; Polygon "1m"/"5m"/"1h"; etc.). Anchored so
-# the daily-and-coarser tokens that merely START with a digit and 'm'
-# ("1mo", "3mo") do NOT match — misclassifying a monthly bar as intraday
-# would skip the date normalization every downstream consumer depends on.
-_INTRADAY_INTERVAL_RE = re.compile(r"^\d+\s*(m|min|minute|h|hour)s?$", re.IGNORECASE)
+# (yfinance "1m".."90m"/"1h"; Polygon "1m"/"5m"/"1h"; Databento "1s"; etc.).
+# Anchored so the daily-and-coarser tokens that merely START with a digit
+# and 'm' ("1mo", "3mo") do NOT match — misclassifying a monthly bar as
+# intraday would skip the date normalization every downstream consumer
+# depends on. Seconds are intraday too: without them Databento's one-second
+# bars were read as daily and every bar of a day was flattened onto its
+# midnight.
+_INTRADAY_INTERVAL_RE = re.compile(
+    r"^\d+\s*(s|sec|second|m|min|minute|h|hour)s?$", re.IGNORECASE
+)
 
 
 def is_intraday_interval(interval: str) -> bool:
-    """True for sub-daily bar intervals ("1m", "15m", "1h"), False for
+    """True for sub-daily bar intervals ("1s", "1m", "15m", "1h"), False for
     daily and coarser ("1d", "5d", "1wk", "1mo", "3mo")."""
     return bool(_INTRADAY_INTERVAL_RE.match(str(interval).strip()))
 
@@ -375,13 +431,13 @@ def _parquet_path(
     and go straight into the filename — validates each against an allow-
     list/pattern (the same slug-plus-resolved-containment approach
     artifacts.py uses for run_id/name) and confirms the resulting path
-    actually resolves inside _CACHE_ROOT before returning it, as defense
+    actually resolves inside the cache root before returning it, as defense
     in depth.
 
     Raises:
         ValidationError: symbol/interval/provider don't match their
-            allowed pattern/set, or the resolved path would escape
-            _CACHE_ROOT.
+            allowed pattern/set, the resolved path would escape the cache
+            root, or SQT_CACHE_DIR is set to something it cannot be.
     """
     if not symbol or ".." in symbol or not _SYMBOL_RE.match(symbol):
         raise ValidationError(
@@ -411,10 +467,9 @@ def _parquet_path(
     # no real symbol can ever produce it by other means.
     safe = symbol.replace("/", "__SLASH__").upper()
     generation = cache_generation(provider)
-    path = (
-        _CACHE_ROOT / f"{generation}_{provider}_{safe}_{start}_{end}_{interval}.parquet"
-    )
-    root = _CACHE_ROOT.resolve()
+    base = cache_root()
+    path = base / f"{generation}_{provider}_{safe}_{start}_{end}_{interval}.parquet"
+    root = base.resolve()
     resolved = path.resolve()
     # The extended-length prefix Windows puts on a resolved path that
     # exists is handled inside require_within, once, for every root this
@@ -439,7 +494,12 @@ def _safe_parquet_path(
     because it can't ALSO be cached; it should just skip caching for that
     call and fall through to a live fetch, same as a disk-cache read
     failure already does.
+
+    A misconfigured SQT_CACHE_DIR is NOT such a symbol: it is resolved
+    before the path is built, so its refusal reaches the caller by name
+    instead of quietly turning the disk cache off for every call.
     """
+    cache_root()
     try:
         return _parquet_path(symbol, start, end, interval, provider=provider)
     except ValidationError:
@@ -500,34 +560,318 @@ def dead_generations(*, dry_run: bool = True) -> "list[Path]":
     CURRENT IS PER PROVIDER. A provider whose own generation was bumped
     (see `_PROVIDER_GENERATION_BUMPS`) has its previous files listed here,
     while another provider's files at the shared version stay current.
+
+    With `dry_run=False` the files actually removed are returned: one that
+    another process holds open on Windows cannot be deleted, and is left
+    for the next collection rather than stopping this one.
     """
-    root = _CACHE_ROOT
+    root = cache_root()
     if not root.exists():
         return []
     dead = sorted(p for p in root.glob("*.parquet") if _is_dead_generation(p.name))
-    if not dry_run:
-        for p in dead:
-            p.unlink(missing_ok=True)
-    return dead
+    if dry_run:
+        return dead
+    return [p for p in dead if _remove(p)]
+
+
+def _remove(path: Path) -> bool:
+    """Delete one file; False when the platform refuses (held open, gone)."""
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        logger.warning("[cache] could not remove %s: %s", path.name, exc)
+        return False
+    return True
+
+
+# ── Orphaned temp files ───────────────────────────────────────────────────────
+#
+# A write puts its bytes under a temp name and renames it over the entry. A
+# write that dies between the two -- the process killed, the disk full, a
+# rename Windows refused -- can leave the temp behind. The current writer
+# removes its temp in a `finally`, so only a killed process leaves one now;
+# the writer before it (see the CHANGELOG entry of 2026-09-28) left one on
+# every failed rename, and named it with the current generation prefix, so
+# the dead-generation collection never saw it.
+
+#: The temp names this cache's writers have used: the current one
+#: (`artifact_store.write_bytes_atomically`: `.<entry>.<32 hex>.tmp`) and
+#: the one before it (`<entry stem>.<pid>.<thread>.<8 hex>.tmp.parquet`).
+_ORPHAN_NAME_RES = (
+    re.compile(r"^\.v\d+_[^\\/]+\.parquet\.[0-9a-f]{32}\.tmp$"),
+    re.compile(r"^v\d+_[^\\/]+\.\d+\.\d+\.[0-9a-f]{8}\.tmp\.parquet$"),
+)
+
+#: A temp file younger than this is left alone: a writer may still own it.
+#: A cache write holds its temp for the milliseconds between writing the
+#: bytes and renaming them, so an hour is far past any live write.
+ORPHAN_MIN_AGE_SECONDS = 3600.0
+
+
+def _is_orphan_name(name: str) -> bool:
+    return any(pattern.match(name) for pattern in _ORPHAN_NAME_RES)
+
+
+def orphaned_temps(
+    *,
+    dry_run: bool = True,
+    min_age_seconds: float = ORPHAN_MIN_AGE_SECONDS,
+) -> "list[Path]":
+    """
+    Temp files a cache write left behind, older than `min_age_seconds`.
+    Returned sorted; deleted when `dry_run` is False, in which case the
+    files actually removed are returned.
+
+    NEVER A FILE A LIVE WRITER MAY STILL OWN. Only names a cache writer
+    produces are candidates, and only once their last modification is
+    older than the threshold, so a write in progress in another thread or
+    process is not collected underneath it. A temp that carries a dead
+    generation is listed by `dead_generations` and not again here.
+    """
+    if min_age_seconds < 0:
+        raise ValidationError(
+            f"min_age_seconds must be >= 0, got {min_age_seconds!r}: a "
+            "negative age would collect a temp file a writer still owns."
+        )
+    root = cache_root()
+    if not root.exists():
+        return []
+    cutoff = time.time() - float(min_age_seconds)
+    found: List[Path] = []
+    for path in root.iterdir():
+        name = path.name
+        if not _is_orphan_name(name) or _is_dead_generation(name):
+            continue
+        try:
+            if not path.is_file() or path.stat().st_mtime > cutoff:
+                continue
+        except OSError:
+            continue
+        found.append(path)
+    found.sort()
+    if dry_run:
+        return found
+    return [p for p in found if _remove(p)]
+
+
+# ── The one write ─────────────────────────────────────────────────────────────
 
 
 def _write_parquet_atomic(path: Path, df: pd.DataFrame) -> None:
     """
-    Write `df` to `path` atomically: write to a per-PID-and-thread temp
-    file then atomically replace the target, so concurrent processes AND
-    concurrent threads within the same process don't collide on the same
-    temp filename (os.getpid() alone isn't unique across threads).
-    Failures are logged and swallowed — a failed cache write should never
-    fail the caller's actual data fetch, which already succeeded.
+    Write `df` to `path` so no reader ever sees a partial file, through the
+    library's one atomic writer (`artifact_store.write_bytes_atomically`):
+    the bytes go to a uniquely named temp file beside the entry and are
+    renamed over it, and the temp is removed in a `finally`, so a failed
+    rename -- or a KeyboardInterrupt in the middle -- leaves nothing behind.
+    This used to be a second implementation that removed its temp only on
+    success, and it left one behind on every rename Windows refused.
+
+    A rename Windows refuses because a reader has the entry open is retried
+    by that writer, briefly. Failures are logged and swallowed: a failed
+    cache write should never fail the caller's data fetch, which already
+    succeeded. An interrupt still propagates, after the cleanup.
     """
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(
-            f"{path.stem}.{os.getpid()}.{threading.get_ident()}."
-            f"{uuid.uuid4().hex[:8]}.tmp.parquet"
-        )
-        df.to_parquet(tmp)
-        tmp.replace(path)  # atomic on all platforms
+        buffer = io.BytesIO()
+        df.to_parquet(buffer)
+        write_bytes_atomically(path, buffer.getvalue())
+    except Exception as exc:  # noqa: BLE001 - caching is an optimisation
+        logger.warning("[cache] disk write failed for %s: %s", path.name, exc)
+    else:
         logger.debug("[cache] disk write → %s", path.name)
-    except Exception as cache_exc:
-        logger.warning("[cache] disk write failed for %s: %s", path.name, cache_exc)
+
+
+# ── The one read, and what an entry must look like to be served ───────────────
+
+#: The columns every provider's live path guarantees, in the library's order.
+REQUIRED_OHLCV_COLUMNS = ("Open", "High", "Low", "Close", "Volume")
+
+#: A read Windows refuses with a sharing violation -- another process is
+#: renaming a new version over the entry, or has it open -- is tried this
+#: many times, with a short, growing pause between attempts, before the
+#: call is treated as a miss. Both causes last milliseconds.
+_SHARING_ATTEMPTS = 3
+_SHARING_BACKOFF_SECONDS = 0.02
+
+_DAYS_PER_UNIT = {"d": 1, "day": 1, "wk": 7, "w": 7, "week": 7, "mo": 31, "month": 31}
+_PERIOD_RE = re.compile(r"^(\d+)\s*(d|day|wk|w|week|mo|month)s?$", re.IGNORECASE)
+
+
+def _bound_timestamp(token: str) -> pd.Timestamp:
+    """A cache-path bound token back to the instant it names."""
+    if "T" in token:
+        return pd.Timestamp(datetime.strptime(token, "%Y-%m-%dT%H%M%S"))
+    return pd.Timestamp(token)
+
+
+def _window(
+    interval: str, start_str: str, end_str: str
+) -> Tuple[pd.Timestamp, pd.Timestamp]:
+    """
+    The earliest and latest bar label a correct answer to this request can
+    carry.
+
+    The end is the inclusive end every provider trims to before it writes.
+    The start is widened by one bar period for daily and coarser bars,
+    because a weekly or monthly bar is labelled by the start of its period,
+    which can precede the requested start. An intraday request is widened a
+    day either way: its bounds are naive and in the caller's zone, while
+    the bars are UTC instants, and the two can differ by up to a day.
+    """
+    lower = _bound_timestamp(start_str)
+    upper = inclusive_end_timestamp(_bound_timestamp(end_str), interval)
+    if is_intraday_interval(interval):
+        return lower - pd.Timedelta(days=1), upper + pd.Timedelta(days=1)
+    match = _PERIOD_RE.match(str(interval).strip())
+    days = int(match.group(1)) * _DAYS_PER_UNIT[match.group(2).lower()] if match else 92
+    return lower - pd.Timedelta(days=days + 3), upper
+
+
+def _cached_frame_problem(
+    frame: pd.DataFrame, interval: str, start_str: str, end_str: str
+) -> Optional[str]:
+    """
+    Why a frame is not a plausible answer to this request, or None.
+
+    The checks the live paths make before they return a frame: the five
+    OHLCV columns, numeric; at least one bar; no null Close. And one only a
+    cache needs: every bar inside the requested window. A readable Parquet
+    file holding a single `Close` column, or another window's bars, was
+    served as a hit because the read path checked none of this.
+    """
+    missing = [c for c in REQUIRED_OHLCV_COLUMNS if c not in frame.columns]
+    if missing:
+        return f"it has no {missing} column(s)"
+    non_numeric = [
+        c for c in REQUIRED_OHLCV_COLUMNS if not pd.api.types.is_numeric_dtype(frame[c])
+    ]
+    if non_numeric:
+        return f"its {non_numeric} column(s) are not numeric"
+    if frame.empty:
+        return "it holds no bars"
+    if frame["Close"].isna().any():
+        return "it has a null Close"
+    try:
+        index = pd.DatetimeIndex(frame.index)
+        if index.tz is not None:
+            return "its index carries a timezone, which no normalised frame does"
+        if index.hasnans:
+            return "it has a missing timestamp"
+        lower, upper = _window(interval, start_str, end_str)
+        first, last = index.min(), index.max()
+    except Exception as exc:  # noqa: BLE001 - an index that cannot be judged
+        return f"its index cannot be checked against the window ({exc})"
+    if first < lower or last > upper:
+        return (
+            f"its bars run from {first} to {last}, outside the requested "
+            f"window {start_str} to {end_str}"
+        )
+    return None
+
+
+def _evict(path: Path, reason: str) -> None:
+    """Remove an entry that is not a plausible answer. A removal the
+    platform refuses is not an error: the entry is refetched either way,
+    and the next write replaces it."""
+    logger.warning("[cache] evicting %s and refetching: %s", path.name, reason)
+    with contextlib.suppress(OSError):
+        path.unlink(missing_ok=True)
+
+
+def _read_cached_ohlcv(
+    path: Optional[Path], interval: str, start_str: str, end_str: str
+) -> Optional[pd.DataFrame]:
+    """
+    The entry at `path` as a normalised OHLCV frame, or None when there is
+    nothing to serve.
+
+    THE SAME CHECKS THE LIVE PATH MAKES. A file that reads but is not a
+    plausible answer to this request (`_cached_frame_problem`) is evicted,
+    and the caller fetches live, exactly as for a file that does not read.
+
+    A SHARING VIOLATION IS NOT CORRUPTION. On Windows, opening an entry
+    another process is renaming a new version over, or has open, raises
+    `PermissionError`. Every provider used to treat that as a corrupt file
+    and delete a valid entry -- and the unguarded delete could itself raise,
+    which the retry layer turned into an APIError with no network call
+    made. The read is retried briefly; if it still cannot open, the call is
+    a miss and the entry is kept. Content that does not parse (pyarrow's
+    errors, a ValueError or an OSError that is not a permission error) is
+    evicted as before.
+
+    Duplicate or out-of-order bar labels are logged, not evicted: no writer
+    here produces them, so they came from the vendor, and a refetch would
+    bring them back.
+    """
+    if path is None:
+        return None
+    try:
+        if not path.exists():
+            return None
+    except OSError:
+        return None
+    raw = None
+    refusal: Optional[BaseException] = None
+    for attempt in range(1, _SHARING_ATTEMPTS + 1):
+        try:
+            raw = pd.read_parquet(path)
+            break
+        except FileNotFoundError:
+            return None
+        except PermissionError as exc:
+            refusal = exc
+            if attempt < _SHARING_ATTEMPTS:
+                time.sleep(_SHARING_BACKOFF_SECONDS * attempt)
+        except Exception as exc:  # noqa: BLE001 - unparseable content
+            _evict(path, f"it does not read as Parquet ({type(exc).__name__}: {exc})")
+            return None
+    if raw is None:
+        logger.warning(
+            "[cache] %s could not be opened (%s); fetching live and keeping "
+            "the entry, which another process is writing or reading",
+            path.name,
+            refusal,
+        )
+        return None
+    try:
+        frame = _normalize_ohlcv_index(raw, interval)
+    except Exception as exc:  # noqa: BLE001 - an index that is not time
+        _evict(path, f"its index is not a timestamp index ({exc})")
+        return None
+    problem = _cached_frame_problem(frame, interval, start_str, end_str)
+    if problem is not None:
+        _evict(path, problem)
+        return None
+    if frame.index.has_duplicates or not frame.index.is_monotonic_increasing:
+        logger.warning(
+            "[cache] %s has duplicate or out-of-order bar labels; served as "
+            "stored, since a refetch would bring them back",
+            path.name,
+        )
+    return frame
+
+
+def _write_cached_ohlcv(
+    path: Optional[Path],
+    df: pd.DataFrame,
+    interval: str,
+    start_str: str,
+    end_str: str,
+) -> None:
+    """
+    Persist a live answer, unless the read would refuse it.
+
+    A frame `_read_cached_ohlcv` would evict is not written: storing it
+    would only cost a write now and an eviction and a refetch on every later
+    call, and the answer is served live either way.
+    """
+    if path is None:
+        return
+    problem = _cached_frame_problem(df, interval, start_str, end_str)
+    if problem is not None:
+        logger.warning("[cache] not caching %s: %s", path.name, problem)
+        return
+    _write_parquet_atomic(path, df)

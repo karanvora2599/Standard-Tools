@@ -358,6 +358,10 @@ def dispatch(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
                     "content": json.dumps(result),
                 })
     """
+    # A call refused below -- an unknown tool, arguments the input model
+    # rejects -- writes no record, so it must not leave the previous
+    # call's id behind for audit.last_request_id() to report.
+    audit.dispatch._forget_last_request_id()
     if tool_name not in _TOOL_DISPATCH:
         raise ValueError(
             f"Unknown tool '{tool_name}'. " f"Available: {sorted(_TOOL_DISPATCH)}"

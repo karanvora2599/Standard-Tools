@@ -34,6 +34,7 @@ from standard_quant_tools.agent.models import (
     CorrelationAnalysisResult,
     DataQualityReportInput,
     DataQualityReportResult,
+    DuplicateTimestamp,
     ExtendedRiskInput,
     ExtendedRiskResult,
     FactorRegressionInput,
@@ -50,6 +51,8 @@ from standard_quant_tools.agent.models import (
     KalmanHedgeRatioInput,
     KalmanHedgeRatioResult,
     MissingBar,
+    OhlcInconsistency,
+    OutOfOrderTimestamp,
     PairFailure,
     PairResult,
     PairScannerInput,
@@ -117,8 +120,12 @@ from standard_quant_tools.analysis.regression import calculate_beta, rolling_bet
 from standard_quant_tools.backtest.artifacts import save_artifact
 from standard_quant_tools.data.factory import DataFactory
 from standard_quant_tools.data.quality import (
+    detect_duplicate_timestamps,
     detect_missing_bars,
+    detect_ohlc_inconsistencies,
+    detect_out_of_order_timestamps,
     detect_price_jumps,
+    detect_sample_feed,
     detect_stale_prices,
     detect_volume_anomalies,
 )
@@ -1778,9 +1785,16 @@ def get_data_quality_report(
     `source` picks the provider, and `volume_window`/`thin_fraction` decide
     what counts as a thin bar. The defaults are severe on purpose: a feed
     that carries a few percent of consolidated volume all the way through
-    is thin consistently rather than occasionally, and nothing here flags
-    it. `thin_fraction=0.5` with a short window is the question "is this
-    bar thin against its own recent past".
+    is thin consistently rather than occasionally, and no volume statistic
+    flags it. `thin_fraction=0.5` with a short window is the question "is
+    this bar thin against its own recent past".
+
+    WHETHER THE BARS CAME FROM A SAMPLE FEED is answered by provenance
+    instead: `served_dataset` is the dataset the provider stamped on the
+    frame, and `sample_feed` is True when that dataset is known to carry a
+    sample of the tape. The integrity checks -- duplicate labels, labels out
+    of order, and bars whose Open/High/Low/Close contradict each other --
+    are data errors rather than leads, and nothing downstream refuses them.
     """
     logger.debug(
         "[data_quality_report] %s  %s → %s",
@@ -1814,11 +1828,24 @@ def get_data_quality_report(
         )
     ]
 
+    duplicates = [DuplicateTimestamp(**d) for d in detect_duplicate_timestamps(df)]
+    out_of_order = [
+        OutOfOrderTimestamp(**o) for o in detect_out_of_order_timestamps(df)
+    ]
+    inconsistent = [OhlcInconsistency(**o) for o in detect_ohlc_inconsistencies(df)]
+    dataset = df.attrs.get("dataset")
+    sample = detect_sample_feed(df)
+
     logger.debug(
-        "[data_quality_report] missing_bars=%d  stale_runs=%d  price_jumps=%d",
+        "[data_quality_report] missing_bars=%d  stale_runs=%d  price_jumps=%d  "
+        "duplicates=%d  out_of_order=%d  ohlc=%d  sample_feed=%s",
         len(missing),
         len(stale),
         len(jumps),
+        len(duplicates),
+        len(out_of_order),
+        len(inconsistent),
+        sample is not None,
     )
 
     return DataQualityReportResult(
@@ -1828,6 +1855,12 @@ def get_data_quality_report(
         stale_price_runs=stale,
         price_jumps=jumps,
         volume_anomalies=volume_anomalies,
+        served_dataset=dataset if isinstance(dataset, str) else None,
+        sample_feed=sample is not None,
+        sample_feed_note=sample["note"] if sample is not None else None,
+        duplicate_timestamps=duplicates,
+        out_of_order_timestamps=out_of_order,
+        ohlc_inconsistencies=inconsistent,
     )
 
 

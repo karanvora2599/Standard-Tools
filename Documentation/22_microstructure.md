@@ -299,6 +299,30 @@ and a null `mean_volume`, `n_empty_buckets` counts them with a warning, and
 session breaks the "already in session time" assumption: the buckets then
 span the bars' own times of day and a warning names `index_timezone`.
 
+**The tape's profile does the same.** `get_trade_profile` returned only the
+`intraday_freq` buckets some print fell in, labelled by the clock, so a
+tape from the open and the close alone had no midday at all and no trough.
+Its buckets now divide the session from the open — bucket 0 starts at
+09:30, each is `intraday_freq` wide, the last is cut at the close — every
+one is returned with its id and print count, an empty one with a zero
+share, and the result carries `trough_bucket` (a bucket id, the first of
+the smallest), `trough_time`, `peak_bucket` and `n_empty_intraday_buckets`,
+with a note naming the empty buckets. A naive tape with prints outside the
+session is profiled over the session's grid extended to cover them, and a
+note says so.
+
+**A tape and quotes from two venues are named.** The tools that pair a tape
+with quotes — `classify_trade_direction`, `get_effective_spread_series`,
+`estimate_kyle_lambda` with `quotes_ref`, `get_microstructure_metrics` and
+`check_spread_proxy` — compare the dataset each frame was served by and
+warn when they differ: a Lee-Ready sign or an effective spread read off
+another venue's midpoint compares prices that never met in one book. On
+Databento the tape and the quotes are routed separately and can differ;
+pass the same `dataset` to `fetch_tick_tape` and `fetch_quote_panel`. The
+tick-fed summaries also count zero-size and sub-penny prints in their
+notes: a zero-size print carries no weight in a size-weighted figure but is
+counted in `n_trades` and in the count-weighted means.
+
 ### `get_implementation_shortfall`
 
 Every other cost tool in this library is a model run *before* the fact —
@@ -428,7 +452,7 @@ reported an infinite peak at severity "very high" on a quiet market.
 | `get_order_book_metrics` | yes | Microprice, imbalance at the touch and cumulatively, and the depth slope -- what a top-of-book quote cannot say; inline snapshots may carry an ISO `timestamp`, which the per-second rates need, and `include_order_counts` returns the orders resting at each level when the feed carries them |
 | `get_order_event_metrics` | yes | Queue position, order lifetime, cancels per add and event intensity — from an ORDER feed, which a depth snapshot cannot produce; the lifetime summaries carry their tail (p25 to p99) beside a mean and median that can differ fifty-fold |
 | `get_microstructure_metrics` | yes | Quoted and effective spread, realized/impact split, Lee-Ready signed flow |
-| `get_trade_profile` | yes | Volume by trade size and time of day |
+| `get_trade_profile` | yes | Volume by trade size and time of day; every bucket of the session is returned, empty ones with a zero share, and `trough_bucket` is a bucket id |
 | `detect_liquidity_events` | yes | When a liquidity regime *changed*, by CUSUM |
 | `check_spread_proxy` | yes | How wrong the OHLCV proxy is on this name |
 | `estimate_roll_spread` | no | Effective spread from bid-ask bounce — with its noise floor |

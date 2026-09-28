@@ -67,6 +67,74 @@ def require_optuna(where: str) -> None:
     )
 
 
+def _distinct_in_order(values: Any) -> List[Any]:
+    """
+    One entry per distinct value, first-seen order kept.
+
+    Equality, not hashing, so an unhashable value compares like any other;
+    and equality of the same TYPE, because sklearn reads some parameters by
+    their type -- `max_features=1` is one feature and `max_features=1.0`
+    is all of them, and `True` is a flag where `1` is a count. Values that
+    differ only in type stay two candidates.
+    """
+
+    def same(left: Any, right: Any) -> bool:
+        if type(left) is not type(right):
+            return False
+        try:
+            return bool(left == right)
+        except (TypeError, ValueError):
+            return False
+
+    distinct: List[Any] = []
+    for value in values:
+        if not any(same(seen, value) for seen in distinct):
+            distinct.append(value)
+    return distinct
+
+
+def distinct_param_grid(search_spec: Any) -> Dict[str, List[Any]]:
+    """
+    `param_grid` with each axis's repeated values removed, in the order
+    they were first given.
+
+    A repeated value is one candidate listed twice. Enumerated as given, a
+    fat-fingered `{"alpha": [0.1, 0.1, 1.0]}` scored 0.1 twice, charged the
+    budget for three candidates and reported three to anything that counts
+    trials; the count every consumer reads is the distinct one.
+    """
+    return {
+        name: _distinct_in_order(values)
+        for name, values in search_spec.param_grid.items()
+    }
+
+
+def duplicate_grid_values(search_spec: Any) -> Dict[str, int]:
+    """Per axis, how many repeated values `distinct_param_grid` dropped;
+    axes with none are left out, so an empty dict means a clean grid."""
+    distinct = distinct_param_grid(search_spec)
+    return {
+        name: len(values) - len(distinct[name])
+        for name, values in search_spec.param_grid.items()
+        if len(values) != len(distinct[name])
+    }
+
+
+def grid_duplicates_warning(search_spec: Any) -> Optional[str]:
+    """The caveat a result carries when `param_grid` repeated a value, or
+    None for a clean grid (and for a search with no grid at all)."""
+    if search_spec is None:
+        return None
+    dropped = duplicate_grid_values(search_spec)
+    if not dropped:
+        return None
+    return (
+        f"search.param_grid repeats value(s) on {sorted(dropped)} "
+        f"({dropped}); each distinct value is one candidate, scored once, "
+        "and the candidate count and fit budget count distinct values only."
+    )
+
+
 def search_candidates(search_spec: Any, random_seed: int) -> List[Dict[str, Any]]:
     """
     The parameter combinations to try, in a deterministic order.
@@ -83,10 +151,13 @@ def search_candidates(search_spec: Any, random_seed: int) -> List[Dict[str, Any]
             "a tpe search samples its candidates rather than enumerating "
             "them; ask n_search_candidates for how many it will run."
         )
-    names = sorted(search_spec.param_grid)
+    # The DISTINCT values of each axis: a value listed twice is one
+    # candidate, scored once and counted once.
+    axes = distinct_param_grid(search_spec)
+    names = sorted(axes)
     grid = [
         dict(zip(names, combo))
-        for combo in itertools.product(*(search_spec.param_grid[n] for n in names))
+        for combo in itertools.product(*(axes[n] for n in names))
     ]
     if search_spec.method == "grid" or len(grid) <= search_spec.n_iter:
         return grid
@@ -101,12 +172,15 @@ def search_candidates(search_spec: Any, random_seed: int) -> List[Dict[str, Any]
 def n_search_candidates(search_spec: Any) -> int:
     """
     How many candidates the search will score per outer fold, without
-    enumerating them: the grid's size, the random sample's size, or the
-    tpe trial budget. What the plan multiplies through the inner folds.
+    enumerating them: the size of the grid of DISTINCT values, the random
+    sample's size, or the tpe trial budget. What the plan multiplies
+    through the inner folds, and so what the fit budget is checked against.
     """
     if search_spec.method == "tpe":
         return int(search_spec.max_trials)
-    size = prod(max(1, len(values)) for values in search_spec.param_grid.values())
+    size = prod(
+        max(1, len(values)) for values in distinct_param_grid(search_spec).values()
+    )
     if search_spec.method == "random":
         return int(min(size, search_spec.n_iter))
     return int(size)
@@ -268,6 +342,7 @@ def search_best_params(
     fit_predict: FitPredict,
     embargo: int = 0,
     label_end: Optional[np.ndarray] = None,
+    purge_basis: Optional[str] = None,
     max_parallelism: int = 1,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
@@ -295,6 +370,9 @@ def search_best_params(
     tells a reader the search did not actually find anything. It also
     records the embargo and how many rows each inner fold purged, so a
     reader can see the selection ran under the discipline it claims.
+    `purge_basis` is how the report names those label ends -- the engine
+    passes 'label_end_derived_from_horizon' when it derived them -- and
+    defaults to 'label_end'.
     """
     if label_end is not None and len(label_end) != len(train_frame):
         raise ValidationError(
@@ -441,7 +519,12 @@ def search_best_params(
         # carried no label ends, not that nothing overlapped.
         "n_train_rows_purged_overlap": purged_per_fold,
         "purged_on_label_end": label_end is not None,
-        "purge": "label_end" if label_end is not None else "not_applicable",
+        "purge": (
+            (purge_basis or "label_end") if label_end is not None else "not_applicable"
+        ),
+        # Repeated grid values dropped before enumerating, per axis; empty
+        # for a clean grid. n_candidates above counts the distinct ones.
+        "duplicate_values_dropped": duplicate_grid_values(search_spec),
         "best_params": best["params"],
         "best_score": best["score"],
         # Sorted best-first and kept whole: a caller can see how flat the
@@ -485,10 +568,11 @@ def _tpe_trials(
 
     def suggest(trial: Any) -> Dict[str, Any]:
         params: Dict[str, Any] = {}
-        for name in sorted(search_spec.param_grid):
-            params[name] = trial.suggest_categorical(
-                name, list(search_spec.param_grid[name])
-            )
+        # Distinct choices, as the grid backends enumerate them: a choice
+        # listed twice would otherwise be one the sampler starts out twice
+        # as likely to draw.
+        for name, choices in sorted(distinct_param_grid(search_spec).items()):
+            params[name] = trial.suggest_categorical(name, list(choices))
         for name in sorted(search_spec.param_ranges):
             axis = search_spec.param_ranges[name]
             if axis.integer:
@@ -549,6 +633,9 @@ def _tpe_trials(
 
 
 __all__ = [
+    "distinct_param_grid",
+    "duplicate_grid_values",
+    "grid_duplicates_warning",
     "inner_fold_count",
     "n_search_candidates",
     "optuna_available",

@@ -37,11 +37,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Union
 
+from standard_quant_tools._env import env_path, env_str
 from standard_quant_tools.audit import signing as _audit_signing
 from standard_quant_tools.error import ValidationError
 
@@ -60,8 +60,9 @@ def signing_available() -> bool:
 
 
 def signing_configured() -> bool:
-    """Whether registrations in this process will be signed."""
-    return bool(os.environ.get(SIGNING_KEY_ENV))
+    """Whether registrations in this process will be signed. A blank
+    value is unset, as for every setting (`_env`)."""
+    return env_str(SIGNING_KEY_ENV) is not None
 
 
 def _require() -> None:
@@ -85,10 +86,11 @@ def _public_key_bytes(value: Union[bytes, str, Path, None]) -> Optional[bytes]:
     `SQT_MODEL_VERIFY_KEY_PATH` environment variable; None when nothing
     is pinned."""
     if value is None:
-        env_path = os.environ.get(VERIFY_KEY_ENV)
-        if not env_path:
+        # Absolute, `~` expanded, never a directory; blank is unset.
+        pinned = env_path(VERIFY_KEY_ENV, kind="file")
+        if pinned is None:
             return None
-        value = Path(env_path)
+        value = pinned
     if isinstance(value, bytes):
         raw = value
     elif isinstance(value, Path):
@@ -144,9 +146,7 @@ def sign_manifest(
             )
         sign = signer
     else:
-        path = Path(key_path) if key_path else None
-        if path is None and os.environ.get(SIGNING_KEY_ENV):
-            path = Path(os.environ[SIGNING_KEY_ENV])
+        path = Path(key_path) if key_path else env_path(SIGNING_KEY_ENV, kind="file")
         if path is None or not path.exists():
             raise ValidationError(
                 f"sign_manifest: no signing key. Pass key_path=..., set "

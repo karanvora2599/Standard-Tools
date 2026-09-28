@@ -478,15 +478,24 @@ class TestAFeatureAbsentFromAFoldIsRefused:
     def test_a_partly_missing_column_trains_and_the_rate_is_recorded_per_fold(
         self,
     ):
+        """The rate is over the rows the fold trained on. This panel has no
+        label_end_date, and its 5-bar labels are now given ends derived from
+        the target's horizon, so under embargo=0 the last five of the 60
+        training dates are purged: 30 missing of 55, where this pinned 30 of
+        60 while such a panel skipped the purge."""
         result = run_experiment(
             _holed_dataset(30), _imputing_spec(alpha=1.0), "ds", register=False
         )
         report = result["validation_report"]
         rates = report["missing_rate_by_fold"]
+        assert report["purge"] == "label_end_derived_from_horizon"
+        assert report["folds"][0]["n_train_rows"] == 2 * 55
         assert rates["f_early"] == [0.0] * result["n_folds"]
-        assert rates["f_late"][0] == pytest.approx(0.5)
+        assert rates["f_late"][0] == pytest.approx(30 / 55, abs=1e-4)
         assert rates["f_late"][-1] == 0.0
-        assert report["folds"][0]["missing_rate_train"]["f_late"] == pytest.approx(0.5)
+        assert report["folds"][0]["missing_rate_train"]["f_late"] == pytest.approx(
+            30 / 55, abs=1e-4
+        )
 
     def test_a_panel_without_holes_records_none(self):
         result = run_experiment(

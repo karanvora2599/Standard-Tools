@@ -236,7 +236,12 @@ class TestSigningRefusesADayThatDoesNotHold:
             _sign(audit_dir, keys)
 
     def test_an_intact_day_is_signed_at_its_recomputed_end(self, audit_dir, keys):
-        """Null case."""
+        """Null case. The checkpoint written is format 2: besides the
+        endpoint and the day's index entry it commits to the record count,
+        a full SHA-256 digest of the records and the chain index's length.
+        This used to pin the four-field format 1 shape, which signing no
+        longer writes (format 1 checkpoints still verify; see
+        TestACheckpointSignedBeforeStillVerifies)."""
         records = _build_day(audit_dir)
         _sign(audit_dir, keys)
 
@@ -245,11 +250,20 @@ class TestSigningRefusesADayThatDoesNotHold:
         )
         assert checkpoint["final_record_hash"] == records[-1].record_hash
         assert set(checkpoint) == {
+            "checkpoint_version",
             "date",
+            "record_count",
             "final_record_hash",
+            "day_digest",
             "index_hash",
+            "index_len",
+            "index_head",
             "signed_at_utc",
         }
+        assert checkpoint["checkpoint_version"] == 2
+        assert checkpoint["record_count"] == len(records)
+        assert len(checkpoint["day_digest"]) == 64
+        assert checkpoint["index_len"] == 1
 
 
 def _sign_the_old_way(audit_dir: Path, private_path: Path) -> None:

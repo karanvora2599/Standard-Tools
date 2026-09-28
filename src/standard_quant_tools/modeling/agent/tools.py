@@ -51,6 +51,7 @@ from ..dataset.builder import SPEC_HASH_VERSION
 from ..dataset.builder import build_dataset as _build_dataset
 from ..dataset.builder import dataset_spec_hash
 from ..dataset.lags import parse_lag_column
+from ..engine import refuse_duplicate_entity_dates
 from ..engine import run_experiment as _run_experiment
 from ..features.registry import list_features as _list_features
 from ..monitoring import THRESHOLDS, drift_report, prediction_drift, realized_ic
@@ -448,6 +449,11 @@ def register_external_panel(
     primary = declared[0]
     panel = loaded["panel"]
     handle = loaded["handle"]
+    # Refused before anything is written: a file holding an (entity, date)
+    # pair twice would register, and every experiment on it would train and
+    # test on the repeat twice. run_model_experiment refuses the same panel;
+    # refusing here names the file while it is the thing being looked at.
+    refuse_duplicate_entity_dates(panel, f"register_external_panel: {handle.path}")
 
     # A real DatasetSpec, synthesized from what the panel actually holds.
     # Not decoration: run_model_experiment verifies its hash, bundles it
@@ -2295,7 +2301,8 @@ def score_predictions(input_data: ScorePredictionsInput) -> ScorePredictionsResu
         baseline_regression_metrics,
         classification_metrics,
         cross_sectional_ic,
-        effective_sample_size,
+        effective_sample_size_report,
+        label_cross_sectional_corr,
         regression_metrics,
         summarize_cross_sectional_ic,
     )
@@ -2452,18 +2459,43 @@ def score_predictions(input_data: ScorePredictionsInput) -> ScorePredictionsResu
             "independent observations is roughly n / h, and a t-statistic read "
             "off the raw count is overstated by that factor."
         )
-    ess = float(effective_sample_size(len(frame), horizon, int(entities)))
+    # Discounted across entities too: rows on one date are one cluster, and
+    # names whose outcomes move together hold fewer independent
+    # observations than rows / horizon. The entity count used to be passed
+    # and cancel out of the arithmetic.
+    n_dates = int(len(np.unique(dates)))
+    rho = (
+        label_cross_sectional_corr(dates, frame["entity"].to_numpy(), y_true)
+        if entities > 1 and "entity" in frame.columns
+        else float("nan")
+    )
+    ess_report = effective_sample_size_report(len(frame), horizon, n_dates, rho)
+    ess = float(ess_report["value"])
+    if ess_report["mean_entities_per_date"] > 1.0:
+        notes.append(
+            f"effective_sample_size={ess:,.0f} lies between "
+            f"{ess_report['floor']:,.0f} (dates / horizon: every entity's "
+            f"outcome the same) and {ess_report['ceiling']:,.0f} (rows / "
+            "horizon: every entity's outcome independent), placed by the "
+            "outcomes' cross-sectional correlation of "
+            f"{ess_report['label_cross_sectional_corr']:.3f} (design effect "
+            f"{ess_report['design_effect']:.2f}). The cross-sectional IC is "
+            "one number per date, so the floor is the count behind it."
+        )
 
     return ScorePredictionsResult(
         task=input_data.task,
         n_observations=int(len(frame)),
-        n_dates=int(len(np.unique(dates))),
+        n_dates=n_dates,
         n_entities=int(entities),
         metrics={k: float(v) for k, v in metrics.items()},
         cross_sectional_ic={k: float(v) for k, v in ic_summary.items()},
         baseline={k: float(v) for k, v in baseline.items()},
         beats_baseline=beats,
         effective_sample_size=ess,
+        effective_sample_size_floor=ess_report["floor"],
+        effective_sample_size_ceiling=ess_report["ceiling"],
+        label_cross_sectional_corr=ess_report["label_cross_sectional_corr"],
         prediction_turnover=turnover,
         notes=notes,
         warnings=warnings,
@@ -3157,7 +3189,9 @@ _MODELING_TOOL_DEFS: List[tuple] = [
         "overlaps the test fold, and a missing horizon disables that purge "
         "silently rather than failing. The panel's content hash is recorded "
         "and verified on every load, so an edited file fails loudly; a moved "
-        "one stops loading. score_model cannot run on a model trained this "
+        "one stops loading. A file holding an (entity, date) pair more than "
+        "once is refused with the count, before anything is registered. "
+        "score_model cannot run on a model trained this "
         "way, because rebuilding features needs definitions this library "
         "does not have. The path must lie in the runs directory or a "
         "directory listed in SQT_EXTERNAL_DIRS.",
@@ -3179,7 +3213,9 @@ _MODELING_TOOL_DEFS: List[tuple] = [
         "Score a predictions reference against its realized outcome — "
         "accuracy metrics, cross-sectional IC and ICIR, a predict-the-mean "
         "baseline, and an effective sample size adjusted for overlapping "
-        "forward returns. Works on predictions this library never produced.",
+        "forward returns and for outcomes that move together across "
+        "entities, with the two bounds it lies between. Works on predictions "
+        "this library never produced.",
         ScorePredictionsInput,
     ),
     (

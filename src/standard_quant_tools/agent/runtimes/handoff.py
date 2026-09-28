@@ -37,6 +37,7 @@ can dangle.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import re
@@ -46,6 +47,10 @@ from typing import Any, Dict, Optional, Tuple
 
 import pandas as pd
 
+from standard_quant_tools.artifact_store import (
+    write_bytes_atomically,
+    write_bytes_exclusively,
+)
 from standard_quant_tools.backtest.artifacts import (
     _resolved_within_runs_dir,
     _runs_dir,
@@ -316,7 +321,10 @@ def publish(
     the same (run_id, name) breaks that promise for every holder of the old
     reference -- including holders already recorded in an audit log. With
     many agents choosing ids independently that collision is routine, so it
-    fails loudly and the caller picks a fresh id.
+    fails loudly and the caller picks a fresh id. The refusal holds under
+    concurrency: the value and its sidecar are written exclusively, so of
+    two publishes racing to one reference exactly one is accepted, and a
+    publish cannot take over a pair an external dataset is registered at.
     """
     if kind not in KINDS:
         raise ValidationError(f"unknown kind {kind!r}; expected one of {sorted(KINDS)}")
@@ -389,37 +397,71 @@ def publish(
             )
         payload = data
 
-    try:
-        save_artifact(payload, run_id, name, overwrite=overwrite)
-    except ValidationError as exc:
-        if "already exists" not in str(exc):
-            raise
-        raise ValidationError(
+    def _already_published() -> ValidationError:
+        return ValidationError(
             f"a value is already published at run_id={run_id!r} "
             f"name={name!r}. A reference promises that resolving it twice "
             "gives the same value, so this will not replace it. Choose a "
             "fresh run_id, or pass overwrite=True only if you genuinely "
             "mean to invalidate every existing holder of that reference."
-        ) from exc
+        )
 
+    try:
+        # Exclusive unless overwrite: of two publishes racing to one
+        # reference, exactly one gets here without "already exists".
+        uri = save_artifact(payload, run_id, name, overwrite=overwrite)
+    except ValidationError as exc:
+        if "already exists" not in str(exc):
+            raise
+        raise _already_published() from exc
+
+    # The sidecar is written whole or not at all, so a reader never finds
+    # half a record. Without overwrite it is written exclusively too: an
+    # external registration's sidecar IS that registration, and replacing
+    # it would silently repoint every holder of the reference at this
+    # value instead.
     sidecar = _resolved_within_runs_dir(_runs_dir() / run_id / _sidecar_name(name))
-    sidecar.write_text(
-        json.dumps({"kind": kind, "producer": producer}, indent=1), encoding="utf-8"
-    )
+    record = json.dumps({"kind": kind, "producer": producer}, indent=1).encode("utf-8")
+    if overwrite:
+        write_bytes_atomically(sidecar, record)
+    elif not write_bytes_exclusively(sidecar, record):
+        # The value just written names nothing; remove it, but never let
+        # the removal replace the refusal that explains it.
+        with contextlib.suppress(OSError):
+            Path(uri).unlink(missing_ok=True)
+        raise _already_published()
 
     return f"{SCHEME}://{kind}/{run_id}/{name}"
 
 
 def _read_sidecar(run_id: str, name: str) -> Dict[str, Any]:
-    """What was recorded beside a published value, or an empty dict."""
+    """
+    What was recorded beside a published value; an empty dict when nothing
+    was, which is a value published before sidecars carried anything.
+
+    A sidecar that exists but cannot be read is REFUSED, not treated as
+    absent. It decides where the data lives -- a registration by path says
+    so here and nowhere else -- so reading a damaged one as empty resolved
+    an external `tick_tape` as whatever Parquet happened to share its name,
+    silently and as the wrong thing.
+    """
     sidecar = _resolved_within_runs_dir(_runs_dir() / run_id / _sidecar_name(name))
     if not sidecar.exists():
         return {}
     try:
         loaded = json.loads(sidecar.read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001 - a damaged sidecar is not fatal
-        return {}
-    return loaded if isinstance(loaded, dict) else {}
+        problem = None if isinstance(loaded, dict) else "it is not a JSON object"
+    except (OSError, ValueError) as exc:
+        problem = f"it cannot be read as JSON ({type(exc).__name__})"
+    if problem is not None:
+        raise ValidationError(
+            f"the record published beside run_id={run_id!r} name={name!r}, "
+            f"{sidecar}, is damaged: {problem}. It is what says whether this "
+            "reference names a stored value or an external dataset, and "
+            "which, so nothing is resolved in its place. Publish or register "
+            "the data again under a fresh run_id or name."
+        )
+    return loaded
 
 
 def publish_external(
@@ -476,33 +518,40 @@ def publish_external(
         )
 
     sidecar = _resolved_within_runs_dir(_runs_dir() / run_id / _sidecar_name(name))
-    if sidecar.exists() and not overwrite:
-        raise ValidationError(
+
+    def _already_registered() -> ValidationError:
+        return ValidationError(
             f"a dataset is already registered at run_id={run_id!r} "
             f"name={name!r}. A reference names one dataset; pointing it at a "
             "second would change what every existing holder resolves. Choose "
             "a fresh run_id, or pass overwrite=True to invalidate them."
         )
-    sidecar.parent.mkdir(parents=True, exist_ok=True)
-    sidecar.write_text(
-        json.dumps(
-            {
-                "kind": kind,
-                "producer": producer,
-                "storage": "external",
-                "path": str(handle.path),
-                "format": handle.fmt,
-                "rows": handle.rows,
-                "columns": list(handle.columns),
-                "dtypes": handle.dtypes,
-                "n_files": handle.n_files,
-                "size_bytes": handle.size_bytes,
-                "fingerprint": handle.fingerprint,
-            },
-            indent=1,
-        ),
-        encoding="utf-8",
-    )
+
+    # The sidecar IS the registration. This early check refuses a duplicate
+    # before a CSV row count is paid for; it is not the guard, because two
+    # registrations can both pass it. The exclusive write below is.
+    if sidecar.exists() and not overwrite:
+        raise _already_registered()
+    record = json.dumps(
+        {
+            "kind": kind,
+            "producer": producer,
+            "storage": "external",
+            "path": str(handle.path),
+            "format": handle.fmt,
+            "rows": handle.rows,
+            "columns": list(handle.columns),
+            "dtypes": handle.dtypes,
+            "n_files": handle.n_files,
+            "size_bytes": handle.size_bytes,
+            "fingerprint": handle.fingerprint,
+        },
+        indent=1,
+    ).encode("utf-8")
+    if overwrite:
+        write_bytes_atomically(sidecar, record)
+    elif not write_bytes_exclusively(sidecar, record):
+        raise _already_registered()
     return f"{SCHEME}://{kind}/{run_id}/{name}", handle
 
 

@@ -43,7 +43,7 @@ than inside a provider method that can only be exercised against live data.
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -257,10 +257,85 @@ def _mask_sentinels(
     return masked
 
 
+#: The vendor's two stamps, in the order `auto` prefers them.
+VENDOR_STAMPS = ("ts_recv", "ts_event")
+
+
+def _stamp_source(frame: pd.DataFrame, name: str) -> Optional[str]:
+    """Where `name` lives on this frame: 'column', 'index', or None.
+
+    THE INDEX COUNTS. `.to_df()` moves `ts_recv` onto the index -- "the
+    DataFrame index will be set to `ts_recv` if it exists in the schema",
+    in the vendor client's own words -- so a lookup among the columns alone
+    never found it: `auto` fell through to `ts_event` on every frame the
+    client produced, and asking for `ts_recv` by name was refused. See the
+    CHANGELOG entry of 2026-09-28.
+    """
+    if name in frame.columns:
+        return "column"
+    if isinstance(frame.index, pd.DatetimeIndex) and frame.index.name == name:
+        return "index"
+    return None
+
+
+def _stamps(frame: pd.DataFrame, name: str) -> Optional[pd.Series]:
+    """One vendor stamp as UTC datetimes, from its column or the index."""
+    where = _stamp_source(frame, name)
+    if where is None:
+        return None
+    raw = (
+        frame[name] if where == "column" else pd.Series(frame.index, index=frame.index)
+    )
+    if pd.api.types.is_integer_dtype(raw):
+        raw = raw.mask(raw == UNDEF_TIMESTAMP)
+        return pd.to_datetime(raw, unit="ns", errors="coerce", utc=True)
+    return pd.to_datetime(raw, errors="coerce", utc=True)
+
+
+def _carry_vendor_stamps(frame: pd.DataFrame, out: pd.DataFrame) -> None:
+    """Both vendor stamps onto the output as columns, whichever was chosen.
+
+    `timestamp` is one of them; the other is what a latency study subtracts
+    it from, and it used to be dropped -- the chosen stamp went into
+    `timestamp` and the index that held `ts_recv` was discarded, so a tape
+    carried neither.
+    """
+    for name in VENDOR_STAMPS:
+        stamps = _stamps(frame, name)
+        if stamps is not None and name not in out.columns:
+            out[name] = stamps.to_numpy()
+
+
+def timestamp_source(frame: pd.DataFrame, requested: str = "auto") -> Optional[str]:
+    """
+    The stamp a normalizer would put in `timestamp` for this frame:
+    'ts_recv', 'ts_event', 'index', or None when there is none.
+
+    Public so a caller holding the vendor frame can say which stamp its
+    output carries -- the normalized frame alone cannot, because both
+    stamps are datetimes of the same shape and differ only by the network.
+    """
+    if requested == "index":
+        return "index" if isinstance(frame.index, pd.DatetimeIndex) else None
+    if requested in VENDOR_STAMPS:
+        return requested if _stamp_source(frame, requested) is not None else None
+    for name in VENDOR_STAMPS:
+        if _stamp_source(frame, name) is not None:
+            return name
+    return "index" if isinstance(frame.index, pd.DatetimeIndex) else None
+
+
 def _resolve_timestamp(
     frame: pd.DataFrame, requested: str
 ) -> Tuple[Optional[pd.Series], str]:
-    """Which column becomes `timestamp`, and the sentence saying so."""
+    """Which vendor stamp becomes `timestamp`, and the sentence saying so.
+
+    `auto` prefers `ts_recv` over `ts_event`, each looked for as a column
+    and then as the index (see `_stamp_source`), and only then an unnamed
+    DatetimeIndex. The note says which stamp was used and where it was
+    found, because the two differ by the network and the output alone
+    cannot say which one it carries.
+    """
     if requested == "index":
         if not isinstance(frame.index, pd.DatetimeIndex):
             raise ValidationError(
@@ -273,46 +348,42 @@ def _resolve_timestamp(
             "timestamp taken from the frame's DatetimeIndex"
         )
 
-    if requested in ("ts_recv", "ts_event"):
-        if requested not in frame.columns:
-            raise ValidationError(
-                f"timestamp={requested!r} was asked for but the frame has no "
-                f"{requested!r} column. It has: {list(frame.columns)[:12]}"
-            )
-        chosen = requested
-    elif "ts_recv" in frame.columns:
-        chosen = "ts_recv"
-    elif "ts_event" in frame.columns:
-        chosen = "ts_event"
-    elif isinstance(frame.index, pd.DatetimeIndex):
+    if requested in VENDOR_STAMPS and _stamp_source(frame, requested) is None:
+        raise ValidationError(
+            f"timestamp={requested!r} was asked for but the frame has no "
+            f"{requested!r} column and its index is not named "
+            f"{requested!r}. Columns: {list(frame.columns)[:12]}; index "
+            f"name: {frame.index.name!r}."
+        )
+    chosen = timestamp_source(frame, requested)
+    if chosen == "index":
         return pd.Series(frame.index, index=frame.index), (
             "timestamp taken from the frame's DatetimeIndex; neither "
-            "ts_recv nor ts_event is present as a column"
+            "ts_recv nor ts_event is present as a column or as the index"
         )
-    else:
+    if chosen is None:
         return None, "no ts_recv, ts_event or datetime index found"
 
-    stamps = frame[chosen]
-    if pd.api.types.is_integer_dtype(stamps):
-        stamps = stamps.mask(stamps == UNDEF_TIMESTAMP)
-        converted = pd.to_datetime(stamps, unit="ns", errors="coerce", utc=True)
-    else:
-        converted = pd.to_datetime(stamps, errors="coerce", utc=True)
-
+    converted = _stamps(frame, chosen)
+    where = (
+        "the frame's index, where `.to_df()` puts it"
+        if _stamp_source(frame, chosen) == "index"
+        else "its column"
+    )
     if chosen == "ts_recv":
         note = (
-            "timestamp taken from ts_recv, when the capture point SAW the "
-            "update. ts_event (when the venue says it happened) is the other "
-            "choice and they differ by the network -- which is the quantity "
-            "a latency study measures, so pass timestamp='ts_event' if that "
-            "is what you mean."
+            f"timestamp taken from ts_recv ({where}), when the capture point "
+            "SAW the update. ts_event (when the venue says it happened) is "
+            "the other choice and they differ by the network -- which is the "
+            "quantity a latency study measures, so pass timestamp='ts_event' "
+            "if that is what you mean."
         )
     else:
         note = (
-            "timestamp taken from ts_event, the venue's own event time. "
-            "ts_recv was not available or was not chosen; note that ordering "
-            "by ts_event can differ from the order the book was actually "
-            "observed in."
+            f"timestamp taken from ts_event ({where}), the venue's own event "
+            "time. ts_recv was not available or was not chosen; note that "
+            "ordering by ts_event can differ from the order the book was "
+            "actually observed in."
         )
     return converted, note
 
@@ -487,6 +558,7 @@ def normalize_book(
     for column in PASSTHROUGH:
         if column in frame.columns:
             out[column] = frame[column].to_numpy()
+    _carry_vendor_stamps(frame, out)
 
     if "flags" in out.columns:
         notes.extend(flag_warnings(out["flags"]))
@@ -556,9 +628,85 @@ def normalize_trades(
     for column in PASSTHROUGH:
         if column in frame.columns:
             out[column] = frame[column].to_numpy()
+    _carry_vendor_stamps(frame, out)
     if "flags" in out.columns:
         notes.extend(flag_warnings(out["flags"]))
+    counts = print_counts(out)
+    if counts["zero_size"] or counts["sub_penny"]:
+        notes.append(_print_counts_note(counts))
     return out, notes
+
+
+def print_counts(trades: pd.DataFrame) -> Dict[str, Any]:
+    """
+    Prints that carry no size, and prints at a fraction of a cent.
+
+    Neither is dropped: what the zero-size prints on a venue tape are has
+    not been established, and dropping rows silently would be a second
+    judgement nobody could see. They are COUNTED, because they move
+    different statistics differently. A zero-size print has no weight in a
+    VWAP or any size-weighted mean, so those are unchanged; it is still a
+    row, so a trade count, a per-print rate and an unweighted mean (the
+    count-weighted effective spread) include it, and the tick rule reads
+    its price when it signs the next print. A sub-penny print -- a midpoint
+    or price-improved execution, usually reported off the exchange -- is a
+    real trade at a price no displayed quote could have had.
+
+    Returns `n`, `zero_size`, `sub_penny` and, when the tape carries
+    `publisher_id`, each count broken down by publisher.
+    """
+    n = int(len(trades))
+    counts: Dict[str, Any] = {"n": n, "zero_size": 0, "sub_penny": 0}
+    if not n or "price" not in trades.columns or "size" not in trades.columns:
+        return counts
+    size = pd.to_numeric(trades["size"], errors="coerce")
+    price = pd.to_numeric(trades["price"], errors="coerce")
+    zero = (size == 0).to_numpy()
+    cents = price.to_numpy(dtype="float64") * 100.0
+    with np.errstate(invalid="ignore"):
+        # A millionth of a cent of tolerance absorbs the float error of a
+        # fixed-point price divided by 1e9, and nothing a venue prints.
+        sub = np.isfinite(cents) & (np.abs(cents - np.round(cents)) > 1e-6)
+    counts["zero_size"] = int(zero.sum())
+    counts["sub_penny"] = int(sub.sum())
+    if "publisher_id" in trades.columns:
+        publisher = trades["publisher_id"].to_numpy()
+        for key, mask in (("zero_size", zero), ("sub_penny", sub)):
+            if mask.any():
+                ids, hits = np.unique(publisher[mask], return_counts=True)
+                counts[f"{key}_by_publisher"] = {
+                    str(i): int(h) for i, h in zip(ids, hits)
+                }
+    return counts
+
+
+def _print_counts_note(counts: Dict[str, Any]) -> str:
+    n = int(counts["n"])
+    parts: List[str] = []
+    if counts["zero_size"]:
+        by = counts.get("zero_size_by_publisher")
+        parts.append(
+            f"{int(counts['zero_size']):,} of {n:,} prints have size 0"
+            + (f" (by publisher_id: {by})" if by else "")
+            + ": they carry no weight in a VWAP or a size-weighted mean, but "
+            "they count in n_trades, in per-print rates and in every "
+            "unweighted mean, and the tick rule reads their prices"
+        )
+    if counts["sub_penny"]:
+        by = counts.get("sub_penny_by_publisher")
+        parts.append(
+            f"{int(counts['sub_penny']):,} of {n:,} prints are at a fraction "
+            "of a cent"
+            + (f" (by publisher_id: {by})" if by else "")
+            + ", usually midpoint or price-improved executions reported off "
+            "the exchange -- real trades at prices no displayed quote had"
+        )
+    return (
+        "NOTE: "
+        + "; ".join(parts)
+        + ". They are kept, not dropped; filter on `size` or on price to "
+        "exclude them."
+    )
 
 
 def normalize_mbo(
@@ -627,6 +775,7 @@ def normalize_mbo(
     for column in ("sequence", "flags", "channel_id", "instrument_id", "symbol"):
         if column in frame.columns:
             out[column] = frame[column].to_numpy()
+    _carry_vendor_stamps(frame, out)
     if "flags" in out.columns:
         notes.extend(flag_warnings(out["flags"]))
     return out, notes
@@ -663,6 +812,44 @@ def flag_warnings(flags: pd.Series) -> List[str]:
     return notes
 
 
+def cross_venue_warning(trades: object, quotes: object) -> Optional[str]:
+    """
+    The warning for a tape and a quote panel served by different datasets.
+
+    Read off `attrs["dataset"]`, which the provider writes on every frame it
+    serves and which survives a publish and a resolve. The tape and the
+    quotes are fetched separately and each takes the first dataset that
+    answers ITS schema, so a venue feed that serves trades but not
+    top-of-book quotes answers the tape while the next feed answers the
+    quotes -- and every spread measured from the pair is then one venue's
+    trades against another venue's quotes. Nothing compared the two.
+
+    None when both name the same dataset, or when either names none (a
+    provider that records no dataset cannot be judged either way).
+    """
+    left = _served_dataset(trades)
+    right = _served_dataset(quotes)
+    if left is None or right is None or left == right:
+        return None
+    return (
+        f"WARNING: the trades come from {left} and the quotes from {right}. "
+        "A spread measured from this pair is one venue's tape against "
+        "another venue's quotes: an effective or realized spread, a "
+        "Lee-Ready sign and a price impact all compare prices that never "
+        "met in one book. Fetch both from one dataset (pass the same "
+        "`dataset` to the tape and the quote fetch) for a same-venue "
+        "measurement."
+    )
+
+
+def _served_dataset(frame: object) -> Optional[str]:
+    attrs = getattr(frame, "attrs", None)
+    if not isinstance(attrs, Mapping):
+        return None
+    value = attrs.get("dataset")
+    return str(value) if value else None
+
+
 __all__ = [
     "CONSOLIDATED_START",
     "DATASET_CONSOLIDATED",
@@ -683,11 +870,15 @@ __all__ = [
     "UNDEF_ORDER_SIZE",
     "UNDEF_PRICE",
     "UNDEF_TIMESTAMP",
+    "VENDOR_STAMPS",
     "book_depth",
+    "cross_venue_warning",
     "flag_warnings",
     "looks_like_databento",
     "normalize_book",
     "normalize_mbo",
     "normalize_quotes",
     "normalize_trades",
+    "print_counts",
+    "timestamp_source",
 ]

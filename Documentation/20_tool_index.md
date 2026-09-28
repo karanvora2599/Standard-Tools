@@ -35,10 +35,10 @@ scoped to four categories rather than all of them, so it advertises 58 of the
 | Runtime | Tools | Schema cost | Categories | Deep documentation |
 |---|---:|---:|---|---|
 | `research` | 42 | 62 KB | `screener`, `analysis`, `quant_research` | [08_analysis.md](08_analysis.md), [23_inference.md](23_inference.md) |
-| `modeling` | 37 | 171 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
+| `modeling` | 37 | 172 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
 | `backtest` | 35 | 86 KB | `backtest_execution`, `backtest_validation`, `custom_signal` | [04_backtesting.md](04_backtesting.md), [24_overfitting.md](24_overfitting.md) |
 | `meta` | 25 | 24 KB | `discovery`, `provenance` | [27_meta.md](27_meta.md), [10_auditability.md](10_auditability.md) |
-| `data` | 21 | 34 KB | *(one surface)* | [26_data.md](26_data.md) |
+| `data` | 21 | 36 KB | *(one surface)* | [26_data.md](26_data.md) |
 | `portfolio` | 19 | 36 KB | `portfolio_risk` | [05_portfolio.md](05_portfolio.md) |
 | `delta_one` | 18 | 44 KB | *(one surface)* | [28_delta_one.md](28_delta_one.md) |
 | `microstructure` | 17 | 31 KB | *(one surface)* | [22_microstructure.md](22_microstructure.md) |
@@ -84,7 +84,7 @@ Compute Parabolic SAR (trend), Wilder ATR (volatility), and MFI (volume-flow osc
 
 #### `get_data_quality_report`
 
-Dataset provenance (adjusted/survivorship-free/point-in-time guarantees) plus missing-bar/stale-price/price-jump detection on a symbol's OHLCV.
+Dataset provenance (adjusted/survivorship-free/point-in-time guarantees, the dataset that answered, and whether it is a sample feed) plus missing-bar/stale-price/price-jump/thin-volume detection and duplicate-timestamp, out-of-order and OHLC-consistency checks on a symbol's OHLCV.
 
 **Required:** `symbol`, `start_date`, `end_date`  
 **Optional:** `source`, `calendar`, `stale_run_length`, `jump_threshold`, `volume_window`, `thin_fraction`
@@ -441,7 +441,7 @@ List the exchange calendars this installation knows, and resolve one into the nu
 
 #### `estimate_feature_warmup`
 
-How many bars of history a feature spec burns before its first usable row, at the parameters you are actually requesting. The catalog's lookback is a static number recorded against a feature's DEFAULT parameters, so it is simply wrong the moment a window is overridden: market.momentum is catalogued at 20 bars and consumes 900 when asked for lookback=900, and statistical.hurst is catalogued at 200 and consumes 500 at window=500. This reports declared beside resolved for every feature, names the one that BINDS (the only one worth shortening), adds the deepest lag on top -- lags are warm-up too, charged once at the deepest -- and converts the total into calendar days, which is the unit score_model's lookback_days is given in. That argument has no default that can be right for every spec: too small and scoring refuses with an empty panel, and nothing in the library derived it. Point-in-time features contribute nothing and are named, because their freshness is a staleness bound on records rather than a count of bars. This is the pre-build form of the question explain_dataset_row_loss answers afterwards, once a build has already been paid for. Unknown feature ids and invalid lags are refused here exactly as the dataset builder would refuse them. Fetches nothing.
+How many bars of history a feature spec burns before its first usable row, at the parameters you are actually requesting. The catalog's lookback is a static number recorded against a feature's DEFAULT parameters, so it is simply wrong the moment a window is overridden: market.momentum is catalogued at 20 bars and consumes 900 when asked for lookback=900, and statistical.hurst is catalogued at 200 and consumes 500 at window=500. This reports declared beside resolved for every feature, names the one that BINDS (the only one worth shortening), adds the deepest lag on top -- lags are warm-up too, charged once at the deepest -- and converts the total into calendar days, which is the unit score_model's lookback_days is given in. That argument has no default that can be right for every spec: too small and scoring refuses with an empty panel, and nothing in the library derived it. Beside the total, bars_required_converged: the history after which a RECURSIVE feature (RSI, ATR, ADX, MACD, Parabolic SAR -- EMA and Wilder smoothers carry their start value forward) no longer depends on where the history started, 139 bars for RSI(14) against a first output at 14. That is what a scoring window must cover for the scored values to be the trained ones, given in calendar days as calendar_days_converged. Point-in-time features contribute nothing and are named, because their freshness is a staleness bound on records rather than a count of bars. This is the pre-build form of the question explain_dataset_row_loss answers afterwards, once a build has already been paid for. Unknown feature ids and invalid lags are refused here exactly as the dataset builder would refuse them. Fetches nothing.
 
 **Required:** `features`  
 **Optional:** `interval`, `calendar`
@@ -545,7 +545,7 @@ Fit a preprocessing pipeline on a sample of a built dataset and report what it d
 
 #### `preview_sample_weights`
 
-What a WeightingSpec would actually do to the training rows, before a model is fitted under it. The weighting method is selectable on every ModelSpec, is applied inside the engine, and its distribution is reported nowhere -- so choosing a half_life_days is choosing blind. Returns the percentiles of the weights, the ratio of the heaviest row to the lightest, the share of total weight sitting on the newest tenth of the dates, and two effective sample sizes that measure different things: the Kish size sum(w)^2/sum(w^2), which is these weights' own dispersion, beside the overlap-based count that every out-of-sample metric is already reported against. A weighting whose max/min is 30 is not a correction, it is a re-selection of the sample under another name, and that is visible here and in no result afterwards. method='none' is summarized as the flat weights it is rather than refused. Uniqueness weighting on a panel that carries no label end dates gets the library's own refusal, unchanged, which is the point of asking here first. Fits nothing.
+What a WeightingSpec would actually do to the training rows, before a model is fitted under it. The weighting method is selectable on every ModelSpec, is applied inside the engine, and its distribution is reported nowhere -- so choosing a half_life_days is choosing blind. Returns the percentiles of the weights, the ratio of the heaviest row to the lightest, the share of total weight sitting on the newest tenth of the dates, and two effective sample sizes that measure different things: the Kish size sum(w)^2/sum(w^2), which is these weights' own dispersion, beside the count every out-of-sample metric is already reported against -- rows discounted for label overlap along time and for the labels' measured correlation across entities, with the two bounds it lies between (dates / horizon and rows / horizon) and the correlation that placed it. A weighting whose max/min is 30 is not a correction, it is a re-selection of the sample under another name, and that is visible here and in no result afterwards. method='none' is summarized as the flat weights it is rather than refused. Uniqueness weighting on a panel that carries no label end dates gets the library's own refusal, unchanged, which is the point of asking here first. Fits nothing.
 
 **Required:** `dataset_id`, `weighting`  
 **Optional:** `target`
@@ -566,7 +566,7 @@ Register a model package from an artifact store into THIS runs directory, verifi
 
 #### `register_external_panel`
 
-Register a feature matrix computed OUTSIDE this library -- by a C++ pipeline over an L2 feed, a warehouse query, another system -- as a modeling dataset, without copying it. Use this when the features already exist and build_model_dataset has nothing to fetch or compute. `horizon` is required and is the one thing not inferable from the file: the engine purges training rows whose label window overlaps the test fold, and a missing horizon disables that purge silently rather than failing. The panel's content hash is recorded and verified on every load, so an edited file fails loudly; a moved one stops loading. score_model cannot run on a model trained this way, because rebuilding features needs definitions this library does not have. The path must lie in the runs directory or a directory listed in SQT_EXTERNAL_DIRS.
+Register a feature matrix computed OUTSIDE this library -- by a C++ pipeline over an L2 feed, a warehouse query, another system -- as a modeling dataset, without copying it. Use this when the features already exist and build_model_dataset has nothing to fetch or compute. `horizon` is required and is the one thing not inferable from the file: the engine purges training rows whose label window overlaps the test fold, and a missing horizon disables that purge silently rather than failing. The panel's content hash is recorded and verified on every load, so an edited file fails loudly; a moved one stops loading. A file holding an (entity, date) pair more than once is refused with the count, before anything is registered. score_model cannot run on a model trained this way, because rebuilding features needs definitions this library does not have. The path must lie in the runs directory or a directory listed in SQT_EXTERNAL_DIRS.
 
 **Required:** `path`  
 **Optional:** `horizon`, `targets`, `target_type`, `event_column`, `interval`, `date_column`, `entity_column`, `target_column`, `label_end_column`, `feature_columns`, `source`, `file_format`
@@ -594,7 +594,7 @@ Score the quantile and interval columns of a published predictions reference aga
 
 #### `score_predictions`
 
-Score a predictions reference against its realized outcome — accuracy metrics, cross-sectional IC and ICIR, a predict-the-mean baseline, and an effective sample size adjusted for overlapping forward returns. Works on predictions this library never produced.
+Score a predictions reference against its realized outcome — accuracy metrics, cross-sectional IC and ICIR, a predict-the-mean baseline, and an effective sample size adjusted for overlapping forward returns and for outcomes that move together across entities, with the two bounds it lies between. Works on predictions this library never produced.
 
 **Required:** `predictions_ref`, `task`  
 **Optional:** `target_column`, `prediction_column`, `ic_method`, `ndcg_cutoffs`, `horizon`, `train_mean`, `event_column`
@@ -1123,10 +1123,10 @@ Fetch order-by-order events -- every add, cancel, modify and fill with its own i
 
 #### `fetch_quote_panel`
 
-Fetch top-of-book quotes and publish them as a quote_panel reference, which is what signing trades by the Lee-Ready rule needs alongside a tape. Top of book ONLY -- depth is a different call, and provider='databento' serves it through get_order_book. Queue position is in neither: it needs an order-level feed and cannot be inferred from aggregated size at a level.
+Fetch top-of-book quotes and publish them as a quote_panel reference, which is what signing trades by the Lee-Ready rule needs alongside a tape. Top of book ONLY -- depth is a different call, and provider='databento' serves it through get_order_book. Queue position is in neither: it needs an order-level feed and cannot be inferred from aggregated size at a level. Pass the tape's `dataset` to keep the quotes on the tape's venue.
 
 **Required:** `start_date`, `end_date`, `run_id`, `name`, `symbol`  
-**Optional:** `source`, `limit`
+**Optional:** `source`, `limit`, `dataset`
 
 #### `fetch_returns_panel`
 
@@ -1137,10 +1137,10 @@ Fetch a universe and publish a wide date-by-ticker frame of returns as a returns
 
 #### `fetch_tick_tape`
 
-Fetch individual trades and publish them as a tick_tape reference, for the microstructure tools that measure rather than estimate. Needs a provider with a tick feed. A tape is large, so `limit` caps it -- and when the cap is hit the result says so, because a truncated tape makes every rate and total computed from it understate the real one.
+Fetch individual trades and publish them as a tick_tape reference, for the microstructure tools that measure rather than estimate. Needs a provider with a tick feed. A tape is large, so `limit` caps it -- and when the cap is hit the result says so, because a truncated tape makes every rate and total computed from it understate the real one. The tape and the quotes are routed separately and can come from different venues; pass the same `dataset` here and to fetch_quote_panel for a same-venue pair.
 
 **Required:** `start_date`, `end_date`, `run_id`, `name`, `symbol`  
-**Optional:** `source`, `limit`
+**Optional:** `source`, `limit`, `dataset`
 
 #### `get_dataset_metadata`
 

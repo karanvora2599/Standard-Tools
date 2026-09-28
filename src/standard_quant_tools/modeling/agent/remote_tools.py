@@ -29,7 +29,6 @@ point of moving a package rather than retraining one.
 from __future__ import annotations
 
 import logging
-import os
 from typing import List
 
 from standard_quant_tools.artifact_store import ArtifactStore, store_from_url
@@ -37,7 +36,7 @@ from standard_quant_tools.error import ValidationError
 
 from .. import artifacts as _artifacts
 from ..registry.lifecycle import current_stage
-from ..registry.mirror import MIRROR_URL_ENV
+from ..registry.mirror import MIRROR_URL_ENV, mirror_url
 from ..registry.package import list_remote_models as _list_remote_models
 from ..registry.package import pull_model_package as _pull_model_package
 from .remote_models import (
@@ -87,7 +86,9 @@ _WORKING_SCHEMES = "a directory path, file://, memory://, s3:// or gs://"
 
 def _resolved_store_url(store_url: "str | None", tool: str) -> str:
     """The store to address, or a refusal naming both ways to give one."""
-    url = store_url or os.environ.get(MIRROR_URL_ENV)
+    # The configured mirror as the registry reads it, so a blank value is
+    # "no store" here too rather than a store at the working directory.
+    url = (store_url or "").strip() or mirror_url()
     if not url:
         raise ValidationError(
             f"{tool}: no artifact store to address. Pass store_url=<the "

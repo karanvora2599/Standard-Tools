@@ -247,6 +247,31 @@ class TestTheColumnsAreCheckedFirst:
         with pytest.raises(ValidationError, match="at most 1000"):
             _register(path)
 
+    def test_a_repeated_entity_date_is_refused(self, runs_dir, tmp_path) -> None:
+        """A file holding every row twice registered with twice the rows,
+        and every experiment on it reported twice the out-of-sample rows
+        and twice the effective sample size for the same evidence."""
+        frame = _panel()
+        path = tmp_path / "twice.parquet"
+        pd.concat([frame, frame], ignore_index=True).to_parquet(path, index=False)
+        with pytest.raises(ValidationError) as caught:
+            _register(path)
+        message = str(caught.value)
+        assert f"{len(frame)} duplicate (entity, date) row(s)" in message
+        assert "twice.parquet" in message
+        # Refused before the record was written.
+        runs = tmp_path / "runs"
+        assert not runs.exists() or not any(runs.glob("ds_*"))
+
+    def test_one_repeated_row_is_enough(self, runs_dir, tmp_path) -> None:
+        frame = _panel()
+        path = tmp_path / "one.parquet"
+        pd.concat([frame, frame.iloc[[7]]], ignore_index=True).to_parquet(
+            path, index=False
+        )
+        with pytest.raises(ValidationError, match=r"1 duplicate \(entity, date\)"):
+            _register(path)
+
 
 class TestIntegritySurvivesNotCopying:
     def test_an_edited_panel_fails_the_hash_check(

@@ -29,6 +29,8 @@ from standard_quant_tools.modeling.validation.metrics import (
     baseline_regression_metrics,
     cross_sectional_ic,
     effective_sample_size,
+    effective_sample_size_report,
+    label_cross_sectional_corr,
     regression_metrics,
     summarize_cross_sectional_ic,
 )
@@ -141,15 +143,183 @@ class TestEffectiveSampleSize:
         independent observations."""
         assert effective_sample_size(2000, horizon=20, n_entities=1) == 100.0
 
-    def test_scales_with_entities(self):
-        """Overlap applies along time, not across entities."""
+    def test_independent_entities_scale_and_correlated_ones_do_not(self):
+        """Overlap applies along time; across entities the count depends on
+        how closely their labels move together. This pinned 100.0 at four
+        entities, the value `n_entities` produced by cancelling out of the
+        arithmetic -- the independent-entities ceiling, reported whatever
+        the correlation. At rho=0 that is still the answer; at rho=1 four
+        identical labels on a date are one observation."""
         assert effective_sample_size(2000, horizon=20, n_entities=4) == 100.0
+        assert effective_sample_size(
+            2000, horizon=20, n_entities=4, cross_sectional_corr=1.0
+        ) == pytest.approx(25.0)
+        # n_entities is no longer inert once the labels correlate.
+        assert effective_sample_size(
+            2000, 20, 8, cross_sectional_corr=0.3
+        ) < effective_sample_size(2000, 20, 2, cross_sectional_corr=0.3)
+
+    def test_the_design_effect_is_kish(self):
+        """Planted: 8 names x 400 dates, h=20, rho=0.3. A simulation of the
+        pooled mean's variance puts the truth near 54; the ceiling is 160
+        and the floor 20."""
+        value = effective_sample_size(
+            3200, 20, 8, n_dates=400, cross_sectional_corr=0.3
+        )
+        assert value == pytest.approx(160 / 3.1)
+
+    def test_the_bounds_are_reached_at_the_ends(self):
+        assert effective_sample_size(
+            3200, 20, n_dates=400, cross_sectional_corr=0.0
+        ) == pytest.approx(160.0)
+        assert effective_sample_size(
+            3200, 20, n_dates=400, cross_sectional_corr=1.0
+        ) == pytest.approx(20.0)
+        # Clipped into [0, 1], and an unmeasurable correlation is read as
+        # the independence the ceiling assumes.
+        assert effective_sample_size(
+            3200, 20, n_dates=400, cross_sectional_corr=-0.5
+        ) == pytest.approx(160.0)
+        assert effective_sample_size(
+            3200, 20, n_dates=400, cross_sectional_corr=float("nan")
+        ) == pytest.approx(160.0)
+
+    def test_the_report_carries_the_bounds_and_inputs(self):
+        report = effective_sample_size_report(3200, 20, 400, 0.3)
+        assert report["value"] == pytest.approx(160 / 3.1)
+        assert report["floor"] == pytest.approx(20.0)
+        assert report["ceiling"] == pytest.approx(160.0)
+        assert report["design_effect"] == pytest.approx(3.1)
+        assert report["mean_entities_per_date"] == pytest.approx(8.0)
+        assert report["label_cross_sectional_corr"] == pytest.approx(0.3)
+        unmeasured = effective_sample_size_report(3200, 20, 400, float("nan"))
+        assert unmeasured["label_cross_sectional_corr"] == 0.0
+        assert unmeasured["label_cross_sectional_corr_measured"] is None
 
     def test_horizon_one_is_unchanged(self):
         assert effective_sample_size(500, horizon=1) == 500.0
 
     def test_non_positive_horizon_falls_back_to_raw_count(self):
         assert effective_sample_size(500, horizon=0) == 500.0
+
+
+def _correlated_labels(n_dates, n_entities, rho, seed):
+    rng = np.random.default_rng(seed)
+    common = rng.standard_normal(n_dates)
+    own = rng.standard_normal((n_dates, n_entities))
+    labels = np.sqrt(rho) * common[:, None] + np.sqrt(1.0 - rho) * own
+    dates = np.repeat(pd.bdate_range("2020-01-01", periods=n_dates), n_entities)
+    entities = np.tile([f"E{i}" for i in range(n_entities)], n_dates)
+    return dates, entities, labels.ravel()
+
+
+class TestLabelCrossSectionalCorrelation:
+    def test_a_planted_correlation_is_recovered(self):
+        dates, entities, labels = _correlated_labels(2000, 8, 0.3, seed=3)
+        assert label_cross_sectional_corr(dates, entities, labels) == pytest.approx(
+            0.3, abs=0.03
+        )
+
+    def test_identical_labels_are_perfectly_correlated(self):
+        dates, entities, labels = _correlated_labels(300, 5, 1.0, seed=4)
+        assert label_cross_sectional_corr(dates, entities, labels) == pytest.approx(1.0)
+
+    def test_it_is_the_mean_pairwise_correlation_on_a_balanced_panel(self):
+        dates, entities, labels = _correlated_labels(250, 4, 0.5, seed=5)
+        wide = labels.reshape(250, 4)
+        corr = np.corrcoef(wide, rowvar=False)
+        expected = corr[~np.eye(4, dtype=bool)].mean()
+        assert label_cross_sectional_corr(dates, entities, labels) == pytest.approx(
+            expected
+        )
+
+    def test_an_entity_offset_is_not_correlation(self):
+        """Each entity is standardized over its own rows, so labels that
+        merely sit at different levels are not read as moving together."""
+        dates, entities, labels = _correlated_labels(2000, 6, 0.0, seed=6)
+        offset = labels + np.tile(np.arange(6) * 10.0, 2000)
+        assert abs(label_cross_sectional_corr(dates, entities, offset)) < 0.03
+
+    def test_independent_labels_are_near_zero(self):
+        """The null case."""
+        dates, entities, labels = _correlated_labels(2000, 8, 0.0, seed=7)
+        assert abs(label_cross_sectional_corr(dates, entities, labels)) < 0.02
+
+    def test_one_entity_has_nothing_to_measure(self):
+        dates = pd.bdate_range("2020-01-01", periods=50)
+        rho = label_cross_sectional_corr(
+            dates, np.array(["A"] * 50), np.random.default_rng(0).normal(size=50)
+        )
+        assert np.isnan(rho)
+
+
+def _shared_target_dataset(n_dates=400, n_entities=8, rho=1.0, seed=11):
+    """A hand-built panel whose h=5 labels are overlapping sums of shocks
+    that correlate across entities at `rho` (rho=1: every entity carries
+    the same label)."""
+    horizon = 5
+    rng = np.random.default_rng(seed)
+    common = rng.standard_normal(n_dates + horizon)
+    own = rng.standard_normal((n_dates + horizon, n_entities))
+    shocks = np.sqrt(rho) * common[:, None] + np.sqrt(1.0 - rho) * own
+    cumulative = np.vstack([np.zeros((1, n_entities)), np.cumsum(shocks, axis=0)])
+    labels = cumulative[horizon : n_dates + horizon] - cumulative[:n_dates]
+    dates = pd.bdate_range("2020-01-01", periods=n_dates)
+    frame = pd.DataFrame(
+        {
+            "date": np.repeat(dates, n_entities),
+            "entity": np.tile([f"E{i}" for i in range(n_entities)], n_dates),
+            "f": rng.standard_normal(n_dates * n_entities),
+            "target": labels.ravel(),
+        }
+    )
+    return {
+        "panel": frame,
+        "feature_ids": ["f"],
+        "target_id": f"forward_return:{horizon}",
+        "data_hash": f"shared_{rho}",
+    }
+
+
+class TestTheExperimentReportsTheDesignEffect:
+    SPEC = ModelSpec(
+        task="regression",
+        estimator=EstimatorSpec(type="ridge", params={"alpha": 1.0}),
+        validation=ValidationSpec(train_window=100, test_window=50, embargo=5),
+        random_seed=1,
+    )
+
+    def test_identical_labels_count_once_per_date(self):
+        """Planted: eight entities sharing one target exactly are one
+        observation a date, so the count is the floor, dates / horizon --
+        not the rows / horizon the engine reported while `n_entities`
+        cancelled out."""
+        result = run_experiment(
+            _shared_target_dataset(rho=1.0), self.SPEC, "ds_ess", register=False
+        )
+        report = result["validation_report"]["effective_sample_size"]
+        assert report["label_cross_sectional_corr"] == pytest.approx(1.0)
+        assert report["value"] == pytest.approx(report["floor"])
+        assert report["floor"] == pytest.approx(report["n_dates"] / 5)
+        assert report["ceiling"] == pytest.approx(report["n_rows"] / 5)
+        assert report["ceiling"] == pytest.approx(8 * report["floor"])
+        assert result["oos_metrics"]["effective_sample_size"] == report["value"]
+        assert report["n_rows"] == result["oos_metrics"]["n_oos_rows"]
+
+    def test_independent_labels_keep_the_ceiling(self):
+        """The null case: independent entities, a correlation within noise
+        of zero, and a count near rows / horizon. The estimate's noise is
+        clipped at zero, so it can only lower the count, and by little."""
+        result = run_experiment(
+            _shared_target_dataset(n_dates=1200, rho=0.0),
+            self.SPEC,
+            "ds_ess_null",
+            register=False,
+        )
+        report = result["validation_report"]["effective_sample_size"]
+        assert abs(report["label_cross_sectional_corr_measured"]) < 0.03
+        assert report["value"] > 0.85 * report["ceiling"]
+        assert report["value"] > 5 * report["floor"]
 
 
 class TestBaselineComparison:

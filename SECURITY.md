@@ -83,7 +83,19 @@ user-supplied strategy code (custom signal callables passed to
   lands in the runs directory's `extracts` folder, an absolute one must lie
   in a listed directory, and nothing is ever written into the OHLCV cache,
   the audit directory or the rest of the runs directory, where a planted
-  file would be read back as the library's own. If you find an input that
+  file would be read back as the library's own. An audit bundle is held the
+  same way: `export_audit_bundle` writes only to the runs directory's
+  `bundles` folder or a listed directory, and never replaces an existing
+  file. The artifact store's keys
+  mean the same file on every platform: a trailing dot, a run of dots or a
+  Windows device name (`NUL`, `CON`, `COM1`, ...) is refused everywhere, and
+  a key that reaches an existing file under another spelling (`run8/Report`
+  after `run8/report` on a case-folding filesystem) is refused rather than
+  read or overwritten. A published reference cannot be replaced by a
+  concurrent publish: the value and its sidecar are written exclusively (a
+  temp file hard-linked into place), so of two publishers racing to one
+  `(run_id, name)` exactly one is accepted, and a damaged sidecar is refused
+  rather than read as absent. If you find an input that
   bypasses one of these checks and reaches an unintended path or code
   branch, that's a legitimate report — please include the specific tool name
   and payload.

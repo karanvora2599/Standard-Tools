@@ -222,6 +222,60 @@ class _ScoringContext:
     warnings: List[str]
 
 
+def _unconverged_window_warning(
+    scoring_spec: DatasetSpec, lookback_days: int, caller: str
+) -> Optional[str]:
+    """
+    The caveat for a scoring window too short for a recursive feature to
+    have forgotten where it started, or None.
+
+    The scoring panel is rebuilt from `as_of - lookback_days`, not from the
+    training build's start. A finite-window feature gives the same value
+    either way once its first output exists; an EMA or Wilder smoother
+    still carries its start value, so the row scored is computed
+    differently from the rows the model was trained on. The bars a window
+    of `lookback_days` holds are estimated by calendar arithmetic, so the
+    check runs for daily-or-coarser intervals only; an intraday interval's
+    bars a day are a property of the venue.
+    """
+    from .dataset.lags import deepest_lag
+    from .features.base import periods_per_year_for_interval
+    from .features.params import resolve_params, resolved_lookback, resolved_warmup
+
+    per_year = periods_per_year_for_interval(scoring_spec.interval, None)
+    if per_year is None:
+        return None
+    needed = 0
+    first_output = 0
+    binding: Optional[str] = None
+    for spec in scoring_spec.features:
+        definition = get_feature(spec.id)
+        if definition.scope == FeatureScope.POINT_IN_TIME:
+            continue
+        params = resolve_params(definition, spec.params)
+        converged = resolved_warmup(definition, params)
+        first_output = max(first_output, resolved_lookback(definition, params))
+        if converged > needed:
+            needed, binding = converged, spec.output_name
+    lag = int(deepest_lag(scoring_spec.features))
+    needed += lag
+    if needed <= first_output + lag:
+        return None
+    window_bars = float(lookback_days) / 365.25 * float(per_year)
+    if window_bars >= needed:
+        return None
+    days_needed = needed / float(per_year) * 365.25
+    return (
+        f"{caller}: lookback_days={lookback_days} holds about "
+        f"{window_bars:,.0f} bars, and {binding!r} is a recursive feature that "
+        f"keeps depending on where its history starts for {needed} bars "
+        "(estimate_feature_warmup's bars_required_converged). The scored "
+        "row's value is therefore not the value a longer history -- the "
+        "training build's -- would give it. Pass lookback_days of at least "
+        f"{int(np.ceil(days_needed))}."
+    )
+
+
 def _scoring_context(
     model_id: str,
     as_of: str,
@@ -460,6 +514,9 @@ def _scoring_context(
     scoring_spec = DatasetSpec(
         **{**original_spec_dict, "universe": universe, "start": start, "end": as_of}
     )
+    short_window = _unconverged_window_warning(scoring_spec, lookback_days, caller)
+    if short_window:
+        warnings.append(short_window)
 
     built = build_dataset(scoring_spec, include_target=False)
     panel = built["panel"]

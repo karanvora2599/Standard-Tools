@@ -15,9 +15,9 @@ reads, can push itself here without a cycle.
 
 from __future__ import annotations
 
-import os
 from typing import Optional
 
+from standard_quant_tools._env import env_path, env_str
 from standard_quant_tools.artifact_store import (
     ArtifactStore,
     LocalArtifactStore,
@@ -27,13 +27,29 @@ from standard_quant_tools.artifact_store import (
 MIRROR_URL_ENV = "SQT_MODEL_MIRROR_URL"
 
 
+def mirror_url() -> Optional[str]:
+    """
+    `SQT_MODEL_MIRROR_URL` as the library reads it, or None when unset.
+
+    Blank is unset: three spaces used to count as a mirror, a store rooted
+    at the working directory, and every registration was then copied into
+    whatever directory the process was launched from. A bare path follows
+    the rule every path setting does -- absolute, `~` expanded, never a
+    file -- and a URL with a scheme is passed through for fsspec.
+    """
+    url = env_str(MIRROR_URL_ENV)
+    if url is None or "://" in url:
+        return url
+    return str(env_path(MIRROR_URL_ENV))
+
+
 def mirror_configured() -> bool:
-    return bool(os.environ.get(MIRROR_URL_ENV))
+    return env_str(MIRROR_URL_ENV) is not None
 
 
 def configured_mirror() -> Optional[ArtifactStore]:
     """The store `SQT_MODEL_MIRROR_URL` names, or None."""
-    url = os.environ.get(MIRROR_URL_ENV)
+    url = mirror_url()
     return store_from_url(url) if url else None
 
 
@@ -47,4 +63,10 @@ def mirror_file(model_id: str, filename: str) -> Optional[str]:
     return store.put(key, LocalArtifactStore().get(key))
 
 
-__all__ = ["MIRROR_URL_ENV", "configured_mirror", "mirror_configured", "mirror_file"]
+__all__ = [
+    "MIRROR_URL_ENV",
+    "configured_mirror",
+    "mirror_configured",
+    "mirror_file",
+    "mirror_url",
+]

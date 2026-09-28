@@ -327,6 +327,11 @@ class TestBearerAuth:
             TOKEN,
             f"Basic {TOKEN}",
             f"Bearer {TOKEN}x",
+            # Not ASCII. These raised a TypeError from compare_digest and
+            # answered 500 instead of 401.
+            "Bearer tökén",
+            "Bearer 😀",
+            f"Bearer {TOKEN}é",
         ],
     )
     def test_a_wrong_credential_is_rejected(self, header):

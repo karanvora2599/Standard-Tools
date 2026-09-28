@@ -911,6 +911,14 @@ class TestRedactionSalt:
 # ── Export bundle ───────────────────────────────────────────────────────────
 
 
+def _bundle_path(tmp_path: Path) -> Path:
+    """A bundle destination beside this test's audit directory and owned by
+    this test alone. These tests used to share `<parent>/bundle.zip`, which
+    only worked because an export silently replaced whatever was there; an
+    export now refuses an existing file, so each test names its own."""
+    return tmp_path.parent / f"{tmp_path.name}-bundle.zip"
+
+
 class TestExportBundle:
     def _write_day(self, tmp_path: Path, date: str, tool_name: str = "call") -> Path:
         w = audit.AuditWriter(audit_dir=tmp_path)
@@ -924,7 +932,7 @@ class TestExportBundle:
         self, tmp_path: Path
     ):
         self._write_day(tmp_path, "2024-01-01")
-        out_path = tmp_path.parent / "bundle.zip"
+        out_path = _bundle_path(tmp_path)
 
         result = audit.export_bundle("2024-01-01", "2024-01-01", out_path, tmp_path)
 
@@ -942,7 +950,7 @@ class TestExportBundle:
         self._write_day(tmp_path, "2024-01-01")
         self._write_day(tmp_path, "2024-01-02")
         self._write_day(tmp_path, "2024-01-03")
-        out_path = tmp_path.parent / "bundle.zip"
+        out_path = _bundle_path(tmp_path)
 
         audit.export_bundle("2024-01-02", "2024-01-02", out_path, tmp_path)
 
@@ -954,7 +962,7 @@ class TestExportBundle:
 
     def test_manifest_sha256_matches_bundled_file_content(self, tmp_path: Path):
         self._write_day(tmp_path, "2024-01-01")
-        out_path = tmp_path.parent / "bundle.zip"
+        out_path = _bundle_path(tmp_path)
         audit.export_bundle("2024-01-01", "2024-01-01", out_path, tmp_path)
 
         with zipfile.ZipFile(out_path) as zf:
@@ -975,8 +983,8 @@ class TestExportBundle:
         import importlib.util
 
         self._write_day(tmp_path, "2024-01-01")
-        out_dir = tmp_path.parent / "extracted"
-        out_path = tmp_path.parent / "bundle.zip"
+        out_dir = tmp_path.parent / f"{tmp_path.name}-extracted"
+        out_path = _bundle_path(tmp_path)
         audit.export_bundle("2024-01-01", "2024-01-01", out_path, tmp_path)
 
         with zipfile.ZipFile(out_path) as zf:

@@ -49,6 +49,7 @@ from standard_quant_tools.agent.runtimes._json_safe import (
     finite_or_none as _finite_or_none,
 )
 from standard_quant_tools.analysis import microstructure_estimators as lib
+from standard_quant_tools.data.databento import cross_venue_warning
 from standard_quant_tools.error import ValidationError
 
 from .._optional_ref import publish_if_requested as _publish_if_requested
@@ -684,6 +685,11 @@ def estimate_kyle_lambda(input_data: KyleLambdaInput) -> KyleLambdaResult:
             freq=input_data.freq,
             window=input_data.window,
         )
+        # A tape and quotes fetched separately can come from two venues;
+        # every print is then signed against another venue's midpoint.
+        mismatch = cross_venue_warning(trades, quotes) if quotes is not None else None
+        if mismatch:
+            computed["warnings"] = [mismatch, *list(computed.get("warnings") or [])]
     else:
         frame = _ohlcv(
             "estimate_kyle_lambda", close=input_data.close, volume=input_data.volume

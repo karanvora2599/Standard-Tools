@@ -56,7 +56,7 @@ because the order is the point.
 | `list_features` | optional category filter → the feature catalog (id, description, params, temporal_support, scope, lookback, and for a point-in-time feature the `frame_kind` and `fields` it reads, which is how an agent learns that `fundamental.*` needs `provider="polygon"`) |
 | `check_leakage` | a feature set → whether it is temporally safe to fit on, from each feature's declared temporal support, answered **before** a dataset is built with it; with a `dataset_id`, the empirical lead-lag screen also runs on the built panel, and `scope` says which of the two `safe` rests on |
 | `build_model_dataset` | `DatasetSpec` → fetches OHLCV, computes features + target, persists a Parquet panel, returns a `dataset_id` |
-| `register_external_panel` | a Parquet/CSV feature matrix computed ELSEWHERE → a `dataset_id`, without copying it. Declares one label or SEVERAL, each with its own horizon, so one panel serves a whole horizon curve. The path must lie in the runs directory or a directory listed in `SQT_EXTERNAL_DIRS` |
+| `register_external_panel` | a Parquet/CSV feature matrix computed ELSEWHERE → a `dataset_id`, without copying it. Declares one label or SEVERAL, each with its own horizon, so one panel serves a whole horizon curve. A file holding an (entity, date) pair twice is refused. The path must lie in the runs directory or a directory listed in `SQT_EXTERNAL_DIRS` |
 | `build_model_ensemble` | several `model_id`s → one combined `sqt://predictions` reference, from their OUT-OF-SAMPLE series only. Reports the pairwise correlation that says whether it was worth building, and `correlation_basis` saying whether that correlation was taken on ranks or on levels. The reference carries no realized outcome, so `score_predictions` refuses it directly — run it through `attach_model_outcomes` first, which the description and a run-time warning both say |
 | `analyze_model_errors` | a `model_id` → where its errors are, by entity, period, prediction decile and any feature's decile, plus whether its SCALE is right. The question an R2 cannot answer |
 | `list_datasets` | → every built panel, newest first, with row/entity/feature counts and date span |
@@ -66,8 +66,8 @@ because the order is the point.
 | `join_point_in_time` | `dataset_id` + records → each panel row gets the most recent record **available by then**, never the one describing that date |
 | `validate_model_spec` | `ModelSpec` → that the estimator exists for the task, that its parameters are accepted, how many fits the spec implies once a search grid multiplies through every fold, and whether that is under the spec's `budget.max_fits`; with a `dataset_id`, a universe whose keys resolve to one provider symbol is refused here, before any fetch, and a calendar the build adopted from the universe's venue is named in `warnings` |
 | `plan_model_experiment` | `dataset_id` + `ModelSpec` → the split before the fit: every fold's train and test spans, the rows the purge removes, the inner folds the window supports (zero when it is too short, and that fold is then priced at one fit), the fits per estimator that quantiles and conformal blocks multiply, the fold hashes `run_model_experiment` will reproduce, and the candidate grid on request. Over budget is reported with `within_budget=False`, not refused; the run still refuses |
-| `estimate_feature_warmup` | a list of `FeatureSpec` (+ interval, calendar) → how many bars the panel burns before its first complete row: each feature's lookback RESOLVED from its requested parameters rather than the catalog's default (`market.momentum` at a 900-bar lookback is 900 bars, not 20) plus the deepest lag, with the binding feature named and a calendar-day estimate. This is the number `score_model(lookback_days=)` needs |
-| `preview_sample_weights` | `dataset_id` + `WeightingSpec` → the weight distribution the engine would fit under (percentiles, max/min ratio, the share on the newest decile) and its Kish effective sample size beside the overlap-based one, which measure different things |
+| `estimate_feature_warmup` | a list of `FeatureSpec` (+ interval, calendar) → how many bars the panel burns before its first complete row: each feature's lookback RESOLVED from its requested parameters rather than the catalog's default (`market.momentum` at a 900-bar lookback is 900 bars, not 20) plus the deepest lag, with the binding feature named and a calendar-day estimate. Beside it, `converged` per feature and `bars_required_converged` / `calendar_days_converged` in total: the history after which a recursive feature (RSI, ATR, ADX, MACD, Parabolic SAR) no longer depends on where it started — 139 bars for RSI(14), whose first output is at 14. That second number is the one `score_model(lookback_days=)` needs |
+| `preview_sample_weights` | `dataset_id` + `WeightingSpec` → the weight distribution the engine would fit under (percentiles, max/min ratio, the share on the newest decile) and its Kish effective sample size beside the one every OOS metric is reported against — overlap-adjusted along time and design-effect-adjusted across entities, with its floor (dates / horizon), ceiling (rows / horizon) and the labels' cross-sectional correlation — which measure different things |
 | `preview_preprocessing` | `dataset_id` + `PreprocessingSpec` → each step's columns in and out on a by-date split of the panel, the state shape the engine produces, the explained variance of a whitening step, and the two traps that used to surface only inside a fit: `pca_whiten` refuses NaN and more components than columns, and `missing_indicator` doubles the width |
 | `describe_estimator` | optional `task` and `name` → the bounds behind every parameter name the capability report lists bare (the 2,000-tree ceiling and why, the 4,096 leaves, the solver-by-penalty matrix, the losses with no probability, `n_hidden_units` rather than `hidden_layer_sizes`), the compatibility notes, the calibration options, and with `include_unavailable` the optional estimators this machine lacks. Sized to one estimator; the unfiltered payload is tens of kilobytes and says so |
 | `describe_exchange_calendar` | optional `calendar` and `interval` → the venues the calendar library knows and, for one, its sessions per year, session length and bars per session, with the same refusal `DatasetSpec.calendar` gives an unknown code |
@@ -78,7 +78,7 @@ because the order is the point.
 | `score_model` | `model_id` + `as_of` + `universe` → predictions, persisted as a Parquet artifact and published as a predictions reference (`predictions_ref`) that `attach_model_outcomes` and `convert_reference` read, with `interval_stats` when the model carries a conformal band and a warning when that band is wider than the cross-section's spread |
 | `attach_model_outcomes` | `model_id`, or a predictions reference + `dataset_id` → the predictions joined to the realized target and published as a reference `score_predictions` reads. Refuses a multi-horizon panel rather than guessing its label, and returns the `horizon` to pass on. This is what makes an ensemble's reference scoreable |
 | `backtest_model_signal` | `model_id` → the model's out-of-sample predictions as a `signal_panel` reference for `run_signal_panel_backtest`, through the VERIFIED branch of the bridge: the task comes from the manifest (there is no `task` argument to get wrong), the predictions file is checked against the hash the manifest recorded, and a cpcv model is refused by name with the walk-forward remedy |
-| `score_predictions` | a predictions reference → accuracy metrics, cross-sectional IC and ICIR, a predict-the-mean baseline, `prediction_turnover` (the bridge between an IC and a net-of-cost P&L), and an effective sample size adjusted for overlapping forward returns. Pass `train_mean`: without it the baseline is the TEST set's own mean, whose R2 is zero by construction — an oracle no forecaster could have met |
+| `score_predictions` | a predictions reference → accuracy metrics, cross-sectional IC and ICIR, a predict-the-mean baseline, `prediction_turnover` (the bridge between an IC and a net-of-cost P&L), and an effective sample size adjusted for overlapping forward returns and for outcomes that move together across entities, with the two bounds it lies between. Pass `train_mean`: without it the baseline is the TEST set's own mean, whose R2 is zero by construction — an oracle no forecaster could have met |
 | `evaluate_model_portfolio` | `model_id` + `PredictionTransformSpec` + `PortfolioSimSpec` → OOS predictions turned into target weights and simulated as one shared-cash account, returning Sharpe/drawdown/turnover/exposure plus a persisted weights artifact |
 | `evaluate_predictions_portfolio` | a predictions reference (an ensemble, an external alpha, a scored run) + `task` + the same `PredictionTransformSpec` and `PortfolioSimSpec` → the same simulation as `evaluate_model_portfolio`, inheriting interval, provider, calendar and window from a `dataset_id` or taking them explicitly. Provenance names the reference and its producer, not a model id, and says so |
 | `score_prediction_intervals` | a predictions reference carrying quantile or `lower`/`upper` columns → whether the intervals cover: pinball loss per quantile, the crossing rate, and coverage against the nominal level, pooled or `by` date or entity, because a band that covered 97% in calm and 62% in a selloff is one pooled number away from looking fine. These metrics used to run inside the engine's fold loop and be averaged into one number |
@@ -113,7 +113,7 @@ typed fields for **one** question:
 | `screen_feature_stability` | `dataset_id` (+ features, blocks, reference) → drift and IC stability for every feature at once, with a per-block PSI curve against the first block or the previous one, so a feature that is no longer the same measurement is visible without knowing its name in advance |
 | `run_feature_ablation` | `dataset_id` + `ModelSpec` → refit without each feature in turn, reporting what each was worth |
 | `select_features` | `dataset_id` → a chosen set, selected on the first `1 - holdout_fraction` of the dates (or through `selection_end`), each selected feature's IC on the held-out dates beside its selection IC, and a recorded reason for every exclusion. The clusters it resolved, each drop's `duplicate_of`, the VIFs and the condition number come back with it (the correlation matrix behind `include_correlation`), so `get_feature_redundancy` need not be run a second time for the same panel |
-| `compare_feature_sets` | `dataset_id` + two sets → per-set IC and collinearity, what is unique to each, and the delta. Both sets are summarised on every date unless `holdout_fraction` (or `selection_end`) holds dates out, and the result's `warnings` say so: at fraction 0 every IC in it is in-sample by construction, a comparison between the sets rather than an estimate of either one's out-of-sample strength |
+| `compare_feature_sets` | `dataset_id` + two sets → per-set IC and collinearity, what is unique to each, and the delta. Both sets are summarised on every date unless `holdout_fraction` (or `selection_end`) holds dates out, and the result's `warnings` say so: at fraction 0 every IC in it is in-sample by construction, a comparison between the sets rather than an estimate of either one's out-of-sample strength. A feature the dataset lacks is refused before anything is computed, naming every missing feature in the order given, so the refusal reads the same in every process |
 
 `feature_lab` is a sibling runtime, not part of `modeling`'s dispatch table;
 the per-runtime counts are in the generated
@@ -279,7 +279,9 @@ print(exp_result.oos_metrics)
 #   cs_ic_mean / cs_ic_icir / cs_ic_hit_rate       (per-date IC, summarized)
 #   cs_rank_ic_mean / cs_rank_ic_icir / ...
 #   baseline_mae                                   (predict-the-mean comparison)
-#   n_oos_rows / effective_sample_size             (overlap-adjusted)
+#   n_oos_rows / effective_sample_size             (overlap- and design-effect-adjusted;
+#                                                   validation_report["effective_sample_size"]
+#                                                   carries its bounds and inputs)
 print(exp_result.validation_report["n_folds_completed"], "of",
       exp_result.validation_report["n_folds_expected"])
 
@@ -676,7 +678,39 @@ question before one is paid for: each feature's lookback **resolved from
 the parameters actually requested** rather than the catalog's default
 (`market.momentum` at `lookback=900` burns 900 bars, not 20), plus the
 deepest lag, with the binding feature named and a calendar-day estimate.
-It is also the number `score_model(lookback_days=)` needs.
+
+That total is where the panel can **start**. It is not enough history for a
+recursive feature's value to stop depending on where the history started:
+an EMA or a Wilder average carries its start value forward with weight
+`(1 - alpha)^n`, so an RSI computed from 2016 and one computed from 2010
+disagree for more than a hundred bars after the first output, on rows that
+are not NaN and that no alignment drops. `score_model` rebuilds features
+from `as_of - lookback_days`, a different start than the training build's,
+so a scoring window that short scores a feature computed differently from
+the one the model was trained on. `estimate_feature_warmup` reports the
+second quantity beside the first: `converged` per feature — the bars until
+the start value's weight is below `warmup_tolerance` (1e-4) — and
+`bars_required_converged` / `calendar_days_converged` in total.
+
+| Feature (default params) | first output (`resolved`) | `converged` |
+|---|---|---|
+| `technical.rsi` (14), `risk.atr_pct` (14) | 14 | 139 = 14 + 125 |
+| `technical.macd_histogram` (12, 26, 9) | 26 | 188 = 26 + 120 + 42 |
+| `technical.adx` (14) | 14 | 187 = 28 + 159 |
+| `market.psar_trend` | 1 | 100 |
+| every finite-window feature | its window | the same |
+
+A single smoother forgets its start in `ceil(ln(eps) / ln(1 - alpha))` bars
+(`alpha = 1/p` for Wilder, `2/(s+1)` for an EMA); stages in series add, and
+ADX's two Wilder stages of one rate decay as `(1 + n*alpha)(1 - alpha)^n`.
+Parabolic SAR is a state machine with no decay rate; 100 bars covers the
+worst coupling time measured over 450 start pairs (81), and scales up for a
+smaller `af_start`. At these warm-ups the truncated and full-history values
+agree to within 3e-4 of the feature's standard deviation. `score_model` warns
+when `lookback_days` holds fewer bars than `bars_required_converged` (daily
+and coarser intervals; the default 400 days covers every default parameter
+set). `bars_required` and `resolved` keep their meaning — the bars to the
+first output, which is what the row-loss accounting above counts.
 
 **`entities` reports what reached the panel**, not what was fetched. The
 two differ whenever a symbol's history is shorter than the feature
@@ -862,6 +896,14 @@ tool refuses to guess.
 
 Supply `label_end_column` as well for a label that can end early — a triple
 barrier — so the purge uses the real end rather than the nominal horizon.
+
+### One row per entity and date
+
+A file that holds an `(entity, date)` pair more than once is refused with
+the count, a sample and the file's path, before anything is registered.
+Each repeat would be trained on and tested on twice, doubling
+`n_oos_rows` and the effective sample size for the same evidence;
+`run_model_experiment` refuses the same panel if it arrives another way.
 
 ### What it costs
 
@@ -1432,12 +1474,29 @@ dates — an integer embargo under-purges exactly there. The count of purged
 rows is reported as `n_train_rows_purged_overlap` rather than applied
 silently: a large value means the horizon is consuming a real fraction of
 each training window, which changes how you read the metrics.
-`validation_report.purge` says whether the purge could run at all:
-`"label_end"` when the panel carries `label_end_date`, `"not_applicable"`
-when it does not — and then `n_train_rows_purged_overlap` is `None`, not
-`0`. Without that column the purge was a no-op that wrote `0`, the same
-value a clean run gives, on a panel with 280 overlapping rows; the inner
-search's report says the same.
+`validation_report.purge` says which label end the purge ran on:
+`"label_end"` when the panel carries `label_end_date`, and
+`"label_end_derived_from_horizon"` when it does not but its `target_id`
+names a horizon (`forward_return:5`) — a dataset dict assembled by hand, or
+one persisted before the column existed. The end is then derived the way
+`register_external_panel` derives it, the date `horizon` rows ahead on the
+entity's own dates (NaT where the panel ends first), and a warning says so:
+exact for a fixed-horizon label, a superset of the overlapping rows for one
+that can end early. The inner search's report and `plan_model_experiment`
+read the same ends, and `preview_sample_weights` weights by them. A panel
+with neither the column nor a horizon is **refused**, naming both remedies,
+rather than validated on training rows whose labels may reach the test
+window. (Such a panel used to skip the purge — first writing `0`, the value
+a clean run gives, on a panel with 280 overlapping rows, then reporting
+`"not_applicable"` — although the horizon it needed was known.)
+
+**One row per (entity, date).** `run_model_experiment` refuses a panel in
+which a pair appears twice, with the count and a sample, and
+`register_external_panel` refuses such a file before anything is
+registered. A repeated row is trained on and tested on twice: a panel
+written out twice reported 960 out-of-sample rows for 480, and twice the
+effective sample size, for the same evidence. The predictions frame the
+bridge reads was always refused on the same condition.
 
 **`embargo` therefore does not need to cover the horizon.** It remains
 useful for feature-side lookback bleed.
@@ -1469,11 +1528,30 @@ cross-sectional model on; the pooled values are kept for continuity.
   realized return, so a test-derived constant holds the model against a
   standard no real forecaster could meet. `baseline_is_oracle` reports
   which is in force, so a caller never has to infer it.
-- `effective_sample_size` — `n_oos_rows` discounted for target overlap. A
-  `horizon`-bar target generated every bar produces labels sharing
-  `horizon−1` of their bars, so 2,000 daily rows of a 20-day target carry
-  roughly 100 independent observations per entity, not 2,000. A first-order
-  correction, not a full Newey-West adjustment.
+- `effective_sample_size` — `n_oos_rows` discounted twice. **Along time**
+  for target overlap: a `horizon`-bar target generated every bar produces
+  labels sharing `horizon−1` of their bars, so 2,000 daily rows of a 20-day
+  target carry roughly 100 independent observations per entity, not 2,000
+  (a first-order correction, not a full Newey-West adjustment). **Across
+  entities** for labels that move together: rows on one date are one
+  cluster, and the Kish design effect `1 + (m−1)·rho` — `m` entities a
+  date, `rho` the labels' cross-sectional correlation, measured on the
+  tested rows with each entity standardized over its own — says how many
+  of them count as one. The count lies between a **floor**, `n_dates /
+  horizon` (every entity's label the same; also the count behind a per-date
+  statistic such as `cs_ic_mean`), and a **ceiling**, `n_oos_rows /
+  horizon` (every entity independent). Eight names at an equity-like
+  `rho = 0.3` over 400 dates of a 20-day target: ceiling 160, floor 20, and
+  51.6 — where a simulation of the pooled mean's variance puts it (54).
+  `validation_report["effective_sample_size"]` carries the value, `floor`,
+  `ceiling`, `label_cross_sectional_corr` (clipped to [0, 1]; 0 when it
+  cannot be measured, with `label_cross_sectional_corr_measured` None),
+  `design_effect`, `mean_entities_per_date`, `n_rows`, `n_dates` and
+  `horizon`. This used to report the ceiling whatever the correlation: the
+  entity count was passed in and cancelled out of the arithmetic.
+  `score_predictions` and `preview_sample_weights` report the same count
+  with `effective_sample_size_floor`, `effective_sample_size_ceiling` and
+  `label_cross_sectional_corr`.
 - For classification: `positive_rate` and `majority_class_accuracy` — the
   number `accuracy` has to beat. A 95/5 split scores 0.95 by always
   guessing the majority class.
@@ -1941,7 +2019,10 @@ weights that act on it.
 `label_uniqueness` weights each row by the mean of `1/concurrency` over the
 bars its own label spans (López de Prado, *Advances in Financial Machine
 Learning*, ch. 4). It is computed **per entity**, because two entities'
-labels are different series and do not make each other redundant. Weights
+labels are different series whose bars do not overlap. They can still move
+together on a date — that is a property of the whole cross-section, not of
+any one row, so it enters the effective sample size as the design effect
+and not these weights. Weights
 are normalized to mean 1, so turning weighting on does not also rescale the
 effective regularization strength.
 
@@ -1956,9 +2037,13 @@ corrected for label overlap and did not.
 `preview_sample_weights` shows the distribution a spec implies before a fit
 pays for it: the percentiles, the max/min ratio, the share of the weight on
 the newest decile, and the Kish effective sample size beside the
-overlap-based one. The two answer different questions — Kish measures how
-uneven the weights are, the overlap figure how much the labels repeat
-themselves — and a weighting can leave one fine and the other ruinous.
+overlap- and design-effect-based one (with its floor, ceiling and the
+labels' cross-sectional correlation). The two answer different questions —
+Kish measures how uneven the weights are, the other how much the labels
+repeat themselves, along time and across entities — and a weighting can
+leave one fine and the other ruinous. A panel with no `label_end_date` is
+weighted on ends derived from the target's horizon, as the engine derives
+them.
 
 ---
 
@@ -2011,6 +2096,15 @@ panel that chose what the registered estimator carries, and
 `deployed_params` beside it are those values — read them against the
 per-fold list, since a deployed choice the folds never agreed on is the
 same signal one level up.
+
+**A value listed twice is one candidate.** Each `param_grid` axis is taken
+as its distinct values, in the order first given, before the grid is
+enumerated or sampled (and before TPE draws a categorical): `{"alpha":
+[0.1, 0.1, 1.0]}` scores two candidates, `n_candidates`, the plan's fit
+count and the budget check count two, each search report records
+`duplicate_values_dropped`, and the run's `warnings` say so. Values that
+differ in type stay apart — sklearn reads `max_features=1` as one feature
+and `1.0` as all of them.
 
 **What it costs.** Roughly `(grid size × inner_splits)` extra fits per outer
 fold, plus the same again once for the final search on the full panel that
@@ -3084,6 +3178,22 @@ The rules are the ones the log exists to make visible:
   recorded like any other line, because rolling back is worth a reason.
 - **`archived` is terminal**, reachable from anywhere. A retired model is
   not revived; retraining produces a new `model_id` with its own history.
+- **One decision at a time.** Reading the stage, checking the move and
+  appending it happen under a cross-process lock on a dot-prefixed file
+  beside the log (`.promotions.lock`, which no package listing, mirror or
+  pull sees), with the stage re-read inside the lock. Two promotions racing
+  on one model are decided one after the other, each against the stage it
+  actually follows, so every record's `from` is the previous record's `to`;
+  the second of two identical promotions is refused as already made. If the
+  lock cannot be taken the promotion is refused rather than made unlocked.
+  `pull_model_package` writes a pulled `promotions.jsonl` under the same
+  lock.
+- **A line is committed by its newline.** An append interrupted part-way
+  leaves an unterminated fragment at the end of the log; that is not a
+  record, and it no longer makes the stage unreadable. It is skipped, kept
+  as evidence in a dot-prefixed `.promotions.torn-*` file beside the log
+  and cut off, under the lock. A line that does not parse anywhere else is
+  an edit, and still makes the stage untrustworthy until it is repaired.
 - **A reason is required** and must be more than a word. It is read months
   later by someone deciding whether to trust the model, and `ok` does not
   help them.

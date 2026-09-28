@@ -249,6 +249,14 @@ class TestThroughTheEngine:
             run_experiment(stripped, _spec(), "ds", register=False)
 
     def test_a_search_selects_on_concordance_over_purged_inner_folds(self, dataset):
+        """The planted rows are independent draws, so each label ends on its
+        own date, and the panel says so. Without the column the engine now
+        derives each row's end from `time_to_fill:50` -- fifty bars ahead --
+        and a 160-date training window purged by fifty dates before each
+        inner block leaves the inner folds nothing to fit; this ran before
+        only because such a panel skipped the purge."""
+        panel = dataset["panel"].assign(label_end_date=dataset["panel"]["date"])
+        dataset = {**dataset, "panel": panel}
         spec = _spec(
             search=SearchSpec(
                 param_grid={"alpha": [0.0, 100.0]},

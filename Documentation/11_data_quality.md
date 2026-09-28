@@ -72,13 +72,19 @@ action is a finding rather than a false positive.
 
 ## Data Quality Checks (`data/quality.py`)
 
-Four pure functions operating on an already-fetched OHLCV `DataFrame` —
-no new data source, no network calls.
+Pure functions operating on an already-fetched OHLCV `DataFrame` — no new
+data source, no network calls. Four are heuristics whose findings are leads
+(gaps, thin volume, stale prices, jumps); three are integrity checks whose
+findings are data errors (duplicate labels, labels out of order, bars whose
+prices contradict each other); one reads provenance rather than numbers
+(a sample feed).
 
 ```python
 from standard_quant_tools.data.quality import (
     detect_missing_bars, detect_volume_anomalies,
     detect_stale_prices, detect_price_jumps,
+    detect_duplicate_timestamps, detect_out_of_order_timestamps,
+    detect_ohlc_inconsistencies, detect_sample_feed,
 )
 
 df = provider.get_ohlcv("AAPL", "2023-01-01", "2024-01-01")
@@ -87,6 +93,10 @@ gaps = detect_missing_bars(df, calendar="XNYS")
 thin = detect_volume_anomalies(df, window=20, thin_fraction=0.05)
 stale = detect_stale_prices(df, n=3)
 jumps = detect_price_jumps(df, threshold=0.15)
+repeated = detect_duplicate_timestamps(df)
+backwards = detect_out_of_order_timestamps(df)
+contradictory = detect_ohlc_inconsistencies(df)
+sample = detect_sample_feed(df)     # None unless attrs["dataset"] names a sample feed
 ```
 
 **`detect_missing_bars(df, calendar="XNYS")`** — flags sessions missing from
@@ -98,14 +108,46 @@ holidays (Thanksgiving, Christmas, etc.) show up as false-positive "gaps" —
 on a live year every one of the 21 reported gaps was a holiday, which is why
 the calendar path exists. Each entry says which it used, `"basis":
 "calendar"` or `"weekday"`, so a reader knows whether a finding is a lead or
-a defect.
+a defect. The span checked runs from the earliest bar to the latest, so an
+index out of order does not shrink it.
 
 **`detect_volume_anomalies(df, window=20, thin_fraction=0.05)`** — flags bars
 whose `Volume` is zero (`kind="zero"`) or below `thin_fraction` of the
 trailing `window`-bar median (`kind="thin"`), with the median beside each.
-A sample feed that carries a few percent of the consolidated tape reads as
-thin against a full-volume history, and a halted session reads as zero;
-neither is visible from prices alone.
+A halted session reads as zero and a bar thin next to its neighbours reads
+as thin; neither is visible from prices alone. **It cannot find a sample
+feed.** Each bar is judged against the frame's own history, so the test is
+blind to scale: multiplying every volume by 0.036 gives the same answer, and
+a feed carrying 3.6% of the tape on every bar reads exactly like the tape.
+Only a frame that switches feeds part-way shows a thin stretch.
+
+**`detect_sample_feed(df)`** — answers the question no statistic can, from
+provenance. A provider that chooses among datasets stamps the one that
+answered on the frame (`df.attrs["dataset"]`; Databento does, including on a
+cache hit), and this returns `{"dataset", "provider", "note"}` when that
+dataset is a known sample of the tape — `EQUS.MINI`, whose volume is 2-4% of
+consolidated and whose daily close is the last print of the UTC day. `None`
+means "not known to be a sample", not "known to be the tape": a frame with no
+stamp says nothing either way.
+
+**`detect_duplicate_timestamps(df)`** — bar labels that occur more than
+once, each with its count and row positions. Two rows under one timestamp
+are two answers to one question: a join or `.loc` lookup returns both, a
+resample counts the bar twice.
+
+**`detect_out_of_order_timestamps(df)`** — rows whose label is earlier than
+the row before it, with both labels. Every rolling window, return and fill
+reads the rows in order as time, so a swapped pair corrupts each of them
+without an error. A repeated label is a duplicate, not out of order.
+
+**`detect_ohlc_inconsistencies(df)`** — bars whose prices contradict each
+other: `Low` above `High` (`kind="low_above_high"`, reported once, since the
+range is then empty), or `Open`/`Close` outside `[Low, High]`
+(`"open_outside_range"`, `"close_outside_range"`). A bar's high and low bound
+every trade in it, so any of these is a data error rather than a market
+event, and every Close-only check above is blind to it. A relative tolerance
+of `1e-9` absorbs floating-point noise in a scaled or adjusted price, so a
+bar with all four prices equal is never flagged.
 
 **`detect_stale_prices(df, n=3)`** — flags runs of `n`+ consecutive
 identical `Close` values, a likely stale/frozen quote (a real market rarely
@@ -138,6 +180,15 @@ all the way through looks normal — it is thin CONSISTENTLY, not
 occasionally. Raise it (0.5 with a short window) to ask whether volume is
 thin relative to its own recent past.
 
+Whether the bars came from a sample feed is answered by provenance instead:
+`served_dataset` is the dataset the provider stamped on the frame (`None`
+for a provider that names none), and `sample_feed` is `True` — with
+`sample_feed_note` saying what the feed is — when that dataset is a known
+sample of the tape. The three integrity checks run on every report and take
+no arguments: `duplicate_timestamps`, `out_of_order_timestamps` and
+`ohlc_inconsistencies` are data errors rather than leads, and nothing
+downstream refuses them.
+
 ```python
 from standard_quant_tools.agent.tools import get_data_quality_report
 from standard_quant_tools.agent.models import DataQualityReportInput
@@ -154,6 +205,10 @@ print(result.missing_bars)      # [{"date": ..., "weekday": ..., "basis": "calen
 print(result.stale_price_runs)  # [{"start": ..., "end": ..., "price": ..., "run_length": ...}, ...]
 print(result.price_jumps)       # [{"date": ..., "pct_change": ...}, ...]
 print(result.volume_anomalies)  # [{"date": ..., "volume": ..., "trailing_median": ..., "kind": "zero" | "thin"}, ...]
+print(result.served_dataset, result.sample_feed)   # e.g. "EQUS.MINI", True
+print(result.duplicate_timestamps)     # [{"timestamp": ..., "count": ..., "positions": [...]}, ...]
+print(result.out_of_order_timestamps)  # [{"position": ..., "timestamp": ..., "previous": ...}, ...]
+print(result.ohlc_inconsistencies)     # [{"date": ..., "position": ..., "kind": ..., "open": ..., "high": ..., "low": ..., "close": ...}, ...]
 ```
 
 See [09_advanced_agent_tools.md](09_advanced_agent_tools.md) for the tool's

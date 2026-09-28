@@ -96,6 +96,10 @@ from standard_quant_tools.backtest.stress_test import (
     scenario_dates,
 )
 from standard_quant_tools.data.base import DataProvider
+from standard_quant_tools.data.databento import (
+    cross_venue_warning as _cross_venue_warning,
+)
+from standard_quant_tools.data.databento import print_counts as _print_counts
 from standard_quant_tools.data.factory import DataFactory
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.indicators.volatility import atr
@@ -1039,6 +1043,35 @@ def _fetch_ticks(provider: Any, symbol: str, start: str, end: str, limit: Any):
     return trades, quotes
 
 
+def _tape_disclosures(trades: Any, quotes: Any = None) -> List[str]:
+    """
+    What the pair of frames says about itself that a measure built on it
+    has to repeat: a tape and quotes from two venues, and prints that move
+    counts without moving volume.
+
+    The two fetches above are routed separately, so a provider whose first
+    venue serves trades but not quotes hands back a cross-venue pair, and
+    every spread below is then one venue's trades against another's
+    quotes. Each frame named its dataset and nothing compared them.
+    """
+    notes: List[str] = []
+    if quotes is not None:
+        mismatch = _cross_venue_warning(trades, quotes)
+        if mismatch:
+            notes.append(mismatch)
+    counts = _print_counts(trades) if isinstance(trades, pd.DataFrame) else {}
+    zero, sub = int(counts.get("zero_size") or 0), int(counts.get("sub_penny") or 0)
+    if zero or sub:
+        notes.append(
+            f"{zero:,} of {int(counts.get('n') or 0):,} prints have size 0 and "
+            f"{sub:,} are at a fraction of a cent; both are kept. A zero-size "
+            "print has no weight in the VWAP or any size-weighted figure, but "
+            "it is counted in n_trades and in every count-weighted mean, and "
+            "the tick rule reads its price. Read the size-weighted figures."
+        )
+    return notes
+
+
 def get_microstructure_metrics(
     input_data: MicrostructureInput,
 ) -> MicrostructureResult:
@@ -1088,6 +1121,7 @@ def get_microstructure_metrics(
     summary = _microstructure_summary(trades, quotes, horizon)
 
     notes: List[str] = list(summary.get("notes", []))
+    notes.extend(_tape_disclosures(trades, quotes))
     if input_data.limit is not None and len(trades) >= input_data.limit:
         notes.append(
             f"Exactly {input_data.limit} trades came back, which is the "
@@ -1171,7 +1205,8 @@ def get_trade_profile(input_data: TradeProfileInput) -> TradeProfileResult:
     sizes = _trade_size_profile(trades, buckets=input_data.size_buckets)
     times = _intraday_volume_profile(trades, freq=input_data.intraday_freq)
 
-    notes: List[str] = []
+    notes: List[str] = list(times.get("warnings", []))
+    notes.extend(_tape_disclosures(trades))
     if input_data.limit is not None and len(trades) >= input_data.limit:
         notes.append(
             f"Exactly {input_data.limit} trades came back, which is the "
@@ -1194,6 +1229,12 @@ def get_trade_profile(input_data: TradeProfileInput) -> TradeProfileResult:
         intraday_buckets=[TimeBucket(**bucket) for bucket in times["buckets"]],
         peak_time=times["peak_time"],
         peak_volume_fraction=float(times["peak_volume_fraction"]),
+        peak_bucket=times["peak_bucket"],
+        trough_bucket=times["trough_bucket"],
+        trough_time=times["trough_time"],
+        trough_volume_fraction=float(times["trough_volume_fraction"]),
+        n_empty_intraday_buckets=int(times["n_empty_buckets"]),
+        extended_hours_share=times["extended_hours_share"],
         notes=notes,
     )
 
@@ -1287,6 +1328,7 @@ def check_spread_proxy(input_data: SpreadProxyCheckInput) -> SpreadProxyCheckRes
         "They describe overlapping but not identical periods, which is "
         "inherent to checking a bar estimator against tick data."
     ]
+    notes.extend(_tape_disclosures(trades, quotes))
     if verdict == "proxy_understates":
         notes.append(
             f"The proxy charges roughly {ratio:.2f}x the measured spread, so "

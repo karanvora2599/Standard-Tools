@@ -5,22 +5,39 @@ the real user cache directory.
 """
 
 import os
+import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pandas as pd
 import pytest
 
 import standard_quant_tools.data._cache as cache_module
 import standard_quant_tools.data.yfinance_provider as provider_module
+from standard_quant_tools.cli import cmd_cache_gc
+from standard_quant_tools.cli import main as cli_main
 from standard_quant_tools.data._cache import _parquet_path
+from standard_quant_tools.data.databento import DATASET_SUMMARY
+from standard_quant_tools.data.polygon_provider import PolygonProvider
 from standard_quant_tools.data.yfinance_provider import (
     YFinanceProvider,
     _is_historical,
     _norm_date,
 )
 from standard_quant_tools.error import ValidationError
+
+from .test_databento_provider import (
+    BASIC,
+    CONSOLIDATED,
+    DEPTH,
+    SINCE_2023,
+    WIDE,
+    StubClient,
+)
+from .test_databento_provider import _provider as _databento
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -377,27 +394,19 @@ class TestTimezoneNormalization:
     def test_cache_dir_uses_env_var(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        """SQT_CACHE_DIR env variable should control the cache directory."""
-        import importlib
+        """SQT_CACHE_DIR controls the cache directory.
 
+        The root is resolved at first use now, not at import, so this no
+        longer reloads the module to see a new value: it clears the
+        resolved root, and the next use reads the variable.
+        """
         custom_dir = tmp_path / "custom_cache"
         monkeypatch.setenv("SQT_CACHE_DIR", str(custom_dir))
-        # _CACHE_ROOT is computed at import time in _cache.py; provider_module
-        # binds its own reference to it via `from ._cache import ...`, so
-        # both modules need reloading (cache first) for this to propagate,
-        # and both need reloading back afterward in a finally -- otherwise
-        # this test leaves provider_module's bound references (e.g.
-        # _session_cache) pointing at objects reload just replaced in
-        # cache_module, silently breaking cache isolation for every test
-        # that runs after this one in the same process.
-        importlib.reload(cache_module)
-        importlib.reload(provider_module)
-        try:
-            assert str(custom_dir) in str(cache_module._CACHE_ROOT)
-        finally:
-            monkeypatch.delenv("SQT_CACHE_DIR", raising=False)
-            importlib.reload(cache_module)
-            importlib.reload(provider_module)
+        monkeypatch.setattr(cache_module, "_CACHE_ROOT", None)
+        assert cache_module.cache_root() == custom_dir
+        assert cache_module._CACHE_ROOT == custom_dir
+        path = _parquet_path("AAPL", "2022-01-01", "2022-06-01", "1d")
+        assert path.parent == custom_dir.resolve()
 
 
 class TestCacheHardening:
@@ -495,17 +504,21 @@ class TestCacheHardening:
         must still use different temp filenames — proving uniqueness comes
         from more than just the PID, which alone doesn't protect against
         two threads in the same process racing on the same cache file.
+
+        The write goes through the library's one atomic writer, which
+        renames with `os.replace` rather than `Path.replace`, so that is
+        what is spied on.
         """
         tmp_names = []
-        orig_replace = Path.replace
+        orig_replace = os.replace
 
-        def spy_replace(self, target):
-            tmp_names.append(self.name)
-            return orig_replace(self, target)
+        def spy_replace(src, dst):
+            tmp_names.append(Path(src).name)
+            return orig_replace(src, dst)
 
         with (
             patch("yfinance.Ticker") as mock_ticker,
-            patch.object(Path, "replace", spy_replace),
+            patch("os.replace", spy_replace),
         ):
             mock_ticker.return_value.history.return_value = minimal_ohlcv.rename(
                 columns=str.lower
@@ -611,6 +624,9 @@ class TestIntervalAwareNormalization:
     @pytest.mark.parametrize(
         "interval,expected",
         [
+            # Databento's one-second bars: read as daily, every bar of a day
+            # was flattened onto its midnight.
+            ("1s", True),
             ("1m", True),
             ("2m", True),
             ("5m", True),
@@ -631,6 +647,12 @@ class TestIntervalAwareNormalization:
     )
     def test_interval_classification(self, interval, expected):
         assert cache_module.is_intraday_interval(interval) is expected
+
+    def test_one_second_bars_keep_their_seconds(self):
+        idx = pd.date_range("2026-08-11 14:30:00", periods=4, freq="s")
+        df = pd.DataFrame({"Close": [1.0, 2.0, 3.0, 4.0]}, index=idx)
+        out = cache_module._normalize_ohlcv_index(df, "1s")
+        assert list(out.index) == list(idx)
 
     def test_intraday_timestamps_preserved(self):
         idx = pd.DatetimeIndex(
@@ -798,3 +820,427 @@ class TestCacheFormatVersioning:
         current = _parquet_path("AAPL", "2022-01-01", "2023-01-01", "1d").name
         legacy = "yfinance_AAPL_2022-01-01_2023-01-01_1d.parquet"
         assert current != legacy
+
+
+# ── The cache root: resolved at first use, blank is the default ───────────────
+
+
+class TestTheCacheRootIsReadAtFirstUse:
+    """
+    The root was read at import with a bare `os.environ.get`: an empty
+    `SQT_CACHE_DIR` meant the working directory, a relative one moved with
+    it, and a value in a local `.env` was never seen because nothing had
+    loaded the file yet. It is read through `env_path` at first use now.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _elsewhere(self, tmp_path, monkeypatch):
+        # A regression that accepted a relative root would create it under
+        # the working directory; make that a throwaway one.
+        monkeypatch.chdir(tmp_path)
+
+    def _unresolved(self, monkeypatch, value):
+        monkeypatch.setattr(cache_module, "_CACHE_ROOT", None)
+        monkeypatch.setenv("SQT_CACHE_DIR", value)
+
+    @pytest.mark.parametrize("blank", ["", "   "])
+    def test_a_blank_setting_is_the_default_not_the_working_directory(
+        self, monkeypatch, blank
+    ):
+        self._unresolved(monkeypatch, blank)
+        root = cache_module.cache_root()
+        assert root == Path.home() / ".cache" / "standard_quant_tools" / "ohlcv"
+        assert root.is_absolute()
+
+    def test_a_relative_setting_is_refused_by_name(self, monkeypatch):
+        self._unresolved(monkeypatch, "relative/cache")
+        with pytest.raises(ValidationError, match="SQT_CACHE_DIR is a relative"):
+            cache_module.cache_root()
+
+    def test_the_refusal_is_not_mistaken_for_an_uncacheable_symbol(self, monkeypatch):
+        """`_safe_parquet_path` turns a symbol the cache cannot encode into
+        "skip the cache for this call". A misconfigured root is not that:
+        skipping would quietly turn the disk cache off for every call."""
+        self._unresolved(monkeypatch, "relative/cache")
+        with pytest.raises(ValidationError, match="SQT_CACHE_DIR"):
+            cache_module._safe_parquet_path("AAPL", "2022-01-01", "2022-06-01", "1d")
+
+    def test_a_fetch_is_refused_before_any_network_call(self, monkeypatch):
+        self._unresolved(monkeypatch, "relative/cache")
+        with patch("yfinance.Ticker") as mock_ticker:
+            with pytest.raises(ValidationError, match="SQT_CACHE_DIR"):
+                YFinanceProvider().get_ohlcv("AAPL", "2022-01-01", "2022-06-01")
+        assert mock_ticker.call_count == 0
+        assert not (Path.cwd() / "relative").exists()
+
+    def test_resolved_once_then_fixed_for_the_process(self, tmp_path, monkeypatch):
+        self._unresolved(monkeypatch, str(tmp_path / "first"))
+        assert cache_module.cache_root() == tmp_path / "first"
+        monkeypatch.setenv("SQT_CACHE_DIR", str(tmp_path / "second"))
+        assert cache_module.cache_root() == tmp_path / "first"
+
+    def test_the_root_is_readable_by_name_before_first_use(self, tmp_path, monkeypatch):
+        """The describe tools and the external-data fence read `_CACHE_ROOT`
+        directly; before the first use it resolves rather than reading as a
+        placeholder."""
+        monkeypatch.delattr(cache_module, "_CACHE_ROOT")
+        monkeypatch.setenv("SQT_CACHE_DIR", str(tmp_path / "named"))
+        assert cache_module._CACHE_ROOT == tmp_path / "named"
+
+
+# ── The write: one atomic writer, nothing left behind ─────────────────────────
+
+
+class TestAWriteLeavesNothingBehind:
+    """
+    The cache had its own atomic write, which removed its temp file only on
+    success: a refused rename left one behind every time (on Windows, every
+    write while a reader had the entry open), and a KeyboardInterrupt left
+    one too. It goes through the library's one writer now, which removes
+    the temp in a `finally`.
+    """
+
+    def _entry(self):
+        return _parquet_path("AAPL", "2022-01-01", "2022-06-01", "1d")
+
+    def test_a_refused_rename_leaves_no_temp_file(self, tmp_path, minimal_ohlcv):
+        def refuse(src, dst):
+            raise PermissionError(13, "Access is denied")
+
+        with patch("os.replace", refuse):
+            cache_module._write_parquet_atomic(self._entry(), minimal_ohlcv)
+        assert list(tmp_path.iterdir()) == []
+
+    def test_an_interrupt_propagates_and_leaves_no_temp_file(
+        self, tmp_path, minimal_ohlcv
+    ):
+        def interrupt(src, dst):
+            raise KeyboardInterrupt
+
+        with patch("os.replace", interrupt):
+            with pytest.raises(KeyboardInterrupt):
+                cache_module._write_parquet_atomic(self._entry(), minimal_ohlcv)
+        assert list(tmp_path.iterdir()) == []
+
+    @pytest.mark.skipif(
+        sys.platform != "win32", reason="a sharing violation is a Windows refusal"
+    )
+    def test_a_sharing_violation_on_the_rename_is_retried(
+        self, tmp_path, minimal_ohlcv
+    ):
+        """A reader holding the entry open makes Windows refuse the rename
+        (ERROR_SHARING_VIOLATION); the write waits it out instead of
+        dropping the entry's update."""
+        real = os.replace
+        attempts = []
+
+        def refused_once(src, dst):
+            attempts.append(Path(src).name)
+            if len(attempts) == 1:
+                raise PermissionError(13, "being used by another process", None, 32)
+            return real(src, dst)
+
+        with patch("os.replace", refused_once):
+            cache_module._write_parquet_atomic(self._entry(), minimal_ohlcv)
+        assert len(attempts) == 2
+        assert [p.name for p in tmp_path.iterdir()] == [self._entry().name]
+
+    def test_a_successful_write_leaves_exactly_the_entry(self, tmp_path, minimal_ohlcv):
+        cache_module._write_parquet_atomic(self._entry(), minimal_ohlcv)
+        assert [p.name for p in tmp_path.iterdir()] == [self._entry().name]
+        pd.testing.assert_frame_equal(
+            pd.read_parquet(self._entry()), minimal_ohlcv, check_freq=False
+        )
+
+
+# ── Orphaned temp files: collected, but never a live writer's ────────────────
+
+_OLD_TEMP = "v3_yfinance_AAPL_2022-01-01_2022-06-01_1d.31852.32040.d5e6b0d1.tmp.parquet"
+_NEW_TEMP = (
+    ".v3_yfinance_AAPL_2022-01-01_2022-06-01_1d.parquet."
+    "0123456789abcdef0123456789abcdef.tmp"
+)
+
+
+def _plant(root: Path, name: str, age_seconds: float) -> Path:
+    path = root / name
+    path.write_bytes(b"partial")
+    stamp = time.time() - age_seconds
+    os.utime(path, (stamp, stamp))
+    return path
+
+
+class TestOrphanedTempFilesAreCollected:
+    """
+    A leaked temp was named with the CURRENT generation prefix, so the
+    dead-generation collection never saw it and `sqt cache gc` could not
+    remove it. Both names a cache writer has used are collected now, once
+    they are older than any live write could be.
+    """
+
+    def test_old_orphans_are_listed_then_collected(self, tmp_path, capsys):
+        old = _plant(tmp_path, _OLD_TEMP, 2 * 3600)
+        new = _plant(tmp_path, _NEW_TEMP, 2 * 3600)
+        entry = tmp_path / "v3_yfinance_AAPL_2022-01-01_2022-06-01_1d.parquet"
+        entry.write_bytes(b"the entry")
+
+        listed = {p.name for p in cache_module.orphaned_temps()}
+        assert listed == {old.name, new.name}
+        assert cli_main(["cache", "gc"]) == 0
+        assert "Orphaned temp files (dry-run): 2 file(s)" in capsys.readouterr().out
+        assert old.exists() and new.exists()
+
+        assert cli_main(["cache", "gc", "--confirm"]) == 0
+        assert "Deleted orphaned temp files: 2 file(s)" in capsys.readouterr().out
+        assert [p.name for p in tmp_path.iterdir()] == [entry.name]
+
+    def test_a_young_temp_file_is_left_for_its_writer(self, tmp_path):
+        young = _plant(tmp_path, _NEW_TEMP, 5)
+        assert cache_module.orphaned_temps() == []
+        assert cmd_cache_gc(confirm=True) == []
+        assert young.exists()
+
+    def test_only_names_a_cache_writer_produces_are_candidates(self, tmp_path):
+        names = (
+            "notes.tmp",
+            ".hidden.tmp",
+            "v3_yfinance_AAPL_a_b_1d.parquet",
+            "unversioned.1.2.abcdef12.tmp.parquet",
+        )
+        for name in names:
+            _plant(tmp_path, name, 2 * 3600)
+        assert cache_module.orphaned_temps() == []
+        cmd_cache_gc(confirm=True)
+        assert sorted(p.name for p in tmp_path.iterdir()) == sorted(names)
+
+    def test_a_dead_generation_temp_is_listed_once(self, tmp_path):
+        dead = _plant(
+            tmp_path, "v1_yfinance_AAPL_a_b_1d.1.2.abcdef12.tmp.parquet", 7200
+        )
+        assert [p.name for p in cache_module.dead_generations()] == [dead.name]
+        assert cache_module.orphaned_temps() == []
+        assert [p.name for p in cmd_cache_gc()] == [dead.name]
+
+    def test_a_negative_age_is_refused(self):
+        with pytest.raises(ValidationError, match="min_age_seconds"):
+            cache_module.orphaned_temps(min_age_seconds=-1)
+
+
+# ── The read: what the live path checks, for every provider ───────────────────
+
+_WINDOW = ("2025-03-03", "2025-03-07")
+_SESSIONS = pd.bdate_range(*_WINDOW)
+_COLUMNS = ["Open", "High", "Low", "Close", "Volume"]
+_DATABENTO_RANGES = {
+    DATASET_SUMMARY: ("2024-07-01T00:00:00+00:00", "2026-09-02T00:00:00+00:00"),
+    CONSOLIDATED: SINCE_2023,
+    BASIC: WIDE,
+    DEPTH: WIDE,
+}
+
+
+def _full_frame(index=_SESSIONS, close: float = 200.0) -> pd.DataFrame:
+    price = close + np.arange(len(index), dtype=float)
+    return pd.DataFrame(
+        {
+            "Open": price,
+            "High": price + 1,
+            "Low": price - 1,
+            "Close": price,
+            "Volume": np.full(len(index), 1_000_000.0),
+        },
+        index=index,
+    )
+
+
+class _Yfinance:
+    name = "yfinance"
+
+    def entry(self) -> Path:
+        return _parquet_path("AAPL", *_WINDOW, "1d")
+
+    def fetch(self):
+        with patch("yfinance.Ticker") as ticker:
+            ticker.return_value.history.return_value = _full_frame(close=100.0).rename(
+                columns=str.lower
+            )
+            frame = YFinanceProvider().get_ohlcv("AAPL", *_WINDOW)
+        return frame, ticker.return_value.history.call_count
+
+
+class _Polygon:
+    name = "polygon"
+
+    def entry(self) -> Path:
+        return _parquet_path("AAPL", *_WINDOW, "1d", provider="polygon")
+
+    def fetch(self):
+        results = [
+            {
+                "o": 100.0 + i,
+                "h": 101.0 + i,
+                "l": 99.0 + i,
+                "c": 100.0 + i,
+                "v": 1_000_000,
+                "t": int(pd.Timestamp(day, tz="America/New_York").value // 10**6),
+            }
+            for i, day in enumerate(_SESSIONS)
+        ]
+        with patch(
+            "standard_quant_tools.data.polygon_provider._polygon_get",
+            return_value={"status": "OK", "results": results},
+        ) as get:
+            frame = PolygonProvider(api_key="test-key").get_ohlcv("AAPL", *_WINDOW)
+        return frame, get.call_count
+
+
+class _Databento:
+    name = "databento"
+
+    def entry(self) -> Path:
+        return _parquet_path(
+            "AAPL", *_WINDOW, "1d", provider=f"databento-{DATASET_SUMMARY}"
+        )
+
+    def fetch(self):
+        client = StubClient(_DATABENTO_RANGES)
+        frame = _databento(client).get_ohlcv("AAPL", *_WINDOW)
+        return frame, len(client.calls)
+
+
+_PROVIDERS = [_Yfinance(), _Polygon(), _Databento()]
+_IDS = [p.name for p in _PROVIDERS]
+
+
+@pytest.fixture
+def _quiet_vendors(monkeypatch):
+    for name in (
+        "DATABENTO_DATASET",
+        "DATABENTO_DEPTH_DATASET",
+        "DATABENTO_OHLCV_DATASET",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr("standard_quant_tools.data._retry.time.sleep", lambda s: None)
+
+
+def _planted(provider, frame: pd.DataFrame) -> Path:
+    path = provider.entry()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    frame.to_parquet(path)
+    return path
+
+
+@pytest.mark.usefixtures("_quiet_vendors")
+class TestTheCacheReadChecksWhatTheLivePathChecks:
+    """
+    Every provider's read returned whatever the file held once it parsed,
+    so a readable Parquet file that was not a plausible answer -- one
+    `Close` column, another window's bars, a null close -- was served as a
+    hit with no request made. The live paths refuse each of those. The one
+    shared read now does too, evicts the entry and fetches.
+    """
+
+    @pytest.mark.parametrize("provider", _PROVIDERS, ids=_IDS)
+    def test_a_close_only_file_is_evicted_and_refetched(self, provider):
+        path = _planted(
+            provider, pd.DataFrame({"Close": [999.0] * len(_SESSIONS)}, _SESSIONS)
+        )
+        frame, calls = provider.fetch()
+        assert calls == 1
+        assert list(frame.columns) == _COLUMNS
+        assert (frame["Close"] != 999.0).all()
+        assert list(pd.read_parquet(path).columns) == _COLUMNS
+
+    @pytest.mark.parametrize("provider", _PROVIDERS, ids=_IDS)
+    def test_another_windows_bars_are_evicted_and_refetched(self, provider):
+        _planted(
+            provider,
+            _full_frame(index=pd.bdate_range("2023-01-02", "2023-01-06"), close=999.0),
+        )
+        frame, calls = provider.fetch()
+        assert calls == 1
+        assert frame.index.min() >= pd.Timestamp(_WINDOW[0])
+        assert (frame["Close"] != 999.0).all()
+
+    @pytest.mark.parametrize("provider", _PROVIDERS, ids=_IDS)
+    def test_a_null_close_is_evicted_and_refetched(self, provider):
+        bad = _full_frame(close=999.0)
+        bad.iloc[2, bad.columns.get_loc("Close")] = np.nan
+        _planted(provider, bad)
+        frame, calls = provider.fetch()
+        assert calls == 1
+        assert frame["Close"].notna().all()
+
+    @pytest.mark.parametrize("provider", _PROVIDERS, ids=_IDS)
+    def test_a_plausible_entry_is_served_without_a_request(self, provider):
+        _planted(provider, _full_frame(close=200.0))
+        frame, calls = provider.fetch()
+        assert calls == 0
+        assert frame["Close"].tolist() == [200.0, 201.0, 202.0, 203.0, 204.0]
+
+    def test_a_live_answer_the_read_would_refuse_is_not_written(self):
+        """Writing it would only buy an eviction and a refetch on the next
+        call; the answer is served live either way."""
+        outside = _full_frame(index=pd.bdate_range("2023-01-02", "2023-01-06"))
+        with patch("yfinance.Ticker") as ticker:
+            ticker.return_value.history.return_value = outside.rename(columns=str.lower)
+            YFinanceProvider().get_ohlcv("AAPL", *_WINDOW)
+        assert not _parquet_path("AAPL", *_WINDOW, "1d").exists()
+
+
+def _sharing_violation(*_args, **_kwargs):
+    raise PermissionError(
+        13, "The process cannot access the file because it is being used"
+    )
+
+
+@pytest.mark.usefixtures("_quiet_vendors")
+class TestASharingViolationIsNotCorruption:
+    """
+    On Windows a reader that opens an entry while another process renames a
+    new version over it gets `PermissionError`. Every provider treated that
+    as corruption and deleted a valid entry, costing a metered refetch; and
+    in yfinance and Polygon the delete itself was unguarded, so a second
+    refusal escaped into the retry layer and came out as an APIError with
+    no request made. The read is retried now, and a read that still cannot
+    open is a miss that keeps the entry.
+    """
+
+    @pytest.mark.parametrize("provider", _PROVIDERS, ids=_IDS)
+    def test_a_read_refused_once_is_retried_and_the_entry_kept(self, provider):
+        path = _planted(provider, _full_frame(close=200.0))
+        real = pd.read_parquet
+        attempts = []
+
+        def refused_once(*args, **kwargs):
+            attempts.append(args)
+            if len(attempts) == 1:
+                _sharing_violation()
+            return real(*args, **kwargs)
+
+        with patch.object(pd, "read_parquet", refused_once):
+            frame, calls = provider.fetch()
+        assert len(attempts) == 2
+        assert calls == 0
+        assert path.exists()
+        assert frame["Close"].iloc[0] == 200.0
+
+    @pytest.mark.parametrize("provider", _PROVIDERS, ids=_IDS)
+    def test_a_refused_read_and_a_refused_delete_serve_the_live_answer(self, provider):
+        path = _planted(provider, _full_frame(close=200.0))
+        with (
+            patch.object(pd, "read_parquet", _sharing_violation),
+            patch.object(Path, "unlink", _sharing_violation),
+        ):
+            frame, calls = provider.fetch()
+        assert calls == 1
+        assert list(frame.columns) == _COLUMNS
+        assert path.exists()
+
+    def test_content_that_does_not_parse_is_still_evicted(self, tmp_path):
+        """The null case: corruption is a ValueError from the Parquet reader,
+        not a permission error, and it is evicted as before."""
+        path = _planted(_Yfinance(), _full_frame())
+        path.write_bytes(b"this is not a valid parquet file")
+        assert cache_module._read_cached_ohlcv(path, "1d", *_WINDOW) is None
+        assert not path.exists()

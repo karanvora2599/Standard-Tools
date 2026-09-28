@@ -58,6 +58,7 @@ silent default it used to be.
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from typing import (
     Any,
@@ -72,7 +73,10 @@ from typing import (
 )
 
 from standard_quant_tools._jsonsafe import sanitize_for_json
-from standard_quant_tools.audit.dispatch import _run_and_record
+from standard_quant_tools.audit.dispatch import (
+    _forget_last_request_id,
+    _run_and_record,
+)
 
 #: runtime name -> the TOOL_CATEGORY values it owns. The grouping rule is
 #: "could one agent plausibly be scoped to this for a whole session", which
@@ -351,6 +355,9 @@ class Runtime:
         JSON-safety boundary -- over a table that holds only this runtime's
         tools.
         """
+        # A call refused before it runs writes no record; clear the
+        # previous call's id so last_request_id() does not name it.
+        _forget_last_request_id()
         if tool_name not in self.dispatch_table:
             raise ValueError(self._out_of_scope_message(tool_name))
         fn, model_cls = self.dispatch_table[tool_name]
@@ -487,6 +494,7 @@ def _build() -> Dict[str, Runtime]:
 
 
 _RUNTIMES: Optional[Dict[str, Runtime]] = None
+_RUNTIMES_LOCK = threading.Lock()
 
 
 def all_runtimes() -> Dict[str, Runtime]:
@@ -495,10 +503,19 @@ def all_runtimes() -> Dict[str, Runtime]:
     Built lazily rather than at import: this module is imported BY the
     package that defines the tools it indexes, and doing the work at import
     time would be a cycle.
+
+    Once per process, not once per thread. Unguarded, eight threads
+    arriving together each ran the whole build and each got its own dict,
+    so `resolve(name)` could return different Runtime objects to different
+    threads. The lock is taken only on the cold path, and a plain Lock is
+    enough: nothing calls this at import time, so a thread importing a
+    runtime package never waits on it while another holds it.
     """
     global _RUNTIMES
     if _RUNTIMES is None:
-        _RUNTIMES = _build()
+        with _RUNTIMES_LOCK:
+            if _RUNTIMES is None:
+                _RUNTIMES = _build()
     return _RUNTIMES
 
 

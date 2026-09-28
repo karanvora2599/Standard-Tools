@@ -220,15 +220,25 @@ class TestTheTailCheckAccusesNobodyElse:
         assert any("2024-03-02" in p and "no longer exists" in p for p in problems)
         assert not any("re-chained" in p for p in problems)
 
-    def test_a_day_that_predates_the_index_is_not_compared_to_it(self, tmp_path: Path):
-        """Days before the index's earliest entry are deliberately not
-        cross-day-linked. A file sitting there with its own genesis chain
-        is not a re-chained day."""
-        earlier = tmp_path / "2023-12-31.jsonl"
-        _write_three_honest_days(tmp_path)
-        standalone_record = _record_chained_onto("older-call", audit._GENESIS_HASH)
-        earlier.write_text(standalone_record.model_dump_json() + "\n", encoding="utf-8")
+    def test_a_day_from_before_the_index_began_is_not_a_re_chained_day(
+        self, tmp_path: Path
+    ):
+        """A day written before the chain index existed started from the
+        genesis hash, as every day did then, and the index's first entry
+        records where that day ended. Such a trail -- the one an upgrade
+        leaves -- is clean.
 
+        This test used to plant the earlier file AFTER a genesis-headed
+        index already existed and require that to be clean too. That is the
+        other case: an index whose first entry says nothing came before it,
+        with a day file dated before it, is history added in front of the
+        trail, and it is now reported (see TestHistoryAddedInFront)."""
+        earlier = tmp_path / "2023-12-31.jsonl"
+        older = _record_chained_onto("older-call", audit._GENESIS_HASH)
+        earlier.write_text(older.model_dump_json() + "\n", encoding="utf-8")
+        _write_three_honest_days(tmp_path)
+
+        assert _index_head_for(tmp_path, "2024-03-01") == older.record_hash
         assert audit.verify_audit_trail_integrity(tmp_path) == []
 
     def test_an_empty_day_file_does_not_produce_a_tail_accusation(self, tmp_path: Path):

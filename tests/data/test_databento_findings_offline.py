@@ -252,15 +252,18 @@ class TestTheSeams:
         assert again.attrs["dataset"] == SUMMARY
         assert again.index.dtype == "datetime64[ns]"
 
-    def test_a_file_written_before_the_databento_generation_is_not_read(self):
-        """Databento's previous generation may hold a file named for
-        `GOOG.L` with Alphabet class A's bars, so none of its files is read
-        again: a planted one here is passed over for a fetch, and the
-        collector lists it, while another provider's file at the shared
-        version stays current."""
+    @pytest.mark.parametrize("stale", ["v3", "v4"])
+    def test_a_file_written_before_the_databento_generation_is_not_read(self, stale):
+        """Databento's earlier generations may hold a file named for
+        `GOOG.L` with Alphabet class A's bars (v3), or an intraday window
+        one bar short and a future's UTC-day bars (v4), so none of their
+        files is read again: a planted one here is passed over for a fetch,
+        and the collector lists it, while another provider's file at the
+        shared version stays current. The written generation used to be v4;
+        the second Databento bump makes it v5."""
         root = cache_module._CACHE_ROOT
         root.mkdir(parents=True, exist_ok=True)
-        poisoned = f"v3_databento-{SUMMARY}_AAPL_2025-03-03_2025-03-07_1d.parquet"
+        poisoned = f"{stale}_databento-{SUMMARY}_AAPL_2025-03-03_2025-03-07_1d.parquet"
         _daily_file(root / poisoned, volume=1)
         (root / "v3_yfinance_AAPL_2025-03-03_2025-03-07_1d.parquet").write_bytes(b"x")
         client = StubClient(ALL)
@@ -269,9 +272,10 @@ class TestTheSeams:
         assert int(frame["Volume"].iloc[0]) != 1
         dead = [p.name for p in cache_module.dead_generations(dry_run=True)]
         assert dead == [poisoned]
+        assert cache_module.cache_generation("databento") == "v5"
         written = [p.name for p in root.glob(f"*databento-{SUMMARY}*")]
         assert sorted(written) == sorted(
-            [poisoned, f"v4_databento-{SUMMARY}_AAPL_2025-03-03_2025-03-07_1d.parquet"]
+            [poisoned, f"v5_databento-{SUMMARY}_AAPL_2025-03-03_2025-03-07_1d.parquet"]
         )
 
     def test_the_temporal_contract_agrees_with_the_metadata(self):

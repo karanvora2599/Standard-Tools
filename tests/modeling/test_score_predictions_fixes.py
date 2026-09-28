@@ -45,12 +45,49 @@ class TestTheHorizon:
         five = score_predictions(
             ScorePredictionsInput(predictions_ref=ref, task="regression", horizon=5)
         )
-        assert one.effective_sample_size == pytest.approx(one.n_observations)
-        assert five.effective_sample_size < one.effective_sample_size / 2
+        # At horizon 1 the CEILING is the row count. The count itself is
+        # also discounted for the outcomes' correlation across the twelve
+        # entities -- this pinned `== n_observations` while that discount
+        # did not exist.
+        assert one.effective_sample_size_ceiling == pytest.approx(one.n_observations)
+        assert one.effective_sample_size == pytest.approx(
+            one.n_observations / (1 + 11 * one.label_cross_sectional_corr)
+        )
+        assert five.effective_sample_size == pytest.approx(
+            one.effective_sample_size / 5
+        )
         assert any("NON-overlapping" in note for note in one.notes)
         assert not any("NON-overlapping" in note for note in five.notes)
         with pytest.raises(Exception):
             ScorePredictionsInput(predictions_ref=ref, task="regression", horizon=0)
+
+    def test_entities_that_share_an_outcome_count_once_a_date(self):
+        """The entity count was passed and cancelled out, so twelve names
+        carrying the SAME outcome reported twelve times the independent
+        observations one did. Planted: the count is the floor, dates /
+        horizon, and the ceiling is twelve times it."""
+        frame = _frame()
+        per_date = frame.groupby("date")["target"].transform("first")
+        frame["target"] = per_date
+        ref = _publish(frame, "shared")
+        result = score_predictions(
+            ScorePredictionsInput(predictions_ref=ref, task="regression", horizon=5)
+        )
+        assert result.label_cross_sectional_corr == pytest.approx(1.0)
+        assert result.effective_sample_size == pytest.approx(40 / 5)
+        assert result.effective_sample_size_floor == pytest.approx(40 / 5)
+        assert result.effective_sample_size_ceiling == pytest.approx(12 * 40 / 5)
+
+    def test_one_entity_has_no_cross_section_to_discount(self):
+        """The null case: a single series is its own ceiling."""
+        frame = _frame(n_entities=1, n_dates=60)
+        ref = _publish(frame, "single")
+        result = score_predictions(
+            ScorePredictionsInput(predictions_ref=ref, task="regression", horizon=3)
+        )
+        assert result.label_cross_sectional_corr == 0.0
+        assert result.effective_sample_size == pytest.approx(60 / 3)
+        assert result.effective_sample_size_ceiling == pytest.approx(60 / 3)
 
 
 class TestSurvival:

@@ -68,7 +68,13 @@ from ..estimators.registry import (
     quantile_support,
 )
 from ..features.base import FeatureScope, periods_per_year_for_interval
-from ..features.params import resolve_params, resolved_lookback
+from ..features.params import (
+    WARMUP_TOLERANCE,
+    is_recursive,
+    resolve_params,
+    resolved_lookback,
+    resolved_warmup,
+)
 from ..features.registry import get_feature
 from ..specs import EstimatorSpec
 from ..tasks import TASKS
@@ -521,7 +527,14 @@ ESTIMATE_FEATURE_WARMUP_DESCRIPTION = (
     "days, which is the unit score_model's lookback_days is given in. That "
     "argument has no default that can be right for every spec: too small "
     "and scoring refuses with an empty panel, and nothing in the library "
-    "derived it. Point-in-time features contribute nothing and are named, "
+    "derived it. Beside the total, bars_required_converged: the history "
+    "after which a RECURSIVE feature (RSI, ATR, ADX, MACD, Parabolic SAR -- "
+    "EMA and Wilder smoothers carry their start value forward) no longer "
+    "depends on where the history started, 139 bars for RSI(14) against a "
+    "first output at 14. That is what a scoring window must cover for the "
+    "scored values to be the trained ones, given in calendar days as "
+    "calendar_days_converged. Point-in-time features contribute nothing "
+    "and are named, "
     "because their freshness is a staleness bound on records rather than a "
     "count of bars. This is the pre-build form of the question "
     "explain_dataset_row_loss answers afterwards, once a build has already "
@@ -595,9 +608,15 @@ def estimate_feature_warmup(
         # record-set parameter that happens to be named like a window can
         # never leak into a bar count.
         resolved = 0 if is_pit else int(resolved_lookback(definition, resolved_params))
+        # The bars until the value stops depending on where the history
+        # starts. The same as `resolved` for a finite window; longer for a
+        # recursive smoother, whose first output still carries its start.
+        converged = 0 if is_pit else int(resolved_warmup(definition, resolved_params))
         entry = FeatureWarmup(
             declared=int(definition.lookback),
             resolved=resolved,
+            converged=converged,
+            recursive=(not is_pit) and is_recursive(definition),
             lags=list(spec.lags),
             deepest_lag=max(spec.lags) if spec.lags else 0,
             point_in_time=is_pit,
@@ -614,7 +633,10 @@ def estimate_feature_warmup(
                 "collision, and the deeper of the two is reported here. "
                 "Give one of them an alias."
             )
-            if existing.resolved >= entry.resolved:
+            if (existing.resolved, existing.converged) >= (
+                entry.resolved,
+                entry.converged,
+            ):
                 continue
         per_feature[spec.output_name] = entry
 
@@ -642,12 +664,51 @@ def estimate_feature_warmup(
     deepest = int(deepest_lag(input_data.features))
     bars_required = int(max_lookback + deepest)
 
+    # The same total at the bars each feature needs to stop depending on
+    # where its history starts. A lag reads the feature `k` bars back, so
+    # the deepest one is charged on top here too.
+    max_converged = max((entry.converged for entry in from_bars.values()), default=0)
+    converged_binding: Optional[str] = None
+    if max_converged > 0:
+        converged_binding = max(from_bars, key=lambda name: from_bars[name].converged)
+    bars_required_converged = int(max_converged + deepest)
+    unconverged = sorted(
+        name for name, entry in from_bars.items() if entry.converged > entry.resolved
+    )
+
     calendar = input_data.calendar
     if calendar is not None:
         calendar = _calendar.validate_calendar_name(
             calendar, "estimate_feature_warmup.calendar"
         )
     days = _calendar_days(bars_required, input_data.interval, calendar, warnings)
+    # The conversion's caveat, if any, was stated once above.
+    days_converged = _calendar_days(
+        bars_required_converged, input_data.interval, calendar, []
+    )
+    if unconverged:
+        shown = ", ".join(
+            f"{name} ({from_bars[name].resolved} -> {from_bars[name].converged})"
+            for name in unconverged[:6]
+        )
+        warnings.append(
+            f"{len(unconverged)} recursive feature(s) keep depending on where "
+            f"their history starts after their first output: {shown}"
+            f"{', ...' if len(unconverged) > 6 else ''} bars. Their rows "
+            "between the two are not NaN, so no alignment drops them, and a "
+            "history started elsewhere gives them other values. "
+            f"bars_required={bars_required} is where the panel can start; "
+            f"bars_required_converged={bars_required_converged} is the history "
+            "a scoring window needs"
+            + (
+                f" -- about {days_converged:,.0f} calendar days of "
+                "score_model lookback_days"
+                if days_converged is not None
+                else ""
+            )
+            + " -- for the scored values to be the ones a model trained on a "
+            "longer history saw."
+        )
 
     logger.debug(
         "[estimate_feature_warmup] bars=%d binding=%s deepest_lag=%d days=%s",
@@ -658,10 +719,14 @@ def estimate_feature_warmup(
     )
     return EstimateFeatureWarmupResult(
         bars_required=bars_required,
+        bars_required_converged=bars_required_converged,
         per_feature=per_feature,
         binding_feature=binding,
+        converged_binding_feature=converged_binding,
         deepest_lag=deepest,
         calendar_days_estimate=days,
+        calendar_days_converged=days_converged,
+        warmup_tolerance=WARMUP_TOLERANCE,
         warnings=warnings,
     )
 

@@ -114,6 +114,9 @@ class ServerConfig:
     runs_dir: Optional[Path] = None
     audit_dir: Optional[Path] = None
     cache_dir: Optional[Path] = None
+    #: What SQT_EXTERNAL_DIRS adds to the directories external data may be
+    #: read from; the runs directory is always one of them.
+    external_dirs: Tuple[Path, ...] = field(default=())
     inline_limit_bytes: int = DEFAULT_INLINE_LIMIT
     include_output_schemas: bool = False
     #: How tools are advertised: 'full' sends every schema up
@@ -356,28 +359,66 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _default_dir(env_var: str) -> Optional[Path]:
+    """Where the library puts what `env_var` would relocate, when it is
+    unset -- asked of the reader that owns it, so the report cannot name a
+    different place from the one the library then uses."""
+    try:
+        if env_var == "SQT_RUNS_DIR":
+            from standard_quant_tools._runspath import runs_dir
+
+            return runs_dir()
+        if env_var == "SQT_AUDIT_DIR":
+            from standard_quant_tools.audit.paths import _audit_dir
+
+            return _audit_dir()
+        if env_var == "SQT_CACHE_DIR":
+            from standard_quant_tools.data import _cache
+
+            reader = getattr(_cache, "cache_root", None)
+            return Path(reader() if callable(reader) else _cache._CACHE_ROOT)
+    except Exception:  # noqa: BLE001 - the warning is still worth giving
+        return None
+    return None
+
+
 def _resolve_dir(
     env_var: str,
     purpose: str,
     warnings: List[str],
     transport: str = "stdio",
 ) -> Optional[Path]:
-    raw = os.environ.get(env_var)
-    if not raw:
-        chose = (
-            "which the MCP client chose, not you. Set it in the client's "
-            "server config."
+    """
+    The directory `env_var` names, created and probed for writing; None
+    when it is unset, with a warning naming the default the library uses.
+
+    Read by the library's own rule (`_env.env_path`), so the path probed
+    here is the path written to later: blank is unset rather than the
+    working directory, `~` is expanded by both, and a relative path or one
+    naming a file stops the server here instead of three turns into a
+    conversation.
+    """
+    from standard_quant_tools._env import env_path
+    from standard_quant_tools.error import ValidationError
+
+    try:
+        path = env_path(env_var)
+    except ValidationError as exc:
+        raise SystemExit(f"sqt-mcp: {exc}") from None
+    if path is None:
+        where = (
+            "Set it in the client's server config"
             if transport == "stdio"
-            else "which is wherever this service happened to be started from. "
-            "Set it in the unit file or the container spec."
+            else "Set it in the unit file or the container spec"
         )
+        default = _default_dir(env_var)
         warnings.append(
-            f"{env_var} is not set, so the {purpose} will use its default "
-            f"location relative to this server's working directory -- {chose} "
-            "Artifacts and resource URIs may not survive a restart."
+            f"{env_var} is not set, so the {purpose} is at its default"
+            + (f", {default}" if default is not None else "")
+            + ": a per-user location, not one chosen for this deployment. "
+            f"{where} to choose one."
         )
         return None
-    path = Path(raw).expanduser()
     try:
         path.mkdir(parents=True, exist_ok=True)
         probe = path / ".sqt-mcp-write-probe"
@@ -392,6 +433,23 @@ def _resolve_dir(
     return path
 
 
+def _resolve_external_dirs() -> Tuple[Path, ...]:
+    """
+    The directories `SQT_EXTERNAL_DIRS` adds to the external-data fence,
+    as the library reads them; a relative entry or one naming a file stops
+    the server here. Not probed for writing: they are read from, and
+    written to only by an explicit conversion.
+    """
+    from standard_quant_tools.error import ValidationError
+
+    try:
+        from standard_quant_tools.data.external import configured_external_dirs
+
+        return tuple(configured_external_dirs())
+    except ValidationError as exc:
+        raise SystemExit(f"sqt-mcp: {exc}") from None
+
+
 def _resolve_transport(args: argparse.Namespace, warnings: List[str]) -> dict:
     """Everything the transport choice implies, checked before the port opens.
 
@@ -400,7 +458,19 @@ def _resolve_transport(args: argparse.Namespace, warnings: List[str]) -> dict:
     line. It shows up as somebody else's tool call in your audit trail. Each
     check is cheap to satisfy now and expensive to discover later.
     """
-    token = (os.environ.get(TOKEN_ENV_VAR) or "").strip() or None
+    from standard_quant_tools._env import env_str
+
+    token = env_str(TOKEN_ENV_VAR)
+    if token is not None and not (token.isascii() and token.isprintable()):
+        # A client sends the token in an HTTP header, which carries ASCII;
+        # a token with any other character can never be presented, so the
+        # server would refuse every request. The value is not echoed.
+        raise SystemExit(
+            f"sqt-mcp: {TOKEN_ENV_VAR} holds a character that is not printable "
+            "ASCII, so no client could send it in an Authorization header. "
+            "Generate one from the base64 alphabet, for example:\n\n"
+            "    export SQT_MCP_TOKEN=$(openssl rand -base64 32)"
+        )
     http_options_given = (
         args.host != "127.0.0.1"
         or args.port != DEFAULT_HTTP_PORT
@@ -587,6 +657,7 @@ def resolve(argv: Optional[Sequence[str]] = None) -> ServerConfig:
     }
 
     return ServerConfig(
+        external_dirs=_resolve_external_dirs(),
         categories=tuple(categories),
         runtimes=tuple(runtimes),
         inline_limit_bytes=args.inline_limit,
@@ -689,6 +760,15 @@ def report(config: ServerConfig, tool_count: int, schema_bytes_total: int) -> No
     for attr, env_var, _purpose in _ENV_DIRS:
         value = getattr(config, attr)
         lines.append(f"  {env_var:<18}: {value if value else '(unset)'}")
+    # The fence on what an agent may read by path. Said at startup because
+    # it is set only here: no tool call can widen it.
+    external = (
+        "the runs directory, and "
+        + os.pathsep.join(str(p) for p in config.external_dirs)
+        if config.external_dirs
+        else "the runs directory only (unset)"
+    )
+    lines.append(f"  {'SQT_EXTERNAL_DIRS':<18}: {external}")
     if config.transport == "http":
         # Worth saying to anyone moving over from stdio, where each client got
         # its own process and therefore its own store.

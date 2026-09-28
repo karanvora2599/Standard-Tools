@@ -264,7 +264,7 @@ TOOL_DEFS = [
     ),
     (
         "get_data_quality_report",
-        "Dataset provenance (adjusted/survivorship-free/point-in-time guarantees) plus missing-bar/stale-price/price-jump detection on a symbol's OHLCV.",
+        "Dataset provenance (adjusted/survivorship-free/point-in-time guarantees, the dataset that answered, and whether it is a sample feed) plus missing-bar/stale-price/price-jump/thin-volume detection and duplicate-timestamp, out-of-order and OHLC-consistency checks on a symbol's OHLCV.",
         DataQualityReportInput,
     ),
     (

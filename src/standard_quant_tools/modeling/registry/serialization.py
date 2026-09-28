@@ -27,10 +27,10 @@ from __future__ import annotations
 
 import io
 import logging
-import os
 from pathlib import Path
 from typing import Any, List, Optional
 
+from standard_quant_tools._env import env_str
 from standard_quant_tools.error import ValidationError
 
 from .. import artifacts as _artifacts
@@ -59,8 +59,9 @@ def _require() -> None:
 
 
 def default_format() -> str:
-    """The format `load_model` uses when not told: `SQT_MODEL_FORMAT`, else joblib."""
-    value = os.environ.get(FORMAT_ENV, "joblib").strip().lower()
+    """The format `load_model` uses when not told: `SQT_MODEL_FORMAT`, else
+    joblib. A blank value is unset, not a format to refuse."""
+    value = (env_str(FORMAT_ENV) or "joblib").lower()
     if value not in FORMATS:
         raise ValidationError(
             f"{FORMAT_ENV}={value!r} is not a model format; the formats are {list(FORMATS)}."

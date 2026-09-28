@@ -26,19 +26,45 @@ accepts; a filename may carry dots but may not start with one, so `..`
 and the store's own temp files are both unspellable. The local store
 resolves every key inside its root before touching it, the same defence
 in depth `_runspath` applies to paths.
+
+A KEY MEANS THE SAME FILE ON EVERY PLATFORM. Windows drops a trailing dot,
+folds case and opens a device for `NUL` or `COM1` in any directory, so
+`run8/rep.` silently replaced `run8/rep` there and `run8/NUL` could not be
+written at all. The grammar refuses the spellings that are not portable --
+a trailing dot, a `..` run, a device name -- on every platform, so a
+package made on Linux can be pulled on Windows, and the local store
+refuses a key that reaches an existing file spelled differently.
+
+TWO WRITES, TWO PROMISES. `write_bytes_atomically` promises a reader never
+sees a partial file, and REPLACES what is there. `write_bytes_exclusively`
+promises the same and also that it never replaces anything: of two
+writers racing to one name, exactly one succeeds. That second promise is
+what a published reference needs, and an `exists()` check before an
+atomic write does not give it -- both writers pass the check, and the
+last rename wins.
 """
 
 from __future__ import annotations
 
+import contextlib
+import errno
 import hashlib
 import os
 import re
+import sys
+import time
 import uuid
 from pathlib import Path
 from typing import BinaryIO, List, Optional, Protocol, runtime_checkable
 
+from standard_quant_tools import _filelock
 from standard_quant_tools._containment import require_within
-from standard_quant_tools._runspath import runs_dir, validate_identifier
+from standard_quant_tools._runspath import (
+    is_device_name,
+    require_spelled_as_on_disk,
+    runs_dir,
+    validate_identifier,
+)
 from standard_quant_tools.error import ValidationError
 
 #: Digest length every content hash in the registry uses: SHA-256, the
@@ -65,12 +91,31 @@ def validate_key(key: str) -> str:
             "one run directory deep, like SQT_RUNS_DIR itself."
         )
     validate_identifier(parts[0], "run_id")
-    if len(parts) == 2 and not _FILENAME_RE.match(parts[1]):
+    if len(parts) == 2:
+        _validate_filename(parts[1], key)
+    return key
+
+
+def _validate_filename(name: str, key: str) -> None:
+    if not _FILENAME_RE.match(name):
         raise ValidationError(
-            f"artifact filename {parts[1]!r} in key {key!r} may use letters, "
+            f"artifact filename {name!r} in key {key!r} may use letters, "
             "digits, '_', '-' and '.', and may not start with '.'."
         )
-    return key
+    if name.endswith(".") or ".." in name:
+        raise ValidationError(
+            f"artifact filename {name!r} in key {key!r} ends in a dot or holds "
+            "a run of dots. Windows drops a trailing dot, so the name would be "
+            "the same file as the one without it; use single dots between "
+            "parts and end on a letter or digit."
+        )
+    if is_device_name(name):
+        raise ValidationError(
+            f"artifact filename {name!r} in key {key!r} is a Windows device "
+            "name (the part before its first dot), which Windows opens as a "
+            "device in every directory. Refused on every platform so a stored "
+            "package can be copied anywhere; choose another name."
+        )
 
 
 def hash_stream(handle: BinaryIO) -> str:
@@ -86,11 +131,78 @@ def hash_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()[:HASH_HEX_CHARS]
 
 
+#: Windows errors a rename onto a file can meet while another process
+#: holds that file open or is renaming onto it at the same moment: access
+#: denied and sharing violation. Both clear within milliseconds.
+_TRANSIENT_WINERRORS = frozenset({5, 32})
+_REPLACE_ATTEMPTS = 10
+_FIRST_REPLACE_WAIT = 0.005
+
+#: What `os.link` raises on a filesystem with no hard links (FAT, exFAT,
+#: some network mounts), as opposed to the target already existing.
+_NO_LINK_ERRNOS = frozenset(
+    code
+    for code in (
+        errno.EPERM,
+        getattr(errno, "ENOTSUP", None),
+        getattr(errno, "EOPNOTSUPP", None),
+        errno.EXDEV,
+        errno.EMLINK,
+        getattr(errno, "ENOSYS", None),
+    )
+    if code is not None
+)
+#: The same, as Windows reports it: invalid function, not supported, too
+#: many links.
+_NO_LINK_WINERRORS = frozenset({1, 50, 1142})
+
+
+def temp_path_for(path: Path) -> Path:
+    """The temp name a write to `path` stages its bytes under: in the same
+    directory, so the final rename or link never crosses a filesystem, and
+    dot-prefixed, so no key can name it and a store listing skips it."""
+    path = Path(path)
+    return path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+
+
+def _write_temp(tmp_path: Path, data: bytes) -> None:
+    with open(tmp_path, "xb") as handle:
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _replace(tmp_path: Path, path: Path) -> None:
+    """`os.replace`, retried briefly on Windows' transient refusals."""
+    wait = _FIRST_REPLACE_WAIT
+    for attempt in range(_REPLACE_ATTEMPTS):
+        try:
+            os.replace(tmp_path, path)
+            return
+        except PermissionError as exc:
+            transient = (
+                sys.platform == "win32"
+                and getattr(exc, "winerror", None) in _TRANSIENT_WINERRORS
+            )
+            if not transient:
+                raise
+            if attempt == _REPLACE_ATTEMPTS - 1:
+                raise ValidationError(
+                    f"{path} could not be replaced: another process kept it "
+                    "open, or kept replacing it, through "
+                    f"{_REPLACE_ATTEMPTS} attempts. Retry once whatever holds "
+                    "it has closed it."
+                ) from exc
+        time.sleep(wait)
+        wait *= 2
+
+
 def write_bytes_atomically(path: Path, data: bytes) -> None:
     """
     Write `data` so that no reader ever observes a partial file at `path`:
     the bytes go to a temp name in the same directory and are renamed
-    over the target in one `os.replace`.
+    over the target in one `os.replace`. What was at `path` is REPLACED;
+    `write_bytes_exclusively` is the write that never replaces.
 
     The one implementation of this. It was written in `backtest.artifacts`
     for Parquet and again in `modeling.artifacts` for JSON and joblib, and
@@ -98,13 +210,97 @@ def write_bytes_atomically(path: Path, data: bytes) -> None:
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+    tmp_path = temp_path_for(path)
     try:
         tmp_path.write_bytes(data)
-        os.replace(tmp_path, path)
+        _replace(tmp_path, path)
     finally:
-        if tmp_path.exists():
-            tmp_path.unlink()
+        _discard(tmp_path)
+
+
+def _discard(tmp_path: Path) -> None:
+    """
+    Remove a staged temp file, never raising.
+
+    It runs in a `finally`, so an error here would REPLACE the one the
+    write raised -- a Windows sharing violation on the temp file reported
+    instead of the disk-full that caused it -- or turn a completed write
+    into a failure. What a failed removal leaves is dot-prefixed and named
+    as a temp file, so no key can name it, a store listing skips it, and
+    `sqt runs gc` collects it.
+    """
+    with contextlib.suppress(OSError):
+        tmp_path.unlink(missing_ok=True)
+
+
+def _cannot_link(exc: OSError) -> bool:
+    if getattr(exc, "winerror", None) in _NO_LINK_WINERRORS:
+        return True
+    return exc.errno in _NO_LINK_ERRNOS
+
+
+def link_exclusively(tmp_path: Path, path: Path) -> bool:
+    """
+    Give the fully written file at `tmp_path` the name `path`, unless
+    something already has that name. True when this call claimed the
+    name, False when it was taken; never replaces.
+
+    A hard link is atomic and exclusive on POSIX and on NTFS: the name
+    appears all at once, naming complete bytes, or the call fails with
+    `FileExistsError`. `os.rename` would not do on POSIX, where it
+    replaces silently, and opening the final name with `O_EXCL` would be
+    exclusive but not atomic -- a reader could see a partial file, and a
+    crash would leave a truncated one holding the name for good.
+
+    On a filesystem without hard links the fallback keeps both promises
+    another way: on Windows `os.rename`, which refuses an existing
+    target; elsewhere a check-and-replace under a lock in the directory.
+    The caller removes `tmp_path` afterwards whichever way it went.
+    """
+    tmp_path, path = Path(tmp_path), Path(path)
+    try:
+        os.link(tmp_path, path)
+        return True
+    except FileExistsError:
+        return False
+    except OSError as exc:
+        if not _cannot_link(exc):
+            raise
+    if sys.platform == "win32":
+        try:
+            os.rename(tmp_path, path)
+            return True
+        except FileExistsError:
+            return False
+    with _filelock.exclusive(
+        path.parent / ".publish.lock", required=True, purpose=f"writing {path.name}"
+    ):
+        if os.path.lexists(path):
+            return False
+        os.replace(tmp_path, path)
+        return True
+
+
+def write_bytes_exclusively(path: Path, data: bytes) -> bool:
+    """
+    Write `data` to `path` atomically, and only if nothing is there.
+
+    True when this call wrote it. False when `path` already existed --
+    including when another writer claimed it a moment earlier -- and then
+    the existing bytes are untouched. The bytes are staged under a temp
+    name, flushed to disk and published with `link_exclusively`, so of any
+    number of concurrent writers to one name exactly one succeeds, and
+    readers only ever see a complete file. Nothing is left behind either
+    way.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = temp_path_for(path)
+    try:
+        _write_temp(tmp_path, data)
+        return link_exclusively(tmp_path, path)
+    finally:
+        _discard(tmp_path)
 
 
 @runtime_checkable
@@ -147,10 +343,17 @@ class LocalArtifactStore:
     def _path(self, key: str) -> Path:
         validate_key(key)
         root = self.root.resolve()
-        resolved = (root / key).resolve()
-        return require_within(
+        lexical = root / key
+        resolved = lexical.resolve()
+        require_within(
             resolved, root, f"artifact key {key!r} escapes the store root {root}"
         )
+        # A key the grammar admits can still reach an existing file under
+        # another spelling on a case-folding filesystem: `run8/Report`
+        # after `run8/report`. Refused, so a put never replaces -- and a
+        # get never returns -- a file stored under a different key.
+        require_spelled_as_on_disk(lexical, resolved, root)
+        return resolved
 
     def put(self, key: str, data: bytes) -> str:
         path = self._path(key)
@@ -287,6 +490,9 @@ __all__ = [
     "hash_stream",
     "require_fsspec",
     "store_from_url",
+    "link_exclusively",
+    "temp_path_for",
     "validate_key",
     "write_bytes_atomically",
+    "write_bytes_exclusively",
 ]

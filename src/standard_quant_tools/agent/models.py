@@ -4240,6 +4240,28 @@ class PriceJump(BaseModel):
     pct_change: float
 
 
+class DuplicateTimestamp(BaseModel):
+    timestamp: str
+    count: int
+    positions: List[int]
+
+
+class OutOfOrderTimestamp(BaseModel):
+    position: int
+    timestamp: str
+    previous: str = Field(..., description="The label of the row before it.")
+
+
+class OhlcInconsistency(BaseModel):
+    date: str
+    position: int
+    kind: Literal["low_above_high", "open_outside_range", "close_outside_range"]
+    open: Optional[float] = None
+    high: float
+    low: float
+    close: Optional[float] = None
+
+
 class DataQualityReportResult(BaseModel):
     symbol: str
     metadata: Dict[str, Any]
@@ -4257,9 +4279,58 @@ class DataQualityReportResult(BaseModel):
     volume_anomalies: List[VolumeAnomaly] = Field(
         default_factory=list,
         description=(
-            "Bars with zero volume or under 5% of the trailing 20-bar median. A "
-            "run of thin bars is the signature of a sample feed rather than the "
-            "tape; this report never read Volume before."
+            "Bars with zero volume, or below `thin_fraction` of the trailing "
+            "`volume_window`-bar median. Judged against the frame's own "
+            "history, so it finds a bar thin next to its neighbours and cannot "
+            "find a feed that is thin throughout: a sample feed carrying a few "
+            "percent of the tape on every bar gives the same answer as the "
+            "tape. `sample_feed` answers that question."
+        ),
+    )
+    served_dataset: Optional[str] = Field(
+        None,
+        description=(
+            "The vendor dataset that answered this fetch, as the provider "
+            "stamped it on the frame (attrs['dataset']). None when the "
+            "provider has one feed and names none."
+        ),
+    )
+    sample_feed: bool = Field(
+        False,
+        description=(
+            "True when served_dataset is a feed known to carry a SAMPLE of "
+            "the consolidated tape (EQUS.MINI: 2-4% of consolidated volume, "
+            "a UTC-day close that is often an after-hours print). Read from "
+            "provenance, because no statistic on the frame can tell: every "
+            "volume check here is relative to the frame's own history. False "
+            "means not known to be a sample, not known to be the tape."
+        ),
+    )
+    sample_feed_note: Optional[str] = Field(
+        None, description="What the sample feed is, when sample_feed is True."
+    )
+    duplicate_timestamps: List[DuplicateTimestamp] = Field(
+        default_factory=list,
+        description=(
+            "Bar labels that occur more than once, with their row positions. "
+            "A join or lookup silently returns every copy, and a resample "
+            "counts the bar twice."
+        ),
+    )
+    out_of_order_timestamps: List[OutOfOrderTimestamp] = Field(
+        default_factory=list,
+        description=(
+            "Rows whose label is earlier than the row before it. Every rolling "
+            "window, return and gap check reads rows in order as time, so a "
+            "swapped pair corrupts each of them without an error."
+        ),
+    )
+    ohlc_inconsistencies: List[OhlcInconsistency] = Field(
+        default_factory=list,
+        description=(
+            "Bars whose prices contradict each other: Low above High, or Open "
+            "or Close outside [Low, High]. A data error rather than a market "
+            "event, and invisible to the Close-only checks."
         ),
     )
 
@@ -5833,6 +5904,48 @@ class VerifyAuditIntegrityResult(BaseModel):
             "signed endpoint could be located in the day's records."
         ),
     )
+    checkpoint_version: Optional[int] = Field(
+        None,
+        description=(
+            "The checkpoint's format, when one was read: 2 commits to the "
+            "day's record count, a full SHA-256 digest of its records and "
+            "the chain index's length at signing; 1 commits to the day's "
+            "last 64-bit record_hash and its index entry only, and is still "
+            "verified by that rule."
+        ),
+    )
+    head_date: Optional[str] = Field(
+        None,
+        description=(
+            "The newest day the check ran through (the date verified, for "
+            "one day). The head_* fields and index_* fields are what to "
+            "RECORD SOMEWHERE ELSE: a newest day cut short, or deleted with "
+            "its chain index entry, verifies clean against the files alone, "
+            "and only a head written down outside the audit directory -- or "
+            "a signed checkpoint -- shows it."
+        ),
+    )
+    head_record_count: int = Field(
+        0, description="Records in that newest day, readable or not."
+    )
+    head_record_hash: Optional[str] = Field(
+        None,
+        description="The record_hash on that day's last line; null when that line is not a record.",
+    )
+    total_records: int = Field(
+        0, description="Records across every day file the check read."
+    )
+    index_entries: Optional[int] = Field(
+        None,
+        description=(
+            "Lines in the chain index when the trail was verified; null for "
+            "a single day, which is checked without walking the index."
+        ),
+    )
+    index_head_hash: Optional[str] = Field(
+        None,
+        description="The index_hash on the chain index's last line; null for a single day.",
+    )
     notes: List[str] = Field(default_factory=list)
 
 
@@ -5852,10 +5965,13 @@ class ExportAuditBundleInput(BaseModel):
         description=(
             "Destination .zip path. A bare name or relative path is "
             "written under SQT_RUNS_DIR/bundles rather than the working "
-            "directory; an absolute path is allowed, since a bundle is "
-            "for handing to someone outside this process. An existing "
-            "destination is REFUSED, not overwritten -- a bundle is "
-            "evidence. This tool never modifies the audit log itself."
+            "directory. An absolute path must lie in that folder or in a "
+            "directory SQT_EXTERNAL_DIRS lists -- the operator's list of "
+            "places this process may write outside its own stores -- and "
+            "never inside the audit directory, the OHLCV cache or the rest "
+            "of the runs directory; its directory must already exist. An "
+            "existing destination is REFUSED, not overwritten -- a bundle "
+            "is evidence. This tool never modifies the audit log itself."
         ),
     )
 
@@ -6046,8 +6162,16 @@ class SizeBucket(BaseModel):
 
 
 class TimeBucket(BaseModel):
-    time: str
+    bucket: int = Field(
+        ...,
+        description=(
+            "The bucket's id: 0 opens the session and each is `intraday_freq` "
+            "wide. Every bucket is listed, an empty one with a zero share."
+        ),
+    )
+    time: str = Field(..., description="When the bucket starts, HH:MM:SS.")
     volume_fraction: float
+    n_trades: int = Field(0, description="Prints in the bucket; 0 when empty.")
 
 
 class TradeProfileResult(BaseModel):
@@ -6070,9 +6194,36 @@ class TradeProfileResult(BaseModel):
             "where the same total arrives in thousands of small ones."
         ),
     )
-    intraday_buckets: List[TimeBucket]
+    intraday_buckets: List[TimeBucket] = Field(
+        ...,
+        description=(
+            "Every bucket of the session, EMPTY ONES INCLUDED. Only the "
+            "occupied ones used to come back, so a tape with a quiet midday "
+            "had no trough to read."
+        ),
+    )
     peak_time: str
     peak_volume_fraction: float
+    peak_bucket: Optional[int] = Field(None, description="The peak's bucket id.")
+    trough_bucket: Optional[int] = Field(
+        None,
+        description=(
+            "The bucket id of the smallest share -- the first, when several "
+            "tie. An empty bucket is the trough when there is one."
+        ),
+    )
+    trough_time: Optional[str] = None
+    trough_volume_fraction: Optional[float] = None
+    n_empty_intraday_buckets: int = Field(
+        0, description="Buckets of the session with no prints at all."
+    )
+    extended_hours_share: Optional[float] = Field(
+        None,
+        description=(
+            "Share of volume outside the session, for a tape stamped with its "
+            "zone; null for a naive one, which is taken as session time."
+        ),
+    )
     notes: List[str] = Field(default_factory=list)
 
 

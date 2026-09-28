@@ -10,7 +10,10 @@ import os
 import stat
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import Any, List, Optional, Union
+
+from standard_quant_tools._env import env_int
+from standard_quant_tools.error import ValidationError
 
 from .paths import _audit_dir, _iter_day_files
 
@@ -66,14 +69,36 @@ def is_held(date: str, audit_dir: Optional[Union[str, Path]] = None) -> bool:
 
 
 def _retention_days_from_env() -> Optional[int]:
-    raw = os.environ.get("SQT_AUDIT_RETENTION_DAYS")
-    if not raw:
-        return None
-    try:
-        return int(raw)
-    except ValueError:
-        logger.warning("[audit] SQT_AUDIT_RETENTION_DAYS=%r is not an integer", raw)
-        return None
+    """
+    SQT_AUDIT_RETENTION_DAYS, or None when it is unset or blank.
+
+    A negative window is refused by name. Any `int()` used to be accepted,
+    and a negative one put the deletion cutoff in the FUTURE, so `sqt gc
+    --confirm` under `-5` deleted every day file including today's --
+    irreversibly, from a sign typo. A value that is not an integer is
+    refused as well, where it used to be logged to a handler nobody
+    attaches and read as "no retention". 0 stays legal: every day before
+    today. See the CHANGELOG entry of 2026-09-28.
+    """
+    return env_int("SQT_AUDIT_RETENTION_DAYS", None, minimum=0)
+
+
+def _checked_retention_days(retention_days: Any) -> int:
+    """`retention_days` as given to `gc_candidates`/`gc`: a whole number of
+    days, zero or more."""
+    if isinstance(retention_days, bool) or not isinstance(retention_days, int):
+        raise ValidationError(
+            f"retention_days must be a whole number of days, got "
+            f"{type(retention_days).__name__}. Pass 0 or more."
+        )
+    if retention_days < 0:
+        raise ValidationError(
+            f"retention_days={retention_days} is negative, which would put the "
+            "deletion cutoff in the future and make every day file -- today's "
+            "included -- a candidate. Pass 0 or more: 0 makes every day "
+            "before today a candidate."
+        )
+    return retention_days
 
 
 def gc_candidates(
@@ -88,12 +113,22 @@ def gc_candidates(
     `retention_days=None` (the default) reads `SQT_AUDIT_RETENTION_DAYS`;
     if that's unset too, returns `[]` — no retention window configured
     means nothing is ever a deletion candidate, not "delete everything."
+    A negative window, from either place, raises ValidationError.
+
+    Today's UTC day file and any file dated after it are never candidates,
+    whatever the window.
     """
     directory = Path(audit_dir) if audit_dir else _audit_dir()
-    days = retention_days if retention_days is not None else _retention_days_from_env()
+    days = (
+        _checked_retention_days(retention_days)
+        if retention_days is not None
+        else _retention_days_from_env()
+    )
     if days is None:
         return []
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
+    now = datetime.now(timezone.utc)
+    today = now.strftime("%Y-%m-%d")
+    cutoff = min((now - timedelta(days=days)).strftime("%Y-%m-%d"), today)
     return sorted(
         p.stem
         for p in _iter_day_files(directory)

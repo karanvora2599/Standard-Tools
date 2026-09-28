@@ -24,18 +24,25 @@ routed through an HSM/KMS, and never let this library see a bare private
 key at all.
 """
 
+import hashlib
 import json
-import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
+from standard_quant_tools._env import env_path
 from standard_quant_tools.error import ValidationError
 
 from .hashing import hash_payload
 from .paths import _INDEX_FILENAME, _audit_dir
-from .verify import _walk_day
+from .verify import _lines, _read_line, _walk_day
+
+#: The checkpoint format `checkpoint_and_sign` writes. A checkpoint with no
+#: `checkpoint_version` field is format 1 -- `{date, final_record_hash,
+#: index_hash, signed_at_utc}` -- and is still verified by the rule it was
+#: signed under.
+CHECKPOINT_VERSION = 2
 
 HAS_CRYPTOGRAPHY = False
 try:
@@ -89,12 +96,16 @@ def _load_signer(key_path: Optional[Union[str, Path]]) -> Callable[[bytes], byte
     Raises a clear error if neither resolves to an existing file — the
     caller should pass their own `signer` callback instead if they don't
     want a bare key file on disk at all.
+
+    The variable is read like every other path setting: blank is unset,
+    `~` is expanded, and a relative path or one naming a directory is
+    refused by name without the value being repeated -- a key's location
+    is not something a refusal, which can end up in a log, should echo.
     """
     _require_cryptography()
     path = Path(key_path) if key_path else None
     if path is None:
-        env_path = os.environ.get("SQT_AUDIT_SIGNING_KEY_PATH")
-        path = Path(env_path) if env_path else None
+        path = env_path("SQT_AUDIT_SIGNING_KEY_PATH", kind="file")
     if path is None or not path.exists():
         raise FileNotFoundError(
             "No signing key found. Pass key_path=..., set "
@@ -126,6 +137,8 @@ class _RecomputedDay:
     #: record_hash of each record in the leading run whose link and content
     #: both hold, in file order.
     clean_hashes: List[str]
+    #: Those records themselves, parsed, in the same order.
+    clean_records: List[Dict[str, Any]]
     #: Non-blank lines in the day file, readable or not.
     lines: int
     #: Every line holds, from the index's head to the end of the file.
@@ -138,32 +151,32 @@ class _RecomputedDay:
     index_entry_holds: bool
 
 
+def _index_entries(directory: Path) -> List[Optional[Dict[str, Any]]]:
+    """Every non-blank line of the chain index, in order: the entry, or None
+    for a line that is not one (the trail check's finding to report)."""
+    index_path = directory / _INDEX_FILENAME
+    if not index_path.exists():
+        return []
+    return [_read_line(raw)[0] for _, raw in _lines(index_path)]
+
+
 def _index_entry(date: str, directory: Path) -> Optional[Dict[str, Any]]:
     """The chain index's entry for `date` -- the last one, since the index is
     append-only and the most recent claim is what the writer committed to.
     An unreadable index line names no date and is the trail check's finding
     to report."""
-    index_path = directory / _INDEX_FILENAME
     found: Optional[Dict[str, Any]] = None
-    if not index_path.exists():
-        return None
-    with open(index_path, "r", encoding="utf-8") as f:
-        for line in f:
-            if not line.strip():
-                continue
-            try:
-                entry = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(entry, dict) and entry.get("date") == date:
-                found = entry
+    for entry in _index_entries(directory):
+        if entry is not None and entry.get("date") == date:
+            found = entry
     return found
 
 
 def _recompute_day(date: str, directory: Path) -> _RecomputedDay:
     """Walk `date` from the head the chain index recorded for it, through the
     same per-record checks `verify_audit_log_integrity` makes. A day the
-    index never witnessed is walked from its first record's own claim."""
+    index never witnessed is walked from its first record's own claim. A
+    line that is not a record stops the day holding there."""
     entry = _index_entry(date, directory)
     entry_holds = entry is None or (
         hash_payload({**entry, "index_hash": None}) == entry.get("index_hash")
@@ -172,36 +185,54 @@ def _recompute_day(date: str, directory: Path) -> _RecomputedDay:
 
     day_path = directory / f"{date}.jsonl"
     clean: List[str] = []
+    records: List[Dict[str, Any]] = []
     holding = True
     first_break: Optional[int] = None
-    last_lineno = 0
+    lines = 0
     if day_path.exists():
-        try:
-            for check in _walk_day(day_path, head):
-                last_lineno = check.lineno
-                if holding and check.link_holds and check.content_holds:
-                    clean.append(check.claimed_hash)
-                elif holding:
-                    holding = False
-                    first_break = check.lineno
-        except (ValueError, AttributeError, TypeError):
-            # A line that is not a record: nothing from there on can be
-            # recomputed, so the day does not hold from that point.
-            if holding:
+        for check in _walk_day(day_path, head):
+            lines += 1
+            if (
+                holding
+                and check.unreadable is None
+                and check.link_holds
+                and check.content_holds
+            ):
+                clean.append(check.claimed_hash)
+                records.append(check.record)
+            elif holding:
                 holding = False
-                first_break = last_lineno + 1
-        with open(day_path, "r", encoding="utf-8", errors="replace") as f:
-            lines = sum(1 for line in f if line.strip())
-    else:
-        lines = 0
+                first_break = check.lineno
     return _RecomputedDay(
         clean_hashes=clean,
+        clean_records=records,
         lines=lines,
         whole_day_holds=holding and len(clean) == lines,
         first_break=first_break,
         index_entry=entry,
         index_entry_holds=entry_holds,
     )
+
+
+def _records_digest(records: List[Dict[str, Any]]) -> str:
+    """
+    A full SHA-256 over records, each as canonical JSON (sorted keys), one
+    per line.
+
+    The record chain itself is 64-bit: each `record_hash` is SHA-256 cut to
+    16 hex characters, and it stays that way because every record already
+    written carries one and re-hashing history is indistinguishable from
+    rewriting it. A signature over one 64-bit endpoint committed to 64 bits
+    of the day. This digest is what a checkpoint signs instead, so a signed
+    day is bound at 256 bits with no change to a single record. It is taken
+    over the parsed records rather than the file's bytes, so a copy whose
+    line endings were converted still verifies.
+    """
+    digest = hashlib.sha256()
+    for record in records:
+        digest.update(json.dumps(record, sort_keys=True).encode("utf-8"))
+        digest.update(b"\n")
+    return digest.hexdigest()
 
 
 def checkpoint_and_sign(
@@ -211,13 +242,23 @@ def checkpoint_and_sign(
     signer: Optional[Callable[[bytes], bytes]] = None,
 ) -> Path:
     """
-    Build a checkpoint for `date` — `{date, final_record_hash, index_hash,
-    signed_at_utc}` — and sign it with Ed25519, writing
+    Build a checkpoint for `date` and sign it with Ed25519, writing
     `<date>.checkpoint.json` (the checkpoint payload) and
     `<date>.checkpoint.sig` (the raw signature, hex-encoded) as sidecars in
     the audit directory. A periodic signed checkpoint, not a signature on
     every record, is enough: the hash chain already covers per-record
     integrity, the checkpoint anchors the chain's endpoint for that day.
+
+    The checkpoint is format 2 (`checkpoint_version: 2`): `date`,
+    `record_count`, `final_record_hash`, `day_digest` (a full SHA-256 over
+    the day's records -- see `_records_digest`), `index_hash` (the day's
+    chain-index entry), `index_len` and `index_head` (how many lines the
+    chain index held when the day was signed, and the last one's hash), and
+    `signed_at_utc`. Format 1 signed only the day's last 64-bit
+    record_hash and its index entry, so a truncated index or a second
+    preimage of one short hash was all it took; format 2 anchors the
+    record count at 256 bits and the index's length up to the moment of
+    signing. See the CHANGELOG entry of 2026-09-28.
 
     The endpoint signed is the one the day's records RECOMPUTE to, walked
     from the chain index's head. A day whose chain does not hold is refused
@@ -256,11 +297,20 @@ def checkpoint_and_sign(
             "`sqt verify` to see what broke, and restore the day from an "
             "exported bundle or a backup before anchoring it."
         )
+    index_lines = _index_entries(directory)
+    index_last = index_lines[-1] if index_lines else None
     checkpoint = {
+        "checkpoint_version": CHECKPOINT_VERSION,
         "date": date,
+        "record_count": len(day.clean_hashes),
         "final_record_hash": day.clean_hashes[-1],
+        "day_digest": _records_digest(day.clean_records),
         "index_hash": (
             day.index_entry.get("index_hash") if day.index_entry is not None else None
+        ),
+        "index_len": len(index_lines),
+        "index_head": (
+            index_last.get("index_hash") if index_last is not None else None
         ),
         "signed_at_utc": datetime.now(timezone.utc).isoformat(),
     }
@@ -361,17 +411,86 @@ class CheckpointVerification:
     were appended after them -- 0 for "valid", at least 1 for "extended",
     None wherever the signed endpoint could not be located. `detail` says,
     in one sentence, where an "altered" day stops holding or how far an
-    "extended" one has grown.
+    "extended" one has grown. `version` is the checkpoint's format (1 or
+    2; None when no checkpoint was read): format 2 also commits to the
+    record count, a full SHA-256 digest of the records and the chain
+    index's length.
     """
 
     state: str
     records_signed: Optional[int] = None
     records_after: Optional[int] = None
     detail: Optional[str] = None
+    version: Optional[int] = None
 
 
 def _content_state(
     date: str, stored_checkpoint: Dict[str, Any], directory: Path
+) -> CheckpointVerification:
+    """What was signed, compared with the day as it recomputes now, tagged
+    with the checkpoint's format."""
+    version = stored_checkpoint.get("checkpoint_version", 1)
+    if version not in (1, 2) or isinstance(version, bool):
+        return CheckpointVerification(
+            "unavailable",
+            detail=(
+                f"the checkpoint says it is format {version!r}, which this "
+                "release does not read; verify it with the release that "
+                "signed it"
+            ),
+        )
+    found = _compare_with_day(date, stored_checkpoint, directory, version)
+    return CheckpointVerification(
+        found.state,
+        records_signed=found.records_signed,
+        records_after=found.records_after,
+        detail=found.detail,
+        version=version,
+    )
+
+
+def _index_anchor_state(
+    stored_checkpoint: Dict[str, Any], directory: Path
+) -> Optional[CheckpointVerification]:
+    """A format-2 checkpoint's hold on the chain index: the index must still
+    hold at least as many lines as when the day was signed, and the line
+    that was last then must be the same entry. None when it holds.
+
+    Deleting the newest day together with the index's last line, or
+    trimming the index back, leaves a shorter trail that verifies clean on
+    its own. A signature over the index's length at signing is what makes
+    that visible for every entry up to the signed day."""
+    signed_len = stored_checkpoint.get("index_len")
+    if isinstance(signed_len, bool) or not isinstance(signed_len, int):
+        return CheckpointVerification(
+            "altered", detail="the checkpoint carries no chain index length"
+        )
+    lines = _index_entries(directory)
+    if len(lines) < signed_len:
+        return CheckpointVerification(
+            "altered",
+            detail=(
+                f"the chain index holds {len(lines)} line(s), fewer than the "
+                f"{signed_len} it held when this day was signed: entries were "
+                "removed"
+            ),
+        )
+    if signed_len:
+        line = lines[signed_len - 1]
+        found = line.get("index_hash") if line is not None else None
+        if found != stored_checkpoint.get("index_head"):
+            return CheckpointVerification(
+                "altered",
+                detail=(
+                    f"chain index line {signed_len} is not the entry that was "
+                    "last when this day was signed: the index was rewritten"
+                ),
+            )
+    return None
+
+
+def _compare_with_day(
+    date: str, stored_checkpoint: Dict[str, Any], directory: Path, version: int
 ) -> CheckpointVerification:
     """Compare what was signed with the day as it recomputes now.
 
@@ -383,8 +502,12 @@ def _content_state(
               records that recompute (an edit, a truncation, a rewrite), a
               record after it does not hold, or the index entry changed
 
-    A checkpoint's format is unchanged, so every checkpoint already signed
-    is judged by this rule too, and an untouched day still reads "valid".
+    Format 1 finds the signed endpoint by its 64-bit record_hash, exactly
+    as it always has, so every checkpoint already signed is judged by the
+    rule it was signed under and an untouched day still reads "valid".
+    Format 2 also requires the endpoint to be record `record_count`, the
+    records up to it to match `day_digest` at 256 bits, and the chain index
+    to hold what it held at signing.
     """
     day = _recompute_day(date, directory)
     entry = day.index_entry
@@ -405,11 +528,59 @@ def _content_state(
             ),
         )
 
+    if version == 2:
+        anchored = _index_anchor_state(stored_checkpoint, directory)
+        if anchored is not None:
+            return anchored
+
     signed = stored_checkpoint.get("final_record_hash")
-    if signed is None:
+    covered: Optional[int]
+    if version == 2:
+        count = stored_checkpoint.get("record_count")
+        if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+            return CheckpointVerification(
+                "altered", detail="the checkpoint carries no usable record count"
+            )
+        if len(day.clean_hashes) < count:
+            where = (
+                f", and the recomputed chain stops holding at line "
+                f"{day.first_break}"
+                if day.first_break is not None
+                else ""
+            )
+            return CheckpointVerification(
+                "altered",
+                detail=(
+                    f"{count} record(s) were signed and only "
+                    f"{len(day.clean_hashes)} still recompute{where}: the day "
+                    "was cut short, edited or rewritten"
+                ),
+            )
+        if day.clean_hashes[count - 1] != signed:
+            return CheckpointVerification(
+                "altered",
+                detail=(
+                    f"record {count} is not the signed endpoint {signed!r}: the "
+                    "day was rewritten"
+                ),
+            )
+        if _records_digest(day.clean_records[:count]) != stored_checkpoint.get(
+            "day_digest"
+        ):
+            return CheckpointVerification(
+                "altered",
+                detail=(
+                    f"the {count} signed record(s) no longer match the signed "
+                    "SHA-256 digest of the day, although their 64-bit chain "
+                    "still links: a record was replaced by one with a "
+                    "colliding record_hash"
+                ),
+            )
+        covered = count
+    elif signed is None:
         # Signed while the day had no records (possible before signing
         # refused an empty day): every record now present came after it.
-        covered: Optional[int] = 0
+        covered = 0
     elif signed in day.clean_hashes:
         covered = day.clean_hashes.index(signed) + 1
     else:

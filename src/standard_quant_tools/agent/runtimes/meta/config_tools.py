@@ -24,10 +24,11 @@ configured -- and the value stays where it was put.
 THE VALUE IS THE EFFECTIVE ONE. Every non-secret is resolved through the
 function the library itself reads it with, not through `os.environ`. That
 difference is the whole point: an unset `SQT_AUDIT_DIR` still has a
-concrete answer, `SQT_CACHE_DIR` is frozen at import so a later change to
-the environment does not move the cache, and `SQT_AUDIT_ENABLED=""` reads
-as OFF rather than as unset. A tool that echoed the raw environment would
-report a configuration nobody is running.
+concrete answer, `SQT_CACHE_DIR` is fixed at the cache's first use so a
+later change to the environment does not move the cache, and `SQT_AUDIT_ENABLED=" off "`
+reads as off while `SQT_AUDIT_ENABLED=""` reads as the default, on. A tool
+that echoed the raw environment would report a configuration nobody is
+running.
 
 The audit settings are declared here once and read from here by
 `describe_audit_log`, so the two tools cannot come to disagree about what
@@ -168,7 +169,7 @@ def _runs_dir_value() -> Optional[str]:
 def _cache_dir_value() -> Optional[str]:
     from standard_quant_tools.data import _cache
 
-    return str(_cache._CACHE_ROOT)
+    return str(_cache.cache_root())
 
 
 def _external_dirs_value() -> Optional[str]:
@@ -206,9 +207,10 @@ def _model_format_value() -> Optional[str]:
 
 
 def _verify_key_value() -> Optional[str]:
+    from standard_quant_tools._env import env_str
     from standard_quant_tools.modeling.registry.signing import VERIFY_KEY_ENV
 
-    return os.environ.get(VERIFY_KEY_ENV) or None
+    return env_str(VERIFY_KEY_ENV, load=False)
 
 
 def _fetch_concurrency_value() -> Optional[str]:
@@ -350,13 +352,14 @@ _OTHER_SETTINGS: Tuple[_Setting, ...] = (
     _Setting(
         name="SQT_CACHE_DIR",
         category="storage",
-        reader="data._cache._CACHE_ROOT",
+        reader="data._cache.cache_root",
         default="a cache directory under the home directory",
         is_secret=False,
         effect=(
-            "The Parquet bar cache. Read ONCE at import, so changing it "
-            "after this process started does not move the cache -- which is "
-            "why the effective value is reported rather than the variable."
+            "The Parquet bar cache. Resolved ONCE, at its first use, so "
+            "changing it afterwards does not move the cache -- which is why "
+            "the effective value is reported rather than the variable. Blank "
+            "means the default; a relative path is refused."
         ),
         resolve=_cache_dir_value,
     ),
@@ -369,8 +372,9 @@ _OTHER_SETTINGS: Tuple[_Setting, ...] = (
         effect=(
             "The directories, separated by the platform path separator, "
             "that register_external_dataset, register_external_panel and "
-            "prepare_vendor_extract may read from and a conversion may "
-            "write to, in addition to the runs directory. The value "
+            "prepare_vendor_extract may read from and a conversion or an "
+            "export_audit_bundle may write to, in addition to the runs "
+            "directory. The value "
             "reported is every directory in force, runs directory first. "
             "Read from the environment only, so no tool call can widen it; "
             "a relative entry is refused by name."
@@ -553,7 +557,11 @@ def resolve_setting(setting: _Setting) -> Tuple[Optional[str], bool, Optional[st
     variable, so it is carried as a warning rather than raised: a broken
     setting must not make the report that would explain it unavailable.
     """
-    present = setting.name in os.environ
+    # Blank is unset, the rule every reader follows (`_env`), so `VAR=` is
+    # reported as not set rather than set to nothing.
+    from standard_quant_tools._env import env_str
+
+    present = env_str(setting.name, load=False) is not None
     if setting.is_secret or setting.resolve is None:
         return None, present, None
     try:
@@ -629,7 +637,7 @@ def describe_effective_config(
     notes: List[str] = [
         "`value` is what the library RESOLVED, not what the environment "
         "holds: an unset variable still reports the default in force, and a "
-        "value read once at import reports what is in force now rather than "
+        "value read once per process reports what is in force now rather than "
         "what the environment says today.",
         "A secret reports `set` and nothing else. That is the whole answer "
         "to 'is this configured'; the value stays where it was put.",

@@ -504,7 +504,11 @@ class TestTradesAndQuotes:
         assert (trades["price"] > 0).all()
         outside = trades[(trades["price"] < low - 1e-6) | (trades["price"] > high + 1e-6)]
         assert outside.empty, f"{len(outside)} trades printed outside the session's range"
-        assert (trades["size"] > 0).all(), "a trade of no size"
+        # This asserted that no print has size 0, and the venue tape carries
+        # them (a third of the prints in one measured minute); what is
+        # checked now is that every one of them is counted on the frame.
+        zero = int((trades["size"] == 0).sum())
+        assert trades.attrs["print_counts"]["zero_size"] == zero
         assert trades.index.is_monotonic_increasing, "trades are out of time order"
 
     def test_the_quoted_spread_is_the_right_way_round(self, provider):
@@ -603,6 +607,80 @@ class TestTheOperationalClaims:
         with pytest.raises(ValidationError) as caught:
             provider.get_ohlcv(SYMBOL, BAR_START, BAR_END, interval="1w")
         assert "1d" in str(caught.value)
+
+
+class TestTheVendorFactsTheOfflineSuiteAssumes:
+    """The four vendor facts the offline suite plants rather than measures,
+    each confirmed once against the live feed: which schemas the default
+    tape carries, how a futures week comes back, what the vendor's own
+    daily-session schema says, and the symbology's not-found report."""
+
+    #: A settled Globex week, Monday to Friday.
+    WEEK = ("2026-09-14", "2026-09-18")
+
+    def test_the_default_tape_and_quotes_say_which_venue_each_is(self, provider):
+        """If XNAS.BASIC carries no top-of-book quotes, the default quote
+        fetch answers from another venue and must say so; if it does, the
+        pair is one venue and says nothing."""
+        from standard_quant_tools.data.databento import cross_venue_warning
+
+        schemas = set(provider._get_client().metadata.list_schemas(dataset="XNAS.BASIC"))
+        assert "trades" in schemas
+        start, end = f"{SESSION}T14:30:00", f"{SESSION}T14:30:05"
+        trades = provider.get_trades(SYMBOL, start, end)
+        quotes = provider.get_quotes(SYMBOL, start, end)
+        assert trades.attrs["dataset"] == "XNAS.BASIC"
+        if "mbp-1" in schemas:
+            assert quotes.attrs["dataset"] == "XNAS.BASIC"
+            assert cross_venue_warning(trades, quotes) is None
+        else:
+            assert quotes.attrs["dataset"] != "XNAS.BASIC"
+            assert quotes.attrs["fallback_from"] == ["XNAS.BASIC"]
+            assert cross_venue_warning(trades, quotes) is not None
+
+    def test_a_futures_week_is_five_trade_dates(self, provider):
+        frame = provider.get_ohlcv("ES.c.0", *self.WEEK, interval="1d")
+        assert [d.weekday() for d in frame.index] == [0, 1, 2, 3, 4]
+        assert "CME trade date" in frame.attrs["session"]
+        assert ((frame["Low"] <= frame["Close"]) & (frame["Close"] <= frame["High"])).all()
+
+    def test_the_vendors_session_schema_agrees_when_it_is_published(self, provider):
+        """The vendor-side alternative to aggregating hourly bars: a daily
+        schema cut at the end of the trading session. Where GLBX.MDP3
+        publishes it, its dates must be the trade dates built here."""
+        client = provider._get_client()
+        if "ohlcv-eod" not in set(client.metadata.list_schemas(dataset="GLBX.MDP3")):
+            pytest.skip("GLBX.MDP3 does not publish ohlcv-eod on this key")
+        store = client.timeseries.get_range(
+            dataset="GLBX.MDP3",
+            schema="ohlcv-eod",
+            symbols=["ES.c.0"],
+            stype_in="continuous",
+            start=self.WEEK[0],
+            end="2026-09-19",
+        )
+        vendor = store.to_df()
+        ours = provider.get_ohlcv("ES.c.0", *self.WEEK, interval="1d")
+        assert len(vendor) == len(ours) == 5
+
+    def test_an_unknown_symbol_fails_on_the_first_request(self):
+        """The symbology's own not-found report on an empty answer: one
+        request, and the error names the symbol."""
+        from standard_quant_tools.error import InvalidSymbolError
+
+        fresh = DatabentoProvider()
+        client = fresh._get_client()
+        calls = []
+        original = client.timeseries.get_range
+
+        def counted(**kw):
+            calls.append(kw)
+            return original(**kw)
+
+        client.timeseries.get_range = counted
+        with pytest.raises(InvalidSymbolError, match="ZZZZQ"):
+            fresh.get_ohlcv("ZZZZQ", BAR_START, BAR_END, interval="1d")
+        assert len(calls) == 1
 
 
 # --- 7. defects found by the second pass, recorded rather than fixed --------

@@ -119,6 +119,22 @@ class FetchReturnsPanelInput(_Fetch):
     interval: str = Field("1d", description="Bar interval, e.g. 1d, 1h, 5m.")
 
 
+#: A vendor dataset name as Databento spells one: venue, a dot, the feed.
+_DATASET_PATTERN = r"^[A-Za-z0-9]{2,12}\.[A-Za-z0-9]{2,12}$"
+
+_TAPE_DATASET_DESCRIPTION = (
+    "Pin the vendor dataset -- the venue -- that serves this, e.g. "
+    "XNAS.ITCH. Only a provider that routes named datasets takes it "
+    "(source='databento'); any other refuses it by name. Null keeps the "
+    "provider's routing, which answers the tape and the quotes "
+    "SEPARATELY, each from the first dataset that serves it -- so the two "
+    "can come from different venues, and a spread measured across venues "
+    "compares prices that never met in one book. Pass the same dataset to "
+    "fetch_tick_tape and fetch_quote_panel for a same-venue pair; the "
+    "result's `dataset` says which one answered either way."
+)
+
+
 class FetchTickTapeInput(_Fetch):
     symbol: str = Field(..., description="One ticker.")
     limit: Optional[int] = Field(
@@ -129,11 +145,17 @@ class FetchTickTapeInput(_Fetch):
             "window can be millions of rows."
         ),
     )
+    dataset: Optional[str] = Field(
+        None, pattern=_DATASET_PATTERN, description=_TAPE_DATASET_DESCRIPTION
+    )
 
 
 class FetchQuotePanelInput(_Fetch):
     symbol: str = Field(..., description="One ticker.")
     limit: Optional[int] = Field(None, gt=0, description="Cap on quotes returned.")
+    dataset: Optional[str] = Field(
+        None, pattern=_DATASET_PATTERN, description=_TAPE_DATASET_DESCRIPTION
+    )
 
 
 class FetchOrderBookInput(_Fetch):

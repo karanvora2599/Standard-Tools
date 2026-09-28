@@ -44,6 +44,7 @@ row cap, is what the vendor bills.
 from __future__ import annotations
 
 import datetime
+import inspect
 import logging
 import math
 from pathlib import Path
@@ -265,6 +266,61 @@ def _span(frame: pd.DataFrame) -> tuple[Optional[str], Optional[str]]:
         return None, None
 
 
+def _sentence(text: Any) -> str:
+    """A clause as a sentence: first letter raised, a full stop added. Not
+    `str.capitalize`, which lowers the rest -- and a dataset name with it."""
+    clause = str(text or "").strip()
+    if not clause:
+        return ""
+    return f"{clause[:1].upper()}{clause[1:].rstrip('.')}."
+
+
+def _disclosures(frame: Any) -> tuple[List[str], List[str]]:
+    """
+    What the provider wrote on a frame that a caller has to be told: the
+    warnings, and the vendor normalizer's notes in full.
+
+    ALL OF IT USED TO STOP AT THE PROVIDER. The vendor notes -- the flag
+    warnings, `F_MAYBE_BAD_BOOK` among them, the sentinel count, the
+    price-scale decision -- were dropped by the tape and quote fetches and
+    only logged by the depth ones, so no result an agent could read carried
+    any of them; a window served whole by a lesser feed because a better
+    one starts inside it said nothing; and a tape's zero-size prints moved
+    every count with no word. Each is read off `attrs` here, where the
+    provider leaves it, and reaches the result.
+    """
+    attrs = dict(getattr(frame, "attrs", None) or {})
+    notes = [str(n) for n in (attrs.get("vendor_notes") or [])]
+    warnings = [n for n in notes if n.startswith("WARNING")]
+    downgrade = attrs.get("coverage_downgrade")
+    if isinstance(downgrade, dict) and downgrade.get("preferred"):
+        warnings.append(
+            f"COVERAGE DOWNGRADE: the window starts before "
+            f"{downgrade.get('preferred')} covers it (from "
+            f"{downgrade.get('covers_from')}), so {downgrade.get('served')} "
+            "answered the WHOLE window, the part the better feed covers "
+            f"included. {_sentence(downgrade.get('advice'))} "
+            "One dataset per frame is deliberate -- stitching two feeds puts "
+            "a volume step at the seam -- but which one answered is chosen "
+            "by where the window starts."
+        )
+    counts = attrs.get("print_counts")
+    if isinstance(counts, dict) and (
+        counts.get("zero_size") or counts.get("sub_penny")
+    ):
+        warnings.append(
+            f"{int(counts.get('zero_size') or 0):,} zero-size and "
+            f"{int(counts.get('sub_penny') or 0):,} sub-penny prints are in "
+            "this tape and were kept. A zero-size print has no weight in a "
+            "VWAP or a size-weighted mean but counts in the number of "
+            "trades, in per-print rates and in every unweighted mean; a "
+            "sub-penny print is a midpoint or price-improved execution, "
+            "usually off the exchange. Filter on `size` or price to exclude "
+            "them."
+        )
+    return warnings, notes
+
+
 def _published(
     frame: pd.DataFrame,
     kind: str,
@@ -283,6 +339,7 @@ def _published(
         )
     ref = publish(frame, kind=kind, run_id=run_id, name=name, producer=producer)
     start, end = _span(frame)
+    disclosed, vendor_notes = _disclosures(frame)
     return FetchResult(
         ref=ref,
         kind=kind,
@@ -296,7 +353,37 @@ def _published(
         # not tell a consolidated tape from a single-venue sample carrying
         # a few percent of volume, and which one answers is date-dependent.
         **_vendor_provenance(frame),
-        warnings=list(warnings or []),
+        vendor_notes=vendor_notes,
+        warnings=list(warnings or []) + disclosed,
+    )
+
+
+def _tape_fetch(provider: Any, method: str, input_data: Any, tool: str):
+    """
+    The provider call for a tape or quote fetch, with `dataset` passed only
+    to a provider that routes named datasets and refused by name elsewhere.
+    """
+    call = getattr(provider, method)
+    kwargs: Dict[str, Any] = {}
+    if getattr(input_data, "dataset", None) is not None:
+        try:
+            accepts = "dataset" in inspect.signature(call).parameters
+        except (TypeError, ValueError):  # pragma: no cover - builtins only
+            accepts = False
+        if not accepts:
+            raise ValidationError(
+                f"{tool}: dataset={input_data.dataset!r} pins a vendor "
+                f"dataset, and {type(provider).__name__} routes no named "
+                "datasets -- it serves one feed. Pass source='databento', or "
+                "drop `dataset`."
+            )
+        kwargs["dataset"] = input_data.dataset
+    return lambda: call(
+        input_data.symbol,
+        input_data.start_date,
+        input_data.end_date,
+        input_data.limit,
+        **kwargs,
     )
 
 
@@ -410,12 +497,7 @@ def fetch_tick_tape(input_data: FetchTickTapeInput) -> FetchResult:
     provider = _provider(input_data)
     frame = _fetched(
         "a tick feed",
-        lambda: provider.get_trades(
-            input_data.symbol,
-            input_data.start_date,
-            input_data.end_date,
-            input_data.limit,
-        ),
+        _tape_fetch(provider, "get_trades", input_data, "fetch_tick_tape"),
         "fetch_tick_tape",
     )
     warnings = []
@@ -441,12 +523,7 @@ def fetch_quote_panel(input_data: FetchQuotePanelInput) -> FetchResult:
     provider = _provider(input_data)
     frame = _fetched(
         "a top-of-book quote feed",
-        lambda: provider.get_quotes(
-            input_data.symbol,
-            input_data.start_date,
-            input_data.end_date,
-            input_data.limit,
-        ),
+        _tape_fetch(provider, "get_quotes", input_data, "fetch_quote_panel"),
         "fetch_quote_panel",
     )
     warnings = [
@@ -564,6 +641,7 @@ def fetch_order_book(input_data: FetchOrderBookInput) -> DepthFetchResult:
         "fetch_order_book",
     )
     provenance = _vendor_provenance(frame)
+    disclosed, vendor_notes = _disclosures(frame)
     truncated = len(frame) >= input_data.limit
     warnings = [
         "ONE VENUE'S BOOK, not a national one. Depth is published per "
@@ -608,7 +686,8 @@ def fetch_order_book(input_data: FetchOrderBookInput) -> DepthFetchResult:
         size_bytes=int(handle.size_bytes or 0),
         dataset=provenance["dataset"],
         provider=provenance["provider"],
-        warnings=warnings,
+        vendor_notes=vendor_notes,
+        warnings=warnings + disclosed,
     )
 
 
@@ -626,6 +705,7 @@ def fetch_order_events(input_data: FetchOrderEventsInput) -> DepthFetchResult:
         "fetch_order_events",
     )
     provenance = _vendor_provenance(frame)
+    disclosed, vendor_notes = _disclosures(frame)
     truncated = len(frame) >= input_data.limit
     warnings = [
         "A WINDOW THAT OPENS MID-SESSION SEES ORDERS IT NEVER SAW ADDED. "
@@ -662,7 +742,8 @@ def fetch_order_events(input_data: FetchOrderEventsInput) -> DepthFetchResult:
         size_bytes=int(handle.size_bytes or 0),
         dataset=provenance["dataset"],
         provider=provenance["provider"],
-        warnings=warnings,
+        vendor_notes=vendor_notes,
+        warnings=warnings + disclosed,
     )
 
 
@@ -802,6 +883,35 @@ def preflight_vendor_request(
             f"{schema!r} and {input_data.symbol!r}, so there is nothing to "
             "price. The request would be refused rather than served."
         )
+
+    # THE DOWNGRADE THE FETCH WILL DISCLOSE, said before it is paid for. A
+    # better feed that begins inside the window is not asked at all -- the
+    # routing above chooses by the window's START -- so the whole window
+    # goes to the lesser feed; the fetch says so on its frame, and the
+    # preflight says so here, where splitting the request is still free.
+    downgrade_of = getattr(provider, "coverage_downgrade", None)
+    if chosen is not None and callable(downgrade_of):
+        try:
+            downgrade = downgrade_of(
+                input_data.symbol,
+                schema,
+                input_data.start_date,
+                input_data.end_date,
+                chosen,
+            )
+        except (ValidationError, ValueError):
+            raise
+        except Exception as exc:  # noqa: BLE001 -- a preview, not a fetch
+            logger.warning("coverage downgrade check failed: %s", exc)
+            downgrade = None
+        if downgrade:
+            warnings.append(
+                f"COVERAGE DOWNGRADE: {downgrade['preferred']} covers this "
+                f"window only from {downgrade['covers_from']}, and a dataset "
+                "that starts inside the window is not asked, so "
+                f"{chosen} would answer ALL of it. "
+                f"{_sentence(downgrade.get('advice'))}"
+            )
 
     coverage_start: Optional[str] = None
     coverage_end: Optional[str] = None
@@ -1457,7 +1567,8 @@ def prepare_vendor_extract(
     launched, and an absolute path has to lie in that folder or a listed
     directory, never in the cache, the audit directory or the rest of the
     runs directory. A dry run is fenced the same way, so it refuses what the
-    real run would.
+    real run would. The output appears whole or not at all, and never over
+    an existing file, even when two conversions race to one name.
     """
     import pandas as pd
 
@@ -1579,7 +1690,18 @@ def prepare_vendor_extract(
         levels, keep_empty, levels_kept = kept, True, kept
 
     # ── convert, writing as we go ─────────────────────────────────────
+    #
+    # Streamed to a temp name beside `out_path` and published only when
+    # complete, with the same exclusive link a published reference uses:
+    # a crash leaves no partial Parquet under the name (which would block
+    # it for good and read as data), and of two conversions racing to one
+    # out_path exactly one lands -- the check above is only a fast refusal.
+    import os
+
+    from standard_quant_tools.artifact_store import link_exclusively, temp_path_for
+
     writer = None
+    staged: Optional[Path] = None
     rows_written = 0
     columns: List[str] = []
     try:
@@ -1606,12 +1728,34 @@ def prepare_vendor_extract(
             table = pa.Table.from_pandas(converted, preserve_index=False)
             if writer is None:
                 out_path.parent.mkdir(parents=True, exist_ok=True)
-                writer = pq.ParquetWriter(str(out_path), table.schema)
+                staged = temp_path_for(out_path)
+                writer = pq.ParquetWriter(str(staged), table.schema)
             writer.write_table(table)
             rows_written += len(converted)
+        if writer is not None:
+            writer.close()
+            writer = None
+            with open(staged, "rb+") as handle:
+                os.fsync(handle.fileno())
+            if not link_exclusively(staged, out_path):
+                raise ValidationError(
+                    f"{out_path} already exists: another conversion wrote it "
+                    "while this one ran. A conversion writes a new file rather "
+                    "than replacing one, because the other file may already be "
+                    "registered; nothing from this run was kept."
+                )
     finally:
         if writer is not None:
             writer.close()
+        if staged is not None:
+            # Never raising from here, so the error that stopped the
+            # conversion is the one reported. A temp file left behind is
+            # dot-prefixed, and in the extracts folder `sqt runs gc`
+            # collects it.
+            try:
+                staged.unlink(missing_ok=True)
+            except OSError:
+                logger.debug("[prepare_vendor_extract] temp file left", exc_info=True)
 
     if input_data.dry_run:
         warnings.append(

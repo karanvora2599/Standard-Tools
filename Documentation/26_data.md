@@ -56,9 +56,27 @@ long bars with an `entity` column, which is what indicator and backtest work
 wants. Fetching the wrong one means the consumer rebuilds it, which is the
 waste this runtime exists to remove.
 
+**A reference names one value, also under concurrency.** Publishing to a
+`(run_id, name)` that is taken is refused (`overwrite=True` is the deliberate
+exception), and the refusal holds when two agents race: the value and the
+sidecar beside it are written exclusively, so exactly one publisher is
+accepted and the other is told the reference is already published. A
+publish cannot take over a pair an external dataset is registered at, and a
+second registration of one pair is refused the same way. The sidecar says
+whether the reference names a stored value or an external dataset, so a
+damaged one is refused by name instead of being read as absent.
+
+**The runs directory keeps what it is given.** Nothing published is ever
+collected: deleting a value breaks every holder of its reference, including
+the ones the decision log names. `sqt runs gc` lists (and with `--confirm`
+deletes) only what no reference can name — temp files left by interrupted
+writes and model or dataset directories whose registration never committed,
+older than a day by default. Retention of published values is an operator's
+decision; see [09_advanced_agent_tools.md](09_advanced_agent_tools.md).
+
 ## What the data cannot support is part of the answer
 
-Four silences that used to be invisible, now returned in `warnings`:
+Silences that used to be invisible, now returned in `warnings`:
 
 **A missing ticker is absent, not NaN.** A universe fetch drops names that
 returned nothing. They are named in `warnings`, because a complete-case join
@@ -77,6 +95,30 @@ serves it where the provider does, and resting size at each level is in
 that and not in a quote panel. Queue position is in neither — it needs an
 order-level feed, which is `fetch_order_events`, and it cannot be inferred
 from aggregated size at a price.
+
+**A tape and its quotes can come from two venues.** On Databento the two
+are routed separately, each to the first dataset that serves its schema, so
+the quotes can come from another venue than the trades — and a spread
+measured from the pair compares prices that never met in one book. Each
+result names its `dataset`, a fetch answered by a fallback venue warns, and
+`fetch_tick_tape` and `fetch_quote_panel` take a `dataset` to pin both to
+one venue; the tools that pair a tape with quotes warn when the two differ.
+
+**What the vendor's normalizer decided comes back.** The flag warnings —
+`F_MAYBE_BAD_BOOK`, the venue saying its book may be inconsistent — the
+sentinel count, the price-scale decision and the timestamp used are in
+`vendor_notes` on every tape, quote, depth and order-event fetch, and the
+WARNING ones in `warnings`. A tape's zero-size and sub-penny prints are
+counted and warned about too: they are kept, carry no weight in a VWAP, and
+still count as trades.
+
+**A window a better feed covers only part of was served whole by the lesser
+one.** A dataset that begins inside the window is not asked, so a daily
+window opening a week before the summary feed's first date came back
+entirely from the sample feed, 27x below its volume. The data is unchanged
+— one dataset per frame — but `fetch_ohlcv` warns, names the date to split
+the request at, and `preflight_vendor_request` says so before the request is
+made.
 
 **A provider that is not point-in-time hands back restated values under
 their original dates.** `get_dataset_metadata` reports that, along with
@@ -184,7 +226,9 @@ wrong, never ratios that are merely incorrect.
 ## What is deliberately not here
 
 **Data quality checks.** `get_data_quality_report` in `research` already
-reports missing bars, stale prices and price jumps — see
+reports missing bars, stale prices, price jumps, thin volume, duplicate and
+out-of-order timestamps, inconsistent OHLC bars, and whether the bars came
+from a sample feed — see
 [11_data_quality.md](11_data_quality.md). A second name for those would be
 exactly the confusable duplication the runtime split exists to prevent.
 
@@ -326,7 +370,11 @@ the dataset would declare ten levels while four hold nothing and
 and the per-level order counts a naive rename discards, and reports which of
 `ts_recv` and `ts_event` it used. Those two differ by the network, which is
 exactly the quantity a latency study measures, so the choice is never left
-implicit.
+implicit — and both are kept as columns beside `timestamp`, so the
+difference can be taken. `timestamp='auto'` prefers `ts_recv` wherever it
+is: a frame from `.to_df()` carries it as the INDEX, and the normalizer
+used to look among the columns only, so it fell through to `ts_event` on
+every such frame and refused `timestamp='ts_recv'` outright.
 
 **The judgements come back in `notes`, not in a log.** Two of them change
 the numbers and neither is recoverable from the output — which timestamp

@@ -32,7 +32,7 @@ from __future__ import annotations
 import math
 import re
 from functools import lru_cache
-from typing import List, Optional
+from typing import Optional, Tuple
 
 from standard_quant_tools.error import ValidationError
 
@@ -79,11 +79,18 @@ def interval_minutes(interval: str) -> Optional[int]:
 
 
 @lru_cache(maxsize=None)
-def calendar_names() -> List[str]:
+def calendar_names() -> Tuple[str, ...]:
+    """Every exchange_calendars name, sorted.
+
+    A TUPLE because the cache hands every caller the same object and
+    `validate_calendar_name` uses it as its allowlist: a list handed out
+    by a cache could be appended to by any caller, and whatever it
+    appended was accepted as a calendar from then on.
+    """
     require_calendar_library("calendar_names")
     import exchange_calendars as xcals
 
-    return sorted(xcals.get_calendar_names())
+    return tuple(sorted(xcals.get_calendar_names()))
 
 
 def validate_calendar_name(name: str, where: str = "DatasetSpec.calendar") -> str:

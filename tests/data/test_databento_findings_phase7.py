@@ -103,16 +103,21 @@ class TestTheDeadGenerationIsCollected:
     def test_a_provider_bump_retires_that_provider_alone(self):
         """
         Databento's generation moved on its own, because its files may name
-        one instrument and hold another's bars. Its previous files are dead;
-        yfinance and Polygon files at the shared version keep their names
-        and stay current, so a rate-limited cache is not refetched.
+        one instrument and hold another's bars -- and again, because an
+        intraday file could be one bar short and a future's daily file held
+        UTC days. Its previous files (v3 and v4, which this test used to
+        keep current) are dead; yfinance and Polygon files at the shared
+        version keep their names and stay current, so a rate-limited cache
+        is not refetched.
         """
         root = cache_module._CACHE_ROOT
         root.mkdir(parents=True)
         names = {
             "v3_databento-EQUS.SUMMARY_GOOG.L_a_b_1d.parquet": True,
             "v3_databento-GLBX.MDP3_ES.C.0_a_b_1d.parquet": True,
-            "v4_databento-EQUS.SUMMARY_AAPL_a_b_1d.parquet": False,
+            "v4_databento-GLBX.MDP3_ES.C.0_a_b_1d.parquet": True,
+            "v4_databento-EQUS.SUMMARY_AAPL_a_b_1d.parquet": True,
+            "v5_databento-EQUS.SUMMARY_AAPL_a_b_1d.parquet": False,
             "v3_yfinance_AAPL_a_b_1d.parquet": False,
             "v3_polygon_MSFT_a_b_1d.parquet": False,
             "v2_polygon_MSFT_a_b_1d.parquet": True,
@@ -130,7 +135,7 @@ class TestTheDeadGenerationIsCollected:
         databento = path(
             "AAPL", "2025-03-03", "2025-03-07", "1d", provider="databento-XNAS.ITCH"
         )
-        assert databento.name.startswith("v4_databento-XNAS.ITCH_")
+        assert databento.name.startswith("v5_databento-XNAS.ITCH_")
 
 
 # ── the session cache and the guard ──────────────────────────────────────

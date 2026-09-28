@@ -330,11 +330,13 @@ def _edges(path: Path) -> Tuple[Optional[str], Optional[str]]:
 
 def _audit_configuration() -> Dict[str, Any]:
     """The seven audit settings, read from the one table that declares
-    them, so this tool and `describe_effective_config` cannot disagree."""
+    them, so this tool and `describe_effective_config` cannot disagree.
+    Each is `(value, set, problem)`: `problem` is the library's own refusal
+    of the value (a word that is neither on nor off, a negative retention
+    window), carried so the report can say it rather than fail."""
     out: Dict[str, Any] = {}
     for setting in AUDIT_SETTINGS:
-        value, present, _problem = resolve_setting(setting)
-        out[setting.name] = (value, present)
+        out[setting.name] = resolve_setting(setting)
     return out
 
 
@@ -380,6 +382,10 @@ def describe_audit_log(input_data: AuditLogInput) -> AuditLogResult:
     signing_configured = bool(config["SQT_AUDIT_SIGNING_KEY_PATH"][1])
     retention_raw = config["SQT_AUDIT_RETENTION_DAYS"][0]
     retention_days = int(retention_raw) if retention_raw is not None else None
+    # A refused setting is reported, not raised: this is the tool that
+    # explains the configuration, and it must not be the one that fails
+    # because of it.
+    refusals = [problem for _value, _set, problem in config.values() if problem]
 
     total_records = 0
     total_bytes = 0
@@ -396,7 +402,12 @@ def describe_audit_log(input_data: AuditLogInput) -> AuditLogResult:
         total_bytes += size
         total_records += records
 
-    candidates = list(gc_candidates(directory))
+    try:
+        candidates = list(gc_candidates(directory))
+    except ValidationError:
+        # The retention window itself was refused; that refusal is already
+        # in `refusals`, and no window means no candidate.
+        candidates = []
 
     summaries: List[AuditDaySummary] = []
     if input_data.include_days:
@@ -442,7 +453,7 @@ def describe_audit_log(input_data: AuditLogInput) -> AuditLogResult:
             "which days are held, sealed or signed."
         )
 
-    warnings: List[str] = []
+    warnings: List[str] = list(refusals)
     if legacy_location:
         # The process-wide warning fires once and only reaches whoever reads
         # stderr; an agent asking what the log is gets it here, every time.

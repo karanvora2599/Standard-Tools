@@ -269,6 +269,32 @@ class TestTradeProfile:
         assert result["peak_volume_fraction"] > 0.9
         assert result["peak_time"] == "15:30:00"
 
+    def test_every_bucket_is_returned_and_the_trough_is_a_bucket_id(
+        self, tick_provider
+    ):
+        """Only the occupied buckets used to come back, so this tape -- the
+        14:30 bucket and the 15:30 one -- read as a two-bucket day with no
+        trough, and nothing said the rest of the session was empty."""
+        quotes = [(0, 99.95, 100.05, 100, 100)]
+        trades = [(0, 100.0, 10), (60, 100.0, 10), (3_600, 100.0, 10_000)]
+        tick_provider(*_tape(trades, quotes))
+        result = dispatch(
+            "get_trade_profile",
+            {
+                "symbol": "TEST",
+                "start": "2024-03-01 14:30:00",
+                "end": "2024-03-01 16:00:00",
+                "intraday_freq": "30min",
+            },
+        )
+        buckets = result["intraday_buckets"]
+        assert [b["bucket"] for b in buckets] == list(range(13))
+        assert buckets[0]["time"] == "09:30:00"
+        assert result["n_empty_intraday_buckets"] == 11
+        assert result["trough_bucket"] == 0 and result["trough_volume_fraction"] == 0
+        assert result["peak_bucket"] == 12
+        assert any("hold no trades" in note for note in result["notes"])
+
     def test_size_buckets_are_quantiles_not_a_fixed_grid(self, tick_provider):
         quotes = [(0, 99.95, 100.05, 100, 100)]
         trades = [

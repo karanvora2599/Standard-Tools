@@ -131,6 +131,30 @@ def _require_feature(panel, feature: str, dataset_id: str) -> None:
     raise ValidationError(f"dataset {dataset_id!r} has no feature {feature!r}.{hint}")
 
 
+def _require_features(panel, features: Sequence[str], dataset_id: str) -> None:
+    """
+    Every feature present, or one refusal naming ALL that are not, in the
+    order the caller gave them.
+
+    Checking one at a time named only the first missing feature, and where
+    the list came from a set union, WHICH one was first depended on
+    string-hash order: the same call refused with a different name in each
+    process. One missing feature keeps `_require_feature`'s wording.
+    """
+    missing = [f for f in dict.fromkeys(features) if f not in panel.columns]
+    if not missing:
+        return
+    if len(missing) == 1:
+        _require_feature(panel, missing[0], dataset_id)
+    from difflib import get_close_matches
+
+    known = [c for c in panel.columns if c not in ("date", "entity", "target")]
+    near = {f: get_close_matches(f, known, n=3) for f in missing}
+    near = {f: matches for f, matches in near.items() if matches}
+    hint = f" Did you mean: {near}?" if near else f" Available: {sorted(known)[:8]}"
+    raise ValidationError(f"dataset {dataset_id!r} has no features {missing}.{hint}")
+
+
 def _pick_representative(
     members: Sequence[str], predictive: Dict[str, Dict[str, float]]
 ) -> str:
@@ -258,8 +282,7 @@ def get_feature_redundancy(
     logger.debug("[get_feature_redundancy] dataset_id=%s", input_data.dataset_id)
     panel, meta, _dir = _load_dataset_panel(input_data.dataset_id)
     features = _resolve_features(meta, input_data.features, input_data.dataset_id)
-    for feature in features:
-        _require_feature(panel, feature, input_data.dataset_id)
+    _require_features(panel, features, input_data.dataset_id)
 
     report = redundancy_report(
         panel, features, cluster_threshold=input_data.cluster_threshold
@@ -389,8 +412,7 @@ def select_features(input_data: SelectFeaturesInput) -> SelectFeaturesResult:
     logger.debug("[select_features] dataset_id=%s", input_data.dataset_id)
     panel, meta, _dir = _load_dataset_panel(input_data.dataset_id)
     features = _resolve_features(meta, input_data.features, input_data.dataset_id)
-    for feature in features:
-        _require_feature(panel, feature, input_data.dataset_id)
+    _require_features(panel, features, input_data.dataset_id)
 
     result = _select_features(
         panel,
@@ -449,8 +471,9 @@ def compare_feature_sets(
 
     logger.debug("[compare_feature_sets] dataset_id=%s", input_data.dataset_id)
     panel, _meta, _dir = _load_dataset_panel(input_data.dataset_id)
-    for feature in set(input_data.left) | set(input_data.right):
-        _require_feature(panel, feature, input_data.dataset_id)
+    _require_features(
+        panel, [*input_data.left, *input_data.right], input_data.dataset_id
+    )
 
     result = _compare_feature_sets(
         panel,
@@ -592,8 +615,7 @@ def _screen_features(panel, meta, requested, dataset_id: str, what: str) -> List
             "actually doubt."
         )
     features = _resolve_features(meta, requested, dataset_id)
-    for feature in features:
-        _require_feature(panel, feature, dataset_id)
+    _require_features(panel, features, dataset_id)
     return features
 
 
@@ -1038,8 +1060,7 @@ def run_feature_ablation(input_data: FeatureAblationInput) -> FeatureAblationRes
     )
     panel, meta, _dir = _load_dataset_panel(input_data.dataset_id)
     features = _resolve_features(meta, input_data.features, input_data.dataset_id)
-    for feature in features:
-        _require_feature(panel, feature, input_data.dataset_id)
+    _require_features(panel, features, input_data.dataset_id)
     if len(features) < 2:
         raise ValidationError(
             "ablation needs at least two features: removing the only feature "

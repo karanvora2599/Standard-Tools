@@ -431,3 +431,62 @@ class TestProfiles:
         assert sum(b["volume_fraction"] for b in profile["buckets"]) == pytest.approx(
             1.0, abs=1e-5
         )
+
+
+class TestEveryTradeProfileBucketIsReported:
+    """
+    The tape's time-of-day profile returned only the buckets some print fell
+    in, labelled by the clock: a tape from the open and the close alone had
+    no midday, so the trough the U is measured against was simply missing.
+    """
+
+    @staticmethod
+    def _open_and_close(tz=None):
+        day = "2024-03-04"
+        stamps = [f"{day} 09:31", f"{day} 09:45", f"{day} 15:40", f"{day} 15:55"]
+        index = pd.DatetimeIndex(stamps)
+        if tz is not None:
+            index = index.tz_localize(tz)
+        return pd.DataFrame({"price": 100.0, "size": [400, 300, 200, 500]}, index=index)
+
+    def test_the_empty_middle_is_returned_and_is_the_trough(self):
+        profile = intraday_volume_profile(self._open_and_close(), freq="30min")
+        assert profile["n_buckets"] == 13
+        assert [b["bucket"] for b in profile["buckets"]] == list(range(13))
+        assert profile["buckets"][0]["time"] == "09:30:00"
+        assert profile["buckets"][-1]["time"] == "15:30:00"
+        assert profile["n_empty_buckets"] == 11
+        middle = profile["buckets"][1:-1]
+        assert all(b["volume_fraction"] == 0.0 and b["n_trades"] == 0 for b in middle)
+        # The trough is a bucket id -- the first of the empty ones -- and
+        # not a position in a shortened list that pointed at the close.
+        assert profile["trough_bucket"] == 1
+        assert profile["trough_volume_fraction"] == 0.0
+        assert profile["peak_bucket"] == 0
+        assert any("11 of 13 buckets" in w for w in profile["warnings"])
+
+    def test_a_zoned_tape_is_bucketed_over_the_session(self):
+        profile = intraday_volume_profile(
+            self._open_and_close("America/New_York"), freq="1h"
+        )
+        assert profile["bucket_span"] == ["09:30:00", "16:00:00"]
+        assert profile["n_buckets"] == 7
+        assert profile["extended_hours_share"] == 0.0
+
+    def test_a_naive_tape_outside_the_session_is_extended_and_said(self):
+        trades = self._open_and_close()
+        trades.index = trades.index.append(pd.DatetimeIndex(["2024-03-04 17:10"]))[1:]
+        profile = intraday_volume_profile(trades, freq="30min")
+        assert profile["bucket_span"][1] == "17:30:00"
+        assert any("outside" in w for w in profile["warnings"])
+
+    def test_null_a_full_day_has_no_empty_bucket(self):
+        index = pd.date_range("2024-03-04 09:30", "2024-03-04 15:59", freq="5min")
+        trades = pd.DataFrame({"price": 100.0, "size": 100.0}, index=index)
+        profile = intraday_volume_profile(trades, freq="30min")
+        assert profile["n_empty_buckets"] == 0
+        assert not [w for w in profile["warnings"] if "hold no trades" in w]
+
+    def test_null_a_duration_that_is_not_one_is_refused(self):
+        with pytest.raises(ValidationError, match="freq"):
+            intraday_volume_profile(self._open_and_close(), freq="soon")

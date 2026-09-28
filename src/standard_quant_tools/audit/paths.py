@@ -8,13 +8,28 @@ import re
 import sys
 import warnings
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import List
+
+from standard_quant_tools._env import env_flag, env_path
 
 logger = logging.getLogger(__name__)
 
 
 def _audit_enabled() -> bool:
-    return os.environ.get("SQT_AUDIT_ENABLED", "1").lower() not in ("0", "false", "")
+    """
+    Whether `dispatch()` writes a decision record: SQT_AUDIT_ENABLED, on
+    unless it reads as off.
+
+    Read through the library's one flag reader. This used to count the
+    EMPTY string as off, so `SQT_AUDIT_ENABLED=` in a launcher -- the
+    usual way of writing "leave the default" -- silently stopped the
+    decision log, while a padded " 0 " or "off" left it running against a
+    plain intent to stop it. Blank is now the default (on), any case and
+    padding of 1/true/yes/on or 0/false/no/off is honoured, and any other
+    word is refused by name rather than read as either answer. See the
+    CHANGELOG entry of 2026-09-28.
+    """
+    return env_flag("SQT_AUDIT_ENABLED", True)
 
 
 class AuditLocationWarning(UserWarning):
@@ -82,11 +97,15 @@ def _audit_dir() -> Path:
     `~/.local/state` is the XDG directory for exactly this: data that
     persists between runs and is not a cache and not user documents.
     `SQT_AUDIT_DIR` still overrides, and a deployment should point it at
-    something backed up.
+    something backed up. It is read like every other path setting: blank is
+    unset, `~` is expanded, and a relative path or one naming an existing
+    file is refused by name -- a relative trail would move with the working
+    directory, and a decision log split across two directories is two logs
+    with a deletion between them.
     """
-    override = os.environ.get("SQT_AUDIT_DIR")
-    if override:
-        return Path(override)
+    override = env_path("SQT_AUDIT_DIR")
+    if override is not None:
+        return override
 
     # An existing trail keeps its home. Changing where this points would
     # otherwise orphan every record already written: the new directory starts
@@ -115,8 +134,19 @@ _GENESIS_HASH = "0" * 16
 # had activity and what each day's file *should* chain onto, separately from
 # the day files themselves. Without this, deleting an entire day's .jsonl is
 # undetectable — the next day's chain would start fresh from genesis with no
-# reference to whether a prior day ever existed. An attacker now has to
-# consistently rewrite both the day file AND this index to hide a deletion.
+# reference to whether a prior day ever existed. To hide the deletion of a
+# day that has a later day after it, an attacker now has to rewrite both the
+# day file AND this index.
+#
+# The NEWEST day is different, and nothing inside this directory can make it
+# otherwise: a newest day cut short is byte for byte an earlier state of the
+# log, and deleting it together with the index's last line leaves a shorter
+# trail that verifies clean. No rewrite is needed. What anchors the end is
+# outside the directory: the verified head `verify_audit_trail_integrity`
+# reports (newest day, its record count and last record_hash, the index's
+# length and last hash), recorded somewhere else, or a signed checkpoint,
+# which commits to the day's record count, a full SHA-256 digest of its
+# records and the index's length.
 _INDEX_FILENAME = "_chain_index.jsonl"
 _DAY_FILE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\.jsonl$")
 
@@ -130,68 +160,12 @@ def _iter_day_files(directory: Path) -> List[Path]:
     return sorted(p for p in directory.glob("*.jsonl") if _DAY_FILE_RE.match(p.name))
 
 
-def _acquire_lock(lock_path: Path) -> Optional[Any]:
-    """
-    Best-effort cross-process exclusive lock via a small sidecar file (not
-    the growing JSONL file itself — locking a fixed, tiny file avoids the
-    platform-specific complexity of byte-range-locking a file whose EOF
-    offset keeps moving). Returns an open file handle the caller must pass
-    to `_release_lock`, or None if locking isn't available on this platform
-    — in which case writes proceed unlocked rather than blocking a tool
-    call on a missing OS primitive.
-    """
-    try:
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        lf = open(lock_path, "a+b")
-    except Exception:
-        logger.debug("[audit] advisory file lock unavailable", exc_info=True)
-        return None
-    try:
-        if sys.platform == "win32":
-            import msvcrt
-
-            lf.seek(0)
-            # msvcrt.locking(LK_LOCK) retries internally for ~10s, then
-            # raises OSError -- unlike POSIX fcntl.flock(LOCK_EX) below,
-            # which blocks indefinitely. Left as a single attempt, a lock
-            # held >10s by another process/thread would raise here, and the
-            # blanket except below would silently return None -- letting
-            # the caller proceed with NO lock at all, unlike POSIX. Retry
-            # in a loop instead so both platforms block indefinitely under
-            # contention, matching the OS-level lock's other property on
-            # both platforms: it's released automatically if the holder
-            # crashes, so this isn't a new hang risk versus POSIX today.
-            while True:
-                try:
-                    msvcrt.locking(lf.fileno(), msvcrt.LK_LOCK, 1)
-                    break
-                except OSError:
-                    continue
-        else:
-            import fcntl
-
-            fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
-        return lf
-    except Exception:
-        logger.debug("[audit] advisory file lock unavailable", exc_info=True)
-        lf.close()
-        return None
-
-
-def _release_lock(lf: Optional[Any]) -> None:
-    if lf is None:
-        return
-    try:
-        if sys.platform == "win32":
-            import msvcrt
-
-            lf.seek(0)
-            msvcrt.locking(lf.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
-
-            fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
-    except Exception:
-        pass
-    finally:
-        lf.close()
+# The cross-process lock every writer in this package takes before touching
+# a day file or the chain index. It lives in `standard_quant_tools._filelock`
+# now, because the model registry's promotion log needs the same one; the
+# names are kept here because the storage backend imports them from here.
+# Best-effort for the audit writer: `_acquire_lock` returns None when the
+# platform offers no lock, and the append then proceeds unlocked rather than
+# stopping every tool call.
+from standard_quant_tools._filelock import acquire_lock as _acquire_lock  # noqa: E402
+from standard_quant_tools._filelock import release_lock as _release_lock  # noqa: E402

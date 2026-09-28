@@ -46,7 +46,12 @@ from standard_quant_tools.modeling.specs import (
     TargetSpec,
     ValidationSpec,
 )
-from standard_quant_tools.modeling.validation.search import search_candidates
+from standard_quant_tools.modeling.validation.search import (
+    duplicate_grid_values,
+    grid_duplicates_warning,
+    n_search_candidates,
+    search_candidates,
+)
 from standard_quant_tools.modeling.validation.walk_forward import build_splitter
 
 UNIVERSE = ["AAA", "BBB", "CCC"]
@@ -185,6 +190,85 @@ class TestTheScheduleWithoutAPanel:
     def test_no_fold_is_a_refusal_not_an_empty_plan(self):
         with pytest.raises(ValidationError, match="no fold"):
             plan_experiment(_ridge(validation=_walk_forward(200, 50)), self.dates)
+
+
+class TestARepeatedGridValueIsOneCandidate:
+    """`{"alpha": [0.1, 0.1, 1.0]}` enumerated three candidates, scored 0.1
+    twice, charged the fit budget for three and reported three to anything
+    that counts trials. Each axis is now taken as its distinct values."""
+
+    dates = pd.bdate_range("2022-01-03", periods=120)
+
+    def test_the_candidates_are_the_distinct_values_in_first_seen_order(self):
+        search = SearchSpec(param_grid={"alpha": [0.1, 0.1, 1.0]})
+        assert search_candidates(search, 0) == [{"alpha": 0.1}, {"alpha": 1.0}]
+        assert n_search_candidates(search) == 2
+        assert duplicate_grid_values(search) == {"alpha": 1}
+
+    def test_the_product_is_over_distinct_axes(self):
+        search = SearchSpec(
+            param_grid={"alpha": [10.0, 1.0, 10.0], "fit_intercept": [True, True]}
+        )
+        assert n_search_candidates(search) == 2
+        assert search_candidates(search, 0) == [
+            {"alpha": 10.0, "fit_intercept": True},
+            {"alpha": 1.0, "fit_intercept": True},
+        ]
+
+    def test_values_of_another_type_stay_apart(self):
+        """sklearn reads `max_features=1` as one feature and `1.0` as all
+        of them, and `True` as a flag where `1` is a count."""
+        search = SearchSpec(param_grid={"max_features": [1, 1.0, True]})
+        assert n_search_candidates(search) == 3
+
+    def test_the_fit_budget_counts_distinct_candidates(self):
+        fat = _ridge(
+            validation=_walk_forward(40, 10),
+            search=SearchSpec(param_grid={"alpha": [1.0, 1.0, 2.0]}, inner_splits=2),
+        )
+        clean = _ridge(
+            validation=_walk_forward(40, 10),
+            search=SearchSpec(param_grid={"alpha": [1.0, 2.0]}, inner_splits=2),
+        )
+        assert plan_experiment(fat, self.dates).n_fits == (
+            plan_experiment(clean, self.dates).n_fits
+        )
+        assert plan_experiment(fat, self.dates).n_candidates == 2
+
+    def test_a_random_search_samples_from_distinct_values(self):
+        search = SearchSpec(
+            method="random", param_grid={"alpha": [1.0, 1.0, 1.0, 2.0]}, n_iter=3
+        )
+        candidates = search_candidates(search, 7)
+        assert candidates == [{"alpha": 1.0}, {"alpha": 2.0}]
+        assert n_search_candidates(search) == 2
+
+    def test_a_clean_grid_is_unchanged(self):
+        """The null case."""
+        search = SearchSpec(param_grid={"alpha": [0.1, 1.0, 10.0]})
+        assert n_search_candidates(search) == 3
+        assert duplicate_grid_values(search) == {}
+        assert grid_duplicates_warning(search) is None
+
+    def test_the_run_scores_each_value_once_and_says_so(self, patched_multi_factory):
+        dataset = build_dataset(_dataset_spec())
+        spec = _ridge(
+            validation=_walk_forward(60, 20, embargo=5),
+            search=SearchSpec(param_grid={"alpha": [0.1, 0.1, 1.0]}, inner_splits=2),
+        )
+        result = run_experiment(dataset, spec, "ds_fat_grid", register=False)
+        searches = result["validation_report"]["hyperparameter_search"]
+        ran = [s for s in searches if s.get("searched")]
+        assert ran
+        for report in ran:
+            assert report["n_candidates"] == 2
+            assert report["duplicate_values_dropped"] == {"alpha": 1}
+            assert sorted(c["params"]["alpha"] for c in report["candidates"]) == [
+                0.1,
+                1.0,
+            ]
+        assert result["validation_report"]["fits"]["candidates_per_fold"] == 2
+        assert any("repeats value(s)" in w for w in result["warnings"])
 
 
 def _oracle_purge(panel: pd.DataFrame, dates: pd.Index, train_pos, test_pos) -> int:

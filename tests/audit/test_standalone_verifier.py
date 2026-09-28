@@ -286,3 +286,75 @@ class TestRecordsWrittenNowVerifyInBoth:
 
         assert audit.verify_audit_trail_integrity(tmp_path) == []
         assert standalone.verify_trail(tmp_path) == []
+
+
+def _two_written_days(directory: Path) -> None:
+    """Two days written through the real writer's index, one record each."""
+    w = audit.AuditWriter(audit_dir=directory)
+    for date in ("2024-01-01", "2024-01-02"):
+        day = directory / f"{date}.jsonl"
+        record = audit.DecisionRecord(
+            request_id=f"r-{date}",
+            timestamp_utc=f"{date}T00:00:00+00:00",
+            tool_name="t1",
+            input={"n": 1},
+            cpp_available=False,
+            duration_ms=1.0,
+            status="ok",
+        )
+        record.prev_record_hash = w._bootstrap_new_day(day)
+        payload = json.loads(record.model_dump_json(exclude={"record_hash"}))
+        record.record_hash = audit.hash_payload({**payload, "record_hash": None})
+        day.write_text(record.model_dump_json() + "\n", encoding="utf-8")
+
+
+#: Damage the two verifiers must read identically: where it goes, and what.
+_DAMAGE = [
+    ("2024-01-01.jsonl", b"{not json\n"),
+    ("2024-01-01.jsonl", b"[1,2,3]\n"),
+    ("2024-01-01.jsonl", b"\xff\xfe\n"),
+    ("2024-01-02.jsonl", b'{"record_hash": "cut'),
+    ("_chain_index.jsonl", b"[1]\n"),
+    ("_chain_index.jsonl", b'"a string"\n'),
+    ("2023-12-31.jsonl", b'{"request_id": "planted", "record_hash": "0"}\n'),
+]
+
+
+class TestBothVerifiersReadDamageAndTheHeadAlike:
+    """Every verification change is made in both copies, word for word:
+    a line that is not a record, a day before the index, and the head the
+    check ran through."""
+
+    @pytest.mark.parametrize(
+        "where,junk", _DAMAGE, ids=[f"{w}:{j[:12]!r}" for w, j in _DAMAGE]
+    )
+    def test_the_same_problems_notes_and_head(self, standalone, tmp_path, where, junk):
+        _two_written_days(tmp_path)
+        with open(tmp_path / where, "ab") as f:
+            f.write(junk)
+
+        real_notes: list = []
+        real_head: dict = {}
+        mirrored_notes: list = []
+        mirrored_head: dict = {}
+        real = audit.verify_audit_trail_integrity(
+            tmp_path, notes=real_notes, head=real_head
+        )
+        mirrored = standalone.verify_trail(
+            tmp_path, notes=mirrored_notes, head=mirrored_head
+        )
+
+        assert real, "the damage must be reported"
+        assert real == mirrored
+        assert real_notes == mirrored_notes
+        assert real_head == mirrored_head
+
+    def test_the_head_sentence_is_the_same_text(self, standalone, tmp_path):
+        _two_written_days(tmp_path)
+        head: dict = {}
+        audit.verify_audit_trail_integrity(tmp_path, head=head)
+        empty: dict = {}
+        audit.verify_audit_trail_integrity(tmp_path / "absent", head=empty)
+
+        for case in (head, empty):
+            assert standalone.describe_head(case) == audit.describe_head(case)

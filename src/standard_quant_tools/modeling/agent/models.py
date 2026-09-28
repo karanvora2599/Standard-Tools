@@ -476,7 +476,12 @@ class RunModelExperimentResult(BaseModel):
         default_factory=dict,
         description="Per-fold metrics and windows, plus fold accounting "
         "(expected/completed/skipped with reasons, rows purged for target "
-        "overlap, and the target horizon). Averaged oos_metrics alone cannot "
+        "overlap and which label end the purge read, and the target "
+        "horizon), and `effective_sample_size`: the count behind "
+        "oos_metrics.effective_sample_size with its floor (dates / horizon), "
+        "ceiling (rows / horizon), the labels' cross-sectional correlation "
+        "and the design effect that placed it between them. Averaged "
+        "oos_metrics alone cannot "
         "show performance decay across folds, reveal that one fold carried "
         "the result, or expose how much of the walk-forward schedule "
         "actually ran.",
@@ -484,10 +489,12 @@ class RunModelExperimentResult(BaseModel):
     n_train_rows_purged_overlap: Optional[int] = Field(
         0,
         description="Training rows dropped because their label would have "
-        "resolved inside the test window, purged on each row's recorded "
-        "label_end_date. None when the panel carries no such column and the "
-        "purge could not run at all -- that used to read 0, the same value a "
-        "clean run gives, on a panel with 280 overlapping rows. A large count "
+        "resolved inside the test window, purged on each row's "
+        "label_end_date -- the recorded one, or one derived from the target's "
+        "horizon when the panel carries none (validation_report.purge = "
+        "'label_end_derived_from_horizon', with a warning). A panel with "
+        "neither the column nor a horizon is refused rather than validated "
+        "unpurged. A large count "
         "means the target horizon consumes a real fraction of each training "
         "window — relevant when reading the OOS metrics; "
         "validation_report.purge says which case this is.",
@@ -547,7 +554,11 @@ class ScoreModelInput(BaseModel):
         400,
         gt=0,
         description="Calendar days of history fetched before as_of — widen for models "
-        "using features with unusually large lookback windows.",
+        "using features with unusually large lookback windows. A recursive "
+        "feature (RSI, ATR, ADX, MACD, Parabolic SAR) needs more than its "
+        "first output to stop depending on where this window starts; a "
+        "window shorter than estimate_feature_warmup's calendar_days_converged "
+        "is scored with a warning.",
     )
     max_staleness_days: Optional[int] = Field(
         None,
@@ -1860,10 +1871,37 @@ class ScorePredictionsResult(BaseModel):
     effective_sample_size: Optional[float] = Field(
         None,
         description=(
-            "Observations adjusted for overlapping forward-return windows. "
-            "A 20-day target sampled daily has far fewer independent "
-            "observations than rows, and every t-statistic computed from the "
-            "raw count is overstated."
+            "Observations adjusted for overlapping forward-return windows "
+            "and for outcomes that move together across entities. A 20-day "
+            "target sampled daily has far fewer independent observations "
+            "than rows, and eight names whose outcomes correlate at 0.3 hold "
+            "about a third of what eight independent ones would; every "
+            "t-statistic computed from the raw count is overstated. Lies "
+            "between effective_sample_size_floor and "
+            "effective_sample_size_ceiling."
+        ),
+    )
+    effective_sample_size_floor: Stat = Field(
+        None,
+        description=(
+            "dates / horizon: the count if every entity's outcome on a date "
+            "were the same. Also the count behind a per-date statistic such "
+            "as the cross-sectional IC."
+        ),
+    )
+    effective_sample_size_ceiling: Stat = Field(
+        None,
+        description=(
+            "rows / horizon: the count if every entity's outcome were " "independent."
+        ),
+    )
+    label_cross_sectional_corr: Stat = Field(
+        None,
+        description=(
+            "The outcomes' mean correlation between two entities on the same "
+            "date, clipped to [0, 1], that placed effective_sample_size "
+            "between its bounds through the design effect 1 + (m-1)*rho. 0.0 "
+            "for a single entity, where there is no cross-section."
         ),
     )
     prediction_turnover: Stat = Field(

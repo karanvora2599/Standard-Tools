@@ -233,6 +233,44 @@ class TestRunExperimentValidation:
             run_experiment(dataset, model_spec, dataset_id="ds_test")
 
 
+class TestARepeatedRowIsRefused:
+    """A panel holding an (entity, date) pair twice trained and tested on
+    the repeat twice: n_oos_rows and the effective sample size doubled
+    with no diagnostic, while the predictions frame the bridge reads was
+    already refused on the same condition."""
+
+    def test_one_repeated_row_is_refused_by_name(self, dataset):
+        panel = dataset["panel"]
+        repeated = pd.concat([panel, panel.iloc[[10]]], ignore_index=True)
+        with pytest.raises(ValidationError, match=r"1 duplicate \(entity, date\)"):
+            run_experiment(
+                {**dataset, "panel": repeated},
+                _model_spec(),
+                dataset_id="ds_dupes",
+                register=False,
+            )
+
+    def test_a_panel_written_twice_does_not_double_the_sample(self, dataset):
+        panel = dataset["panel"]
+        doubled = pd.concat([panel, panel], ignore_index=True)
+        with pytest.raises(ValidationError, match="duplicate"):
+            run_experiment(
+                {**dataset, "panel": doubled},
+                _model_spec(),
+                dataset_id="ds_dupes",
+                register=False,
+            )
+
+    def test_a_clean_panel_is_not_refused(self, dataset):
+        """The null case: every pair once, and the run reports rows it
+        actually tested."""
+        result = run_experiment(
+            dataset, _model_spec(), dataset_id="ds_clean", register=False
+        )
+        report = result["validation_report"]["effective_sample_size"]
+        assert result["oos_metrics"]["n_oos_rows"] == report["n_rows"] > 0
+
+
 class TestPreprocessingLeakageDiscipline:
     def test_apply_uses_train_stats_not_test_stats(self):
         """A test-fold value far outside the train fold's range must be

@@ -38,12 +38,13 @@ Then point a client at the `sqt-mcp` entry point:
 }
 ```
 
-**Set those three paths.** A client launches the server with a working
-directory nobody chose, so an unset `SQT_RUNS_DIR` does not fail at startup
-— it fails three turns into a conversation when a tool tries to persist an
-artifact, and resource links stop resolving across restarts. The server
-warns on stderr when they are missing and refuses to start if one is set but
-not writable.
+**Set those three paths.** Left unset, each is at its per-user default for
+whoever runs the server — stable, but not a location chosen for the
+deployment — and the server warns on stderr naming that default. The startup check reads them exactly as the library does, so the
+directory it probes is the one written to: a blank value is unset (never the
+working directory the client happened to choose), `~` is expanded, and a
+relative path, a value naming a file, or a directory that is not writable
+refuses to start rather than failing three turns into a conversation.
 
 **`SQT_EXTERNAL_DIRS` is optional** and lists, separated by the platform path
 separator, the directories `register_external_dataset`,
@@ -51,7 +52,9 @@ separator, the directories `register_external_dataset`,
 the runs directory. Leave it unset and only the runs directory is readable —
 the server's working directory is never implied, because the client chose it.
 It is set here, in the environment the server starts with, and nowhere a
-tool call can reach, so an agent cannot widen it. See
+tool call can reach, so an agent cannot widen it. The startup report lists
+the directories it adds (or says the runs directory is the only one), and a
+relative entry refuses to start. See
 [26_data.md](26_data.md#where-external-data-may-come-from).
 
 ---
@@ -100,7 +103,7 @@ by watching the port answer at all.
 
 ### What it refuses to do
 
-All four are startup failures, not runtime ones. A server reachable by more
+Each is a startup failure, not a runtime one. A server reachable by more
 callers than you meant does not show up in a log line; it shows up as
 somebody else's tool call in your audit trail.
 
@@ -108,11 +111,15 @@ somebody else's tool call in your audit trail.
 |---|---|
 | `--transport http` with no `SQT_MCP_TOKEN` | Refuses to start. Pass `--no-auth` to serve without one deliberately. |
 | `SQT_MCP_TOKEN` set **and** `--no-auth` passed | Refuses to start. The two ask for opposite things and guessing fails open. |
+| `SQT_MCP_TOKEN` holds a character that is not printable ASCII | Refuses to start, without echoing the value. A header carries ASCII, so no client could ever present it. `openssl rand -base64 32` gives a usable one. |
 | A non-loopback `--host` with no `--allow-host` | Refuses to start. The Host check cannot be derived from a wildcard bind. |
 | `--no-auth` on a non-loopback host | Starts, with a warning naming exactly what is now reachable. |
 
 The token is read from the environment and never from a flag, because a
-command line is visible in the process table to every user on the box.
+command line is visible in the process table to every user on the box. It is
+compared with the presented credential as bytes, in constant time, so an
+`Authorization` header carrying non-ASCII bytes is a 401 like any other
+wrong credential rather than an error from the comparison.
 
 ### Security notes
 
