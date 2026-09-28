@@ -56,7 +56,19 @@ underlying — so `price_option(model="bachelier", dividend_yield=...)` is
 refused by name rather than pricing as if the dividend were zero. It used
 to discard the dividend silently, with `notes` empty; pass
 `dividend_yield=0` and a forward that already carries the dividend, or
-use a lognormal model.
+use a lognormal model. **Black-76 refuses it for the same reason**: it
+prices an option on a forward, which already carries the dividend, and a
+yield passed to it was replaced by zero — `q=0` and `q=0.08` returned the
+same price with `notes` empty. Pass the forward with `dividend_yield=0`, or
+use `black_scholes` with the spot and the yield.
+
+**The rate is bounded like the yield.** `risk_free_rate` is refused unless
+finite and within ±10 (1,000%), on magnitude and never on sign, on every
+tool here and in the library underneath; a NaN rate used to price to a null
+with no warning, and `-1e300` escaped as a bare `OverflowError`. Each
+`rate × time_to_expiry` is refused above 700 too, because both factors can
+be inside their bounds while `exp()` of the product overflows (`r=-9` at
+`T=100`).
 
 ### The expected move is not a bound
 
@@ -97,8 +109,11 @@ expiry is usually the illiquid one.
 ## Greeks beyond the first order
 
 `get_option_pricing` returns delta, gamma, vega, theta and rho — today's
-risk. `get_option_greeks` returns how that risk **changes**, which is what
-actually gets a hedged position into trouble.
+risk — from every closed-form model (theta per calendar day; it used to be
+null for all but the default Black-Scholes path). The binomial lattice
+returns delta and gamma only, and its `notes` say why. `get_option_greeks`
+returns how that risk **changes**, which is what actually gets a hedged
+position into trouble.
 
 | Greek | What it measures | Why it matters |
 |---|---|---|
@@ -159,9 +174,26 @@ concave price in strike. Measured: a smile with a curvature of +25 passes
 the check and one with −4 fails it.
 
 The fit **does not extrapolate**. A quadratic continued into the wings
-reaches negative variance at an ordinary distance from the money, so a
-strike outside the fitted range returns a refusal rather than a
-polynomial's opinion.
+reaches negative variance at an ordinary distance from the money. The
+fitted range is returned as `strike_range`, and no tool evaluates the
+quadratic for you — a caller evaluating the coefficients must stay inside
+that range.
+
+**Five distinct strikes, not five quotes.** Six quotes at two strikes used
+to pass the minimum and come back with `r_squared` 1.0 and a curvature from
+the minimum-norm solution of an underdetermined fit. `n_strikes` now counts
+distinct strikes and `n_quotes` the rows; repeated quotes at one strike are
+still fitted. **A flat smile is a perfect fit**: its total sum of squares is
+float residue, which reported `r_squared = -8.00` on `[0.45]*7` and warned
+that a quadratic did not describe it; a constant smile fitted to float
+precision now reports 1.0 and no warning.
+
+**Quote maps refuse keys that are the same number.** `implied_by_expiry` and
+`current_implied` are keyed by numbers written as strings, and `'0.25'` and
+`'0.250'` used to collapse into one key, the later quote silently replacing
+the earlier. They are refused naming both keys. `current_implied` horizons
+must be whole trading days: `'21.7'` was truncated to 21 and replaced the
+real 21-day quote.
 
 **A violation is reported where a trader can act on it.** Each entry in
 `arbitrage_violations` carries `moneyness` (`K/F`) and `strike` in the
@@ -245,12 +277,38 @@ dangerous thing a payoff calculator can return, and it is what returning
 `profit[0]` without the flag would do.
 
 **The scan runs from a spot of zero to twice the highest strike** (801
-points). It used to start at half the lowest strike, which put a put's
-worst case outside it: `max_loss` came back at half the true figure and,
-because the extreme sat at the scan's edge, a bounded loss was labelled
-unbounded. Zero is a floor for a price rather than a horizon, so with the
-default grid only the *right* edge can be open; a caller-supplied
-`spot_range` is scanned as given, with both edges open.
+points, plus every strike inside the range). It used to start at half the
+lowest strike, which put a put's worst case outside it: `max_loss` came back
+at half the true figure and, because the extreme sat at the scan's edge, a
+bounded loss was labelled unbounded. Zero is a floor for a price rather than
+a horizon, so with the default grid only the *right* edge can be open; a
+caller-supplied `spot_range` is scanned as given, with both edges open.
+
+**The strikes are scan points.** An expiry payoff is piecewise linear with
+its kinks at the strikes, so its extrema sit at a strike or an edge, and a
+grid that stepped over a strike missed the kink: a 99/100.1/101.2 butterfly
+reported its peak 8.6% low, at the wrong spot. With the strikes added, max
+profit and max loss are exact and a breakeven interpolated between two scan
+points is exact too, since no segment straddles a kink. `payoff_curve` is
+still every 20th of the 801 scan points. **A stretch of exactly zero P&L is
+one breakeven**, at its start, with a warning naming the stretch: a deep
+out-of-the-money put whose premium underflowed to 0.0 used to report 760.
+
+**Legs that expire at different times are valued at the first expiry.**
+The payoff took every leg's intrinsic value as though all expired together,
+so a same-strike calendar's two `max(S−K, 0)` terms cancelled and it read as
+a certain loss of its debit at every spot, with no breakeven. When the
+option legs carry more than one `time_to_expiry`, the P&L is evaluated at
+the earliest: legs expiring then contribute intrinsic value, and each later
+leg is marked with Black-Scholes at its remaining time, its own volatility
+and the call's rate and yield — the standard calendar and diagonal diagram.
+Long a 9-month 100 call against a short 1-month one (spot 100, vol 0.2):
+peak **+1.91** at 100, breakevens 96.05 and 104.63, worst case the 4.60
+debit. Breakevens on that smooth curve are bisected on the curve itself.
+`payoff_basis` (`expiry` or `first_expiry_marked`) and `evaluated_at_years`
+say which was done, and a warning names the expiries and the assumption the
+mark makes: that volatility is unchanged at the first expiry, which is the
+risk a calendar carries.
 
 ## Related
 

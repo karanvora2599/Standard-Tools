@@ -110,6 +110,105 @@ class TestQueuePosition:
         assert queue["mean_queue_ahead"] is None
 
 
+def _opened_mid_session():
+    """
+    A window that opens with 1,000 shares already resting at 99.99 and no
+    snapshot of them. Five 100-share orders join; 400 shares of an order
+    placed before the window are cancelled; one more 100-share order joins.
+
+    The real queue ahead of the six arrivals was 1,000, 1,100, 1,200,
+    1,300, 1,400 and 1,100. What the window can see is only its own adds:
+    0, 100, 200, 300, 400, and then the same 500 -- the cancelled order was
+    never in the running total, so it takes nothing out of it.
+    """
+    rows = [(k, 1000 + k, "A", "B", 99.99, 100.0) for k in range(5)]
+    rows.append((10, 1, "C", "B", 99.99, 400.0))
+    rows.append((11, 1100, "A", "B", 99.99, 100.0))
+    return _events(rows)
+
+
+class TestAWindowThatOpensMidSession:
+    """Every level starts empty when nothing told the window what was
+    resting, so each queue figure counts only what arrived inside it. That
+    was reported as market structure: no count, no warning, and a cancel of
+    an order the window never saw was taken out of the orders it had."""
+
+    def test_the_queue_figures_are_marked_as_lower_bounds(self) -> None:
+        queue = queue_positions(_opened_mid_session())
+        assert queue["queue_is_lower_bound"] is True
+        assert queue["n_unseeded_adds"] == 6
+        assert queue["n_adds"] == 6
+
+    def test_the_unseen_cancel_is_counted_not_subtracted(self) -> None:
+        queue = queue_positions(_opened_mid_session())
+        assert queue["n_unseen_decrements"] == 1
+        assert queue["unseen_size"] == 400.0
+        # 0, 100, 200, 300, 400, 500: the last arrival still sees the five
+        # orders the window watched join. Taking the unseen 400 out of them
+        # left it 100 ahead, which was nobody's queue.
+        assert queue["mean_queue_ahead"] == pytest.approx(1500 / 6)
+
+    def test_the_report_says_so(self) -> None:
+        report = order_event_metrics(_opened_mid_session())
+        warning = [w for w in report["warnings"] if "LOWER BOUNDS" in w]
+        assert len(warning) == 1
+        assert "6 of 6" in warning[0]
+        assert "400 shares" in warning[0]
+
+    def test_a_partial_fill_takes_only_what_it_filled(self) -> None:
+        events = _events(
+            [
+                (0, 0, "R", "N", np.nan, np.nan),
+                (1, 1, "A", "B", 100.0, 300),
+                (2, 1, "F", "B", 100.0, 100),
+                (3, 2, "A", "B", 100.0, 50),
+                (4, 1, "F", "B", 100.0, 500),  # more than the 200 it had left
+                (5, 3, "A", "B", 100.0, 50),
+            ]
+        )
+        queue = queue_positions(events)
+        # Order 1 joins an empty level; order 2 sees the 200 left of order
+        # 1; order 3 sees only order 2, because order 1 took out its own 200
+        # and no more.
+        assert queue["mean_queue_ahead"] == pytest.approx((0 + 200 + 50) / 3)
+        assert queue["n_unseen_decrements"] == 0
+
+    def test_a_window_opened_by_its_snapshot_is_not_a_lower_bound(self) -> None:
+        """Null case: the snapshot seeds the levels, so the arrival's 800
+        ahead is the queue, as it always was."""
+        events = _events(
+            [
+                (0, 1, "A", "B", 100.0, 500),
+                (0, 2, "A", "B", 100.0, 300),
+                (1, 3, "A", "B", 100.0, 100),
+            ]
+        )
+        events["snapshot"] = [True, True, False]
+        queue = queue_positions(events)
+        assert queue.get("queue_is_lower_bound", False) is False
+        assert queue["n_snapshot_orders"] == 2
+        assert queue["mean_queue_ahead"] == 800.0
+        assert queue.get("n_unseen_decrements", 0) == 0
+
+    def test_a_window_opened_by_a_clear_is_exact(self) -> None:
+        """Null case: a CLEAR empties the book, so the window knows it
+        started from nothing and its queue figures are the queue."""
+        events = _events(
+            [
+                (0, 0, "R", "N", np.nan, np.nan),
+                (1, 1, "A", "B", 100.0, 100),
+                (2, 2, "A", "B", 100.0, 200),
+            ]
+        )
+        queue = queue_positions(events)
+        assert queue.get("queue_is_lower_bound", False) is False
+        assert queue.get("n_unseeded_adds", 0) == 0
+        assert queue["mean_queue_ahead"] == pytest.approx(50.0)
+        assert not any(
+            "LOWER BOUNDS" in w for w in order_event_metrics(events)["warnings"]
+        )
+
+
 class TestOrderLifetime:
     def test_a_filled_order_is_measured_from_its_add(self) -> None:
         events = _events([(0, 1, "A", "B", 100.0, 100), (5, 1, "F", "B", 100.0, 100)])

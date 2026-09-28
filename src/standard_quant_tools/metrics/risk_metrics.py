@@ -141,18 +141,19 @@ def sharpe_ratio(
 def sortino_ratio(
     returns: pd.Series, risk_free_rate: float = 0.0, periods_per_year: int = 252
 ) -> float:
+    # Validated BEFORE the division below, as sharpe_ratio does: checked
+    # after it, periods_per_year=0 escaped as a bare ZeroDivisionError.
+    require_periods_per_year(periods_per_year, "sortino_ratio")
+    require_finite_scalar(risk_free_rate, "risk_free_rate", "sortino_ratio")
     excess_returns = returns - risk_free_rate / periods_per_year
     # Semi-deviation: RMS of clipped returns across ALL periods (zero contribution for
     # profitable bars). Dividing by N (not just n_negative) is the Sortino & Price (1994)
     # definition and gives a larger, more conservative denominator than std of negatives only.
-    require_periods_per_year(periods_per_year, "sortino_ratio")
-    require_finite_scalar(risk_free_rate, "risk_free_rate", "sortino_ratio")
     downside_sq = np.minimum(excess_returns.to_numpy(dtype=np.float64), 0.0) ** 2
     downside_dev = float(np.sqrt(downside_sq.mean())) * np.sqrt(periods_per_year)
     # These two used to share a return value, and they mean opposite things:
     #
-    #   downside_dev == 0   the strategy genuinely never lost -> +inf is the
-    #                       correct, meaningful answer (infinite Sortino).
+    #   downside_dev == 0   the strategy never fell short of the rate.
     #   downside_dev NaN    the deviation could not be computed at all.
     #
     # Returning +inf for both made "my inputs were unusable" read as "my
@@ -163,7 +164,13 @@ def sortino_ratio(
     if np.isnan(downside_dev):
         return float("nan")
     if downside_dev == 0:
-        return np.inf
+        # With no downside the numerator decides. A positive mean excess over
+        # nothing is +inf, the meaningful "never lost" answer. A zero mean
+        # excess over nothing is 0/0 -- a book that never moved -- and is
+        # undefined, the convention sharpe_ratio already follows. It used to
+        # be +inf too, so a parameter set that never traded ranked first in
+        # any grid sorted by this ratio.
+        return np.inf if float(excess_returns.mean()) > 0 else float("nan")
     return (excess_returns.mean() * periods_per_year) / downside_dev
 
 
@@ -188,11 +195,15 @@ def calmar_ratio(equity_curve: pd.Series, periods_per_year: int = 252) -> float:
     """
     Calmar Ratio: CAGR / |Max Drawdown|.
     Higher is better. A ratio > 1 means annual return exceeds worst drawdown.
+
+    With no drawdown the growth rate decides: +inf for a curve that only
+    rose, NaN for one that never moved (0/0 is undefined, not infinitely
+    good -- a flat curve used to score +inf and outrank every real one).
     """
     annual_return = cagr(equity_curve, periods_per_year)
     mdd = max_drawdown(equity_curve)
     if mdd == 0.0:
-        return np.inf
+        return np.inf if annual_return > 0 else float("nan")
     return annual_return / abs(mdd)
 
 
@@ -267,6 +278,9 @@ def information_ratio(
     Information Ratio: annualized active return divided by tracking error.
     Measures quality of active management. IR > 0.5 is considered strong.
     """
+    # Every other annualized metric validates this; unchecked, a zero or
+    # negative value went into sqrt() and came back as a silent NaN.
+    require_periods_per_year(periods_per_year, "information_ratio")
     common_idx = returns.index.intersection(benchmark_returns.index)
     active = returns.loc[common_idx] - benchmark_returns.loc[common_idx]
 
@@ -313,6 +327,12 @@ def treynor_ratio(
     Treynor Ratio: excess return per unit of systematic (beta) risk.
     Complements Sharpe (which uses total risk).
     """
+    # The same pair sharpe_ratio checks. Treynor has no sqrt to turn a bad
+    # value into NaN, so periods_per_year=-252 returned the true ratio with
+    # its sign flipped, 0 raised a bare ZeroDivisionError, and a NaN or
+    # infinite rate came back as a NaN or -inf ratio.
+    require_periods_per_year(periods_per_year, "treynor_ratio")
+    require_finite_scalar(risk_free_rate, "risk_free_rate", "treynor_ratio")
     common_idx = returns.index.intersection(benchmark_returns.index)
     aligned_returns = returns.loc[common_idx]
     beta_stats = calculate_beta(aligned_returns, benchmark_returns.loc[common_idx])

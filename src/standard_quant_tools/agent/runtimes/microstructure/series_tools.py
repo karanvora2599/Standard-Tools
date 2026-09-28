@@ -141,7 +141,10 @@ def classify_trade_direction(input_data: ClassifyTradesInput) -> SignedTapeResul
             "from where the trade fell against the prevailing quote. It "
             "agrees with the true classification about 85% of the time on a "
             "liquid name and materially worse on an illiquid one, and the "
-            "error attenuates every downstream estimate toward zero."
+            "error attenuates a downstream estimate toward zero -- except one "
+            "regressed on these same trade prices, such as a price impact, "
+            "where the sign is read off the change being explained and the "
+            "bid-ask bounce inflates it instead."
         )
 
     ref = publish(

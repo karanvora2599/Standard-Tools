@@ -22,9 +22,11 @@ See the CHANGELOG entry of 2026-09-22.
 """
 
 import importlib
+import math
 
 import numpy as np
 import pytest
+from pydantic import ValidationError as PydanticValidationError
 
 from standard_quant_tools.agent.runtimes.delta_one.models import (
     BasisScanInput,
@@ -37,7 +39,7 @@ from standard_quant_tools.agent.runtimes.delta_one.tools import (
     monitor_spread_stream,
     scan_basis_dislocations,
 )
-from standard_quant_tools.delta_one.daycount import CONVENTIONS
+from standard_quant_tools.delta_one.daycount import CONVENTIONS, day_count
 from standard_quant_tools.delta_one.futures import roll_analysis
 from standard_quant_tools.delta_one.streaming import STREAMING_THRESHOLD
 from standard_quant_tools.error import ValidationError
@@ -102,13 +104,37 @@ class TestTheRollSaysWhichDayCountItUsed:
         assert default.breakeven_annualized_rate == 0.2992396671066364
         assert default.model_dump() == spelled_out.model_dump()
 
-    def test_a_360_day_year_is_a_360_day_year_whichever_way_it_is_counted(self):
-        """30/360 and ACT/360 share a denominator, and a roll is given in
+    def test_30_360_is_refused_because_a_roll_is_given_in_days(self):
+        """This used to assert that 30/360 and ACT/360 agree here -- which
 
-        DAYS -- so here they agree, while over real dates they need not."""
-        thirty = analyze_roll(RollAnalysisInput(day_count="30/360", **_ROLL))
-        actual = analyze_roll(RollAnalysisInput(day_count="ACT/360", **_ROLL))
-        assert thirty.roll_yield_bps == actual.roll_yield_bps
+        was the defect, pinned. 30/360 counts the days between two DATES;
+        a roll arrives as days already counted, so dividing them by 360 is
+        ACT/360 under another name. On a 20 March to 19 June roll (91 actual
+        days, 89 counted 30/360) that reported the roll yield 2.2% low under
+        the 30/360 label. Refused in the library, with the exact remedy,
+        and not offered by the schema."""
+        with pytest.raises(ValidationError, match="DATES") as excinfo:
+            roll_analysis(day_count="30/360", **_ROLL)
+        assert "ACT/360" in str(excinfo.value)
+        with pytest.raises(PydanticValidationError, match="day_count"):
+            RollAnalysisInput(day_count="30/360", **_ROLL)
+
+    def test_the_named_remedy_reproduces_a_true_30_360_roll_yield(self):
+        """The refusal's remedy, checked: the 30/360 count of the period,
+
+        passed as the days under ACT/360, is the 30/360 rate exactly."""
+        counted, denominator = day_count(
+            "2026-03-20", "2026-06-19", convention="30/360"
+        )
+        assert (counted, denominator) == (89.0, 360.0)
+        roll = dict(_ROLL, days_between_expiries=counted)
+        out = roll_analysis(day_count="ACT/360", **roll)
+        expected = math.log(6265.0 / 6240.0) / (89.0 / 360.0) * 10_000.0
+        assert out["roll_yield_bps"] == pytest.approx(expected, rel=1e-12)
+        # ...which the old answer, 91 actual days over 360, was not.
+        assert out["roll_yield_bps"] / roll_analysis(day_count="ACT/360", **_ROLL)[
+            "roll_yield_bps"
+        ] == pytest.approx(91.0 / 89.0, rel=1e-12)
 
     def test_a_convention_this_library_does_not_count_is_refused_by_name(self):
         with pytest.raises(ValidationError, match="30E/360"):
@@ -243,6 +269,22 @@ class TestAResumedMonitorCannotBeRebuilt:
         )
         assert resumed.state["threshold"] == 20.0
         assert resumed.n_observations == 81
+
+    def test_an_edited_state_is_refused_when_no_field_is_sent(self):
+        """Silence resumes what the STATE says, so the state itself is
+
+        checked: the comparison above only ever looked at fields that were
+        sent, and a threshold edited to -5 in the state fired on the first
+        tick after warm-up with a statistic of 0.0."""
+        state = self._open()
+        state["threshold"] = -5.0
+        with pytest.raises(ValidationError, match="threshold") as excinfo:
+            monitor_spread_stream(
+                SpreadMonitorInput(
+                    primary_prices=[100.3], reference_prices=[100.0], state=state
+                )
+            )
+        assert "open a new monitor" in str(excinfo.value)
 
 
 class TestTheStreamThresholdIsTheStreamingOne:

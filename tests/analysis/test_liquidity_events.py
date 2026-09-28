@@ -127,6 +127,61 @@ class TestAPriceLevelIsNotStationary:
         assert "mid_return" in reason
 
 
+def _zero_quote_last_in_its_bucket():
+    """A quiet one-second quote panel, and the same panel with ONE quote
+    printed at 0.0 / 0.0 as the last quote of the 14:36:40 bucket."""
+    rng = np.random.default_rng(0)
+    stamps = pd.date_range("2026-03-02 14:30:00", periods=600, freq="1s")
+    mid = 100 + np.cumsum(rng.normal(0, 0.01, 600))
+    half = (0.01 + rng.uniform(0, 0.02, 600)) / 2
+    quotes = pd.DataFrame(
+        {"bid_price": mid - half, "ask_price": mid + half}, index=stamps
+    )
+    bad = quotes.copy()
+    bad.iloc[409, :] = 0.0
+    return quotes, bad
+
+
+class TestAMidThatIsNotAPrice:
+    """The spread channel skipped a zero mid and the mid-return channel did
+    not: one zero-priced quote landing last in its bucket made that
+    bucket's log mid -inf and the next +inf, and the detector reported an
+    infinite peak at severity "very high" on a market where nothing
+    happened."""
+
+    def test_one_zero_quote_does_not_make_an_event(self):
+        clean, bad = _zero_quote_last_in_its_bucket()
+        expected = detect_liquidity_events(
+            channels=["mid_return"], quotes=clean, freq="10s"
+        )["results"][0]
+        result = detect_liquidity_events(
+            channels=["mid_return"], quotes=bad, freq="10s"
+        )["results"][0]
+        assert np.isfinite(result["peak_statistic"])
+        assert result["severity"] == "none"
+        assert not result["triggered"]
+        # The bucket falls back to its last REAL quote, which on this panel
+        # is the same answer the clean panel gives.
+        assert result["peak_statistic"] == pytest.approx(expected["peak_statistic"])
+
+    def test_the_channel_skips_the_quote_and_keeps_the_bucket(self):
+        clean, bad = _zero_quote_last_in_its_bucket()
+        series = CHANNELS["mid_return"].compute(quotes=bad, freq="10s")
+        assert np.isfinite(series.to_numpy()).all()
+        assert len(series) == len(
+            CHANNELS["mid_return"].compute(quotes=clean, freq="10s")
+        )
+
+    def test_a_clean_panel_is_the_log_return_of_each_buckets_last_mid(self):
+        """Null case: with every mid a price, the channel is exactly what it
+        always was."""
+        clean, _ = _zero_quote_last_in_its_bucket()
+        mid = (clean["bid_price"] + clean["ask_price"]) / 2.0
+        expected = np.log(mid.resample("10s").last()).diff().dropna()
+        series = CHANNELS["mid_return"].compute(quotes=clean, freq="10s")
+        np.testing.assert_array_equal(series.to_numpy(), expected.to_numpy())
+
+
 class TestADegenerateBaselineIsLabelled:
     """Bug 2, pinned. A near-constant reference window makes the statistic a
     ratio to nearly zero."""

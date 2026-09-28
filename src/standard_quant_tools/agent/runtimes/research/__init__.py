@@ -189,7 +189,7 @@ TOOL_DEFS = [
     ),
     (
         "run_factor_regression",
-        "Multi-factor OLS regression: alpha, loadings, t-stats, p-values, R².",
+        "Multi-factor OLS regression: alpha, loadings, t-stats, p-values, R². One unique name per factor ticker; linearly dependent factors are refused by name; dates missing from any series are dropped and counted.",
         FactorRegressionInput,
     ),
     (
@@ -214,7 +214,7 @@ TOOL_DEFS = [
     ),
     (
         "run_hurst_analysis",
-        "Hurst exponent (DFA/R-S): regime classification and optional rolling breakdown.",
+        "Hurst exponent (DFA, or R/S corrected for its small-sample upward bias): regime classification against a random-walk band that widens for short series (regime_band), and optional rolling breakdown. hurst is null when the series is too short for the window range.",
         HurstInput,
     ),
     (
@@ -234,7 +234,7 @@ TOOL_DEFS = [
     ),
     (
         "scan_pairs",
-        "Scan a ticker universe for cointegrated pairs, ranked by half-life.",
+        "Scan a ticker universe for cointegrated pairs, ranked by half-life. Each pair is tested in both regression orders (Engle-Granger is not symmetric) and gated on the larger p-value after a Benjamini-Hochberg adjustment across every pair tested; reports the number tested and how many would pass by chance.",
         PairScannerInput,
     ),
     (

@@ -44,6 +44,7 @@ import pandas as pd
 from standard_quant_tools.backtest.costs import impact_cost
 from standard_quant_tools.constants import TRADING_DAYS_PER_YEAR
 from standard_quant_tools.error import ValidationError
+from standard_quant_tools.metrics.risk_metrics import has_no_dispersion
 from standard_quant_tools.numeric_contract import (
     require_finite_covariance,
     require_periods_per_year,
@@ -60,6 +61,24 @@ TRADING_DAYS = TRADING_DAYS_PER_YEAR
 #: indefinite matrix rather than rounding; either way the matrix is
 #: repaired, and only the genuine case is warned about loudly.
 _PSD_TOLERANCE = 1e-10
+
+#: A variance at or below this share of the largest variance in the same
+#: problem is treated as zero: a volatility ratio of 1e-10. A constant
+#: series leaves float residue around 1e-36 to 1e-40 rather than an exact
+#: zero, and an exact-zero test let it through -- a cash sleeve at a
+#: constant 1bp a day then took 100% of an inverse-variance allocation with
+#: converged=True. A real quiet asset (T-bills against equities) sits
+#: around 1e-6 of the largest, far above this.
+_RELATIVE_VARIANCE_FLOOR = 1e-20
+
+
+def _zero_variance_assets(names: Sequence[Any], variances: np.ndarray) -> List[str]:
+    """The assets whose variance is zero, negative, or float residue next
+    to the largest variance in the problem."""
+    variances = np.asarray(variances, dtype=float)
+    largest = float(np.max(variances)) if variances.size else 0.0
+    floor = _RELATIVE_VARIANCE_FLOOR * max(largest, 0.0)
+    return [str(n) for n, v in zip(names, variances) if not v > floor]
 
 
 def _repair_psd(frame: pd.DataFrame, who: str) -> "tuple[pd.DataFrame, List[str]]":
@@ -119,10 +138,21 @@ def _covariance_frame_with_notes(
     array = require_finite_covariance(frame.to_numpy(), "covariance", who)
     # Not the contract's: it has no rule about the diagonal, and a
     # zero-variance asset is specific to a portfolio construction problem.
-    if (np.diag(array) <= 0).any():
+    # RELATIVE, not `<= 0`: a constant series' variance is float residue
+    # (1.8e-40 for a constant 1bp a day), which passed an exact-zero test,
+    # and risk_parity and max_diversification then gave that asset 100% of
+    # the portfolio with converged=True.
+    flat = _zero_variance_assets(frame.columns, np.diag(array))
+    if flat:
         raise ValidationError(
-            f"{who}: a diagonal entry is non-positive, so some asset has "
-            "zero or negative variance. Usually a constant price series."
+            f"{who}: a diagonal entry is non-positive or negligible, so "
+            f"{flat} have zero variance (at or below "
+            f"{_RELATIVE_VARIANCE_FLOOR:g} of the largest variance, which is "
+            "float residue rather than a quiet asset). Usually a constant "
+            "price series -- a cash sleeve, a halted or stale name. Every "
+            "allocator here divides by variance, so its weight would be "
+            "undefined at an exact zero and 100% at the residue; remove it "
+            "and size it outside the allocation."
         )
     return _repair_psd(frame, who)
 
@@ -328,6 +358,35 @@ def hierarchical_risk_parity(
             f"{n_assets} assets. The correlation matrix is rank-deficient "
             "and the clustering would be reading noise."
         )
+    values = frame.to_numpy()
+    if not np.isfinite(values).all():
+        bad = [
+            str(c) for c, ok in zip(frame.columns, np.isfinite(values).all(0)) if not ok
+        ]
+        raise ValidationError(
+            f"hierarchical_risk_parity: {bad} contain an infinite return, "
+            "usually a zero price feeding a percentage change."
+        )
+    # The siblings refuse a zero-variance asset through the covariance's
+    # diagonal and this one had no guard at all: an exactly constant column
+    # made `_cluster_variance` divide by zero and every weight came back
+    # NaN, and a column constant at a non-zero level (std 1.4e-20 rather
+    # than 0) took 100% of the portfolio, because the bisection splits
+    # capital in inverse proportion to variance. Both cases are checked:
+    # the column is constant on its own scale, or its variance is float
+    # residue next to the largest one here.
+    flat = [str(c) for c in frame.columns if has_no_dispersion(frame[c].to_numpy())]
+    for name in _zero_variance_assets(frame.columns, frame.var(ddof=1).to_numpy()):
+        if name not in flat:
+            flat.append(name)
+    if flat:
+        raise ValidationError(
+            f"hierarchical_risk_parity: {flat} have no variance over the "
+            f"{len(frame)} observations used (a cash sleeve, a halted or stale "
+            "price). HRP splits capital in inverse proportion to variance, so "
+            "a zero-variance asset's allocation is undefined at exactly zero "
+            "and 100% at float residue. Remove it and size it outside HRP."
+        )
 
     correlation = frame.corr().to_numpy()
     covariance = frame.cov().to_numpy()
@@ -363,6 +422,14 @@ def hierarchical_risk_parity(
         clusters = [c for c in clusters if len(c) > 1]
 
     weights = weights / weights.sum()
+    # The guards above are meant to make this unreachable. A weight that is
+    # not a number must never leave as an allocation: at the agent surface
+    # NaN weights serialised as nulls, a silent empty allocation.
+    if not np.isfinite(weights).all():
+        raise ValidationError(
+            "hierarchical_risk_parity: the allocation is not finite. Check "
+            "the return series for a constant or degenerate column."
+        )
     contributions = _risk_contributions(weights, covariance)
 
     # 252 was hardcoded, so monthly returns came back overstated by
@@ -719,6 +786,25 @@ def liquidity_adjusted_var(
         )
     if not -1 <= correlation <= 1:
         raise ValidationError(f"correlation must be in [-1, 1], got {correlation!r}")
+    # REFUSED rather than clamped. One correlation shared by every pair is a
+    # valid correlation matrix only for rho >= -1/(n-1); below that floor
+    # the implied portfolio variance is negative, and it was clamped to 0:
+    # five $1m positions in 30%-vol names at rho=-0.30 reported a VaR of
+    # exactly $0.00. There is no book the number could describe, so no
+    # number is returned; the refusal names the floor for this book's size.
+    # At n=2 the floor is -1, the edge of the range already accepted.
+    n_positions = len(positions)
+    if n_positions > 2:
+        psd_floor = -1.0 / (n_positions - 1)
+        if correlation < psd_floor - 1e-12:
+            raise ValidationError(
+                f"liquidity_adjusted_var: correlation={correlation} is below "
+                f"-1/(n-1) = {psd_floor:.4f} for {n_positions} positions. One "
+                "correlation shared by every pair of asset returns is a valid "
+                "correlation matrix only at or above that floor; below it the "
+                "implied portfolio variance is negative and the VaR would read "
+                f"as $0. Use a correlation of at least {psd_floor:.4f}."
+            )
 
     # Normal quantile via the erf inverse, bisected -- no scipy.
     z = _normal_quantile(confidence)
@@ -770,8 +856,16 @@ def liquidity_adjusted_var(
         )
     rows.sort(key=lambda r: r["liquidity_adjusted_var"], reverse=True)
 
-    naive_values = np.array([r["naive_1d_var"] for r in rows])
-    adjusted_values = np.array([r["liquidity_adjusted_var"] for r in rows])
+    # SIGNED, because `correlation` is between asset RETURNS and a short
+    # position's P&L is the negative of its asset's return. The rows carry
+    # magnitudes (a risk is reported as a size), and aggregating those
+    # magnitudes scored a long/short hedge as a long/long doubling: {+1m,
+    # -1m} at rho=+0.9 came back 60,595 -- the same as two longs -- where
+    # the hedge carries sqrt(0.2) of one leg's risk.
+    signs = np.array([1.0 if r["position_value"] >= 0 else -1.0 for r in rows])
+    naive_values = signs * np.array([r["naive_1d_var"] for r in rows])
+    adjusted_values = signs * np.array([r["liquidity_adjusted_var"] for r in rows])
+    offsetting = False
 
     def _aggregate(values: np.ndarray) -> float:
         # ONLY zero short-circuits. `correlation <= 0` returned the ZERO
@@ -781,15 +875,19 @@ def liquidity_adjusted_var(
         # where this function's own formula, two lines down, gives
         # 77,560.49: VaR overstated 2.74x for a book whose positions offset.
         #
-        # The formula is correct across [-1, 1]: variance is
-        # sum(v^2)(1 - rho) + rho * (sum v)^2, which at rho = -0.5 on two
-        # equal positions gives exactly one position's worth, and the
-        # `max(..., 0.0)` below already guards the degenerate corner.
+        # Variance is sum(v^2)(1 - rho) + rho * (sum v)^2 over the SIGNED
+        # values, which is non-negative for every rho at or above the
+        # -1/(n-1) floor refused above. The `max(..., 0.0)` only absorbs
+        # rounding at an exact offset, which is reported below.
+        nonlocal offsetting
+        independent = float((values**2).sum())
         if correlation == 0:
-            return float(math.sqrt((values**2).sum()))
-        independent = (values**2).sum()
-        cross = correlation * (values.sum() ** 2 - independent)
-        return float(math.sqrt(max(independent + cross, 0.0)))
+            return float(math.sqrt(independent))
+        cross = correlation * (float(values.sum()) ** 2 - independent)
+        total = independent + cross
+        if independent > 0 and total <= 1e-12 * independent:
+            offsetting = True
+        return float(math.sqrt(max(total, 0.0)))
 
     total_naive = _aggregate(naive_values)
     total_adjusted = _aggregate(adjusted_values)
@@ -797,6 +895,13 @@ def liquidity_adjusted_var(
     worst = rows[0] if rows else None
 
     warnings: List[str] = []
+    if offsetting:
+        warnings.append(
+            f"The positions exactly offset under the assumed correlation of "
+            f"{correlation:.4f}, so the aggregate VaR is zero to rounding. "
+            "That is a statement about the assumption, not about the book: "
+            "a perfect offset holds only while the correlation holds exactly."
+        )
     slow = [r["asset"] for r in rows if r["liquidation_days"] > 5]
     if slow:
         warnings.append(

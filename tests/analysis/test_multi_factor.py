@@ -199,6 +199,65 @@ class TestMultiFactorRegressionValues:
         assert result["loadings"]["hml"] == pytest.approx(-0.3, abs=0.08)
 
 
+class TestRankDeficientDesign:
+    """
+    A design that is not full rank has no unique loadings. Least squares
+    used to answer anyway: two identical factors split one loading 50/50,
+    and the t-statistics from inv(X'X) of a singular matrix were NaN or a
+    confident 1.5e-7. The regression now refuses and names the factor to
+    drop -- the policy rolling_factor_loadings already applied per window.
+    """
+
+    @staticmethod
+    def _frame(seed=21, n=300):
+        rng = np.random.default_rng(seed)
+        dates = pd.date_range("2022-01-01", periods=n, freq="B")
+        a = rng.normal(0, 0.01, n)
+        b = rng.normal(0, 0.008, n)
+        y = 0.0002 + 0.9 * a + 0.4 * b + rng.normal(0, 0.002, n)
+        return pd.Series(y, index=dates), a, b, dates
+
+    def test_a_factor_that_is_the_sum_of_two_others_is_named(self):
+        asset, a, b, dates = self._frame()
+        factors = pd.DataFrame({"a": a, "b": b, "c": a + b}, index=dates)
+        with pytest.raises(ValidationError, match="'c'"):
+            multi_factor_regression(asset, factors)
+
+    def test_a_factor_that_is_a_multiple_of_another_is_named(self):
+        asset, a, b, dates = self._frame()
+        factors = pd.DataFrame({"a": a, "b": 1.1 * a}, index=dates)
+        with pytest.raises(ValidationError, match="'b'"):
+            multi_factor_regression(asset, factors)
+
+    def test_a_constant_factor_duplicates_the_intercept(self):
+        asset, a, b, dates = self._frame()
+        factors = pd.DataFrame({"a": a, "const": np.full(len(a), 0.001)}, index=dates)
+        with pytest.raises(ValidationError, match="'const'"):
+            multi_factor_regression(asset, factors)
+
+    def test_identical_factors_are_refused(self):
+        asset, a, b, dates = self._frame()
+        factors = pd.DataFrame({"spy": a, "spy2": a.copy()}, index=dates)
+        with pytest.raises(ValidationError, match="linearly dependent"):
+            multi_factor_regression(asset, factors)
+
+    def test_a_full_rank_planted_model_still_recovers_its_loadings(self):
+        """The null case: nearly-but-not-exactly collinear factors answer."""
+        rng = np.random.default_rng(22)
+        n = 1000
+        dates = pd.date_range("2022-01-01", periods=n, freq="B")
+        f1 = rng.normal(0, 0.01, n)
+        f2 = 0.6 * f1 + rng.normal(0, 0.006, n)
+        f3 = rng.normal(0, 0.007, n)
+        y = 0.0001 + 1.1 * f1 - 0.4 * f2 + 0.3 * f3 + rng.normal(0, 0.001, n)
+        factors = pd.DataFrame({"f1": f1, "f2": f2, "f3": f3}, index=dates)
+        result = multi_factor_regression(pd.Series(y, index=dates), factors)
+        assert result["loadings"]["f1"] == pytest.approx(1.1, abs=0.05)
+        assert result["loadings"]["f2"] == pytest.approx(-0.4, abs=0.05)
+        assert result["loadings"]["f3"] == pytest.approx(0.3, abs=0.05)
+        assert all(np.isfinite(v) for v in result["t_stats"].values())
+
+
 # ── rolling_factor_loadings ────────────────────────────────────────────────────
 
 

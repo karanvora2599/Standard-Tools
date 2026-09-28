@@ -490,6 +490,63 @@ class TestGetTechnicalAnalysis:
         assert fused_result.last_values == fallback_result.last_values
         assert fused_result.signals == fallback_result.signals
 
+    @staticmethod
+    def _run(patched_factory, frame, indicators, native, monkeypatch):
+        from standard_quant_tools.agent.runtimes.research import tools as research
+
+        if native and not research.HAS_CPP:
+            pytest.skip("C++ extension not built")
+        if not native:
+            monkeypatch.setattr(research, "HAS_CPP", False)
+        patched_factory.get_ohlcv.return_value = frame
+        return get_technical_analysis(
+            TechnicalInput(
+                symbol="AAPL", start_date=START, end_date=END, indicators=indicators
+            )
+        )
+
+    @pytest.mark.parametrize("native", [True, False], ids=["fused", "per-indicator"])
+    def test_an_inf_close_is_refused_on_both_paths(
+        self, patched_factory, sample_ohlcv, native, monkeypatch
+    ):
+        """The per-indicator wrappers refuse +/-inf; the fused native call
+        took it, and RSI after an inf bar is NaN to the end, so the tool
+        reported the last RSI from before the bad bar as the current one."""
+        from standard_quant_tools.error import ValidationError
+
+        frame = sample_ohlcv.copy()
+        frame.iloc[len(frame) // 2, frame.columns.get_loc("Close")] = np.inf
+        with pytest.raises(ValidationError, match="infinite"):
+            self._run(patched_factory, frame, ["rsi", "bollinger"], native, monkeypatch)
+
+    @pytest.mark.parametrize("native", [True, False], ids=["fused", "per-indicator"])
+    def test_an_inf_in_a_column_no_requested_indicator_reads_is_not(
+        self, patched_factory, sample_ohlcv, native, monkeypatch
+    ):
+        """The null case: rsi and bollinger read Close only, so an inf High
+        is refused by neither path."""
+        frame = sample_ohlcv.copy()
+        frame.iloc[len(frame) // 2, frame.columns.get_loc("High")] = np.inf
+        result = self._run(
+            patched_factory, frame, ["rsi", "bollinger"], native, monkeypatch
+        )
+        assert 0 <= result.last_values["rsi_14"] <= 100
+
+    def test_a_flat_close_gives_the_same_bands_on_both_paths(
+        self, patched_factory, sample_ohlcv, monkeypatch
+    ):
+        frame = sample_ohlcv.copy()
+        frame.iloc[-25:, frame.columns.get_loc("Close")] = frame["Close"].iloc[-26]
+        fused = self._run(
+            patched_factory, frame, ["rsi", "bollinger"], True, monkeypatch
+        )
+        alone = self._run(
+            patched_factory, frame, ["rsi", "bollinger"], False, monkeypatch
+        )
+        assert fused.last_values == alone.last_values
+        flat = round(float(frame["Close"].iloc[-1]), 4)
+        assert fused.last_values["bb_upper"] == fused.last_values["bb_lower"] == flat
+
 
 class TestGetPortfolioAnalysis:
     def test_returns_portfolio_result(self, patched_factory):
@@ -546,7 +603,51 @@ class TestRunScreener:
 
 
 class TestRunFactorRegression:
-    def test_returns_factor_regression_result(self, patched_factory):
+    """
+    Every factor is its own series.
+
+    `mock_provider` returns the same `sample_ohlcv` for every ticker, so SPY
+    and IWM were one series twice and these tests ran a rank-deficient
+    regression: one loading split between two identical columns, with
+    t-statistics that were rounding noise. `multi_factor_regression` now
+    refuses such a design, so the class gets a provider with one distinct
+    series per ticker -- AAPL built from SPY and IWM with known loadings --
+    and keeps its assertions.
+    """
+
+    @pytest.fixture
+    def factor_universe(self, monkeypatch, sample_ohlcv):
+        rng = np.random.default_rng(31)
+        n = len(sample_ohlcv)
+        spy = rng.normal(0.0004, 0.010, n)
+        iwm = rng.normal(0.0003, 0.012, n)
+        iwd = rng.normal(0.0002, 0.009, n)
+        aapl = 0.0002 + 1.2 * spy + 0.5 * iwm + rng.normal(0, 0.004, n)
+
+        def _frame(returns):
+            frame = sample_ohlcv.copy()
+            frame["Close"] = 100.0 * np.cumprod(1.0 + returns)
+            return frame
+
+        frames = {
+            "AAPL": _frame(aapl),
+            "SPY": _frame(spy),
+            "SPY2": _frame(spy),
+            "IWM": _frame(iwm),
+            "IWD": _frame(iwd),
+            "IWM_SHORT": _frame(iwm).iloc[100:],
+            "TINY": _frame(spy).iloc[:4],
+        }
+
+        def _by_symbol(symbol, *args, **kwargs):
+            return frames[str(symbol).upper()]
+
+        provider = MagicMock()
+        provider.get_ohlcv.side_effect = _by_symbol
+        monkeypatch.setattr(DataFactory, "get_provider", lambda *a, **kw: provider)
+        return provider
+
+    def test_returns_factor_regression_result(self, factor_universe):
         inp = FactorRegressionInput(
             symbol="AAPL",
             factor_tickers=["SPY", "IWM"],
@@ -558,7 +659,7 @@ class TestRunFactorRegression:
         assert result.symbol == "AAPL"
         assert result.factors == ["mkt", "smb"]
 
-    def test_defaults_factor_names_to_tickers(self, patched_factory):
+    def test_defaults_factor_names_to_tickers(self, factor_universe):
         inp = FactorRegressionInput(
             symbol="AAPL",
             factor_tickers=["SPY", "IWM"],
@@ -568,7 +669,7 @@ class TestRunFactorRegression:
         result = run_factor_regression(inp)
         assert result.factors == ["SPY", "IWM"]
 
-    def test_alpha_is_float(self, patched_factory):
+    def test_alpha_is_float(self, factor_universe):
         inp = FactorRegressionInput(
             symbol="AAPL",
             factor_tickers=["SPY"],
@@ -578,7 +679,7 @@ class TestRunFactorRegression:
         result = run_factor_regression(inp)
         assert isinstance(result.alpha, float)
 
-    def test_loadings_keys_match_factor_names(self, patched_factory):
+    def test_loadings_keys_match_factor_names(self, factor_universe):
         inp = FactorRegressionInput(
             symbol="AAPL",
             factor_tickers=["SPY", "IWM"],
@@ -589,7 +690,7 @@ class TestRunFactorRegression:
         result = run_factor_regression(inp)
         assert set(result.loadings.keys()) == {"mkt", "smb"}
 
-    def test_t_stats_and_p_values_have_alpha_key(self, patched_factory):
+    def test_t_stats_and_p_values_have_alpha_key(self, factor_universe):
         inp = FactorRegressionInput(
             symbol="AAPL",
             factor_tickers=["SPY"],
@@ -601,7 +702,7 @@ class TestRunFactorRegression:
         assert "alpha" in result.t_stats
         assert "alpha" in result.p_values
 
-    def test_r_squared_bounded(self, patched_factory):
+    def test_r_squared_bounded(self, factor_universe):
         inp = FactorRegressionInput(
             symbol="AAPL",
             factor_tickers=["SPY"],
@@ -611,7 +712,7 @@ class TestRunFactorRegression:
         result = run_factor_regression(inp)
         assert 0.0 <= result.r_squared <= 1.0
 
-    def test_n_obs_positive(self, patched_factory):
+    def test_n_obs_positive(self, factor_universe):
         inp = FactorRegressionInput(
             symbol="AAPL",
             factor_tickers=["SPY"],
@@ -621,7 +722,7 @@ class TestRunFactorRegression:
         result = run_factor_regression(inp)
         assert result.n_obs > 0
 
-    def test_rolling_tail_none_when_not_requested(self, patched_factory):
+    def test_rolling_tail_none_when_not_requested(self, factor_universe):
         inp = FactorRegressionInput(
             symbol="AAPL",
             factor_tickers=["SPY"],
@@ -632,7 +733,7 @@ class TestRunFactorRegression:
         assert result.rolling_alpha_tail is None
         assert result.rolling_loadings_tail is None
 
-    def test_rolling_tail_populated_when_requested(self, patched_factory):
+    def test_rolling_tail_populated_when_requested(self, factor_universe):
         inp = FactorRegressionInput(
             symbol="AAPL",
             factor_tickers=["SPY"],
@@ -645,6 +746,103 @@ class TestRunFactorRegression:
         assert result.rolling_alpha_tail is not None
         assert result.rolling_loadings_tail is not None
         assert "mkt" in result.rolling_loadings_tail
+
+    def test_a_planted_two_factor_model_is_recovered(self, factor_universe):
+        inp = FactorRegressionInput(
+            symbol="AAPL",
+            factor_tickers=["SPY", "IWM"],
+            factor_names=["mkt", "smb"],
+            start_date=START,
+            end_date=END,
+        )
+        result = run_factor_regression(inp)
+        assert result.loadings["mkt"] == pytest.approx(1.2, abs=0.05)
+        assert result.loadings["smb"] == pytest.approx(0.5, abs=0.05)
+        assert result.n_dates_dropped == 0
+
+    def test_fewer_names_than_tickers_is_refused(self):
+        """A short name list used to drop the unnamed factors silently."""
+        from pydantic import ValidationError as PydanticValidationError
+
+        with pytest.raises(PydanticValidationError, match="one name per"):
+            FactorRegressionInput(
+                symbol="AAPL",
+                factor_tickers=["SPY", "IWM"],
+                factor_names=["mkt"],
+                start_date=START,
+                end_date=END,
+            )
+
+    def test_a_repeated_name_is_refused(self):
+        """A repeated name overwrote one factor with the other."""
+        from pydantic import ValidationError as PydanticValidationError
+
+        with pytest.raises(PydanticValidationError, match="unique"):
+            FactorRegressionInput(
+                symbol="AAPL",
+                factor_tickers=["SPY", "IWM"],
+                factor_names=["f", "f"],
+                start_date=START,
+                end_date=END,
+            )
+
+    def test_alpha_is_not_a_factor_name(self):
+        from pydantic import ValidationError as PydanticValidationError
+
+        with pytest.raises(PydanticValidationError, match="reserved"):
+            FactorRegressionInput(
+                symbol="AAPL",
+                factor_tickers=["SPY"],
+                factor_names=["alpha"],
+                start_date=START,
+                end_date=END,
+            )
+
+    def test_identical_factors_are_refused_by_name(self, factor_universe):
+        """Two tickers with the same returns split one loading between them."""
+        from standard_quant_tools.error import ValidationError
+
+        inp = FactorRegressionInput(
+            symbol="AAPL",
+            factor_tickers=["SPY", "SPY2"],
+            start_date=START,
+            end_date=END,
+        )
+        with pytest.raises(ValidationError, match="'SPY2'"):
+            run_factor_regression(inp)
+
+    def test_a_shorter_history_factor_drops_dates_and_says_so(self, factor_universe):
+        """
+        The factor frame was an outer join, so a factor listed later put
+        NaN on every earlier date and the whole request was refused over
+        them. The shared dates are used and the rest counted.
+        """
+        inp = FactorRegressionInput(
+            symbol="AAPL",
+            factor_tickers=["SPY", "IWM_SHORT"],
+            start_date=START,
+            end_date=END,
+        )
+        result = run_factor_regression(inp)
+        assert result.n_dates_dropped == 100
+        assert any("100 of" in w for w in result.warnings)
+        assert result.loadings["IWM_SHORT"] == pytest.approx(0.5, abs=0.06)
+
+    def test_undefined_statistics_are_none_not_zero_and_one(self, factor_universe):
+        """
+        With fewer observations than coefficients there are no t-statistics.
+        They were reported as t=0.0 and p=1.0: a definite "no effect".
+        """
+        inp = FactorRegressionInput(
+            symbol="TINY",
+            factor_tickers=["SPY", "IWM", "IWD"],
+            start_date=START,
+            end_date=END,
+        )
+        result = run_factor_regression(inp)
+        assert all(v is None for v in result.t_stats.values())
+        assert all(v is None for v in result.p_values.values())
+        assert result.adj_r_squared is None
 
 
 class TestRunCointegrationTest:
@@ -959,6 +1157,67 @@ class TestRunHurstAnalysis:
         fracs = result.rolling_regime_fractions
         assert set(fracs.keys()) == {"trending", "random_walk", "mean_reverting"}
         assert abs(sum(fracs.values()) - 1.0) < 0.01
+
+    def test_rolling_fractions_use_the_library_classifier(self, patched_factory):
+        """
+        The fractions used a fixed 0.55/0.45 while the headline regime
+        came from the library. A 100-bar window's estimate has a white-noise
+        standard deviation near 0.15, so the fixed band labelled most of
+        the noise; the fractions now use the band for the window's length.
+        """
+        from standard_quant_tools.analysis.hurst import classify_regime, rolling_hurst
+
+        inp = HurstInput(
+            symbol="AAPL", start_date=START, end_date=END, rolling_window=100
+        )
+        result = run_hurst_analysis(inp)
+        frame = patched_factory.get_ohlcv("AAPL", START, END)
+        returns = frame["Close"].pct_change(fill_method=None).dropna()
+        values = rolling_hurst(returns, window=100).dropna()
+        labels = [classify_regime(float(v), 100, "dfa") for v in values]
+        for name, fraction in result.rolling_regime_fractions.items():
+            assert fraction == pytest.approx(labels.count(name) / len(labels), abs=1e-3)
+
+    def test_an_inverted_window_range_is_refused_at_the_input(self):
+        """min_window 50 with max_window 20 used to answer hurst 0.0."""
+        from pydantic import ValidationError as PydanticValidationError
+
+        with pytest.raises(PydanticValidationError, match="greater than min_window"):
+            HurstInput(
+                symbol="AAPL",
+                start_date=START,
+                end_date=END,
+                min_window=50,
+                max_window=20,
+            )
+
+    def test_a_dfa_box_under_four_points_is_refused_at_the_input(self):
+        from pydantic import ValidationError as PydanticValidationError
+
+        with pytest.raises(PydanticValidationError):
+            HurstInput(symbol="AAPL", start_date=START, end_date=END, min_window=2)
+
+    def test_too_short_a_series_reports_none_not_zero(self, patched_factory):
+        """
+        A NaN exponent was reported as 0.0 -- the strongest possible
+        mean-reversion reading -- with fit_r_squared 0.0. It is None now,
+        with the reason, and the regime is "unknown".
+        """
+        inp = HurstInput(symbol="AAPL", start_date=START, end_date=END, min_window=5000)
+        result = run_hurst_analysis(inp)
+        assert result.hurst is None
+        assert result.fit_r_squared is None
+        assert result.regime == "unknown"
+        assert any("too few" in w for w in result.warnings)
+
+    def test_rs_reports_its_correction(self, patched_factory):
+        inp = HurstInput(symbol="AAPL", start_date=START, end_date=END, method="rs")
+        result = run_hurst_analysis(inp)
+        assert result.bias_correction > 0
+        assert result.hurst == pytest.approx(
+            result.hurst_raw - result.bias_correction, abs=2e-4
+        )
+        assert result.max_window_used == result.n_obs // 2
 
 
 class TestGetRallySignal:

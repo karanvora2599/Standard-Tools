@@ -302,6 +302,65 @@ class TestRollingCorrelationStability:
         a, b = self._pair()
         result = rolling_correlation_stability(a, b, window=63)
         assert result["stress_correlation"] is not None
+        assert result["n_stress_observations"] >= 20
+
+    def test_a_planted_crash_co_movement_is_measured_and_flagged(self):
+        """
+        Two independent series that crash together on 5% of days. On those
+        days both sit in their worst decile and move almost as one, so the
+        correlation there is about 0.9 while the full sample reads about
+        0.45. The union of the two worst deciles measured 0.48 here and the
+        warning stayed silent; the intersection -- what "joint worst decile"
+        means -- measures the crash.
+        """
+        rng = np.random.default_rng(5)
+        n = 2520
+        x = rng.standard_normal(n) * 0.01
+        y = rng.standard_normal(n) * 0.01
+        crash = rng.random(n) < 0.05
+        common = rng.standard_normal(crash.sum()) * 0.03 - 0.03
+        x[crash] = common + rng.standard_normal(crash.sum()) * 0.005
+        y[crash] = common + rng.standard_normal(crash.sum()) * 0.005
+        result = rolling_correlation_stability(x, y, window=63)
+        assert result["stress_correlation"] > 0.8
+        assert result["n_stress_observations"] >= 50
+        assert any("joint worst decile" in w for w in result["warnings"])
+
+    def test_independent_series_have_no_stress_correlation(self):
+        """
+        The null case. At a true correlation of zero the union of the two
+        worst deciles is two opposing arms and read about -0.6; the joint
+        decile reads near zero, and nothing is flagged.
+        """
+        values, flagged, trials = [], 0, 40
+        for seed in range(trials):
+            rng = np.random.default_rng(seed)
+            x = rng.standard_normal(2520) * 0.01
+            y = rng.standard_normal(2520) * 0.01
+            result = rolling_correlation_stability(x, y, window=63)
+            if result["stress_correlation"] is not None:
+                values.append(result["stress_correlation"])
+            flagged += any("joint worst decile is" in w for w in result["warnings"])
+        # About 1% of 2520 days: most samples clear the 20-day floor.
+        assert len(values) >= 30
+        assert abs(float(np.mean(values))) < 0.1
+        # A one-sided 5% test: a few of forty independent pairs at most. The
+        # bare "full plus 0.15" rule flagged about one in five.
+        assert flagged <= 6
+
+    def test_too_few_joint_stress_days_report_none_and_say_so(self):
+        """
+        A year of independent daily data puts about two or three days in
+        both worst deciles. A correlation of that many points is not
+        reported; the count is, with the reason.
+        """
+        rng = np.random.default_rng(1)
+        x = rng.standard_normal(252)
+        y = rng.standard_normal(252)
+        result = rolling_correlation_stability(x, y, window=63)
+        assert result["stress_correlation"] is None
+        assert result["n_stress_observations"] < 20
+        assert any("fewer than the 20" in w for w in result["warnings"])
 
     def test_misaligned_series_are_refused(self):
         with pytest.raises(ValidationError, match="aligned"):

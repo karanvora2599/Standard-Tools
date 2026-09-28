@@ -10,12 +10,14 @@ struct BacktestResult {
     double total_return;
     double annualized_vol;
     double sharpe_ratio;
-    double sortino_ratio;   // +inf when no negative returns
+    double sortino_ratio;   // +inf when no downside and a positive mean excess;
+                            // NaN when no downside and no excess (0/0)
     double max_drawdown;    // ≤ 0  (convention: min of (equity - peak)/peak)
-    double calmar_ratio;    // +inf when max_drawdown == 0
+    double calmar_ratio;    // +inf when max_drawdown == 0 and CAGR > 0;
+                            // NaN when neither moved (0/0)
     int    num_trades;      // completed (closed) trades only
     double win_rate;
-    double profit_factor;   // +inf when no losing trades
+    double profit_factor;   // +inf when no losing trades; NaN when no trades
     double avg_trade_return_pct;
     std::vector<double> equity_curve;
 };
@@ -57,11 +59,14 @@ struct BacktestResult {
  *                                        priced at YESTERDAY's position
  *                         intraday[i]  = (close[i] - ref[i]) / ref[i]
  *                                        priced at TODAY's position
+ *                         gross[i]     = (1 + exec[i-1]*overnight[i])
+ *                                        * (1 + exec[i]*intraday[i]) - 1
  *
- *                       Adding the two legs (rather than compounding them)
- *                       matches engine.py exactly; the product term is the
- *                       only difference from pure close-to-close and is the
- *                       standard overnight/intraday P&L attribution.
+ *                       The legs COMPOUND, exactly as engine.py does, so a
+ *                       position held through a bar earns close[i]/close[i-1]
+ *                       - 1 and a lot's equity growth at zero cost equals its
+ *                       fill-to-fill return. Adding them dropped the product
+ *                       term (see the CHANGELOG entry of 2026-09-27).
  *
  *                       Without this, fill_price != "close" had no native
  *                       path at all, so the MORE REALISTIC execution model

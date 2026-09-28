@@ -1,5 +1,86 @@
 # Changelog
 
+## A strategy that never traded no longer wins, and white noise is no longer a trend
+
+The numerical layer answered questions its inputs could not support and
+reported the answer as a measurement: a no-trade parameter set ranked first
+under Calmar, monthly bars annualised as if daily, a crisis correlation
+computed on the wrong days, white noise labelled trending, a collinear
+factor given a t-statistic, a cash sleeve given the whole portfolio, a
+calendar spread priced as a certain loss, a flat market read as one-sided
+flow, a percent typed where a fraction belonged priced as a 223% financing
+leg. Each now answers what it can measure, or refuses by name.
+
+- **Ranking and annualisation.** Only rows that traded and have a finite
+  metric are ranked, in `backtest_grid` on both engines, `compare_strategies`,
+  the regime-adaptive walk-forward, the strategy matrix and the optimisation
+  tool; the rest follow in order and are counted (`n_unrankable`). A Sortino
+  or Calmar that is 0/0, and a profit factor with no trade, are NaN on both
+  engines; x/0 stays infinite. Every backtest annualises by the bars' own
+  year — an explicit `periods_per_year` or `interval`, the fetched interval,
+  or the bar spacing — with 252 and a warning only as a last resort, and
+  reports which it used. Unsorted or duplicated dates and a non-finite
+  risk-free rate are refused up front, the portfolio engine screens for
+  unadjusted splits, repeated grid values run once (`n_combinations` counts
+  distinct combinations), `next_open` legs compound instead of adding, and the
+  trade log states how far it reconciles with the equity curve. `treynor_ratio`
+  and `information_ratio` validate `periods_per_year`, and `sortino_ratio`
+  validates before dividing.
+- **Inference.** The worst-decile correlation uses the days both series fall
+  together, reports how many (`n_stress_observations`) and is withheld below
+  twenty. R/S Hurst estimates carry the Anis-Lloyd-Peters small-sample
+  correction and a length-aware random-walk band, so white noise is no longer
+  called trending; DFA needs a minimum window of four, and an empty or
+  inverted window range is refused instead of reading as 0.0. Factor
+  regression refuses linearly dependent factors by name, matches names to
+  tickers one to one, and reports dropped dates and undefined statistics as
+  null. The pair scan tests both regression orders and controls the false
+  discovery rate, reporting how many pairs would pass by chance. A half-life
+  comes with its Dickey-Fuller test. The autocorrelation, structural-break
+  and change-point tests refuse a constant series; seasonality uses Welch
+  degrees of freedom; cointegration needs twenty observations; a flat basis
+  is flagged and ranked last.
+- **Regression and indicators.** `calculate_beta` gives the same answer with
+  or without the extension, NaN where a constant benchmark leaves beta
+  undefined; the `rolling_beta` fallback is exact per window after a large
+  print. `stochastic_oscillator` answers on 14 and 15 bars instead of being
+  refused by its own debug line. Bollinger bands on a window of identical
+  prices equal the price on every backend and pandas version. The indicator
+  panel, the fused technical-analysis path and the feature permutation test
+  refuse infinities; NaN remains a gap.
+- **Portfolio and derivatives.** Allocators refuse a zero or near-zero
+  variance asset by name, where HRP returned NaN weights and risk parity gave
+  a cash sleeve 100%. Liquidity-adjusted VaR refuses a correlation below
+  −1/(n−1) and treats short positions as hedges. Option strategies with legs
+  at different expiries are valued at the first expiry, with exact extrema at
+  the strikes and one breakeven per zero stretch. Smile fits count distinct
+  strikes and give a flat smile R² of 1; colliding numeric quote keys and
+  fractional cone horizons are refused. The binomial lattice is vectorised,
+  about 90 times faster with identical prices, and every closed-form model
+  returns theta. EWMA covariance refuses a zero or collapsing half-life and
+  reports its effective observations. Bounded max-Sharpe refuses a rate no
+  portfolio can beat. Rates and dividend yields are bounded, including rate ×
+  time, and Black-76 refuses a dividend yield.
+- **Microstructure.** VPIN and the order-flow buy fraction split a bar that
+  did not move half to each side, so a flat market no longer reads as maximal
+  one-sided flow. The intraday volume profile returns every session bucket,
+  so a midday with no trading is the trough, and `trough_bucket` is a bucket
+  id. Kyle's lambda from a tape without quotes says `circular=True`. Bar
+  estimators sort dated bars that arrive out of order and say so, and refuse
+  a repeated timestamp. The mid-return channel skips a zero-priced quote; the
+  book summaries count and exclude non-finite and crossed touches; queue
+  positions from a window with no opening snapshot are marked as lower
+  bounds.
+- **Delta one.** The spread monitor re-freezes a degenerate baseline instead
+  of testing against a near-zero denominator, and its retry continues the
+  warm-up's window; a resumed state's settings are re-checked like a new
+  monitor's. Positional return series of unequal length are refused rather
+  than truncated. Swap and total-return-future rates and spreads are bounded
+  with a percent-for-fraction warning; ETF cash and tolerance must be finite.
+  `analyze_roll` refuses 30/360, which it computed as ACT/360; numeric dates
+  are refused rather than read as 1970; roll costs must be non-negative;
+  percent-scaled index weights are refused; a flat curve is `flat`.
+
 ## A test that never rejected, a fit that never moved, and a trail that could not be evidence
 
 Each of these returned a plausible answer that was wrong, or a verdict that

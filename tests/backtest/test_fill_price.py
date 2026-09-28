@@ -68,10 +68,16 @@ class TestFillPriceNextOpen:
     def test_hand_verified_equity_curve(self, small_ohlcv, small_signals):
         """
         Two-leg decomposition (see test module docstring for the setup):
-        gross returns per bar = [0, 0, -0.019417, 0.039313, 0.009524]
-        (bar 2 = entry, open-to-close only; bar 3 = held, overnight+intraday
-        sum; bar 4 = exit, overnight-gap only — position was flat all of
-        bar 4 itself). Independently verified via a standalone script.
+        gross returns per bar = [0, 0, -0.019417, 0.039604, 0.009524]
+        (bar 2 = entry, open-to-close only; bar 3 = held, the overnight and
+        intraday legs compounded, which is exactly 105/101 - 1; bar 4 =
+        exit, overnight-gap only — position was flat all of bar 4 itself).
+
+        This test used to pin bar 3 at 0.039313, the two legs ADDED. That
+        was the defect: it dropped their product, so the equity curve
+        (10288.38) fell short of what the one trade earned fill to fill,
+        Open 103 -> Open 106 = +2.9126%. Compounded, the curve ends at
+        10291.26 and the two agree exactly.
         """
         result = run_strategy(
             small_ohlcv,
@@ -82,10 +88,11 @@ class TestFillPriceNextOpen:
             fill_price="next_open",
         )
         equity = result["equity_curve"]
-        expected = [10000.0, 10000.0, 9805.83, 10191.32, 10288.38]
+        expected = [10000.0, 10000.0, 9805.83, 10194.17, 10291.26]
         for actual, exp in zip(equity.tolist(), expected):
             assert actual == pytest.approx(exp, abs=0.05)
-        assert result["final_equity"] == pytest.approx(10288.38, abs=0.05)
+        assert result["final_equity"] == pytest.approx(10291.26, abs=0.05)
+        assert result["total_return"] == pytest.approx(106.0 / 103.0 - 1.0, abs=1e-6)
 
     def test_next_open_differs_from_close(self, small_ohlcv, small_signals):
         close_result = run_strategy(
@@ -143,7 +150,11 @@ class TestFillPriceHl2Exploratory:
         """
         Same two-leg decomposition as next_open, but the reference price
         each bar is (High + Low) / 2 instead of Open: ref = [100.0, 101.5,
-        102.0, 103.5, 104.5]. Independently verified via a standalone script.
+        102.0, 103.5, 104.5]. Bar 3 is held, so its two legs compound to
+        exactly 105/101 - 1; this used to pin their sum (10290.5655 and
+        10241.5628 below), which was the defect the next_open test above
+        describes. The one lot fills at 102 and exits at 104.5, and the
+        curve now ends at exactly 10000 * 104.5 / 102.
         """
         result = run_strategy(
             small_ohlcv,
@@ -154,10 +165,10 @@ class TestFillPriceHl2Exploratory:
             fill_price="hl2_exploratory",
         )
         equity = result["equity_curve"]
-        expected = [10000.0, 10000.0, 9901.9608, 10290.5655, 10241.5628]
+        expected = [10000.0, 10000.0, 9901.9608, 10294.1176, 10245.0980]
         for actual, exp in zip(equity.tolist(), expected):
             assert actual == pytest.approx(exp, abs=0.05)
-        assert result["final_equity"] == pytest.approx(10241.5628, abs=0.05)
+        assert result["final_equity"] == pytest.approx(10245.0980, abs=0.05)
 
     def test_hl2_exploratory_differs_from_close_and_next_open(
         self, small_ohlcv, small_signals
@@ -225,20 +236,29 @@ class TestFillPriceBacktestGrid:
         )
 
     def test_backtest_grid_threads_hl2_exploratory_fill_price(self, small_ohlcv):
+        """
+        The level is 101.5, not 100, so the signal exits and re-enters. With
+        the overnight and intraday legs compounded, a position held from
+        entry to the last bar earns the same under both fills whenever its
+        entry fill equals the prior close -- as this fixture's HL2 at bar 2
+        (102) does -- so level=100 no longer told the two fills apart. An
+        exit and a re-entry make the fill price matter.
+        """
+
         def my_signal(df: pd.DataFrame, level: float) -> pd.Series:
             return (df["Close"] > level).astype(float)
 
         grid_close = backtest_grid(
             small_ohlcv,
             strategy=my_signal,
-            param_grid={"level": [100.0]},
+            param_grid={"level": [101.5]},
             n_workers=1,
             fill_price="close",
         )
         grid_hl2 = backtest_grid(
             small_ohlcv,
             strategy=my_signal,
-            param_grid={"level": [100.0]},
+            param_grid={"level": [101.5]},
             n_workers=1,
             fill_price="hl2_exploratory",
         )

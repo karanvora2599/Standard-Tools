@@ -34,8 +34,10 @@ from typing import Any, Dict, List, Optional, Sequence
 import numpy as np
 import pandas as pd
 
-from standard_quant_tools.analysis.cointegration import half_life, spread_zscore
-from standard_quant_tools.analysis.derivatives import _positive
+from standard_quant_tools.analysis.cointegration import (
+    half_life_statistics,
+    spread_zscore,
+)
 from standard_quant_tools.analysis.liquidity_events import (
     DEFAULT_REFERENCE_FRACTION,
     DEFAULT_SLACK,
@@ -44,6 +46,7 @@ from standard_quant_tools.analysis.liquidity_events import (
 )
 from standard_quant_tools.analysis.structure import detect_change_points
 from standard_quant_tools.error import ValidationError
+from standard_quant_tools.metrics.risk_metrics import has_no_dispersion
 
 from ._numbers import finite, positive
 from .carry import forward_price, observed_carry_rate, solve_carry
@@ -261,13 +264,41 @@ def basis_history(
             "different amounts of time, not different amounts of richness."
         )
 
-    hl = half_life(target.dropna())
-    if not math.isfinite(hl):
+    # A basis that never moves -- a constant bps level, typically a stale or
+    # synthetic series -- has no distribution to sit in. Its z-score is 0.0
+    # (full sample) or undefined (rolling) by convention, and a scan must not
+    # rank it; the relative test, because the standard deviation of a flat
+    # series is rounding residue (7e-15), not 0.
+    basis_flat = bool(has_no_dispersion(finite.to_numpy(dtype=float)))
+    if basis_flat:
+        warnings.append(
+            "The basis does not move: every observation is the same level to "
+            "within floating-point noise. The z-score and percentile describe "
+            "nothing; a perfectly constant basis usually means a stale or "
+            "synthetic series rather than a perfectly tracked one."
+        )
+
+    # A finite half-life is not evidence of mean reversion: on a random walk
+    # the fitted AR(1) coefficient is negative about half the time and small
+    # the rest, and 84% of random walks of 250 observations came back with a
+    # half-life inside a 5-126 bar screen. The Dickey-Fuller t-statistic of
+    # the same regression is what says whether the reversion is there.
+    hl_stats = half_life_statistics(target.dropna())
+    hl = hl_stats["half_life"]
+    if not basis_flat and not math.isfinite(hl):
         warnings.append(
             "Half-life is undefined: the fitted AR(1) coefficient is not "
             "negative, so this basis series shows no mean reversion over the "
             "window given. Trading it as a spread assumes reversion that the "
             "data does not show."
+        )
+    elif not basis_flat and not hl_stats["mean_reverting"]:
+        warnings.append(
+            f"The half-life of {hl:.1f} observations is not evidence of mean "
+            f"reversion: its Dickey-Fuller t-statistic "
+            f"{hl_stats['t_statistic']:.2f} does not clear the 5% critical "
+            f"value {hl_stats['critical_value']:.2f}, and a random walk "
+            "produces a finite half-life like this most of the time."
         )
 
     return {
@@ -281,6 +312,10 @@ def basis_history(
         "zscore": float(zscores.iloc[-1]) if len(zscores.dropna()) else float("nan"),
         "percentile": float((finite < current).mean() * 100.0),
         "half_life_observations": float(hl),
+        "half_life_mean_reverting": bool(hl_stats["mean_reverting"]),
+        "half_life_t_statistic": float(hl_stats["t_statistic"]),
+        "half_life_critical_value": float(hl_stats["critical_value"]),
+        "basis_flat": basis_flat,
         "annualized": annualized_bps is not None,
         "window": window,
         # The three series the eleven numbers above are computed from,
@@ -398,8 +433,8 @@ def detect_basis_dislocation(
     try:
         breaks = detect_change_points(channel, max_breaks=max_breaks)
     except ValidationError:
-        # Too short to segment is not too short to run CUSUM on, and the
-        # CUSUM answer is still worth returning.
+        # Too short to segment -- or a basis that does not move, which the
+        # segmenter refuses -- is not a reason to withhold the CUSUM answer.
         pass
 
     warnings: List[str] = []

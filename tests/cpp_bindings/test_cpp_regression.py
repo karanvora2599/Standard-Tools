@@ -79,7 +79,13 @@ def factor_data():
 
 
 def _py_rolling_beta(y: np.ndarray, x: np.ndarray, window: int) -> np.ndarray:
-    """pandas cov/var rolling beta (the Python fallback path)."""
+    """pandas cov/var rolling beta: an independent reference on clean data.
+
+    No longer the library's fallback. pandas' rolling cov/var are online
+    sums that lose digits after a large print leaves the window, so the
+    fallback now computes each window from scratch (see the CHANGELOG entry
+    of 2026-09-27); on clean data like this fixture the two agree.
+    """
     sy = pd.Series(y)
     sx = pd.Series(x)
     return (sy.rolling(window).cov(sx) / sx.rolling(window).var()).to_numpy()
@@ -152,7 +158,7 @@ class TestCppRollingBeta:
         assert np.all(np.isnan(out[19:]))
 
     @requires_cpp
-    def test_matches_pandas_fallback(self, yx_arrays):
+    def test_matches_pandas_on_clean_data(self, yx_arrays):
         y, x = yx_arrays
         window = 60
         cpp_out = _cpp.rolling_beta(y.astype(np.float64), x.astype(np.float64), window)
@@ -254,7 +260,7 @@ class TestRollingBetaWrapper:
         assert (valid - 2.0).abs().max() < 1e-6
 
     def test_cpp_and_pandas_paths_agree(self, yx_series):
-        """C++ and pandas fallback should produce numerically identical results."""
+        """The C++ path and the NumPy fallback agree to rounding."""
         if not REGRESSION_HAS_CPP:
             pytest.skip("_sqt_core not built")
         from unittest.mock import patch

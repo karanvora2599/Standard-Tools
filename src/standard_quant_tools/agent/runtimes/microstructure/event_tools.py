@@ -102,7 +102,38 @@ class QueueSummary(BaseModel):
     share_joining_empty: Optional[float] = Field(
         None,
         description="Fraction of adds that joined an EMPTY level. A high "
-        "share is a different market from one where you always queue.",
+        "share is a different market from one where you always queue -- "
+        "unless queue_is_lower_bound, when part of it is the window's own "
+        "warm-up.",
+    )
+    n_snapshot_orders: int = Field(
+        0,
+        description="Orders the window's opening snapshot showed resting. "
+        "They seed the queue every later arrival waits behind.",
+    )
+    queue_is_lower_bound: bool = Field(
+        False,
+        description="READ THIS FIRST. True when some adds were measured "
+        "before a snapshot or a CLEAR told the window what the book held: "
+        "every level starts EMPTY, so those queue-ahead readings count only "
+        "size added inside the window and understate the real queue.",
+    )
+    n_unseeded_adds: int = Field(
+        0,
+        description="How many queue-ahead readings are lower bounds -- adds "
+        "before the opening book was known.",
+    )
+    n_unseen_decrements: int = Field(
+        0,
+        description="Cancels and fills of orders this window never saw added "
+        "and no snapshot showed. They take nothing from the levels the "
+        "window did see, and are counted here instead.",
+    )
+    unseen_size: Optional[float] = Field(
+        None,
+        description="Shares those cancels and fills removed: resting size "
+        "that was in the book, possibly ahead, and is in none of the queue "
+        "figures.",
     )
 
 
@@ -269,7 +300,10 @@ EVENT_TOOL_DEFS = [
         "resting when the window opened are counted and EXCLUDED from the "
         "lifetime averages rather than folded in as instantaneous, which "
         "would bias every average toward impatience precisely where the "
-        "long-resting orders are. Takes events inline or as an "
+        "long-resting orders are. The same orders sit ahead of every early "
+        "arrival: without an opening snapshot every level starts empty, and "
+        "`queue.queue_is_lower_bound` says the queue figures count only size "
+        "added inside the window. Takes events inline or as an "
         "`sqt://order_event_panel` reference.",
         OrderEventInput,
     ),

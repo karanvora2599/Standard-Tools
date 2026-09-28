@@ -3,16 +3,23 @@ import os
 import time
 from concurrent.futures import ProcessPoolExecutor
 from itertools import product
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 logger = logging.getLogger(__name__)
 
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools.backtest.ranking import rank_rows, unrankable_note
+from standard_quant_tools.backtest.screens import (  # noqa: F401
+    SPLIT_SCREEN_THRESHOLD,
+    require_sorted_unique_index,
+    split_screen_warnings,
+)
 from standard_quant_tools.backtest.strategies import STRATEGY_REGISTRY
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.indicators.trend import sma
+from standard_quant_tools.metrics.annualization import resolve_periods_per_year
 from standard_quant_tools.metrics.return_metrics import (
     annualized_volatility,
     cumulative_return,
@@ -24,7 +31,10 @@ from standard_quant_tools.metrics.risk_metrics import (
     sharpe_ratio,
     sortino_ratio,
 )
-from standard_quant_tools.numeric_contract import require_positive_price_series
+from standard_quant_tools.numeric_contract import (
+    require_finite_scalar,
+    require_positive_price_series,
+)
 from standard_quant_tools.validation import require_finite_array
 
 _VALID_FILL_PRICES = ("close", "next_open", "hl2_exploratory")
@@ -73,7 +83,23 @@ def _build_trade_log(
     cost_per_unit: float = 0.0,
 ) -> pd.DataFrame:
     """
-    Build a per-trade log reconciled with the equity curve's own P&L.
+    Build a per-trade log from the same events and prices the equity curve
+    uses.
+
+    How far the two reconcile, exactly. At zero cost a unit-size lot's
+    return_pct equals the equity curve's growth over the lot's bars under
+    every fill_price (the next_open / hl2_exploratory legs compound, so a
+    held bar earns the full close-to-close move). With costs they agree to
+    first order only: return_pct charges each event's cost as a simple
+    fraction of the lot's notional, while the equity curve deducts it from
+    that bar's equity and compounds, so an entry cost forgoes the lot's
+    growth and an exit cost is charged on the drifted notional. The gap is
+    about cost * |lot return| per lot -- measured at 15 bps over five years
+    of daily bars, at most 0.11 points on one lot and 0.07-0.15 points over
+    the whole log, with the log on the high side. A lot sized other than 1
+    also differs at zero cost, because a fractional position compounds
+    differently from its simple return. Read performance from the equity
+    curve; read the log for attribution.
 
     entry_price/exit_price use ref_prices — the same reference price series
     run_strategy's return calculation uses: Close[i-1] under
@@ -243,7 +269,9 @@ def _compute_trade_stats(trade_log: pd.DataFrame) -> Dict[str, float]:
     if trade_log.empty:
         return {
             "win_rate": 0.0,
-            "profit_factor": 0.0,
+            # NaN, not 0.0: 0.0 is what "every trade lost" produces, and
+            # nothing traded. backtest.cpp starts from the same NaN.
+            "profit_factor": float("nan"),
             "num_trades": 0,
             "avg_trade_return_pct": 0.0,
         }
@@ -270,50 +298,6 @@ def _compute_trade_stats(trade_log: pd.DataFrame) -> Dict[str, float]:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-#: A bar-to-bar move beyond this is screened as a probable split (or a
-#: bad print). No equity moves 35% in a day often; a 2:1 split moves
-#: -50% every time.
-SPLIT_SCREEN_THRESHOLD = 0.35
-
-
-def _split_screen_warnings(prices: pd.Series, adjusted: Optional[bool]) -> List[str]:
-    """
-    One warning naming every bar whose |return| exceeds the split
-    threshold, phrased by what is known about the bars' adjustment.
-    """
-    moves = prices.pct_change(fill_method=None)
-    jumps = moves[moves.abs() > SPLIT_SCREEN_THRESHOLD]
-    if jumps.empty:
-        return []
-    listed = ", ".join(
-        f"{pd.Timestamp(at).date()} ({float(move):+.1%})"
-        for at, move in list(jumps.items())[:5]
-    )
-    more = f" and {len(jumps) - 5} more" if len(jumps) > 5 else ""
-    if adjusted is False:
-        provenance = (
-            "The provider reports adjusted=False, so a split is a real bar "
-            "here and every metric that compounds through it is wrong; "
-            "adjust the prices or fetch adjusted bars"
-        )
-    elif adjusted is True:
-        provenance = (
-            "The provider reports adjusted=True, so this is either a genuine "
-            "move or a bad print; check the bar before trusting the result"
-        )
-    else:
-        provenance = (
-            "Whether these bars are split-adjusted is not known here; if "
-            "they are not, every metric that compounds through such a bar "
-            "is wrong (a 10:1 split read as -90%)"
-        )
-    return [
-        f"SPLIT SCREEN: {len(jumps)} bar(s) move more than "
-        f"{SPLIT_SCREEN_THRESHOLD:.0%} close to close: {listed}{more}. "
-        f"{provenance}."
-    ]
-
-
 def _turnover_and_cost(signals: pd.Series, cost_per_unit: float) -> Dict[str, float]:
     """Position changed, summed over bars, and the cost that charged --
     the same lagged positions the returns are computed on."""
@@ -326,6 +310,46 @@ def _turnover_and_cost(signals: pd.Series, cost_per_unit: float) -> Dict[str, fl
     }
 
 
+def _undefined_ratios_as_nan(
+    sortino: Any,
+    calmar: Any,
+    profit_factor: Any,
+    total_return: Any,
+    annualized_vol: Any,
+    num_trades: Any,
+    risk_free_rate: float,
+) -> tuple:
+    """
+    The 0/0 convention for a native result, applied at the boundary.
+
+    backtest.cpp now returns NaN, not +inf, for a Sortino or Calmar over an
+    empty denominator when the numerator is zero too, and NaN, not 0.0, for
+    the profit factor of a run that never traded -- the same convention
+    `risk_metrics` and `_compute_trade_stats` follow. An extension compiled
+    before that change keeps the old values until it is rebuilt, and the old
+    +inf ranked a do-nothing parameter set first, so the rule is enforced
+    here as well, the way the Sharpe convention is below. Idempotent after a
+    rebuild. Works on scalars and on whole grid columns alike.
+
+    A Sortino is 0/0 only when every excess return is exactly zero: a book
+    that never moved under a zero rate (a positive rate makes the first bar
+    downside; a negative one makes every flat bar a gain, and +inf is right).
+    A Calmar over no drawdown is 0/0 when the curve did not grow.
+    """
+    total_return = np.asarray(total_return, dtype=float)
+    no_motion = (total_return == 0.0) & (np.asarray(annualized_vol, dtype=float) == 0.0)
+    sortino = np.asarray(sortino, dtype=float)
+    calmar = np.asarray(calmar, dtype=float)
+    sortino = np.where(
+        np.isinf(sortino) & no_motion & (risk_free_rate >= 0.0), np.nan, sortino
+    )
+    calmar = np.where(np.isinf(calmar) & (total_return <= 0.0), np.nan, calmar)
+    profit_factor = np.where(
+        np.asarray(num_trades) == 0, np.nan, np.asarray(profit_factor, dtype=float)
+    )
+    return sortino, calmar, profit_factor
+
+
 def run_strategy(
     price_data: pd.DataFrame,
     signal_series: pd.Series,
@@ -336,13 +360,29 @@ def run_strategy(
     fill_price: str = "close",
     risk_free_rate: float = 0.0,
     adjusted: Optional[bool] = None,
+    periods_per_year: Optional[int] = None,
+    interval: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Vectorized backtesting engine with transaction costs.
 
     Args:
         price_data: DataFrame with 'Close' column (and 'Open' if fill_price="next_open").
-        signal_series: Series of 1 (long), 0 (flat), -1 (short).
+            Its index must be sorted and unique: bar order is time order.
+        signal_series: Series of 1 (long), 0 (flat), -1 (short), aligned to
+            price_data by date. Its index must be unique.
+        periods_per_year: bars per year for every annualized metric
+            (volatility, Sharpe, Sortino, Calmar). A positive whole number.
+        interval: the interval the bars were fetched at ("1d", "1wk",
+            "1mo", ...), used for periods_per_year when that is not given.
+            With neither, the number is read off the bar spacing (daily ->
+            252, weekly -> 52, monthly -> 12, quarterly -> 4), and when the
+            spacing cannot say (intraday bars, irregular spacing, a
+            non-date index) 252 is used and a warning says so. The value
+            used and where it came from are returned as `periods_per_year`
+            and `periods_per_year_source`. This engine used 252 always, so
+            weekly bars reported a volatility 2.2x too high and monthly bars
+            a CAGR of 38%/yr against a true 1.6%.
         initial_capital: Starting capital.
         commission_pct: Commission per unit of position changed (default 0.1%).
         slippage_pct: Slippage per unit of position changed (default 0.05%).
@@ -369,8 +409,10 @@ def run_strategy(
             close, priced at today's position), so an entry only earns its
             own open-to-close move, an exit still bears the overnight gap
             it was held through before selling at the open, and a held
-            position sums the two legs instead of compounding them (a
-            second-order, daily-bar-negligible approximation).
+            position compounds the two legs, earning exactly the
+            close-to-close move. (They used to be added, which left the
+            equity curve 0.2-0.5 points below the fill-to-fill trade log
+            over five years of daily bars at zero cost.)
             "hl2_exploratory" — identical two-leg decomposition, but using
             that bar's own (High + Low) / 2 ("HL2") as the reference fill
             price instead of Open. This is NOT a bid/ask midpoint quote —
@@ -384,12 +426,19 @@ def run_strategy(
             see _build_trade_log.
 
     Returns:
-        Dict with performance metrics, equity curve, and optionally
-        trade_log. When fill_price is "close" or "hl2_exploratory",
-        result["warnings"] includes a look-ahead-bias caveat (see below).
+        Dict with performance metrics, equity curve, `periods_per_year` and
+        `periods_per_year_source`, and optionally trade_log. When fill_price
+        is "close" or "hl2_exploratory", result["warnings"] includes a
+        look-ahead-bias caveat (see below). sortino_ratio and calmar_ratio
+        are +inf over an empty denominator with a positive numerator and
+        NaN when both are zero (a book that never moved); profit_factor is
+        NaN when nothing traded.
 
     Raises:
-        ValidationError: fill_price is not one of "close", "next_open", "hl2_exploratory".
+        ValidationError: fill_price is not one of "close", "next_open",
+            "hl2_exploratory"; a cost, the capital, the risk-free rate or
+            periods_per_year is out of range; or price_data's index is
+            unsorted or duplicated, or signal_series' index is duplicated.
     """
     if fill_price not in _VALID_FILL_PRICES:
         raise ValidationError(
@@ -409,6 +458,12 @@ def run_strategy(
             raise ValidationError(
                 f"{name} must be non-negative and finite, got {value!r}"
             )
+    # Up front, for both paths. The native binding refuses a NaN rate and
+    # sharpe_ratio refuses one on the Python path, but only after the whole
+    # simulation has run -- and a build that predated the binding check
+    # returned a NaN Sharpe beside a +inf Sortino. Any sign is allowed:
+    # negative policy rates are real.
+    require_finite_scalar(risk_free_rate, "risk_free_rate", "run_strategy")
 
     # Columns each fill mode actually reads — checked up front so a missing
     # one is a clear error naming the mode that needs it, not a raw KeyError
@@ -424,6 +479,15 @@ def run_strategy(
             f"price_data is missing column(s) {missing_cols} required for "
             f"fill_price={fill_price!r}"
         )
+
+    # Bar order is time order on both paths below, and the intersection
+    # keeps price_data's own order, so an unsorted price index is refused
+    # here, before anything is computed from it. The signal is read onto
+    # those bars by label, so only a repeated signal date matters.
+    require_sorted_unique_index(price_data.index, "price_data", "run_strategy")
+    require_sorted_unique_index(
+        signal_series.index, "signal_series", "run_strategy", order_matters=False
+    )
 
     # Fast path: skip the intersection + two .loc[] calls entirely when the
     # indices are already identical (the common case for a signal derived
@@ -456,6 +520,15 @@ def run_strategy(
             "to backtest. Check that the two are on the same calendar and "
             "cover overlapping ranges."
         )
+    # Resolved once, on the bars actually backtested, and passed to BOTH
+    # paths -- the native kernel took this number all along and was always
+    # handed 252.0.
+    ppy, ppy_source, ppy_warnings = resolve_periods_per_year(
+        idx,
+        periods_per_year=periods_per_year,
+        interval=interval,
+        where="run_strategy",
+    )
     prices_arr = prices.to_numpy(dtype=np.float64)
     signals_arr = signals.to_numpy(dtype=np.float64)
     # STRICTLY POSITIVE, not merely finite. Every price column here feeds a
@@ -498,7 +571,7 @@ def run_strategy(
     # at the top of the Python fallback branch below (where both are
     # genuinely needed for the return/cost calculation itself).
 
-    warnings: List[str] = []
+    warnings: List[str] = list(ppy_warnings)
     # ── The split screen (findings D6) ──────────────────────────────────
     # Nothing under backtest/ read the provider's `adjusted` flag, and a
     # split on unadjusted bars is a real -50% bar to this engine: LRCX's
@@ -506,7 +579,7 @@ def run_strategy(
     # and a short held through it printed a fictitious +93%. The engine
     # already walks every bar for the total-loss guard; this pass is free.
     warnings.extend(
-        _split_screen_warnings(
+        split_screen_warnings(
             prices,
             adjusted if adjusted is not None else price_data.attrs.get("adjusted"),
         )
@@ -592,7 +665,7 @@ def run_strategy(
             initial_capital,
             commission_pct,
             slippage_pct,
-            252.0,
+            float(ppy),
             ref_arr,
             risk_free_rate,
         )
@@ -611,9 +684,23 @@ def run_strategy(
         # convention is enforced here as well. Idempotent: after a rebuild
         # the kernel returns NaN and this changes nothing.
         native_returns = equity_curve.pct_change(fill_method=None).dropna().to_numpy()
+        r = dict(r)
         if native_returns.size and has_no_dispersion(native_returns):
-            r = dict(r)
             r["sharpe_ratio"] = float("nan")
+        # The 0/0 convention for Sortino, Calmar and a no-trade profit
+        # factor, enforced here for the same reason -- see the helper.
+        sortino_v, calmar_v, pf_v = _undefined_ratios_as_nan(
+            r["sortino_ratio"],
+            r["calmar_ratio"],
+            r["profit_factor"],
+            r["total_return"],
+            r["annualized_volatility"],
+            r["num_trades"],
+            risk_free_rate,
+        )
+        r["sortino_ratio"] = float(sortino_v)
+        r["calmar_ratio"] = float(calmar_v)
+        r["profit_factor"] = float(pf_v)
         # win_rate/profit_factor/num_trades/avg_trade_return_pct: read
         # straight from the native result. backtest.cpp's own trade-log
         # logic uses the identical convention _build_trade_log does
@@ -641,6 +728,8 @@ def run_strategy(
             "avg_trade_return_pct": round(float(r["avg_trade_return_pct"]), 4),
             "equity_curve": equity_curve,
             "warnings": warnings,
+            "periods_per_year": ppy,
+            "periods_per_year_source": ppy_source,
         }
         # Turnover and the cost it realized, which the Python path computes
         # on its way to the returns and this path recomputes here from the
@@ -696,11 +785,14 @@ def run_strategy(
         #     position (executed) — captures a same-day entry's move from
         #     the reference price to the close, and a held-through day's
         #     remaining move.
-        # For an unchanged position this sums two simple returns instead of
-        # compounding them (their product is the only difference from pure
-        # close-to-close — negligible for daily bars, standard in overnight
-        # vs. intraday P&L attribution). "next_open" uses that bar's Open as
-        # the reference price; "hl2_exploratory" uses (High + Low) / 2 —
+        # The legs COMPOUND: the intraday leg is earned on the equity the
+        # overnight leg left, so an unchanged position earns exactly the
+        # close-to-close move. They used to be summed, which dropped the
+        # product term -- over five years of daily bars at zero cost that
+        # put the equity curve 0.2-0.5 points below the fill-to-fill trade
+        # log, the curve being the approximate side. backtest.cpp's
+        # gross_return_at compounds them identically. "next_open" uses that
+        # bar's Open as the reference price; "hl2_exploratory" uses (High + Low) / 2 —
         # NOT a real bid/ask midpoint, and only knowable after the bar has
         # already completed (see the look-ahead warning above).
         if fill_price == "next_open":
@@ -712,7 +804,9 @@ def run_strategy(
         overnight_leg = ((ref_prices - prices.shift(1)) / prices.shift(1)).fillna(0.0)
         intraday_leg = (prices - ref_prices) / ref_prices
         executed_prev = executed.shift(1).fillna(0.0)
-        gross_returns = executed_prev * overnight_leg + executed * intraday_leg
+        gross_returns = (1.0 + executed_prev * overnight_leg) * (
+            1.0 + executed * intraday_leg
+        ) - 1.0
         strategy_returns = gross_returns - transaction_costs
     else:
         strategy_returns = executed * returns - transaction_costs
@@ -749,11 +843,11 @@ def run_strategy(
         )
 
     total_ret = cumulative_return(equity_curve)
-    annual_vol = annualized_volatility(strategy_returns)
-    sr = sharpe_ratio(strategy_returns, risk_free_rate)
-    srt = sortino_ratio(strategy_returns, risk_free_rate)
+    annual_vol = annualized_volatility(strategy_returns, ppy)
+    sr = sharpe_ratio(strategy_returns, risk_free_rate, ppy)
+    srt = sortino_ratio(strategy_returns, risk_free_rate, ppy)
     mdd = max_drawdown(equity_curve)
-    cal = calmar_ratio(equity_curve)
+    cal = calmar_ratio(equity_curve, ppy)
     final_eq = (
         float(equity_curve.iloc[-1]) if not equity_curve.empty else initial_capital
     )
@@ -773,6 +867,8 @@ def run_strategy(
         # away').
         "turnover": round(float(pos_diff.abs().sum()), 6),
         "realized_cost_pct": round(float(transaction_costs.sum()), 6),
+        "periods_per_year": ppy,
+        "periods_per_year_source": ppy_source,
     }
 
     trade_log = _build_trade_log(ref_prices, prices, executed, cost_per_unit)
@@ -805,6 +901,7 @@ def _fused_crossover_metrics(
     slippage_pct: float,
     ref_arr: Optional[np.ndarray],
     risk_free_rate: float = 0.0,
+    periods_per_year: int = 252,
 ) -> Optional[np.ndarray]:
     """
     Fused path for two-moving-average crossover grids.
@@ -858,7 +955,7 @@ def _fused_crossover_metrics(
         initial_capital,
         commission_pct,
         slippage_pct,
-        252.0,
+        float(periods_per_year),
         ref_arr,
         risk_free_rate,
     )
@@ -889,9 +986,14 @@ def _run_grid_job(job: Dict[str, Any]) -> Dict[str, Any]:
         # is compared against used a real one would pick a different
         # winner, and nothing in either result would say why.
         risk_free_rate=job.get("risk_free_rate", 0.0),
+        # Resolved once by backtest_grid for the whole grid, so every row is
+        # annualized alike and the per-row run does not re-infer (or re-warn).
+        periods_per_year=job.get("periods_per_year"),
     )
     result.pop("equity_curve", None)
     result.pop("trade_log", None)
+    result.pop("periods_per_year", None)
+    result.pop("periods_per_year_source", None)
     result.update(job["params"])
     return result
 
@@ -923,6 +1025,7 @@ def _run_signal_fn_job(
     slippage_pct: float,
     fill_price: str = "close",
     risk_free_rate: float = 0.0,
+    periods_per_year: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Sequential-only counterpart to _run_grid_job for a user-supplied signal
@@ -942,11 +1045,97 @@ def _run_signal_fn_job(
         slippage_pct=slippage_pct,
         fill_price=fill_price,
         risk_free_rate=risk_free_rate,
+        periods_per_year=periods_per_year,
     )
     result.pop("equity_curve", None)
     result.pop("trade_log", None)
+    result.pop("periods_per_year", None)
+    result.pop("periods_per_year_source", None)
     result.update(params)
     return result
+
+
+def _distinct_in_order(values: List[Any]) -> List[Any]:
+    """One entry per distinct value, first occurrence first.
+
+    Hashable values go through a dict, which also collapses 10 and 10.0 --
+    the same parameter to every strategy here. An unhashable value falls
+    back to an equality scan.
+    """
+    try:
+        return list(dict.fromkeys(values))
+    except TypeError:
+        kept: List[Any] = []
+        for value in values:
+            if not any(value is k or value == k for k in kept):
+                kept.append(value)
+        return kept
+
+
+def _distinct_axes(
+    param_grid: Dict[str, List],
+) -> Tuple[Dict[str, List], Dict[str, int]]:
+    """
+    Each axis with its repeated values removed, and how many each lost.
+
+    A grid is the product of its axes, so {"fast": [10, 10, 20], "slow":
+    [50, 50]} ran six backtests for two distinct combinations, and the row
+    count is what a caller hands deflated_sharpe_ratio as n_trials: tripled
+    trials and a dispersion shrunk by identical rows nearly doubled the
+    selection-bias benchmark a real result is judged against.
+    """
+    axes = {key: _distinct_in_order(list(values)) for key, values in param_grid.items()}
+    dropped = {
+        key: len(param_grid[key]) - len(axes[key])
+        for key in axes
+        if len(param_grid[key]) != len(axes[key])
+    }
+    return axes, dropped
+
+
+def _finish_grid(
+    df_out: pd.DataFrame,
+    sort_by: str,
+    ascending: bool,
+    periods_per_year: int,
+    ppy_source: str,
+    ppy_warnings: List[str],
+    dropped: Dict[str, int],
+) -> pd.DataFrame:
+    """
+    Rank the grid and stamp what the ranking and the run depended on.
+
+    Shared by the native and the Python path, so the two cannot rank the
+    same grid differently -- they did once, over a Sharpe of 0.0 against
+    NaN. `attrs` carries: n_unrankable, n_combinations (distinct
+    combinations run), duplicate_values_dropped, periods_per_year,
+    periods_per_year_source and warnings.
+    """
+    ranked = rank_rows(df_out, sort_by, ascending)
+    warnings = list(ppy_warnings)
+    if dropped:
+        warnings.append(
+            "param_grid repeated value(s) "
+            + ", ".join(f"{k}: {n}" for k, n in dropped.items())
+            + "; each distinct combination was run once, and n_combinations "
+            "counts distinct combinations."
+        )
+    n_unrankable = int(ranked.attrs.get("n_unrankable", 0))
+    if n_unrankable:
+        note = unrankable_note(n_unrankable, len(ranked), sort_by, "combination")
+        warnings.append(note)
+        logger.warning("[backtest_grid] %s", note)
+    ranked.attrs.update(
+        {
+            "n_unrankable": n_unrankable,
+            "n_combinations": len(ranked),
+            "duplicate_values_dropped": dict(dropped),
+            "periods_per_year": periods_per_year,
+            "periods_per_year_source": ppy_source,
+            "warnings": warnings,
+        }
+    )
+    return ranked
 
 
 def backtest_grid(
@@ -961,6 +1150,8 @@ def backtest_grid(
     n_workers: Optional[int] = None,
     fill_price: str = "close",
     risk_free_rate: float = 0.0,
+    periods_per_year: Optional[int] = None,
+    interval: Optional[str] = None,
 ) -> pd.DataFrame:
     """
     Run a backtest across every parameter combination in param_grid in parallel.
@@ -981,10 +1172,18 @@ def backtest_grid(
                         a built-in strategy or your own model.
         param_grid:     Dict mapping parameter name → list of values.
                         e.g. {'fast_period': [5, 10, 20], 'slow_period': [30, 50]}
+                        A value repeated on an axis is run once (10 and 10.0
+                        are the same value), so the row count is the number
+                        of distinct combinations.
         initial_capital: Starting capital for every backtest.
         commission_pct: Commission per trade side (fraction).
         slippage_pct:   Slippage per trade side (fraction).
         sort_by:        Output column to rank results by (default: 'sharpe_ratio').
+                        Only rows whose value is finite AND that traded are
+                        ranked; the rest (a combination that never traded,
+                        or a ratio over an empty denominator) follow every
+                        ranked row in grid order, and their count is
+                        `attrs["n_unrankable"]`.
         ascending:      Sort direction (default: False = best first).
         n_workers:      Worker processes for the PYTHON grid loop, defaulting
                         to os.cpu_count(); pass 1 to run sequentially.
@@ -1006,10 +1205,21 @@ def backtest_grid(
                         latter two "force the Python path" because "the C++
                         batch kernel only knows Close prices", was left
                         behind by the change that added `grid_ref_arr`.
+        periods_per_year, interval: resolved once for the whole grid, as
+                        run_strategy resolves them (explicit, then the
+                        interval, then the bar spacing, then 252 with a
+                        warning), and applied to every path.
 
     Returns:
-        pd.DataFrame with one row per parameter combination, sorted by sort_by.
-        Columns include all metric keys plus the parameter names.
+        pd.DataFrame with one row per distinct parameter combination, ranked
+        by sort_by. Columns include all metric keys plus the parameter
+        names. `attrs` carries n_unrankable, n_combinations,
+        duplicate_values_dropped, periods_per_year, periods_per_year_source
+        and warnings.
+
+    Raises:
+        ValidationError: price_data's index is unsorted or duplicated, or a
+            cost, the capital, the rate or periods_per_year is out of range.
 
     Example (built-in strategy)::
 
@@ -1046,6 +1256,18 @@ def backtest_grid(
             raise ValidationError(
                 f"{name} must be non-negative and finite, got {value!r}"
             )
+    require_finite_scalar(risk_free_rate, "risk_free_rate", "backtest_grid")
+    # Before either path, and before the bars are read for anything: the
+    # native path used to backtest a reversed frame (signals computed on the
+    # reversed series) and a duplicated bar without a word, where run_strategy
+    # raised on the same input.
+    require_sorted_unique_index(price_data.index, "price_data", "backtest_grid")
+    ppy, ppy_source, ppy_warnings = resolve_periods_per_year(
+        price_data.index,
+        periods_per_year=periods_per_year,
+        interval=interval,
+        where="backtest_grid",
+    )
 
     is_custom = callable(strategy)
     if is_custom:
@@ -1071,9 +1293,10 @@ def backtest_grid(
         signal_fn = STRATEGY_REGISTRY[strategy]
         strategy_label = strategy
 
-    # Build all parameter combinations
-    keys = list(param_grid.keys())
-    combos = list(product(*[param_grid[k] for k in keys]))
+    # Build every DISTINCT parameter combination -- see _distinct_axes.
+    axes, dropped = _distinct_axes(param_grid)
+    keys = list(axes.keys())
+    combos = list(product(*[axes[k] for k in keys]))
 
     t0 = time.perf_counter()
 
@@ -1136,6 +1359,7 @@ def backtest_grid(
                     slippage_pct,
                     grid_ref_arr,
                     risk_free_rate,
+                    ppy,
                 )
 
             if metrics_arr is None:
@@ -1176,12 +1400,26 @@ def backtest_grid(
                     initial_capital,
                     commission_pct,
                     slippage_pct,
-                    252.0,
+                    float(ppy),
                     grid_ref_arr,
                     risk_free_rate,
                 )
             metrics_df = pd.DataFrame(metrics_arr, columns=_BATCH_METRIC_COLUMNS)
             metrics_df["num_trades"] = metrics_df["num_trades"].astype(int)
+            # The same boundary rule run_strategy's native branch applies.
+            (
+                metrics_df["sortino_ratio"],
+                metrics_df["calmar_ratio"],
+                metrics_df["profit_factor"],
+            ) = _undefined_ratios_as_nan(
+                metrics_df["sortino_ratio"],
+                metrics_df["calmar_ratio"],
+                metrics_df["profit_factor"],
+                metrics_df["total_return"],
+                metrics_df["annualized_volatility"],
+                metrics_df["num_trades"],
+                risk_free_rate,
+            )
             metrics_df["final_equity"] = metrics_df["final_equity"].round(2)
             metrics_df["total_return"] = metrics_df["total_return"].round(6)
             metrics_df["annualized_volatility"] = metrics_df[
@@ -1199,10 +1437,9 @@ def backtest_grid(
 
             params_df = pd.DataFrame(combos, columns=keys)
             df_out = pd.concat([metrics_df, params_df.reset_index(drop=True)], axis=1)
-            if sort_by in df_out.columns:
-                df_out = df_out.sort_values(sort_by, ascending=ascending).reset_index(
-                    drop=True
-                )
+            df_out = _finish_grid(
+                df_out, sort_by, ascending, ppy, ppy_source, ppy_warnings, dropped
+            )
 
             elapsed_ms = (time.perf_counter() - t0) * 1000
             if not df_out.empty and sort_by in df_out.columns:
@@ -1265,6 +1502,7 @@ def backtest_grid(
                 slippage_pct,
                 fill_price=fill_price,
                 risk_free_rate=risk_free_rate,
+                periods_per_year=ppy,
             )
             for combo in combos
         ]
@@ -1279,6 +1517,7 @@ def backtest_grid(
                 "slippage_pct": slippage_pct,
                 "fill_price": fill_price,
                 "risk_free_rate": risk_free_rate,
+                "periods_per_year": ppy,
             }
             for combo in combos
         ]
@@ -1297,9 +1536,15 @@ def backtest_grid(
             with ProcessPoolExecutor(max_workers=workers) as pool:
                 results = list(pool.map(_run_grid_job, jobs))
 
-    df_out = pd.DataFrame(results)
-    if sort_by in df_out.columns:
-        df_out = df_out.sort_values(sort_by, ascending=ascending).reset_index(drop=True)
+    df_out = _finish_grid(
+        pd.DataFrame(results),
+        sort_by,
+        ascending,
+        ppy,
+        ppy_source,
+        ppy_warnings,
+        dropped,
+    )
 
     elapsed_ms = (time.perf_counter() - t0) * 1000
     if not df_out.empty and sort_by in df_out.columns:

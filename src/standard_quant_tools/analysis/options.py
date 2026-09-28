@@ -47,6 +47,11 @@ SIGMA_LOW, SIGMA_HIGH = 1e-6, 5.0
 #: import graph its header promises; `tests/analysis/test_options.py`
 #: pins the two together.
 MAX_RATE = 10.0  # 1,000% continuously compounded
+#: The largest |rate x time_to_expiry| handed to `math.exp`, restated from
+#: `analysis.derivatives.MAX_EXPONENT` for the same import-graph reason and
+#: pinned to it by the same test. Each factor inside its own bound is not
+#: enough: r=-9 at T=100 is 900, and exp(900) raised a bare OverflowError.
+MAX_EXPONENT = 700.0
 _SQRT_2PI = math.sqrt(2.0 * math.pi)
 
 
@@ -119,6 +124,57 @@ def _validate_option_inputs(
             )
 
 
+def _validate_rates(
+    risk_free_rate: float, dividend_yield: float, time_to_expiry: float
+) -> None:
+    """
+    Bound the two continuous rates, and their products with the time.
+
+    The rate had no bound at all: r=-1e300 escaped as a bare OverflowError,
+    r=nan priced to NaN (a null price at the agent surface, with no
+    warning), and r=1e300 returned a call worth exactly the spot. The
+    dividend yield was bounded on magnitude and never on its product with
+    time. Both are bounded on MAGNITUDE and never on sign: negative rates
+    and yields are ordinary and price normally. The same refusal lives in
+    `analysis.derivatives._option_inputs` and in `analysis.pricing`.
+    """
+    for name, value in (
+        ("risk_free_rate", risk_free_rate),
+        ("dividend_yield", dividend_yield),
+    ):
+        numeric = float(value)
+        if not math.isfinite(numeric) or abs(numeric) > MAX_RATE:
+            raise ValidationError(
+                f"{name}={numeric:g} is outside +/-{MAX_RATE:g}. The bound is "
+                "on MAGNITUDE and never on sign: a NEGATIVE rate or continuous "
+                "yield is ordinary (an FX option's foreign rate, a commodity "
+                "whose convenience yield exceeds its storage cost) and prices "
+                "normally here. A magnitude beyond this is a unit error rather "
+                "than an extreme case."
+            )
+        exponent = numeric * float(time_to_expiry)
+        if abs(exponent) > MAX_EXPONENT:
+            raise ValidationError(
+                f"{name} x time_to_expiry = {exponent:.4g}, and exp() of it "
+                f"overflows a float above about {MAX_EXPONENT:.0f}. Each factor "
+                "is inside its own bound -- it is their PRODUCT that is not. "
+                "Check the units: a rate of 4.3 is 430%, not 4.3%."
+            )
+
+
+def _require_finite_price(price: float, who: str) -> float:
+    """A price that is not a number is refused rather than returned: at the
+    agent surface a NaN serialises as a null price with no warning."""
+    if not math.isfinite(price):
+        raise ValidationError(
+            f"{who}: the price comes out {price!r}. The inputs are each inside "
+            "their bounds and their combination is not priceable in floating "
+            "point -- usually a discount factor exp(-rate x time) far from 1 "
+            "multiplied by a large strike. Check the rate units."
+        )
+    return price
+
+
 def _d1_d2(
     spot: float,
     strike: float,
@@ -166,18 +222,12 @@ def black_scholes_price(
 
     Raises:
         ValidationError: spot/strike/time_to_expiry/volatility <= 0,
-            abs(dividend_yield) > MAX_RATE, or an unknown option_type.
+            a non-finite risk_free_rate or dividend_yield or one whose
+            magnitude exceeds MAX_RATE, |rate x time_to_expiry| above
+            MAX_EXPONENT, or an unknown option_type.
     """
     _validate_option_inputs(spot, strike, time_to_expiry, volatility, option_type)
-    if abs(dividend_yield) > MAX_RATE:
-        raise ValidationError(
-            f"dividend_yield={dividend_yield} is outside +/-{MAX_RATE:g}. The "
-            "bound is on MAGNITUDE and never on sign: a NEGATIVE continuous "
-            "yield is the ordinary case for an FX option's foreign rate and "
-            "for a commodity whose convenience yield exceeds its storage "
-            "cost, and both price normally here. A magnitude beyond this is "
-            "a unit error rather than an extreme case."
-        )
+    _validate_rates(risk_free_rate, dividend_yield, time_to_expiry)
 
     d1, d2 = _d1_d2(
         spot, strike, time_to_expiry, risk_free_rate, volatility, dividend_yield
@@ -201,7 +251,7 @@ def black_scholes_price(
         dividend_yield,
         price,
     )
-    return price
+    return _require_finite_price(price, "black_scholes_price")
 
 
 def black_scholes_greeks(
@@ -229,15 +279,7 @@ def black_scholes_greeks(
     with keys "delta", "gamma", "vega", "theta", "rho", "d1", "d2".
     """
     _validate_option_inputs(spot, strike, time_to_expiry, volatility, option_type)
-    if abs(dividend_yield) > MAX_RATE:
-        raise ValidationError(
-            f"dividend_yield={dividend_yield} is outside +/-{MAX_RATE:g}. The "
-            "bound is on MAGNITUDE and never on sign: a NEGATIVE continuous "
-            "yield is the ordinary case for an FX option's foreign rate and "
-            "for a commodity whose convenience yield exceeds its storage "
-            "cost, and both price normally here. A magnitude beyond this is "
-            "a unit error rather than an extreme case."
-        )
+    _validate_rates(risk_free_rate, dividend_yield, time_to_expiry)
 
     d1, d2 = _d1_d2(
         spot, strike, time_to_expiry, risk_free_rate, volatility, dividend_yield
@@ -344,9 +386,10 @@ def implied_volatility(
 
     Raises:
         ValidationError: option_price <= 0, spot/strike/time_to_expiry <= 0,
-            an unknown option_type, abs(dividend_yield) > MAX_RATE, or
-            option_price is outside the no-arbitrage bounds achievable at
-            any volatility.
+            an unknown option_type, a non-finite risk_free_rate or
+            dividend_yield or one whose magnitude exceeds MAX_RATE,
+            |rate x time_to_expiry| above MAX_EXPONENT, or option_price is
+            outside the no-arbitrage bounds achievable at any volatility.
     """
     if option_price <= 0:
         raise ValidationError(
@@ -365,15 +408,14 @@ def implied_volatility(
         raise ValidationError(
             f"option_type must be one of {sorted(_OPTION_TYPES)}, got {option_type!r}"
         )
-    if abs(dividend_yield) > MAX_RATE:
+    # Before the bounds below, which exponentiate both rates: the time's
+    # magnitude first, since the exponent check multiplies by it.
+    if not math.isfinite(float(time_to_expiry)) or time_to_expiry > 100.0:
         raise ValidationError(
-            f"dividend_yield={dividend_yield} is outside +/-{MAX_RATE:g}. The "
-            "bound is on MAGNITUDE and never on sign: a NEGATIVE continuous "
-            "yield is the ordinary case for an FX option's foreign rate and "
-            "for a commodity whose convenience yield exceeds its storage "
-            "cost, and both price normally here. A magnitude beyond this is "
-            "a unit error rather than an extreme case."
+            f"time_to_expiry={time_to_expiry:g} has a magnitude outside what "
+            "these formulas can price (limit 100)."
         )
+    _validate_rates(risk_free_rate, dividend_yield, time_to_expiry)
 
     disc_q = math.exp(-dividend_yield * time_to_expiry)
     disc_r = math.exp(-risk_free_rate * time_to_expiry)

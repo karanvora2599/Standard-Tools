@@ -72,6 +72,8 @@ def _make_independent_rws(n: int = 300, seed: int = 99):
 class TestCointegrationTestReturnSchema:
     """The public API must return the expected keys regardless of backend."""
 
+    # The half-life arrives with the Dickey-Fuller check that says whether
+    # it describes a mean-reverting spread at all.
     REQUIRED_KEYS = {
         "cointegrated",
         "hedge_ratio",
@@ -79,6 +81,9 @@ class TestCointegrationTestReturnSchema:
         "p_value",
         "critical_values",
         "half_life_days",
+        "half_life_mean_reverting",
+        "half_life_t_statistic",
+        "half_life_critical_value",
         "n_obs",
     }
     CV_KEYS = {"1%", "5%", "10%"}
@@ -986,5 +991,9 @@ class TestScanCointegratedPairs:
             scan_cointegrated_pairs(df, pairs=[("T00", "NOPE")])
         with pytest.raises(ValidationError, match="at least 2 series"):
             scan_cointegrated_pairs(df[["T00"]])
-        with pytest.raises(ValidationError, match="at least 8 aligned bars"):
-            scan_cointegrated_pairs(df.iloc[:5])
+        # The scan and cointegration_test share one minimum of 20 aligned
+        # bars. The scan's own floor was 8, where the single test answered
+        # p=0.85 as if eight points could say anything.
+        with pytest.raises(ValidationError, match="at least 20 aligned bars"):
+            scan_cointegrated_pairs(df.iloc[:19])
+        assert len(scan_cointegrated_pairs(df.iloc[:20])) == 6

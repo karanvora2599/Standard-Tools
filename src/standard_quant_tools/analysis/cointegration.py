@@ -1,6 +1,7 @@
 import logging
+import math
 from itertools import combinations
-from typing import Any, Dict, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -16,6 +17,14 @@ logger = logging.getLogger(__name__)
 #: so the threshold sits well above that and far below any real spread. Two
 #: series whose spread is a millionth of their price are the same series.
 _DEGENERATE_RTOL = 1e-9
+
+#: The fewest aligned observations a cointegration verdict is given on, for
+#: `cointegration_test` and `scan_cointegrated_pairs` alike. The ADF
+#: regression on the residual spends degrees of freedom on the intercept,
+#: the lag and its augmentation lags, and MacKinnon's response surface is
+#: fitted on samples of 20 and more; below that the single test answered
+#: p=nan at n=0 and p=0.85 at n=8 as if either were a finding.
+_MIN_COINT_OBS = 20
 
 
 def _degenerate_pair_reason(a_vals: np.ndarray, b_vals: np.ndarray):
@@ -88,6 +97,16 @@ except ImportError:
         return func
 
 
+def _half_life_gate(spread: pd.Series) -> Dict[str, Any]:
+    """The Dickey-Fuller check on a fitted spread's half-life, as result keys."""
+    stats = half_life_statistics(spread, fitted_residual=True)
+    return {
+        "half_life_mean_reverting": stats["mean_reverting"],
+        "half_life_t_statistic": stats["t_statistic"],
+        "half_life_critical_value": stats["critical_value"],
+    }
+
+
 def cointegration_test(
     series_a: pd.Series,
     series_b: pd.Series,
@@ -118,7 +137,14 @@ def cointegration_test(
         p_value        : float  – MacKinnon cointegration p-value
         critical_values: dict   – {"1%": ..., "5%": ..., "10%": ...}
         half_life_days : float  – AR(1) half-life of the spread in bars
+        half_life_mean_reverting : bool – the half-life's own Dickey-Fuller
+                         t-statistic clears the 5% Engle-Granger critical
+                         value. A finite half-life without it is what a
+                         random walk usually produces.
+        half_life_t_statistic, half_life_critical_value : float
         n_obs          : int
+
+    Raises ValidationError on fewer than 20 aligned observations.
     """
     # Validated rather than silently coerced: the C++ path below maps
     # anything that isn't exactly "bic" onto AIC, while the statsmodels
@@ -136,6 +162,14 @@ def cointegration_test(
     require_finite_array(a_vals, "series_a", "cointegration_test")
     require_finite_array(b_vals, "series_b", "cointegration_test")
     n = len(a_vals)
+    # Ahead of the degenerate-pair guard, which on one observation reported
+    # "series_b is constant" -- true, and not the reason.
+    if n < _MIN_COINT_OBS:
+        raise ValidationError(
+            f"cointegration_test: {n} aligned observation(s); a cointegration "
+            f"verdict needs at least {_MIN_COINT_OBS}. Check that the two "
+            "series share dates, or widen the date range."
+        )
     path = "C++" if (HAS_CPP and _cpp_core is not None) else "statsmodels"
     logger.debug("[cointegration] n_obs=%d  autolag=%s  path=%s", n, autolag, path)
 
@@ -162,6 +196,10 @@ def cointegration_test(
     if HAS_CPP and _cpp_core is not None:
         use_aic = autolag.lower() != "bic"
         raw = _cpp_core.engle_granger(a_vals, b_vals, -1, use_aic)
+        spread = pd.Series(
+            a_vals - float(raw["intercept"]) - float(raw["hedge_ratio"]) * b_vals,
+            index=common_idx,
+        )
         return {
             "cointegrated": bool(raw["cointegrated"]),
             "hedge_ratio": float(raw["hedge_ratio"]),
@@ -173,6 +211,7 @@ def cointegration_test(
                 "10%": float(raw["cv_10pct"]),
             },
             "half_life_days": float(raw["half_life"]),
+            **_half_life_gate(spread),
             "n_obs": int(raw["n_obs"]),
         }
 
@@ -199,6 +238,7 @@ def cointegration_test(
         "p_value": float(p_val),
         "critical_values": crit,
         "half_life_days": hl,
+        **_half_life_gate(spread),
         "n_obs": n,
     }
     logger.debug(
@@ -319,6 +359,84 @@ def half_life(spread: pd.Series) -> float:
     return float(np.log(0.5) / np.log(abs(phi)))
 
 
+def half_life_statistics(
+    spread: pd.Series, *, fitted_residual: bool = False
+) -> Dict[str, Any]:
+    """
+    The AR(1) half-life, with the test that says whether there is one.
+
+    `half_life` returns a finite number whenever the fitted AR(1)
+    coefficient is negative, and on a random walk it is negative about half
+    the time and small the rest: measured on 1000 random walks of 250
+    observations, 95.5% came back finite and 84% inside a 5-126 bar screen,
+    median 36. A half-life is a claim that the spread mean-reverts, so it
+    comes here with the Dickey-Fuller t-statistic of that same regression
+    and the 5% critical value it has to clear -- which gates the random
+    walks down to about 5%.
+
+    `fitted_residual=True` when the spread is the residual of a regression
+    of one price on another (an Engle-Granger spread): the regression has
+    already chosen the most stationary-looking combination, so the critical
+    value is MacKinnon's for two variables (about -3.36 at 250
+    observations) rather than the one-series -2.87.
+
+    Returns a dict with `half_life` (bars; inf when the coefficient is not
+    negative, as `half_life`), `ar_coefficient`, `t_statistic`,
+    `critical_value`, `mean_reverting` (the t-statistic clears the 5%
+    critical value and the half-life is finite) and `n_obs`.
+    """
+    from statsmodels.tsa.adfvalues import mackinnoncrit
+
+    # Imported here: `metrics` imports `analysis` at package level, so a
+    # module-level import would close a cycle.
+    from standard_quant_tools.metrics.risk_metrics import has_no_dispersion
+
+    values = spread.dropna().to_numpy(dtype=float)
+    require_finite_array(values, "spread", "half_life_statistics")
+    n = int(values.size) - 1
+    nan = float("nan")
+    result: Dict[str, Any] = {
+        "half_life": float("inf"),
+        "ar_coefficient": nan,
+        "t_statistic": nan,
+        "critical_value": nan,
+        "mean_reverting": False,
+        "n_obs": max(n, 0),
+    }
+    if n < 3 or has_no_dispersion(values):
+        # Too short to fit, or a constant: no reversion to measure.
+        return result
+
+    y = np.diff(values)
+    x = values[:-1]
+    design = np.column_stack([np.ones(n), x])
+    beta, *_ = np.linalg.lstsq(design, y, rcond=None)
+    residual = y - design @ beta
+    dof = n - 2
+    s2 = float(residual @ residual) / dof if dof > 0 else nan
+    x_centred = x - x.mean()
+    sxx = float(x_centred @ x_centred)
+    se = math.sqrt(s2 / sxx) if sxx > 0 and s2 == s2 else nan
+    ar_coeff = float(beta[1])
+    t_stat = ar_coeff / se if se == se and se > 0 else nan
+    critical = float(
+        mackinnoncrit(N=2 if fitted_residual else 1, regression="c", nobs=n)[1]
+    )
+    hl = half_life(spread.dropna())
+    result.update(
+        {
+            "half_life": float(hl),
+            "ar_coefficient": ar_coeff,
+            "t_statistic": float(t_stat),
+            "critical_value": critical,
+            "mean_reverting": bool(
+                t_stat == t_stat and t_stat < critical and math.isfinite(hl)
+            ),
+        }
+    )
+    return result
+
+
 def spread_zscore(
     spread: pd.Series,
     window: Optional[int] = None,
@@ -341,19 +459,36 @@ def spread_zscore(
     -------
     pd.Series with the same index as ``spread``.
     """
+    # Imported here: `metrics` imports `analysis` at package level, so a
+    # module-level import would close a cycle.
+    from standard_quant_tools.metrics.risk_metrics import (
+        DISPERSION_RTOL,
+        has_no_dispersion,
+    )
+
     if window is None:
         mu = spread.mean()
         sigma = spread.std()
-        if sigma == 0:
+        # The library's relative test, not `sigma == 0`. A spread flat at a
+        # level like 12.3456 bps has a standard deviation of 7e-15, not 0,
+        # and the exact test divided rounding residue by rounding residue:
+        # a z-score of 0.99 on a series that never moved, ranked first in a
+        # basis scan. A flat spread keeps its 0.0 convention.
+        values = spread.dropna().to_numpy(dtype=float)
+        if sigma == 0 or (values.size >= 2 and has_no_dispersion(values)):
             return pd.Series(0.0, index=spread.index, name="zscore")
         return ((spread - mu) / sigma).rename("zscore")
 
     rolling_mean = spread.rolling(window).mean()
     rolling_std = spread.rolling(window).std()
-    # A window with zero variance (e.g. a constant spread) would otherwise
-    # divide by zero -- NaN out that bar rather than a mid-series inf/nan
-    # spike being mistaken for a real z-score.
-    safe_std = rolling_std.where(rolling_std > 0)
+    # A window with no dispersion (e.g. a constant spread) would otherwise
+    # divide by zero or by rounding residue -- NaN out that bar rather than
+    # an inf or a residue ratio being mistaken for a real z-score. Relative
+    # to the window's own magnitude, as `has_no_dispersion` is.
+    window_range = spread.rolling(window).max() - spread.rolling(window).min()
+    window_scale = spread.abs().rolling(window).max()
+    flat = (rolling_std <= 0) | (window_range <= window_scale * DISPERSION_RTOL)
+    safe_std = rolling_std.where(~flat)
     return ((spread - rolling_mean) / safe_std).rename("zscore")
 
 
@@ -475,12 +610,50 @@ _BATCH_COINT_COLUMNS = [
     "cointegrated",
 ]
 
+#: What a screen adds to the per-pair test: the verdict with the pair's
+#: order reversed, one p-value for both orders, and the multiple-testing
+#: correction a screen over many pairs needs.
+_SCAN_COLUMNS = _BATCH_COINT_COLUMNS + [
+    "p_value_reverse",
+    "p_value_both",
+    "direction_consistent",
+    "p_value_bh",
+    "cointegrated_fdr",
+]
+
+
+def benjamini_hochberg(p_values: Sequence[float]) -> np.ndarray:
+    """
+    Benjamini-Hochberg adjusted p-values (the step-up false discovery rate).
+
+    A NaN p-value is not a test: it is left NaN and not counted in the
+    number of tests. Reject at FDR level q where the adjusted value is at
+    most q. Valid under independence and positive dependence of the tests;
+    Benjamini-Yekutieli (multiply by sum 1/i) is the conservative option
+    under arbitrary dependence.
+    """
+    p = np.asarray(p_values, dtype=float)
+    out = np.full(p.shape, np.nan)
+    mask = np.isfinite(p)
+    m = int(mask.sum())
+    if m == 0:
+        return out
+    values = p[mask]
+    order = np.argsort(values, kind="stable")
+    scaled = values[order] * m / np.arange(1, m + 1)
+    scaled = np.minimum.accumulate(scaled[::-1])[::-1]
+    adjusted = np.empty(m)
+    adjusted[order] = np.minimum(scaled, 1.0)
+    out[mask] = adjusted
+    return out
+
 
 def scan_cointegrated_pairs(
     prices: Union[pd.DataFrame, Dict[str, pd.Series]],
     pairs: Optional[Sequence[Tuple[str, str]]] = None,
     autolag: str = "aic",
     max_lag: int = -1,
+    fdr: float = 0.05,
 ) -> pd.DataFrame:
     """
     Engle-Granger over many pairs in ONE native call.
@@ -500,23 +673,44 @@ def scan_cointegrated_pairs(
     pairs are then comparable; either way it is stated here rather than
     discovered.
 
+    THE VERDICT DEPENDS ON WHICH SERIES IS REGRESSED ON WHICH. Engle-Granger
+    is not symmetric: on 24 random walks, 65 of 276 verdicts flipped when
+    the columns were swapped. So every pair is also tested reversed, in the
+    same native call, and `p_value_both` is the larger of the two p-values
+    -- a pair is cointegrated in both orders or it is not cointegrated.
+    `direction_consistent` says whether the two orders agree at 5%.
+
+    A SCREEN IS MANY TESTS. At 5%, 276 unrelated pairs produce about 14
+    "cointegrated" rows by chance. `p_value_bh` is the Benjamini-Hochberg
+    adjustment of `p_value_both` across every answerable pair, and
+    `cointegrated_fdr` is it at most `fdr`: the rows that survive a false
+    discovery rate of `fdr`. Benjamini-Yekutieli is the conservative
+    alternative when the pairs are strongly dependent (they share series);
+    `benjamini_hochberg` is exported for recomputing either.
+
     Args:
         prices: Wide DataFrame (columns = tickers) or dict of ticker -> Series.
         pairs: Which pairs to test. Defaults to every unordered combination.
         autolag: "aic" (default) or "bic".
         max_lag: ADF max lag; -1 for the automatic Schwert rule.
+        fdr: False discovery rate for `cointegrated_fdr` (default 0.05).
 
     Returns:
         DataFrame indexed by a MultiIndex of (symbol_a, symbol_b), with columns
         intercept, hedge_ratio, adf_statistic, optimal_lag, p_value, cv_1pct,
-        cv_5pct, cv_10pct, half_life_days, n_obs, cointegrated.
+        cv_5pct, cv_10pct, half_life_days, n_obs, cointegrated (all for
+        symbol_a regressed on symbol_b), then p_value_reverse, p_value_both,
+        direction_consistent, p_value_bh and cointegrated_fdr.
 
     Raises:
-        ValidationError: on an unknown autolag, an empty universe, a pair
-            naming a ticker not in `prices`, or fewer than 8 aligned bars.
+        ValidationError: on an unknown autolag, an fdr outside (0, 1), an
+            empty universe, a pair naming a ticker not in `prices`, or fewer
+            than 20 aligned bars.
     """
     if autolag.lower() not in ("aic", "bic"):
         raise ValidationError(f"autolag must be 'aic' or 'bic', got {autolag!r}")
+    if not (0.0 < float(fdr) < 1.0):
+        raise ValidationError(f"fdr must be strictly between 0 and 1, got {fdr!r}")
 
     frame = prices if isinstance(prices, pd.DataFrame) else pd.DataFrame(prices)
     frame = frame.dropna(how="any")
@@ -525,9 +719,11 @@ def scan_cointegrated_pairs(
         raise ValidationError(
             f"scan_cointegrated_pairs: need at least 2 series, got {len(tickers)}"
         )
-    if len(frame) < 8:
+    if len(frame) < _MIN_COINT_OBS:
         raise ValidationError(
-            f"scan_cointegrated_pairs: need at least 8 aligned bars, got {len(frame)}"
+            f"scan_cointegrated_pairs: need at least {_MIN_COINT_OBS} aligned "
+            f"bars, got {len(frame)}. Rows with a gap in any series are "
+            "dropped before the scan, so one short history shortens them all."
         )
 
     pos = {t: i for i, t in enumerate(tickers)}
@@ -542,7 +738,7 @@ def scan_cointegrated_pairs(
             )
     if not pair_list:
         return pd.DataFrame(
-            columns=_BATCH_COINT_COLUMNS,
+            columns=_SCAN_COLUMNS,
             index=pd.MultiIndex.from_tuples([], names=["symbol_a", "symbol_b"]),
         )
 
@@ -562,63 +758,88 @@ def scan_cointegrated_pairs(
     # 4,949 pairs. Same predicate either way, so the scan and the single test
     # never disagree about which pairs are answerable -- and it runs on BOTH
     # backends, because the kernel does not see the guard above.
-    degenerate = {
-        (a, b): _degenerate_pair_reason(
+    degenerate = [
+        _degenerate_pair_reason(
             frame[a].to_numpy(dtype=float), frame[b].to_numpy(dtype=float)
         )
+        is not None
         for a, b in pair_list
-    }
+    ]
 
     def _blank_row(n_obs: int):
         nan = float("nan")
         return [nan, nan, nan, 0, nan, nan, nan, nan, nan, n_obs, False]
 
+    reversed_pairs = [(b, a) for a, b in pair_list]
+    m = len(pair_list)
     if HAS_CPP and _cpp_core is not None:
-        # (n_tickers x n_bars), the layout the kernel indexes by row.
+        # (n_tickers x n_bars), the layout the kernel indexes by row. Both
+        # orders of every pair in the one call.
         panel = np.ascontiguousarray(frame.to_numpy(dtype=np.float64).T)
-        pair_idx = np.array([(pos[a], pos[b]) for a, b in pair_list], dtype=np.int32)
-        out = _cpp_core.batch_engle_granger(panel, pair_idx, max_lag, use_aic)
-        df = pd.DataFrame(out, columns=_BATCH_COINT_COLUMNS, index=index)
-        for position, (a, b) in enumerate(pair_list):
-            if degenerate[(a, b)] is not None:
-                df.iloc[position] = _blank_row(int(df.iloc[position]["n_obs"]))
-        df["optimal_lag"] = df["optimal_lag"].astype(int)
-        df["n_obs"] = df["n_obs"].astype(int)
-        df["cointegrated"] = df["cointegrated"].astype(bool)
-        return df
-
-    # Pure-Python fallback: same columns, same order, one pair at a time.
-    # The intercept is the OLS identity on the aligned rows (the hedge
-    # ratio IS the OLS slope with an intercept, so a - slope * b at the
-    # means is that intercept). statsmodels' `coint` does not report the
-    # lag it chose, so `optimal_lag` is -1 here: unknown, not zero.
-    rows = []
-    for a, b in pair_list:
-        if degenerate[(a, b)] is not None:
-            rows.append(_blank_row(len(frame)))
-            continue
-        r = cointegration_test(frame[a], frame[b], autolag=autolag)
-        aligned = frame[[a, b]].dropna()
-        intercept = float(aligned[a].mean() - r["hedge_ratio"] * aligned[b].mean())
-        rows.append(
-            [
-                intercept,
-                r["hedge_ratio"],
-                r["adf_statistic"],
-                -1,
-                r["p_value"],
-                r["critical_values"]["1%"],
-                r["critical_values"]["5%"],
-                r["critical_values"]["10%"],
-                r["half_life_days"],
-                r["n_obs"],
-                r["cointegrated"],
-            ]
+        pair_idx = np.array(
+            [(pos[a], pos[b]) for a, b in pair_list + reversed_pairs],
+            dtype=np.int32,
         )
-    df = pd.DataFrame(rows, columns=_BATCH_COINT_COLUMNS, index=index)
+        out = np.asarray(
+            _cpp_core.batch_engle_granger(panel, pair_idx, max_lag, use_aic)
+        )
+        df = pd.DataFrame(out[:m], columns=_BATCH_COINT_COLUMNS, index=index)
+        p_reverse = out[m:, _BATCH_COINT_COLUMNS.index("p_value")].astype(float)
+        for position in range(m):
+            if degenerate[position]:
+                df.iloc[position] = _blank_row(int(df.iloc[position]["n_obs"]))
+    else:
+        # Pure-Python fallback: same columns, same order, one pair at a
+        # time. The intercept is the OLS identity on the aligned rows (the
+        # hedge ratio IS the OLS slope with an intercept, so a - slope * b at
+        # the means is that intercept). statsmodels' `coint` does not report
+        # the lag it chose, so `optimal_lag` is -1 here: unknown, not zero.
+        rows = []
+        p_reverse = np.full(m, np.nan)
+        for position, (a, b) in enumerate(pair_list):
+            if degenerate[position]:
+                rows.append(_blank_row(len(frame)))
+                continue
+            r = cointegration_test(frame[a], frame[b], autolag=autolag)
+            p_reverse[position] = cointegration_test(
+                frame[b], frame[a], autolag=autolag
+            )["p_value"]
+            aligned = frame[[a, b]].dropna()
+            intercept = float(aligned[a].mean() - r["hedge_ratio"] * aligned[b].mean())
+            rows.append(
+                [
+                    intercept,
+                    r["hedge_ratio"],
+                    r["adf_statistic"],
+                    -1,
+                    r["p_value"],
+                    r["critical_values"]["1%"],
+                    r["critical_values"]["5%"],
+                    r["critical_values"]["10%"],
+                    r["half_life_days"],
+                    r["n_obs"],
+                    r["cointegrated"],
+                ]
+            )
+        df = pd.DataFrame(rows, columns=_BATCH_COINT_COLUMNS, index=index)
+
     df["optimal_lag"] = df["optimal_lag"].astype(int)
     df["n_obs"] = df["n_obs"].astype(int)
     df["cointegrated"] = df["cointegrated"].astype(bool)
+
+    p_forward = df["p_value"].to_numpy(dtype=float)
+    p_reverse = np.where(degenerate, np.nan, p_reverse)
+    p_both = np.fmax(p_forward, p_reverse)
+    p_both = np.where(np.isfinite(p_forward) & np.isfinite(p_reverse), p_both, np.nan)
+    answerable = np.isfinite(p_both)
+    df["p_value_reverse"] = p_reverse
+    df["p_value_both"] = p_both
+    df["direction_consistent"] = answerable & ((p_forward < 0.05) == (p_reverse < 0.05))
+    p_bh = benjamini_hochberg(p_both)
+    df["p_value_bh"] = p_bh
+    df["cointegrated_fdr"] = answerable & (np.nan_to_num(p_bh, nan=1.0) <= fdr)
+    df["direction_consistent"] = df["direction_consistent"].astype(bool)
+    df["cointegrated_fdr"] = df["cointegrated_fdr"].astype(bool)
     return df
 
 

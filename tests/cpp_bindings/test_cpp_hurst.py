@@ -237,13 +237,23 @@ class TestPythonWrapper:
         assert "regime" in result
 
     def test_hurst_exponent_keys(self, series_500):
+        """
+        The wrapper reports more than the kernel: the uncorrected R/S slope
+        and its small-sample correction, the random-walk band the regime is
+        judged against, the largest window fitted, and warnings.
+        """
         result = hurst_exponent(series_500)
         assert set(result.keys()) == {
             "hurst",
+            "hurst_raw",
+            "bias_correction",
             "regime",
+            "regime_band",
             "fit_r_squared",
             "method",
             "n_obs",
+            "max_window_used",
+            "warnings",
         }
 
     def test_hurst_exponent_valid_range(self, series_1000):

@@ -1,6 +1,6 @@
 import logging
 import math
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 import numpy as np
 import pandas as pd
@@ -39,6 +39,25 @@ _math_erf = math.erf
 _norm_cdf = norm_cdf_array
 
 
+def _dependent_columns(X: np.ndarray, names: List[str]) -> List[str]:
+    """
+    The columns of `X` that add no rank to the columns before them.
+
+    Greedy, left to right, with the same tolerance lstsq uses: the first
+    column of a dependent set is kept and the later ones are named, so the
+    list says exactly what to drop.
+    """
+    kept: List[int] = []
+    dependent: List[str] = []
+    for j in range(X.shape[1]):
+        columns = kept + [j]
+        if np.linalg.matrix_rank(X[:, columns]) < len(columns):
+            dependent.append(names[j])
+        else:
+            kept.append(j)
+    return dependent
+
+
 def multi_factor_regression(
     asset_returns: pd.Series,
     factor_returns: pd.DataFrame,
@@ -71,6 +90,11 @@ def multi_factor_regression(
     scipy is installed, and a normal approximation otherwise. The two agree
     closely for large samples but differ materially for small ones — check
     `n_obs` before comparing p-values computed in different environments.
+
+    Raises ValidationError when the factors are linearly dependent (a
+    duplicated factor, one that is a sum or multiple of others, a constant
+    one), naming the factors to drop: their loadings are not identified,
+    and the numbers least squares would return for them are not estimates.
     """
     common_idx = asset_returns.index.intersection(factor_returns.index)
     y = asset_returns.loc[common_idx].to_numpy(dtype=float)
@@ -105,7 +129,25 @@ def multi_factor_regression(
 
     X = np.column_stack([np.ones(n), X_f])
 
-    beta, *_ = np.linalg.lstsq(X, y, rcond=None)
+    beta, _residuals, rank, _sv = np.linalg.lstsq(X, y, rcond=None)
+    # The rank-deficiency policy rolling_factor_loadings already applies,
+    # made a refusal here because there is one regression, not a series of
+    # windows to leave blank. A design that is not full rank has no unique
+    # loadings: lstsq returns the minimum-norm member of an infinite set
+    # (two identical factors split their loading 50/50), and inv(X'X) of a
+    # singular matrix is rounding noise, so the t-statistics came back NaN
+    # or as a confident 1.5e-7 on a factor that is 1.1 times another.
+    if rank < k:
+        dependent = _dependent_columns(X, ["intercept"] + factor_names)
+        raise ValidationError(
+            f"multi_factor_regression: the factors are linearly dependent "
+            f"(rank {rank} of {k} columns including the intercept), so their "
+            f"loadings are not identified. Dependent on the columns before "
+            f"them: {', '.join(repr(d) for d in dependent)}. A duplicated "
+            "factor, a factor that is a sum or multiple of others, and a "
+            "constant factor (which duplicates the intercept) all do this. "
+            "Drop the named factor(s) and rerun."
+        )
 
     y_pred = X @ beta
     ss_res = float(np.sum((y - y_pred) ** 2))

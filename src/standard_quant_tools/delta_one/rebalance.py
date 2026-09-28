@@ -26,13 +26,23 @@ inside it.
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from standard_quant_tools.error import ValidationError
 
 from ._numbers import finite, positive
 
 __all__ = ["index_rebalance_flow"]
+
+#: The largest weight sum read as an index in FRACTIONS. A whole index sums
+#: to 1; this leaves room for rounding and a sloppy hand-typed set, and it
+#: sits far below the 100 that percent-scaled weights sum to, which is the
+#: mistake it exists to catch.
+_MAX_WEIGHT_SUM = 1.5
+
+#: How far a weight sum may sit from 1 before the result says the set is
+#: not a whole index. One percent covers rounding in published weights.
+_SUM_TOLERANCE = 0.01
 
 
 def index_rebalance_flow(
@@ -67,8 +77,8 @@ def index_rebalance_flow(
             "multiple of it."
         )
 
-    old = _weights(old_weights, "old_weights")
-    new = _weights(new_weights, "new_weights")
+    old, old_total = _weights(old_weights, "old_weights")
+    new, new_total = _weights(new_weights, "new_weights")
     universe = sorted(set(old) | set(new))
 
     rows: List[Dict[str, Any]] = []
@@ -126,6 +136,19 @@ def index_rebalance_flow(
     )
 
     warnings: List[str] = []
+    partial = [
+        f"{name} sums to {total:.4g}"
+        for name, total in (("old_weights", old_total), ("new_weights", new_total))
+        if abs(total - 1.0) > _SUM_TOLERANCE
+    ]
+    if partial:
+        warnings.append(
+            f"{' and '.join(partial)}, not 1. The flows below are computed "
+            "for the names given only: a set that leaves names out sizes "
+            "those names correctly and says nothing about the rest, and one "
+            "that is not a whole index cannot be checked for buys and sells "
+            "that offset."
+        )
     missing_adv = [r["symbol"] for r in rows if r["adv"] is None]
     if missing_adv:
         warnings.append(
@@ -185,7 +208,8 @@ def index_rebalance_flow(
 # ── internals ───────────────────────────────────────────────────────────
 
 
-def _weights(mapping: Mapping[str, float], name: str) -> Dict[str, float]:
+def _weights(mapping: Mapping[str, float], name: str) -> Tuple[Dict[str, float], float]:
+    """The weights as floats, and their sum, or a refusal naming the scale."""
     if not isinstance(mapping, Mapping) or not mapping:
         raise ValidationError(
             f"{name} must be a non-empty mapping of symbol to weight."
@@ -199,4 +223,21 @@ def _weights(mapping: Mapping[str, float], name: str) -> Dict[str, float]:
             f"{name} sums to {total:g}, which is not an index. Weights are "
             "expected to sum to about 1."
         )
-    return out
+    if total > _MAX_WEIGHT_SUM:
+        # Every flow is weight x indexed_assets, so a scale error here is a
+        # scale error in every number returned. Percent weights on $800bn
+        # reported $40 TRILLION of buying and a turnover of 5,000%, and the
+        # buy/sell offset check could not fire because both sets were
+        # scaled alike.
+        scale = (
+            "percent -- divide every weight by 100"
+            if total < 1_000.0
+            else "basis points -- divide every weight by 10,000"
+        )
+        raise ValidationError(
+            f"{name} sums to {total:g}. Index weights here are FRACTIONS "
+            "that sum to about 1 (0.35% is 0.0035), and every flow is a "
+            "weight times indexed_assets, so this set would scale every "
+            f"number by the same factor. It reads as {scale}."
+        )
+    return out, total

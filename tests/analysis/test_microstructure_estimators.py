@@ -422,20 +422,23 @@ class TestOrderFlowImbalance:
         result = order_flow_imbalance(self._frame())
         assert any("TICK RULE" in w for w in result["warnings"])
 
-    def test_a_repeated_timestamp_is_just_another_bar(self):
-        """The imbalance is lined up with the NEXT bar's return by position.
-        Aligning by label raised pandas' 'cannot reindex on an axis with
-        duplicate labels' on any dated frame with one stamp repeated, where
-        every sibling estimator ran. The answer is the positional one: the
-        same bars on a plain index."""
+    def test_a_repeated_timestamp_is_refused_by_name(self):
+        """Aligning the imbalance with the next return by label raised
+        pandas' 'cannot reindex on an axis with duplicate labels' on a dated
+        frame with one stamp repeated. This test used to accept the
+        positional answer instead, treating the repeat as just another bar;
+        but two bars at one moment are two sources concatenated, nothing
+        says which came first, and every bar estimator now refuses them by
+        name -- still not with the pandas error."""
         frame = self._frame(n=300)
         stamps = pd.date_range("2026-01-02", periods=len(frame), freq="D")
         repeated = pd.DatetimeIndex(np.r_[stamps[:150], stamps[149:299]])
         assert repeated.has_duplicates
         dated = frame.set_axis(repeated)
-        assert order_flow_imbalance(dated, window=5) == order_flow_imbalance(
-            frame, window=5
-        )
+        with pytest.raises(ValidationError) as exc:
+            order_flow_imbalance(dated, window=5)
+        assert str(stamps[149].date()) in str(exc.value)
+        assert "duplicate labels" not in str(exc.value)
 
     def test_dated_bars_give_the_same_answer_as_plain_ones(self):
         """Null case: nothing repeated, and the date labels change nothing."""
@@ -561,3 +564,289 @@ class TestIntradayVolumeProfile:
         result = intraday_volume_profile(frame)
         if result["close_share"] > 0.20:
             assert any("Closing auction share" in w for w in result["warnings"])
+
+
+class TestVpinBarsThatDidNotMove:
+    """A bar whose close did not move has no direction the tick rule can
+    read. It used to be counted as all buying, so a flat market came back
+    at the maximum reading, 1.0 -- toxic flow on a tape where nothing
+    happened."""
+
+    def test_a_flat_market_has_no_imbalance(self):
+        flat = pd.DataFrame({"close": [100.0] * 200, "volume": [1000.0] * 200})
+        result = estimate_vpin(flat, n_buckets=50, window=10)
+        assert result["current_vpin"] == 0.0
+        assert result["max_vpin"] == 0.0
+        assert result["undirected_volume_share"] == 1.0
+        assert any("split half to each side" in w for w in result["warnings"])
+
+    def test_a_still_bar_is_split_evenly_between_the_sides(self):
+        """Every four-bar bucket is still, up, still, down: one buy, one
+        sell and two bars nobody initiated. Half each makes every bucket
+        exactly balanced; counting the still bars as buys made each one a
+        3-to-1 imbalance of 0.5."""
+        steps = np.tile([0.0, 1.0, 0.0, -1.0], 100)
+        frame = pd.DataFrame({"close": 100.0 + np.cumsum(steps), "volume": 1000.0})
+        result = estimate_vpin(frame, n_buckets=100, window=10)
+        assert result["current_vpin"] == 0.0
+        assert result["undirected_volume_share"] == pytest.approx(0.5)
+
+    def test_bars_that_moved_keep_their_whole_volume_on_their_side(self):
+        """Null case: a series that rises on every bar after the first has
+        only one still bar, in the first bucket, and every later bucket is
+        entirely buying -- exactly as before."""
+        frame = pd.DataFrame({"close": np.linspace(100, 200, 400), "volume": 1e6})
+        result = estimate_vpin(frame, n_buckets=100, window=10)
+        assert result["current_vpin"] == 1.0
+        assert result.get("undirected_volume_share", 1 / 400) == pytest.approx(1 / 400)
+
+    def test_order_flow_imbalance_splits_the_same_way(self):
+        """The sibling estimator's buy-volume fraction counted a still bar
+        as not-buy, so a flat series read as all selling (0.0) beside a mean
+        imbalance of exactly zero."""
+        flat = pd.DataFrame({"close": [100.0] * 200, "volume": [1000.0] * 200})
+        result = order_flow_imbalance(flat)
+        assert result["buy_volume_fraction"] == 0.5
+        assert result["mean_imbalance"] == 0.0
+
+    def test_a_rising_series_is_all_buying_but_its_first_bar(self):
+        """Only the first bar, which has no return, is split: it counted as
+        not-buy, which put the fraction at 299/300."""
+        frame = pd.DataFrame({"close": np.linspace(100, 140, 300), "volume": 1e6})
+        result = order_flow_imbalance(frame)
+        assert result["buy_volume_fraction"] == pytest.approx(299.5 / 300)
+
+
+class TestTheProfileKeepsEveryBucket:
+    """The trough is the number a volume profile exists to measure, and it
+    was computed over the buckets some bar happened to fall in."""
+
+    @staticmethod
+    def _bars(hours_and_minutes, volume):
+        day = pd.Timestamp("2026-03-02")
+        stamps = [day + pd.Timedelta(hours=h, minutes=m) for h, m in hours_and_minutes]
+        return pd.DataFrame({"volume": volume}, index=pd.DatetimeIndex(stamps))
+
+    def _open_and_close_only(self):
+        """Twenty one-minute bars at the open and twenty at the close, none
+        in between: the most extreme U there is."""
+        slots = [(9, 30 + m) for m in range(20)] + [(15, 30 + m) for m in range(20)]
+        return self._bars(slots, [300.0] * 20 + [200.0] * 20)
+
+    def test_the_empty_midday_is_the_trough(self):
+        result = intraday_volume_profile(self._open_and_close_only(), n_buckets=13)
+        assert result["n_buckets"] == 13
+        assert len(result["profile"]) == 13
+        assert result["n_empty_buckets"] == 11
+        assert result["trough_share"] == 0.0
+        assert result["u_shaped"] is True
+        assert result["open_share"] == pytest.approx(0.6)
+        assert result["close_share"] == pytest.approx(0.4)
+        assert result["open_to_trough_ratio"] is None
+        assert any("hold no bars" in w for w in result["warnings"])
+
+    def test_the_trough_bucket_is_an_id_not_a_position(self):
+        """It was a position in the list of occupied buckets, returned beside
+        entries whose `bucket` field was the real id -- on the bars above it
+        pointed at the close."""
+        result = intraday_volume_profile(self._open_and_close_only(), n_buckets=13)
+        trough = result["profile"][result["trough_bucket"]]
+        assert trough["bucket"] == result["trough_bucket"]
+        assert trough["share_of_volume"] == 0.0
+        assert trough["n_bars"] == 0
+        assert trough["mean_volume"] is None
+
+    def test_one_empty_bucket_in_a_real_u_is_the_trough(self):
+        """A U over a full session with nothing between 12:30 and 13:00 --
+        bucket 6 of 13. Dropped, the trough became whichever occupied
+        bucket was lowest and its id was off by one."""
+        slots = [(h, m) for h in range(9, 16) for m in range(0, 60, 5)]
+        slots = [(h, m) for h, m in slots if 570 <= h * 60 + m < 960]
+        minutes = np.array([h * 60 + m for h, m in slots])
+        shape = 3.0 - 2.6 * np.sin(np.pi * (minutes - 570) / 390)
+        keep = (minutes < 750) | (minutes >= 780)
+        frame = self._bars(
+            [s for s, k in zip(slots, keep) if k], (shape * 1e5)[keep].tolist()
+        )
+        result = intraday_volume_profile(frame, n_buckets=13)
+        assert result["trough_bucket"] == 6
+        assert result["profile"][6]["start_time"] == "12:30"
+        assert result["trough_share"] == 0.0
+        assert result["n_empty_buckets"] == 1
+        assert result["u_shaped"] is True
+
+    def test_the_buckets_divide_the_session_not_the_sample(self):
+        """Bars from 10:00 to 13:55 only. Over the sample's own range the
+        first bucket was 'the open' at 10:00; over the session it is 09:30
+        and empty, which is what the bars actually say about the open."""
+        slots = [(h, m) for h in range(10, 14) for m in range(0, 60, 5)]
+        frame = self._bars(slots, [1000.0] * len(slots))
+        result = intraday_volume_profile(frame, n_buckets=13)
+        assert result["bucket_span"] == ["09:30", "16:00"]
+        assert result["profile"][0]["start_time"] == "09:30"
+        assert result["profile"][12]["start_time"] == "15:30"
+        assert result["open_share"] == 0.0
+        assert result["close_share"] == 0.0
+        assert result["u_shaped"] is False
+
+    def test_a_zoned_index_is_bucketed_over_the_session_too(self):
+        slots = [(h, m) for h in range(10, 14) for m in range(0, 60, 5)]
+        frame = self._bars(slots, [1000.0] * len(slots))
+        zoned = frame.tz_localize("America/New_York")
+        result = intraday_volume_profile(zoned, n_buckets=13)
+        assert result["bucket_span"] == ["09:30", "16:00"]
+        assert [p["start_time"] for p in result["profile"]] == [
+            p["start_time"]
+            for p in intraday_volume_profile(frame, n_buckets=13)["profile"]
+        ]
+
+    def test_naive_bars_outside_the_session_are_profiled_as_given_and_named(self):
+        """Without a zone nothing places a 04:00 bar, so the buckets span
+        the bars' own times -- and the result says so and names the fix."""
+        slots = [(h, m) for h in range(4, 20) for m in range(0, 60, 5)]
+        frame = self._bars(slots, [1000.0] * len(slots))
+        result = intraday_volume_profile(frame, n_buckets=13)
+        assert result["bucket_span"] == ["04:00", "19:56"]
+        assert any("index_timezone" in w for w in result["warnings"])
+
+    def test_a_full_session_has_no_empty_bucket_and_no_note(self):
+        """Null case: a session in which every bucket traded comes back as
+        thirteen buckets with ids 0 to 12, one flat share each, and no note
+        about empty buckets or bars outside the session -- as before."""
+        slots = [(h, m) for h in range(9, 16) for m in range(0, 60, 5)]
+        slots = [(h, m) for h, m in slots if 570 <= h * 60 + m < 960]
+        frame = self._bars(slots, [1000.0] * len(slots))
+        result = intraday_volume_profile(frame, n_buckets=13)
+        assert result.get("n_empty_buckets", 0) == 0
+        assert [p["bucket"] for p in result["profile"]] == list(range(13))
+        assert all(p["n_bars"] > 0 for p in result["profile"])
+        assert result["trough_share"] > 0
+        assert not any("hold no bars" in w for w in result["warnings"])
+        assert not any("outside the" in w for w in result["warnings"])
+
+    def test_the_session_edges_are_the_ones_used(self):
+        slots = [(h, m) for h in range(9, 16) for m in range(0, 60, 5)]
+        slots = [(h, m) for h, m in slots if 570 <= h * 60 + m < 960]
+        frame = self._bars(slots, [1000.0] * len(slots))
+        result = intraday_volume_profile(frame, n_buckets=13)
+        assert result["bucket_span"] == ["09:30", "16:00"]
+        assert all(p["n_bars"] == 6 for p in result["profile"])
+
+
+def _dated_bars(n=500, seed=0):
+    """A daily random walk with a date on every bar, oldest first."""
+    rng = np.random.default_rng(seed)
+    close = 100 + np.cumsum(rng.normal(0, 1.0, n))
+    return pd.DataFrame(
+        {
+            "close": close,
+            "volume": rng.uniform(1e5, 5e5, n),
+            "high": close + rng.uniform(0.1, 1.0, n),
+            "low": close - rng.uniform(0.1, 1.0, n),
+        },
+        index=pd.date_range("2024-01-01", periods=n, freq="D"),
+    )
+
+
+#: Every estimator that reads consecutive bars as consecutive moments, with
+#: the headline number each one returns.
+SEQUENTIAL_ESTIMATORS = [
+    pytest.param(lambda f: roll_spread(f["close"]), "spread_estimate", id="roll"),
+    pytest.param(corwin_schultz_spread, "spread_bps", id="corwin_schultz"),
+    pytest.param(amihud_illiquidity, "current_illiquidity", id="amihud"),
+    pytest.param(kyle_lambda, "kyle_lambda", id="kyle"),
+    pytest.param(order_flow_imbalance, "current_imbalance", id="order_flow"),
+    pytest.param(estimate_vpin, "current_vpin", id="vpin"),
+]
+
+
+class TestBarsOutOfTimeOrder:
+    """A dated frame out of order was estimated in the order it came. A
+    shuffled random walk is white noise by construction, and Roll's
+    estimator called it a significant spread of 16.99."""
+
+    def test_a_shuffled_walk_is_not_a_spread(self):
+        bars = _dated_bars()
+        shuffled = bars.iloc[np.random.default_rng(1).permutation(len(bars))]
+        in_order = roll_spread(bars["close"])
+        result = roll_spread(shuffled["close"])
+        assert result["spread_estimate"] == in_order["spread_estimate"]
+        assert result["significant"] is in_order["significant"] is False
+
+    @pytest.mark.parametrize("estimator,key", SEQUENTIAL_ESTIMATORS)
+    def test_shuffled_bars_give_the_sorted_answer_and_say_so(self, estimator, key):
+        bars = _dated_bars()
+        shuffled = bars.iloc[np.random.default_rng(1).permutation(len(bars))]
+        in_order = estimator(bars)
+        result = estimator(shuffled)
+        assert result[key] == in_order[key]
+        assert any("NOT in time order" in w for w in result["warnings"])
+        assert not any("NOT in time order" in w for w in in_order["warnings"])
+
+    @pytest.mark.parametrize("estimator,key", SEQUENTIAL_ESTIMATORS)
+    def test_a_repeated_stamp_is_refused_by_name(self, estimator, key):
+        bars = _dated_bars()
+        index = bars.index.to_numpy().copy()
+        index[101] = index[100]
+        with pytest.raises(ValidationError) as exc:
+            estimator(bars.set_axis(pd.DatetimeIndex(index)))
+        assert "2024-04-10" in str(exc.value)
+        assert "one bar per timestamp" in str(exc.value)
+
+    def test_a_bar_with_no_stamp_is_refused(self):
+        bars = _dated_bars()
+        index = bars.index.to_numpy().copy()
+        index[7] = np.datetime64("NaT")
+        with pytest.raises(ValidationError, match="NaT"):
+            roll_spread(bars.set_axis(pd.DatetimeIndex(index))["close"])
+
+    @pytest.mark.parametrize("estimator,key", SEQUENTIAL_ESTIMATORS)
+    def test_bars_in_order_answer_as_their_positions_do(self, estimator, key):
+        """Null case: dated bars already in order give the same number and
+        the same warnings as the same bars on a plain index."""
+        bars = _dated_bars()
+        dated = estimator(bars)
+        plain = estimator(bars.reset_index(drop=True))
+        assert dated[key] == plain[key]
+        assert dated["warnings"] == plain["warnings"]
+
+
+class TestATapeWithoutQuotesIsCircular:
+    """Prints bouncing half a cent either side of a price that never moves:
+    the true lambda is zero. Signed by the tick rule and regressed on the
+    last trade price, the bounce is in both x and y."""
+
+    @staticmethod
+    def _bouncing_tape(n=20000, seed=5):
+        rng = np.random.default_rng(seed)
+        stamps = pd.Timestamp("2026-03-02 14:30:00") + pd.to_timedelta(
+            np.cumsum(rng.integers(20, 200, n)), unit="ms"
+        )
+        side = rng.choice([-1.0, 1.0], n)
+        tape = pd.DataFrame(
+            {"price": 100.0 + 0.005 * side, "size": 100.0},
+            index=pd.DatetimeIndex(stamps),
+        )
+        quotes = pd.DataFrame(
+            {"bid_price": 99.995, "ask_price": 100.005},
+            index=pd.DatetimeIndex(stamps - pd.Timedelta(milliseconds=1)),
+        )
+        return tape, quotes
+
+    def test_the_tick_rule_path_says_it_is_circular(self):
+        tape, _ = self._bouncing_tape()
+        result = kyle_lambda(trades=tape, freq="100ms")
+        assert result["sign_source"] == "tick_rule"
+        assert result["circular"] is True
+        assert result["kyle_lambda"] > 0, "a slope from the bounce alone"
+        assert any("CIRCULAR" in w and "Pass quotes" in w for w in result["warnings"])
+        assert not any("attenuates" in w for w in result["warnings"])
+
+    def test_the_same_tape_with_quotes_is_not(self):
+        """Null case: Lee-Ready against the quotes and the midpoint as the
+        price find the zero that is there."""
+        tape, quotes = self._bouncing_tape()
+        result = kyle_lambda(trades=tape, quotes=quotes, freq="100ms")
+        assert result["sign_source"] == "lee_ready"
+        assert result["circular"] is False
+        assert result["kyle_lambda"] == pytest.approx(0.0, abs=1e-12)

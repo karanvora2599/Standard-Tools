@@ -11,13 +11,13 @@ from standard_quant_tools.metrics.return_metrics import (
     cumulative_return,
 )
 from standard_quant_tools.metrics.risk_metrics import (
-    has_no_dispersion,
     HAS_SCIPY,
     _fit_gpd_pwm,
     calmar_ratio,
     cvar,
     drawdown_series,
     evt_tail_risk,
+    has_no_dispersion,
     information_ratio,
     max_drawdown,
     sharpe_ratio,
@@ -563,3 +563,88 @@ class TestTheDispersionGuardReachedTheRestOfTheLibrary:
         result = break_even_cost(pd.Series([0.002] * 63))
         for row in result["sensitivity"]:
             assert row["per_trade_sharpe"] is None, row
+
+
+# ── Ratios over an empty denominator ──────────────────────────────────────────
+
+
+class TestRatiosOverAnEmptyDenominator:
+    """x/0 is +inf and 0/0 is NaN, the convention sharpe_ratio follows.
+
+    Sortino and Calmar used to return +inf for both. A book that never moved
+    therefore had an infinite Sortino and Calmar, and a parameter set that
+    never traded ranked first in any grid sorted by either one.
+    """
+
+    IDX = pd.date_range("2022-01-03", periods=60, freq="B")
+
+    def test_sortino_of_a_book_that_never_moved_is_undefined(self):
+        assert np.isnan(sortino_ratio(pd.Series(0.0, index=self.IDX)))
+
+    def test_calmar_of_a_flat_curve_is_undefined(self):
+        assert np.isnan(calmar_ratio(pd.Series(10_000.0, index=self.IDX)))
+
+    def test_a_positive_numerator_over_nothing_stays_infinite(self):
+        """Null case: the documented "never lost" reading is unchanged."""
+        assert sortino_ratio(pd.Series(0.01, index=self.IDX)) == np.inf
+        rising = pd.Series(np.linspace(100.0, 130.0, 60), index=self.IDX)
+        assert calmar_ratio(rising) == np.inf
+
+    def test_a_negative_rate_makes_a_flat_book_a_gain(self):
+        """Under a negative policy rate every flat bar beats the rate, so the
+        numerator is positive and the ratio is +inf, not undefined."""
+        flat = pd.Series(0.0, index=self.IDX)
+        assert sortino_ratio(flat, risk_free_rate=-0.02) == np.inf
+
+    def test_a_series_with_downside_is_unchanged(self):
+        r = pd.Series(np.random.default_rng(1).normal(0.001, 0.01, 60), index=self.IDX)
+        downside = np.sqrt((np.minimum(r.to_numpy(), 0.0) ** 2).mean()) * np.sqrt(252)
+        assert sortino_ratio(r) == pytest.approx(r.mean() * 252 / downside)
+
+
+# ── periods_per_year and the rate are validated before any arithmetic ────────
+
+
+class TestAnnualizationArgumentsAreValidated:
+    """treynor_ratio and information_ratio never checked periods_per_year:
+    -252 flipped Treynor's sign and made the information ratio a silent NaN,
+    and 0 raised a bare ZeroDivisionError. sortino_ratio checked it only
+    after dividing by it."""
+
+    rng = np.random.default_rng(0)
+    IDX = pd.date_range("2024-01-01", periods=300, freq="B")
+    BENCH = pd.Series(rng.normal(0.0004, 0.01, 300), index=IDX)
+    RET = pd.Series(1.2 * BENCH.to_numpy() + rng.normal(0.0002, 0.004, 300), index=IDX)
+
+    @pytest.mark.parametrize("ppy", [0, -252, 0.5, True, float("nan")])
+    @pytest.mark.parametrize(
+        "call",
+        [
+            lambda r, b, p: treynor_ratio(r, b, 0.0, p),
+            lambda r, b, p: information_ratio(r, b, p),
+            lambda r, b, p: sortino_ratio(r, 0.0, p),
+        ],
+        ids=["treynor", "information", "sortino"],
+    )
+    def test_a_bad_periods_per_year_is_refused(self, call, ppy):
+        with pytest.raises(ValidationError, match="periods_per_year"):
+            call(self.RET, self.BENCH, ppy)
+
+    @pytest.mark.parametrize("rate", [float("nan"), float("inf"), "0.02"])
+    def test_treynor_refuses_a_rate_that_is_not_a_finite_number(self, rate):
+        with pytest.raises(ValidationError, match="risk_free_rate"):
+            treynor_ratio(self.RET, self.BENCH, rate, 252)
+
+    def test_treynor_is_the_hand_computed_value(self):
+        """Planted: (mean(r) - rf/252) * 252 / beta, beta = cov(r, b) / var(b)."""
+        rf = 0.03
+        beta = np.cov(self.RET, self.BENCH, ddof=1)[0, 1] / np.var(self.BENCH, ddof=1)
+        expected = (self.RET.mean() - rf / 252) * 252 / beta
+        assert treynor_ratio(self.RET, self.BENCH, rf, 252) == pytest.approx(
+            expected, rel=1e-9
+        )
+
+    def test_valid_arguments_still_answer(self):
+        """Null case: an ordinary call is unaffected."""
+        assert np.isfinite(information_ratio(self.RET, self.BENCH, 52))
+        assert treynor_ratio(self.RET, self.BENCH, 0.0, 12) > 0

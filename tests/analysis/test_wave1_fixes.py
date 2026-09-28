@@ -36,8 +36,16 @@ def _pairs_frame(seed=0, n=400):
 
 
 class TestBetaRSquared:
-    def test_a_constant_series_has_no_variance_to_explain(self, monkeypatch):
-        monkeypatch.setattr(regression, "HAS_CPP", False)
+    @pytest.mark.parametrize("native", [True, False])
+    def test_a_constant_series_has_no_variance_to_explain(self, native, monkeypatch):
+        """Both backends, not the NumPy one alone. This test used to pin only
+        the fallback, which is how the native path kept returning an R-squared
+        of 0.0 for a constant asset while the policy it pinned said NaN."""
+        if native and not regression.HAS_CPP:
+            pytest.skip("C++ extension not built")
+        if not native:
+            monkeypatch.setattr(regression, "HAS_CPP", False)
+            monkeypatch.setattr(regression, "_cpp_core", None)
         index = pd.bdate_range("2023-01-02", periods=30)
         constant = pd.Series(0.01, index=index)
         market = pd.Series(np.random.default_rng(0).normal(size=30), index=index)

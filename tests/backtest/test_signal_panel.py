@@ -41,11 +41,16 @@ class TestSignalPanelBacktest:
     def test_output_structure(self, universe):
         tickers, price_data, signal_panel = universe
         result = run_signal_panel_backtest(price_data, signal_panel)
+        # The last three say how every metric was annualized: one value for
+        # all tickers and the portfolio, where it came from, and any caveat.
         assert set(result.keys()) == {
             "tickers",
             "per_ticker",
             "portfolio_returns",
             "portfolio_metrics",
+            "periods_per_year",
+            "periods_per_year_source",
+            "warnings",
         }
         assert result["tickers"] == tickers
         assert set(result["per_ticker"]) == set(tickers)

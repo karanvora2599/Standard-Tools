@@ -33,7 +33,7 @@ function can see it.
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -87,8 +87,13 @@ def tracking_error(
 
     Uses the SAMPLE standard deviation (ddof=1), matching `information_ratio`
     so the two cannot disagree about the same portfolio.
+
+    Two plain sequences are paired by POSITION and must be the same length;
+    two dated Series are joined on their dates. See `_aligned_returns`.
     """
-    a = _aligned_returns(returns, benchmark_returns)
+    a = _aligned_returns(
+        returns, benchmark_returns, names=("returns", "benchmark_returns")
+    )
     if len(a) < 2:
         raise ValidationError(
             f"tracking error needs at least two overlapping observations, "
@@ -247,8 +252,13 @@ def hedge_effectiveness(
     whose ratio averaged 1.0 while ranging from 0.4 to 1.7 was never a
     hedge; it was two different positions that happened to average out, and
     the volatility reduction it shows in-sample will not repeat.
+
+    Plain sequences are paired by POSITION and must be the same length;
+    dated Series are joined on their dates.
     """
-    frame = _aligned_returns(portfolio_returns, hedge_returns)
+    frame = _aligned_returns(
+        portfolio_returns, hedge_returns, names=("portfolio_returns", "hedge_returns")
+    )
     if len(frame) < 3:
         raise ValidationError(
             f"only {len(frame)} overlapping observations; hedge effectiveness "
@@ -358,7 +368,12 @@ def hedge_effectiveness(
 # ── internals ───────────────────────────────────────────────────────────
 
 
-def _aligned_returns(portfolio: Any, benchmark: Any) -> pd.DataFrame:
+def _aligned_returns(
+    portfolio: Any,
+    benchmark: Any,
+    *,
+    names: Tuple[str, str] = ("portfolio_returns", "benchmark_returns"),
+) -> pd.DataFrame:
     """
     Two return series joined on their shared index, non-finite rows dropped.
 
@@ -366,9 +381,27 @@ def _aligned_returns(portfolio: Any, benchmark: Any) -> pd.DataFrame:
     not is a missing comparison, not a zero one, and filling it would put a
     real portfolio return against a fabricated zero hedge return on exactly
     the days a hedge is judged by.
+
+    BUT ONLY A LABELLED SERIES HAS DATES TO JOIN ON. Two plain sequences
+    carry nothing but their positions, so the join paired observation i
+    with observation i and silently dropped the tail of the longer one:
+    500 returns against 300 gave the tracking error of the first 300 of
+    each, and `hedge_effectiveness` reported `n_observations=200` for 500
+    against 200 with no warning. Nothing in the input says which end of the
+    shorter series is missing, so unequal positional lengths are refused --
+    the same refusal `replication._aligned` makes.
     """
-    p = _as_series(portfolio, "portfolio_returns")
-    b = _as_series(benchmark, "benchmark_returns")
+    p = _as_series(portfolio, names[0])
+    b = _as_series(benchmark, names[1])
+    if _positional(p) and _positional(b) and len(p) != len(b):
+        raise ValidationError(
+            f"{names[0]} has {len(p)} observations and {names[1]} has "
+            f"{len(b)}, and neither carries an index to align them on. "
+            "Pairing them by position would keep the first "
+            f"{min(len(p), len(b))} of each and cannot tell which end of the "
+            "shorter one is missing. Pass the two over the same periods, or "
+            "as pandas Series indexed by date so they are joined on dates."
+        )
     frame = pd.concat({"portfolio": p, "benchmark": b}, axis=1, join="inner")
     frame = frame.replace([np.inf, -np.inf], np.nan).dropna()
     if frame.empty:
@@ -377,6 +410,11 @@ def _aligned_returns(portfolio: Any, benchmark: Any) -> pd.DataFrame:
             "they cover the same dates and are returns rather than prices."
         )
     return frame
+
+
+def _positional(series: pd.Series) -> bool:
+    """True when the index is only a count, 0..n-1, as a list becomes."""
+    return series.index.equals(pd.RangeIndex(len(series)))
 
 
 def _as_series(values: Any, name: str) -> pd.Series:

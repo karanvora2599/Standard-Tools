@@ -1,10 +1,13 @@
 """Tests for momentum indicators: RSI, Stochastic Oscillator."""
 
+import logging
+
 import numpy as np
 import pandas as pd
 import pytest
 
 from standard_quant_tools.error import ValidationError
+from standard_quant_tools.indicators import momentum
 from standard_quant_tools.indicators.momentum import rsi, stochastic_oscillator
 
 
@@ -176,3 +179,53 @@ class TestStochasticOscillator:
             check_names=False,
             rtol=1e-10,
         )
+
+
+@pytest.fixture(params=[True, False], ids=["native", "pandas"])
+def stochastic_backend(request, monkeypatch):
+    """Run the test once on the native kernel and once on the pandas path."""
+    if request.param:
+        if not momentum.HAS_CPP:
+            pytest.skip("C++ extension not built")
+    else:
+        monkeypatch.setattr(momentum, "HAS_CPP", False)
+    return request.param
+
+
+def _bars(n, seed=1):
+    close = pd.Series(100 + np.cumsum(np.random.default_rng(seed).normal(0, 1, n)))
+    return close + 1.0, close - 1.0, close
+
+
+class TestStochasticBeforeDHasAValue:
+    """
+    Between k_period and k_period + d_period - 2 bars, %K has values and %D
+    has none yet. A debug line took %D's last finite value as an ARGUMENT,
+    so it ran at every log level and raised there -- inside the native
+    try, whose except fell back to pandas, where the same line raised
+    again. A valid call on 14 or 15 bars was refused by its own logging.
+    """
+
+    @pytest.mark.parametrize("n", [14, 15])
+    def test_it_returns_k_with_d_still_warming_up(self, stochastic_backend, n, caplog):
+        with caplog.at_level(logging.WARNING, logger=momentum.__name__):
+            result = stochastic_oscillator(*_bars(n))
+        assert list(result.columns) == ["Stoch_K", "Stoch_D"]
+        assert result["Stoch_K"].notna().sum() == n - 13
+        assert result["Stoch_D"].isna().all()
+        assert not [r for r in caplog.records if "C++ failed" in r.getMessage()]
+
+    def test_the_debug_line_reports_the_warm_up_instead_of_raising(
+        self, stochastic_backend, caplog
+    ):
+        with caplog.at_level(logging.DEBUG, logger=momentum.__name__):
+            stochastic_oscillator(*_bars(14))
+        lines = [r.getMessage() for r in caplog.records if "D last" in r.getMessage()]
+        assert lines and lines[-1].endswith("D last=none")
+
+    def test_the_first_d_value_is_the_mean_of_three_k(self, stochastic_backend):
+        """The null case: one bar later %D exists and is what it should be."""
+        result = stochastic_oscillator(*_bars(16))
+        k = result["Stoch_K"].to_numpy()
+        assert result["Stoch_D"].notna().sum() == 1
+        assert result["Stoch_D"].iloc[-1] == pytest.approx(k[-3:].mean(), rel=1e-12)

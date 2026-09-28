@@ -32,7 +32,7 @@ from typing import Any, Dict, List, Optional
 
 from standard_quant_tools.error import ValidationError
 
-from ._numbers import non_negative, positive
+from ._numbers import finite, non_negative, positive
 
 __all__ = ["etf_fair_value"]
 
@@ -73,6 +73,16 @@ def etf_fair_value(
     """
     price = positive(etf_price, "etf_price")
     net_asset_value = positive(nav, "nav")
+    # Checked as `basis.cash_futures_basis` checks the same argument. It
+    # was used raw: NaN failed every `<=` it met and made every discrepancy
+    # an arbitrage, infinity made everything fair, and -5 was echoed back
+    # as the tolerance applied.
+    tolerance = non_negative(tolerance_bps, "tolerance_bps")
+    # Finite, not merely added to the basket: the positivity check on the
+    # sum is a comparison, which NaN never satisfies, and +inf passes it.
+    # An infinite cash component priced the fund at a 10,000 bp discount to
+    # its basket and recommended redeeming, with arbitrage_survives=True.
+    cash = finite(cash_component, "cash_component")
 
     premium = price - net_asset_value
     premium_pct = premium / net_asset_value * 100.0
@@ -83,7 +93,7 @@ def etf_fair_value(
     basket_total: Optional[float] = None
     basket_vs_nav_bps: Optional[float] = None
     if basket_value is not None:
-        basket_total = positive(basket_value, "basket_value") + float(cash_component)
+        basket_total = positive(basket_value, "basket_value") + cash
         if basket_total <= 0:
             raise ValidationError(
                 f"basket_value + cash_component is {basket_total!r}, which is "
@@ -132,7 +142,7 @@ def etf_fair_value(
     gross_bps = abs(reference_bps)
     net_bps = gross_bps - execution_bps - fee_bps
 
-    if abs(reference_bps) <= tolerance_bps:
+    if abs(reference_bps) <= tolerance:
         classification = "fair"
     elif reference_bps > 0:
         classification = "premium"
@@ -169,7 +179,7 @@ def etf_fair_value(
             "That is a theoretical premium, not a tradeable edge -- an ETF "
             "arbitrage crosses the fund's spread and the basket's, twice."
         )
-    if basket_vs_nav_bps is not None and abs(basket_vs_nav_bps) > tolerance_bps:
+    if basket_vs_nav_bps is not None and abs(basket_vs_nav_bps) > tolerance:
         warnings.append(
             f"Priced against the BASKET, not the NAV: the fund is "
             f"{reference_bps:+.1f} bps to what it holds, where against NAV "
@@ -191,7 +201,7 @@ def etf_fair_value(
         "premium_discount_pct": float(premium_pct),
         "premium_discount_bps": float(premium_bps),
         "classification": classification,
-        "tolerance_bps": float(tolerance_bps),
+        "tolerance_bps": tolerance,
         "basket_value_per_share": basket_total,
         "basket_vs_nav_bps": basket_vs_nav_bps,
         # Which reference the classification and action were taken against,

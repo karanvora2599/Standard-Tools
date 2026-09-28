@@ -406,10 +406,11 @@ def _solve_unconstrained(
                 "the efficient branch has negative excess return and the "
                 "Sharpe supremum is not attained. Use a risk_free_rate below "
                 f"{min_var_return:.6f}, or objective='min_volatility'. "
-                "(Bounded requests — allow_short=False and/or max_weight set "
-                "— do have a solution here, since bounds make the feasible "
-                "set compact; this restriction is specific to the "
-                "unconstrained closed form.)"
+                "(A bounded request -- allow_short=False and/or max_weight "
+                "set -- is answered only if some portfolio inside its bounds "
+                "earns more than the risk-free rate; otherwise it is refused "
+                "too, because maximizing a negative Sharpe rewards "
+                "volatility.)"
             )
         return raw / denom
 
@@ -465,6 +466,38 @@ def _objective_value(
     )  # _OBJECTIVES pre-validated
 
 
+def _weight_bounds(
+    n: int, allow_short: bool, max_weight: Optional[float]
+) -> Tuple[float, float]:
+    """(lower, upper) per-asset weight bound of the constrained path."""
+    bound = max_weight if max_weight is not None else 1.0
+    return (-bound if allow_short else 0.0), bound
+
+
+def _max_attainable_return(
+    mu: np.ndarray, allow_short: bool, max_weight: Optional[float]
+) -> Tuple[float, np.ndarray]:
+    """
+    The highest expected return any fully-invested portfolio inside the
+    bounds can earn, and that portfolio.
+
+    A linear programme over a box and one equality, solved exactly by
+    filling the highest-returning assets first from the lower bound up.
+    Feasible whenever `max_weight * n >= 1`, which the caller has checked.
+    """
+    n = len(mu)
+    lower, upper = _weight_bounds(n, allow_short, max_weight)
+    weights = np.full(n, lower, dtype=float)
+    remaining = 1.0 - n * lower
+    for i in np.argsort(-mu, kind="stable"):
+        if remaining <= 0:
+            break
+        add = min(upper - lower, remaining)
+        weights[i] += add
+        remaining -= add
+    return float(weights @ mu), weights
+
+
 def _solve_constrained(
     mu: np.ndarray,
     cov: np.ndarray,
@@ -474,6 +507,7 @@ def _solve_constrained(
     target_volatility: Optional[float],
     allow_short: bool,
     max_weight: Optional[float],
+    x0: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, bool, Dict[str, Any]]:
     """
     (weights, the solver's own success flag, what the solver reported).
@@ -487,9 +521,9 @@ def _solve_constrained(
     who got a non-converged answer had one boolean and no way to ask why.
     """
     n = len(mu)
-    bound = max_weight if max_weight is not None else 1.0
-    bounds = [(-bound, bound)] * n if allow_short else [(0.0, bound)] * n
-    x0 = np.full(n, 1.0 / n)
+    bounds = [_weight_bounds(n, allow_short, max_weight)] * n
+    if x0 is None:
+        x0 = np.full(n, 1.0 / n)
     constraints: List[Dict[str, Any]] = [
         {"type": "eq", "fun": lambda w: np.sum(w) - 1.0}
     ]
@@ -604,8 +638,9 @@ def mean_variance_optimize(
             infeasible max_weight for the given asset count, a
             singular/degenerate covariance matrix, a risk_free_rate at or
             above the minimum-variance return for the unconstrained
-            max_sharpe objective, or (constrained path only) scipy not
-            installed.
+            max_sharpe objective or at or above the highest return any
+            portfolio inside the bounds can earn for the constrained one,
+            or (constrained path only) scipy not installed.
     """
     if objective not in _OBJECTIVES:
         raise ValidationError(
@@ -739,6 +774,28 @@ def mean_variance_optimize(
         _require_scipy(
             "constrained mean-variance optimization (allow_short=False and/or max_weight set)"
         )
+        best_w: Optional[np.ndarray] = None
+        if objective == "max_sharpe":
+            # Bounds make the feasible set compact, so a maximum always
+            # EXISTS -- but when no portfolio inside them earns the
+            # risk-free rate every Sharpe is negative, and the maximum of a
+            # negative Sharpe is the portfolio that divides the shortfall by
+            # the most volatility. Long-only with rf=10% above assets
+            # returning 4%, 3% and 5% returned 100% in the 3% asset at 30%
+            # vol -- dominated by both others -- with converged=True and no
+            # warning. The closed form refuses the same regime; so does
+            # this, by computing the best attainable return exactly.
+            best_return, best_w = _max_attainable_return(mu, allow_short, max_weight)
+            if best_return - risk_free_rate <= 1e-12 * max(1.0, abs(risk_free_rate)):
+                raise ValidationError(
+                    f"no portfolio inside these bounds has a positive excess "
+                    f"return at risk_free_rate={risk_free_rate:.6f}: the "
+                    f"highest attainable expected return is {best_return:.6f}. "
+                    "Maximizing a negative Sharpe rewards volatility, so the "
+                    "'optimum' would be a dominated portfolio. Use a "
+                    f"risk_free_rate below {best_return:.6f}, or "
+                    "objective='min_volatility'."
+                )
         w, converged, solver = _solve_constrained(
             mu,
             cov,
@@ -749,6 +806,34 @@ def mean_variance_optimize(
             allow_short,
             max_weight,
         )
+        if best_w is not None and float(w @ mu) - risk_free_rate <= 0:
+            # A positive-excess portfolio exists, and equal weights can sit
+            # in the negative region where the gradient points at
+            # volatility. Restart from the highest-return portfolio, which
+            # is inside the positive region, and keep the better answer.
+            retry = _solve_constrained(
+                mu,
+                cov,
+                objective,
+                risk_free_rate,
+                target_return,
+                target_volatility,
+                allow_short,
+                max_weight,
+                x0=best_w,
+            )
+            if _objective_value(
+                objective, retry[0], mu, cov, risk_free_rate
+            ) < _objective_value(objective, w, mu, cov, risk_free_rate):
+                w, converged, solver = retry
+            if float(w @ mu) - risk_free_rate <= 0:
+                converged = False
+                warnings.append(
+                    "The solver ended on a portfolio with a non-positive "
+                    "excess return although one earning more than the "
+                    "risk-free rate exists inside these bounds. Treat the "
+                    "weights as an iterate, not the maximum-Sharpe portfolio."
+                )
 
     # Independent of what the solver said about itself. A reported success is
     # the solver's opinion of its own run, not a guarantee the answer is

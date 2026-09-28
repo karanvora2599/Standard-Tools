@@ -10,12 +10,15 @@ realized per-ticker returns into portfolio-level metrics via the existing
 """
 
 import logging
+from functools import reduce
 from typing import Any, Dict, List, Optional, Union
 
 import pandas as pd
 
 from standard_quant_tools.backtest.engine import run_strategy
+from standard_quant_tools.backtest.screens import require_sorted_unique_index
 from standard_quant_tools.error import ValidationError
+from standard_quant_tools.metrics.annualization import resolve_periods_per_year
 from standard_quant_tools.portfolio.portfolio import build_portfolio, portfolio_metrics
 
 logger = logging.getLogger(__name__)
@@ -78,6 +81,8 @@ def run_signal_panel_backtest(
     fill_price: str = "close",
     signal_calendar_policy: str = "hold",
     risk_free_rate: float = 0.0,
+    periods_per_year: Optional[int] = None,
+    interval: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Backtest a pre-computed signal panel across a ticker universe.
@@ -108,6 +113,15 @@ def run_signal_panel_backtest(
                       rebalance schedule), "flat" (0.0 between signal dates,
                       i.e. in the market only on dates that have a signal),
                       or "error" (refuse). See the calendar note below.
+        periods_per_year, interval: bars per year for every annualized
+                      metric, per ticker AND for the portfolio -- resolved
+                      once, as run_strategy resolves them (explicit, then
+                      the interval the bars were fetched at, then the
+                      spacing of the tickers' common calendar, then 252
+                      with a warning), and applied to every ticker and to
+                      the combined row alike. Read off the PRICE calendar,
+                      never the signal's: a monthly signal on daily bars is
+                      still a daily backtest.
 
     Calendar preservation:
         run_strategy intersects price dates with signal dates and then takes
@@ -136,7 +150,15 @@ def run_signal_panel_backtest(
           "per_ticker": {ticker: run_strategy(...) result dict, ...},
           "portfolio_returns": pd.Series (daily weighted portfolio returns),
           "portfolio_metrics": portfolio_metrics(...) result dict,
+          "periods_per_year": the value every metric above used,
+          "periods_per_year_source": how it was decided,
+          "warnings": the panel's own caveats (how it annualized),
         }
+
+    Raises:
+        ValidationError: a ticker's price index, or the signal panel's
+        index, is unsorted or duplicated (see run_strategy), among the
+        weight and universe checks below.
 
     Note: per-ticker equity curves are aligned to their common date range
     (inner join) before being combined into the portfolio — a ticker whose
@@ -157,6 +179,30 @@ def run_signal_panel_backtest(
             f"signal_calendar_policy must be one of {sorted(_CALENDAR_POLICIES)}, "
             f"got {signal_calendar_policy!r}"
         )
+    # Refused by name, per ticker, before anything is read off the bars. A
+    # repeated signal date made the reindex below raise a bare pandas error.
+    require_sorted_unique_index(
+        signal_panel.index, "signal_panel", "run_signal_panel_backtest"
+    )
+    for ticker in tickers:
+        require_sorted_unique_index(
+            price_data[ticker].index,
+            f"price_data[{ticker!r}]",
+            "run_signal_panel_backtest",
+        )
+    # ONE annualization for every ticker and the portfolio row, read off
+    # the calendar the portfolio is built on (the tickers' common dates),
+    # so no per-ticker number and the combined one can disagree about what
+    # a year is. It used to be 252 for all of them, whatever the bars were.
+    common_calendar = reduce(
+        lambda a, b: a.intersection(b), (price_data[t].index for t in tickers)
+    )
+    ppy, ppy_source, ppy_warnings = resolve_periods_per_year(
+        common_calendar,
+        periods_per_year=periods_per_year,
+        interval=interval,
+        where="run_signal_panel_backtest",
+    )
 
     logger.debug("[signal_panel] tickers=%d  bars=%d", len(tickers), len(signal_panel))
 
@@ -179,6 +225,7 @@ def run_signal_panel_backtest(
             include_trade_log=include_trade_log,
             fill_price=fill_price,
             risk_free_rate=risk_free_rate,
+            periods_per_year=ppy,
         )
         per_ticker_results[ticker] = result
         # Realized per-bar strategy return, recovered from the equity curve —
@@ -222,6 +269,7 @@ def run_signal_panel_backtest(
         returns_df,
         w,
         risk_free_rate=risk_free_rate,
+        periods_per_year=ppy,
         benchmark_returns=benchmark_returns,
     )
     portfolio_returns = build_portfolio(returns_df, w)
@@ -238,4 +286,7 @@ def run_signal_panel_backtest(
         "per_ticker": per_ticker_results,
         "portfolio_returns": portfolio_returns,
         "portfolio_metrics": metrics,
+        "periods_per_year": ppy,
+        "periods_per_year_source": ppy_source,
+        "warnings": ppy_warnings,
     }

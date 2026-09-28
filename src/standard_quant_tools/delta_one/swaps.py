@@ -100,11 +100,29 @@ def price_total_return_swap(
 
     t, source = _elapsed(start_date, valuation_date, time_elapsed, day_count)
 
+    # Bounded exactly as `total_return_future` bounds its reference rate and
+    # quote, for the reason given there. These two were `float(...)` and
+    # nothing else: NaN returned a NaN P&L with no error, and a spread of
+    # 1e12 bps a financing leg of -5.0e15 on $100m.
+    rate = bounded(financing_rate, "financing_rate", low=-MAX_RATE, high=MAX_RATE)
+    spread = bounded(
+        spread_bps,
+        "spread_bps",
+        low=-MAX_RATE * 10_000.0,
+        high=MAX_RATE * 10_000.0,
+        unit=" bps",
+    )
+    all_in_rate = bounded(
+        rate + spread / 10_000.0,
+        "financing_rate + spread_bps",
+        low=-MAX_RATE,
+        high=MAX_RATE,
+    )
+
     price_return = (s1 - s0) / s0
     dividend_return = div / s0
     total_return = price_return + dividend_return
 
-    all_in_rate = float(financing_rate) + float(spread_bps) / 10_000.0
     financing = all_in_rate * t
 
     sign = 1.0 if direction == "receive" else -1.0
@@ -113,6 +131,20 @@ def price_total_return_swap(
     net = equity_leg + financing_leg
 
     warnings: List[str] = []
+    # Warned rather than refused, as `solve_carry` and `dividend_points` do:
+    # a rate above 100% is the percent-for-fraction typo far more often
+    # than a real financing rate, but a real one is not impossible. 4.5 for
+    # 4.5% financed $100m at 450% a year -- a financing leg of about -$226m
+    # over six months -- and no warning mentioned the rate.
+    if abs(rate) > 1.0:
+        warnings.append(_percent_hint("financing_rate", rate))
+    if abs(spread) > 1_000.0:
+        warnings.append(
+            f"The financing spread is {spread:,.0f} bps, which is not a spread "
+            "anyone quotes over a reference rate. spread_bps is in BASIS "
+            "POINTS (45 is 0.45%); check the unit before reading the "
+            "financing leg."
+        )
     if div == 0.0:
         warnings.append(
             "No dividends were given, so this is a PRICE-return swap in "
@@ -120,7 +152,7 @@ def price_total_return_swap(
             "leg is understated by the whole dividend, which over a year on "
             "a 2% yielder is 200 bps of the notional."
         )
-    if spread_bps == 0.0:
+    if spread == 0.0:
         warnings.append(
             "The financing spread is zero, so this prices at the reference "
             "rate flat. That is not a quote anyone receives -- the spread is "
@@ -148,8 +180,8 @@ def price_total_return_swap(
         "price_return": float(price_return),
         "dividend_return": float(dividend_return),
         "total_return": float(total_return),
-        "financing_rate": float(financing_rate),
-        "spread_bps": float(spread_bps),
+        "financing_rate": float(rate),
+        "spread_bps": float(spread),
         "all_in_financing_rate": float(all_in_rate),
         "financing_accrued": float(financing),
         "equity_leg": float(equity_leg),
@@ -232,14 +264,34 @@ def total_return_future(
         all_in = math.log(level / s) / t
         implied_spread_bps = (all_in - rate) * 10_000.0
 
+    # The same bounds as the reference rate and the quote a few lines up.
+    # Both were `float(...)`: a NaN yield made the net carry NaN, 2.0 for 2%
+    # took 200% off it silently, and an infinite comparison spread reported
+    # a difference of -inf bps.
+    q = bounded(dividend_yield, "dividend_yield", low=-MAX_RATE, high=MAX_RATE)
+    comparison = (
+        None
+        if comparison_spread_bps is None
+        else bounded(
+            comparison_spread_bps,
+            "comparison_spread_bps",
+            low=-MAX_RATE * 10_000.0,
+            high=MAX_RATE * 10_000.0,
+            unit=" bps",
+        )
+    )
+
     all_in_rate = rate + implied_spread_bps / 10_000.0
-    carry_cost = all_in_rate - float(dividend_yield)
+    carry_cost = all_in_rate - q
 
     difference_bps = None
-    if comparison_spread_bps is not None:
-        difference_bps = implied_spread_bps - float(comparison_spread_bps)
+    if comparison is not None:
+        difference_bps = implied_spread_bps - comparison
 
     warnings: List[str] = []
+    for name, value in (("reference_rate", rate), ("dividend_yield", q)):
+        if abs(value) > 1.0:
+            warnings.append(_percent_hint(name, value))
     if abs(implied_spread_bps) > 1_000:
         warnings.append(
             f"The implied spread is {implied_spread_bps:.0f} bps, which is "
@@ -250,7 +302,7 @@ def total_return_future(
     if difference_bps is not None and abs(difference_bps) > 25:
         warnings.append(
             f"The TRF implies {implied_spread_bps:.0f} bps against "
-            f"{float(comparison_spread_bps):.0f} bps elsewhere, a "
+            f"{comparison:.0f} bps elsewhere, a "
             f"{difference_bps:+.0f} bp gap. Before treating it as relative "
             "value, account for what the two instruments do not share: "
             "margin versus posted collateral, exchange clearing against "
@@ -273,15 +325,24 @@ def total_return_future(
         "implied_level": float(implied_level),
         "all_in_financing_rate": float(all_in_rate),
         "net_carry_rate": float(carry_cost),
-        "comparison_spread_bps": (
-            None if comparison_spread_bps is None else float(comparison_spread_bps)
-        ),
+        "comparison_spread_bps": comparison,
         "difference_bps": difference_bps,
         "warnings": warnings,
     }
 
 
 # ── internals ───────────────────────────────────────────────────────────
+
+
+def _percent_hint(name: str, rate: float) -> str:
+    """The warning for a rate above 100% a year, in the package's words."""
+    return (
+        f"{name}={rate:g} is {rate * 100:,.0f}% a year, which is not a rate "
+        "any market pays or charges. The usual cause is a rate given as a percent "
+        f"rather than a fraction -- {rate:g}% is {rate / 100:g} -- and what "
+        "is priced off it is then a hundred times too large. Check it "
+        "before reading the result."
+    )
 
 
 def _elapsed(start, end, elapsed, convention):

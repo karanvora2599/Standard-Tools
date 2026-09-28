@@ -186,7 +186,10 @@ class CalendarSpread(BaseModel):
 class FuturesCurveResult(_Result):
     n_contracts: int = 0
     shape: str = Field(
-        "", description="'contango', 'backwardation' or 'mixed'. PRICE curve."
+        "",
+        description="'contango' (no step down, at least one up), "
+        "'backwardation' (the mirror), 'flat' (every contract at one price) "
+        "or 'mixed'. PRICE curve.",
     )
     spot: Stat = None
     curve: List[CurvePoint] = Field(default_factory=list)

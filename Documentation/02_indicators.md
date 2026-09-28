@@ -21,6 +21,7 @@ not `_sqt_core` is built.
 | `period`/`window` > 0 | all periodised indicators | `ValidationError`. `macd` additionally requires `fast < slow` — an inverted pair is a sign-flipped indicator, not an error the arithmetic would show. |
 | Equal input lengths | multi-series indicators (`adx`, `atr`, `wilder_atr`, `williams_r`, `parabolic_sar`, `vwap`, `mfi`) | `ValidationError` naming the actual lengths. |
 | Finite (no NaN/Inf) | `rsi`, `adx`, `atr`, `wilder_atr`, `parabolic_sar`, `bollinger_bands`, `stochastic_oscillator` | `ValidationError` reporting how many non-finite values were found. |
+| No ±inf (NaN is a gap) | `technical_indicators_panel`; the fused path of `get_technical_analysis` | `ValidationError` naming the ticker (or symbol) and column. A Wilder recursion (RSI, ATR, ADX) carries one inf bar into every later value, and a stochastic %D after one never recovers, so the native kernel answered with NaN to the end of the history where the per-ticker wrappers refused. NaN is not refused here: the kernel treats it as a missing bar. |
 
 Two of these were genuine safety fixes rather than ergonomics, and are worth
 knowing about if you call the kernels in unusual ways:
@@ -49,6 +50,15 @@ prices across the whole lookback) makes `%K` and `%R` a `0/0`:
 - `mfi` yields **NaN** for a window with no money flow at all (both positive
   and negative flow zero, e.g. zero volume) — it previously reported `0.0`,
   i.e. "maximally oversold", for a window carrying no information.
+- `bollinger_bands` sets **upper, middle and lower to the price itself** on a
+  window of identical prices, on both backends. That is the exact answer
+  (mean = price, standard deviation = 0), and setting it removes the
+  rounding residue an online rolling variance can leave there — pandas 3.x
+  leaves a standard deviation of up to 2.6e-5 in about half such windows at
+  real price levels. `bollinger_reversion` compares the close with the lower
+  and middle bands exactly, so that residue used to decide which bars traded
+  depending on the backend. A 1-bar window is left as each backend computes
+  it.
 
 ---
 
@@ -176,6 +186,11 @@ df['Stoch_D'] = stoch['Stoch_D']
 # Bullish stochastic cross
 df['stoch_bull'] = (df['Stoch_K'] > df['Stoch_D']) & (df['Stoch_K'] < 20)
 ```
+
+**Warm-up:** with `k_period <= n < k_period + d_period - 1` bars (14 or 15 at
+the defaults), `%K` has values and `%D` is all NaN. That returns a frame on
+both backends; it used to raise, because a debug line read `%D`'s last value
+whether or not debug logging was on.
 
 **Validation:** raises `ValidationError` if `k_period <= 0` or `d_period <= 0`
 (a `d_period <= 0` previously reached the C++ kernel unchecked and caused an
@@ -359,6 +374,11 @@ Every per-ticker parameter is here (`rsi_period`, `bollinger_num_std`, `macd_slo
 `sar_af_max`, `atr_simple_period`, …), keyword-only, applied to every ticker. Arithmetic is
 identical: each row is handed to the same kernel or the same wrapper the single-series
 path uses, so output is bit-identical to calling the per-ticker function in a loop.
+
+**±inf is refused, NaN is a gap.** An infinite High, Low, Close or Volume on the shared
+bars raises `ValidationError` naming the ticker and column, on both paths. A NaN is not
+refused by the panel: the native kernel blanks the windows that hold it and resumes after
+it (the per-ticker wrappers the fallback loops refuse NaN themselves).
 
 **The index is the intersection** of every ticker's bars — the only shape a dense panel can
 have. A ticker with a shorter history therefore truncates the panel for everyone, which is

@@ -198,6 +198,10 @@ the shape leaves room for a recommendation rather than a table:
   as `null="within_date"`, and the result reports `null` and
   `ic_autocorrelation_lag1` so a reader can see which regime a feature is
   in. The p-value is two-sided so a strong negative IC counts as strong.
+  A ±inf feature or target is refused by name rather than dropped: the
+  observed IC kept such a row while the null dropped it, so the two were
+  computed on different rows (replace it with NaN to drop the row from
+  both).
   Its `null_p95_abs` is that one feature's floor; the floor for a whole
   panel is the **maximum** of them, which is what
   `screen_feature_significance` returns as `honest_floor` and what

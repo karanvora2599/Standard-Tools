@@ -25,6 +25,17 @@ namespace {
     // hard-coded 252 silently annualized hourly and minute bars as though
     // they were trading days.
 
+    // A ratio whose denominator is empty (no downside, no drawdown). A
+    // positive numerator over nothing is +inf, the documented "never lost"
+    // reading. Zero over nothing is undefined -- a series that never moved
+    // has no Sortino and no Calmar -- and is NaN, the convention the Sharpe
+    // already follows. Both used to be +inf, so in a ranked grid a
+    // parameter set that never traded sorted above every real strategy
+    // under Sortino or Calmar. metrics/risk_metrics.py applies the same rule.
+    inline double undefined_ratio(double numerator) {
+        return (numerator > 0.0) ? kInf : kNaN;
+    }
+
     // ── Trade-log position accounting (weighted-average cost basis) ─────────
     //
     // Replaces the old "any pos_diff event closes-then-reopens" model, whose
@@ -148,7 +159,15 @@ namespace {
             ? (fill - prev_close) / prev_close : 0.0;
         const double intraday  = (fill != 0.0)
             ? (prices[i] - fill) / fill : 0.0;
-        return exec_prev * overnight + exec_i * intraday;
+        // The two legs COMPOUND: the account carries yesterday's position
+        // to the fill, then today's position from the fill to the close,
+        // and the second leg is earned on the equity the first one left.
+        // They used to be added, which drops the product term; over five
+        // years of daily bars that put the equity curve 0.2-0.5 points
+        // below the fill-to-fill trade log at zero cost, with the curve as
+        // the approximate side. A position held through the bar now earns
+        // exactly close[i] / close[i-1] - 1, as it does under the close fill.
+        return (1.0 + exec_prev * overnight) * (1.0 + exec_i * intraday) - 1.0;
     }
 
     TradeCompletion flush_open_lot(const PositionState& st, double final_price) {
@@ -180,12 +199,17 @@ BacktestResult run_strategy(
     r.total_return         = 0.0;
     r.annualized_vol       = 0.0;
     r.sharpe_ratio         = 0.0;
-    r.sortino_ratio        = kInf;
+    // Sortino, Calmar and the profit factor start undefined, not at a
+    // number: a run that never computes them (no bars, one bar, no trade)
+    // has no ratio, and +inf or 0.0 here read as "no downside" or "every
+    // trade lost" -- the first ranked a do-nothing parameter set above
+    // every real one. See undefined_ratio() below.
+    r.sortino_ratio        = kNaN;
     r.max_drawdown         = 0.0;
-    r.calmar_ratio         = 0.0;
+    r.calmar_ratio         = kNaN;
     r.num_trades           = 0;
     r.win_rate             = 0.0;
-    r.profit_factor        = 0.0;
+    r.profit_factor        = kNaN;
     r.avg_trade_return_pct = 0.0;
 
     if (n == 0) return r;
@@ -327,8 +351,9 @@ BacktestResult run_strategy(
             down_sq_sum += d * d;
         }
         const double down_dev = std::sqrt(down_sq_sum / n_d) * std::sqrt(periods_per_year);
-        r.sortino_ratio =
-            (down_dev > 0.0) ? (mean_excess * periods_per_year) / down_dev : kInf;
+        r.sortino_ratio = (down_dev > 0.0)
+            ? (mean_excess * periods_per_year) / down_dev
+            : undefined_ratio(mean_excess);
     }
 
     // ── Calmar: CAGR / |max_drawdown|  (CAGR = (final/initial)^(252/n) - 1) ──
@@ -356,10 +381,13 @@ BacktestResult run_strategy(
             ann_ret = std::pow(r.final_equity / initial_capital,
                                1.0 / elapsed_years) - 1.0;
         }
-        r.calmar_ratio = (abs_mdd > 0.0) ? ann_ret / abs_mdd : kInf;
+        r.calmar_ratio =
+            (abs_mdd > 0.0) ? ann_ret / abs_mdd : undefined_ratio(ann_ret);
     }
 
     // ── Trade statistics ──────────────────────────────────────────────────────
+    // A run with no trade keeps profit_factor at its NaN default: 0.0 is
+    // the value "every trade lost" produces, and nothing was traded.
     r.num_trades = numerics::checked_narrow_to_int(trade_rets.size(), "run_strategy: num_trades");
     if (r.num_trades > 0) {
         int    n_wins    = 0;
@@ -424,12 +452,13 @@ BacktestResult run_strategy_summary(
     r.total_return         = 0.0;
     r.annualized_vol       = 0.0;
     r.sharpe_ratio         = 0.0;
-    r.sortino_ratio        = kInf;
+    // Undefined until computed -- the same defaults as run_strategy().
+    r.sortino_ratio        = kNaN;
     r.max_drawdown         = 0.0;
-    r.calmar_ratio         = 0.0;
+    r.calmar_ratio         = kNaN;
     r.num_trades           = 0;
     r.win_rate             = 0.0;
-    r.profit_factor        = 0.0;
+    r.profit_factor        = kNaN;
     r.avg_trade_return_pct = 0.0;
 
     if (n == 0) return r;
@@ -532,7 +561,8 @@ BacktestResult run_strategy_summary(
             ann_ret = std::pow(r.final_equity / initial_capital,
                                1.0 / elapsed_years) - 1.0;
         }
-        r.calmar_ratio = (abs_mdd > 0.0) ? ann_ret / abs_mdd : kInf;
+        r.calmar_ratio =
+            (abs_mdd > 0.0) ? ann_ret / abs_mdd : undefined_ratio(ann_ret);
     }
 
     // ── Pass 2: recompute strat_ret[i] on demand (no state carried across
@@ -585,8 +615,9 @@ BacktestResult run_strategy_summary(
         ? (mean_excess / sample_std) * std::sqrt(periods_per_year) : kNaN;
 
     const double down_dev = std::sqrt(down_sq_sum / n_d) * std::sqrt(periods_per_year);
-    r.sortino_ratio =
-        (down_dev > 0.0) ? (mean_excess * periods_per_year) / down_dev : kInf;
+    r.sortino_ratio = (down_dev > 0.0)
+        ? (mean_excess * periods_per_year) / down_dev
+        : undefined_ratio(mean_excess);
 
     // ── Trade statistics ──────────────────────────────────────────────────────
     r.num_trades = numerics::checked_narrow_to_int(

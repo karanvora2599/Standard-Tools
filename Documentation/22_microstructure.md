@@ -81,6 +81,18 @@ it" and "it was zero" are different facts and only one of them is true.
 
 ## The bar-based estimators
 
+**Bars are read in time order, and a repeated stamp is refused.** Every
+estimator here reads consecutive rows as consecutive moments — a covariance
+of successive changes, a two-bar range, a rolling window, a bucket walk —
+and a dated frame out of order used to be estimated in the order it came: a
+shuffled daily random walk, white noise by construction, came back from
+Roll's estimator as a `significant` spread of 16.99. A `DatetimeIndex`
+states the order, so the bars are now stable-sorted by it and the result
+says they were. Two bars on one timestamp are refused by name, because
+nothing says which came first; so is a bar with no timestamp. A list of
+closes (a plain index) is taken as already in order, which is what every
+tool here passes.
+
 ### `estimate_corwin_schultz_spread`
 
 A day's high-low range contains both volatility and the spread. Volatility
@@ -160,12 +172,24 @@ now says what it is: the result carries `circular=True` and
 `sign_source="return_sign"`, and the warning states that lambda is positive
 by construction. Pass a tape instead — `kyle_lambda(trades=..., quotes=...,
 freq="1min")` — and the flow is signed by Lee-Ready (99.7% accurate against
-the venue's own aggressor flag; the tick rule without quotes), bucketed at
-`freq`, and the **midpoint** change is regressed on it, because a last
-trade price carries the bid-ask bounce whose sign is also in the signed
-volume. That path returns `circular=False`, and on a market with no impact
-at all it finds a lambda near zero, which is the test that separates a
-measurement from an artefact.
+the venue's own aggressor flag), bucketed at `freq`, and the **midpoint**
+change is regressed on it, because a last trade price carries the bid-ask
+bounce whose sign is also in the signed volume. That path returns
+`circular=False`, and on a market with no impact at all it finds a lambda
+near zero, which is the test that separates a measurement from an artefact.
+
+**A tape without quotes is circular too, and says so.** It falls back to
+the tick rule, which signs each print by its change from the one before, and
+the price regressed is the last *trade* price — the same prints. An up-tick
+is a buy in `x` and a rise in `y`. On prints bouncing half a cent around a
+price that never moved (true lambda zero) it returned a positive lambda with
+an r-squared of 0.31 at 100 ms buckets, and it used to report
+`circular=False` with a warning that misclassification only *attenuates*
+the slope — the opposite of what happened. That path now returns
+`circular=True` (`sign_source="tick_rule"`) and a warning that names the
+bounce; where impact is real it can land near the truth, but nothing in the
+result separates the two cases. Only a tape **with** quotes is
+`circular=False`.
 
 Check `r_squared` before sizing anything: a lambda from a regression
 explaining 2% of the variance has a standard error larger than itself — and
@@ -191,9 +215,13 @@ The overlapping figure describes the *window*, not the flow. It is still
 returned as `overlapping_persistence` so the difference is visible rather
 than assumed away.
 
-The next bar's return is lined up with each imbalance **by position**, so a
-dated frame with a repeated timestamp is measured like any other rather than
+The next bar's return is lined up with each imbalance **by position**, and a
+dated frame with a repeated timestamp is refused by name (above) rather than
 raising pandas' "cannot reindex on an axis with duplicate labels".
+`buy_volume_fraction` counts a bar whose close did not move — and the first
+bar, which has no return — half to each side, the rule the signed sum
+already applied; it counted them as not-buy, so a flat series read as all
+selling beside a mean imbalance of exactly zero.
 
 ### `estimate_vpin`
 
@@ -220,6 +248,16 @@ and which landed *last* — so it dominated `current_vpin`, and 51 buckets
 came back for 50 requested. The trailing partial bucket is now dropped and
 its size reported as `residual_volume`; `n_buckets` is what was asked for.
 
+**A bar that did not move is split half to each side.** The tick rule has
+no direction for a zero return, and every such bar — and the first bar,
+which has no return at all — used to be counted as buying: a flat close
+series came back at `current_vpin` 1.0, the maximum, and one-second bars
+(about a quarter of them zero-return on a liquid name) read 17% high in
+every bucket. Half each is what `get_order_flow_imbalance` does with a
+sign of zero and what bulk-volume classification gives at a zero
+standardized return; a flat market now reads 0.0. `undirected_volume_share`
+reports how much of the volume that was, with a warning above a quarter.
+
 ### `get_intraday_volume_profile`
 
 The U-shape every execution schedule is built on: volume concentrates at the
@@ -244,7 +282,22 @@ tz-aware index, and both profiles — the bars-based estimator and the
 trades-based `get_trade_profile` — bucket `session` (default 09:30–16:00)
 in `exchange_timezone` (default New York) and report the
 `extended_hours_share` beside it. A naive index with no `index_timezone` is
-taken as already in session time, which is what yfinance bars are.
+taken as already in session time, which is what yfinance bars are, and
+profiled as given.
+
+**The buckets divide the session, and every one is returned.** The bucket
+edges used to be the sample's first and last bar, so they moved with the
+data — on bars that stopped at 15:19 the "close" bucket started at 14:52 —
+and only buckets some bar fell in came back, so the trough and the U were
+computed over whatever was occupied. On bars from the open and the close
+alone, `trough_share` was 0.40 where the truth was zero, `u_shaped` was
+False on the most extreme U there is, and `trough_bucket` was a position in
+the shortened list that pointed at the close. Now the buckets divide
+`session` (reported as `bucket_span`), an empty bucket carries a zero share
+and a null `mean_volume`, `n_empty_buckets` counts them with a warning, and
+`trough_bucket` is a bucket id. A naive index whose bars fall outside the
+session breaks the "already in session time" assumption: the buckets then
+span the bars' own times of day and a warning names `index_timezone`.
 
 ### `get_implementation_shortfall`
 
@@ -304,7 +357,11 @@ trade against the quote *preceding* it. Without one it falls back to the
 tick rule, which agrees with the true classification about 85% of the time
 on a liquid name and materially worse on an illiquid one. Every downstream
 estimate inherits that error, and misclassification attenuates toward zero
-— so the weaker rule makes an edge look smaller, not noisier.
+— so the weaker rule makes an edge look smaller, not noisier. The exception
+is an estimate regressed on the same trade prices the tick rule read, such
+as a price impact: there the sign is read off the change being explained,
+the bid-ask bounce inflates the slope instead, and `estimate_kyle_lambda`
+reports that path as `circular=True`.
 
 **`get_effective_spread_series` without `realized_horizon_seconds` gives
 you one number where there are two.** The realized half is what the
@@ -356,6 +413,10 @@ And a channel that fails for any reason is reported as `unavailable` with
 the exception's name; it used to catch only `ValidationError`, so one
 channel's `ValueError` killed all six — and the failing channel was one
 the module declared computable, so the obvious call was the one that died.
+The `mid_return` channel skips a quote whose mid is zero, negative or not
+finite, as the `spread` channel already did: one quote printed at 0.0 as the
+last of its bucket made that bucket's log mid infinite, and the detector
+reported an infinite peak at severity "very high" on a quiet market.
 
 ## The tools
 
@@ -373,14 +434,29 @@ the module declared computable, so the obvious call was the one that died.
 | `estimate_roll_spread` | no | Effective spread from bid-ask bounce — with its noise floor |
 | `estimate_corwin_schultz_spread` | no | Spread from the high-low range |
 | `get_amihud_illiquidity` | no | Price move per dollar traded, as a percentile; with `run_id` and `name` the rolling series is published as an `analytic_series` |
-| `estimate_kyle_lambda` | either | Market depth, and the impact of a given size. Give it a `trades_ref` (and a `quotes_ref`) and the flow is signed print by print, bucketed at `freq`; give it `close`/`volume` and the only sign available is the bar's own return, so the result comes back `circular=True` -- a number that was 3.2x the signed one on the same live tape while its r-squared looked 2.7x better. `circular`, `sign_source` and `freq` say which estimate you were handed |
+| `estimate_kyle_lambda` | either | Market depth, and the impact of a given size. Give it a `trades_ref` and a `quotes_ref` and the flow is signed print by print against the quote, bucketed at `freq`; give it `close`/`volume` and the only sign available is the bar's own return, so the result comes back `circular=True` -- a number that was 3.2x the signed one on the same live tape while its r-squared looked 2.7x better. A `trades_ref` without `quotes_ref` is tick-rule signed off the prices it explains and is `circular=True` too. `circular`, `sign_source` and `freq` say which estimate you were handed |
 | `get_order_flow_imbalance` | no | Signed volume imbalance, and whether it predicts anything |
-| `estimate_vpin` | no | Flow one-sidedness in volume time |
-| `get_intraday_volume_profile` | no | The U-shape, for scheduling; takes the venue's `exchange_timezone` and session, since a London tape under the New York session is refused rather than mis-measured |
+| `estimate_vpin` | no | Flow one-sidedness in volume time; a bar that did not move is split half to each side |
+| `get_intraday_volume_profile` | no | The U-shape, for scheduling; takes the venue's `exchange_timezone` and session, since a London tape under the New York session is refused rather than mis-measured. Every bucket of the session is returned, empty ones with a zero share, and `trough_bucket` is a bucket id |
 | `get_implementation_shortfall` | no | What an execution actually cost, decomposed |
 
 Full argument lists:
 [20_tool_index.md](20_tool_index.md#microstructure--microstructure).
+
+## A touch that is not a touch
+
+`get_order_book_metrics` and its per-level profile apply one rule to a
+broken snapshot, and count both kinds. A snapshot whose level 0 is not four
+finite numbers — a missing or infinite price or size — has no touch and is
+excluded from **every** statistic (`n_nonfinite_touch`). It used to be
+averaged in: `nanmean` skips a NaN but not an infinity, so one infinite ask
+in a hundred snapshots turned the mean spread, mid and microprice into
+null, while `n_crossed` said the book was clean. A crossed or locked
+snapshot (`n_crossed`) is excluded from everything measured **from the
+mid** — spread, microprice, depth slope, distance per level — and kept in
+the size and imbalance statistics. The per-level profile used to measure
+every snapshot, so an all-crossed book reported the bid 1.5 bps *above*
+the mid; its distances are now null, with the count and a warning.
 
 ## What a depth book still cannot tell you
 
@@ -423,6 +499,22 @@ A `CLEAR` wipes the book, so the queue accumulators reset on one rather than
 carrying depth across a boundary where none existed. A `MODIFY` is counted
 but does not adjust queue depth: whether it loses priority depends on the
 venue's own rule, and guessing would be worse than saying so.
+
+### A window with no snapshot measures a lower bound
+
+The same orders that are censored from the lifetimes sit **ahead** of every
+early arrival. A window that opens mid-session with no snapshot starts
+every level empty, so its queue-ahead figures count only size added inside
+it: 1,000 shares resting before the window and five 100-share arrivals read
+0 to 400 where the queue was 1,000 to 1,400, and the arrival that "joined an
+empty level" was the window's own warm-up. That used to be reported as
+market structure. `queue.queue_is_lower_bound` now says so, with
+`n_unseeded_adds` (readings taken before a snapshot or a `CLEAR` told the
+window what the book held) and a warning. Resting size is tracked per
+order, so a cancel or fill of an order the window never saw added takes
+nothing from the orders it did see — level-only bookkeeping subtracted it
+from them — and is counted instead: `n_unseen_decrements` events,
+`unseen_size` shares of resting size that is in none of the queue figures.
 
 ### A snapshot is the book, not an event
 

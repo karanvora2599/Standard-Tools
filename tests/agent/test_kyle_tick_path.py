@@ -167,7 +167,12 @@ class TestFlowThatMovesNothing:
         which carries a bounce whose sign is the last trade's side -- and
         that side is also in the signed volume. On a tape with no impact at
         all that produces a spurious positive lambda, well above even the
-        circular one."""
+        circular one.
+
+        This test used to assert `circular is False` on that path, which
+        was the defect: the tick rule reads its sign off the same trade
+        prices the regression explains, so the result is circular in the
+        same sense as bars and now says so."""
         trades, quotes = _tape(0.0, seed=11)
         tape_ref, quote_ref = _published(trades, quotes, "flat")
         with_quotes = dispatch(
@@ -175,9 +180,12 @@ class TestFlowThatMovesNothing:
         )
         without = dispatch("estimate_kyle_lambda", {"trades_ref": tape_ref})
         assert without["sign_source"] == "tick_rule"
-        assert without["circular"] is False
+        assert without["circular"] is True
+        assert with_quotes["circular"] is False
         assert without["freq"] == "1min"
         assert abs(without["kyle_lambda"]) > 5 * abs(with_quotes["kyle_lambda"])
+        assert any("CIRCULAR" in w and "quotes" in w for w in without["warnings"])
+        assert not any("attenuates" in w for w in without["warnings"])
 
 
 class TestFlowThatMovesThePrice:
@@ -200,8 +208,11 @@ class TestFlowThatMovesThePrice:
         assert lee_ready["r_squared"] > 0.3
         # Without quotes the tick rule is signing a tape whose prints DO
         # move the price, which is the case it was designed for, so it
-        # lands in the same place by a worse route.
+        # lands in the same place by a worse route -- and is still flagged
+        # circular, because on the flat tape the same route lands on a
+        # lambda that is not there, and the result cannot tell which.
         assert tick_rule["sign_source"] == "tick_rule"
+        assert tick_rule["circular"] is True
         assert tick_rule["kyle_lambda"] == pytest.approx(PLANTED_LAMBDA, rel=0.35)
 
     def test_the_bars_path_reports_a_fraction_of_the_planted_lambda(self, runs_dir):

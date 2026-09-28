@@ -102,7 +102,11 @@ from standard_quant_tools.analysis.correlation import (
     pairwise_correlation_summary,
 )
 from standard_quant_tools.analysis.garch import garch_volatility_forecast
-from standard_quant_tools.analysis.hurst import hurst_exponent, rolling_hurst
+from standard_quant_tools.analysis.hurst import (
+    classify_regime,
+    hurst_exponent,
+    rolling_hurst,
+)
 from standard_quant_tools.analysis.multi_factor import (
     multi_factor_regression,
     rolling_factor_loadings,
@@ -131,7 +135,12 @@ from standard_quant_tools.indicators.trend import (
     sma,
     williams_r,
 )
-from standard_quant_tools.indicators.volatility import atr, bollinger_bands, wilder_atr
+from standard_quant_tools.indicators.volatility import (
+    atr,
+    bollinger_bands,
+    collapse_flat_windows,
+    wilder_atr,
+)
 from standard_quant_tools.indicators.volume import mfi, obv, vwap
 from standard_quant_tools.metrics.return_metrics import annualized_volatility, cagr
 from standard_quant_tools.metrics.risk_metrics import (
@@ -285,16 +294,43 @@ def get_technical_analysis(input_data: TechnicalInput) -> TechnicalResult:
     fused: Optional[Dict[str, Any]] = None
     fusable_requested = _FUSABLE_INDICATORS & set(requested)
     if HAS_CPP and _cpp_core is not None and len(fusable_requested) >= 2:
+        # Refused before the try, so the except below cannot turn it into a
+        # quiet fallback. The per-indicator wrappers refuse +/-inf; the fused
+        # kernel took it, and its Wilder recursions (rsi, adx) carry one inf
+        # bar into every later value. Only the columns the requested
+        # indicators read are checked, so this refuses exactly what the
+        # per-indicator path would. NaN is left to the kernel, as a gap.
+        fused_columns = {"Close": close}
+        if fusable_requested & {"adx", "stochastic"}:
+            fused_columns.update(High=high, Low=low)
+        for column, values in fused_columns.items():
+            n_inf = int(np.isinf(values.to_numpy(dtype=np.float64)).sum())
+            if n_inf:
+                raise ValidationError(
+                    f"get_technical_analysis: {input_data.symbol} has {n_inf} "
+                    f"infinite {column} value(s) in the requested range. An "
+                    "infinity is not a price, and RSI and ADX would carry it "
+                    "into every later bar. Request a range that excludes the "
+                    "bad bar, or inspect it with get_data_quality_report."
+                )
         try:
+            close_arr = close.to_numpy(dtype=np.float64)
             fused = _cpp_core.technical_indicators(
                 high.to_numpy(dtype=np.float64),
                 low.to_numpy(dtype=np.float64),
-                close.to_numpy(dtype=np.float64),
+                close_arr,
                 compute_rsi="rsi" in fusable_requested,
                 compute_adx="adx" in fusable_requested,
                 compute_bollinger="bollinger" in fusable_requested,
+                bollinger_period=20,
                 compute_stochastic="stochastic" in fusable_requested,
             )
+            if "bollinger_bands" in fused:
+                # Same flat-window answer as bollinger_bands(close), which
+                # the per-indicator path below calls with period 20.
+                fused["bollinger_bands"] = collapse_flat_windows(
+                    close_arr, np.array(fused["bollinger_bands"]), 20
+                )
             logger.debug(
                 "[tech_analysis] fused technical_indicators path for %s",
                 sorted(fusable_requested),
@@ -573,14 +609,34 @@ def run_factor_regression(input_data: FactorRegressionInput) -> FactorRegression
     )
     asset_rets = asset_df["Close"].pct_change(fill_method=None).dropna()
 
+    # One name per ticker, unique -- the input model checks both, so the
+    # zip below cannot drop or overwrite a factor.
     names = input_data.factor_names or input_data.factor_tickers
     factor_series = {}
     for ticker, name in zip(input_data.factor_tickers, names):
         df = provider.get_ohlcv(ticker, input_data.start_date, input_data.end_date)
         factor_series[name] = df["Close"].pct_change(fill_method=None).dropna()
 
-    factors = pd.DataFrame(factor_series)
+    # Inner join: a date is used only when every factor has a return on it.
+    # The outer join the frame constructor makes put NaN on every date one
+    # factor lacked (a later listing, a different holiday calendar), and the
+    # regression then refused the whole request over those NaNs. The dates
+    # dropped here and in aligning the asset are counted and reported.
+    factors = pd.concat(factor_series, axis=1, join="inner")
+    all_dates = asset_rets.index
+    for series in factor_series.values():
+        all_dates = all_dates.union(series.index)
     result = multi_factor_regression(asset_rets, factors)
+    n_dates_dropped = int(len(all_dates) - result["n_obs"])
+    warnings = [
+        "OLS standard errors: the t-statistics and p-values assume independent, homoskedastic residuals. Daily return residuals are neither, so a loading that is 'significant' here may not survive HAC (Newey-West) errors; read the p-values as a ranking of the loadings, not a test."
+    ]
+    if n_dates_dropped > 0:
+        warnings.append(
+            f"{n_dates_dropped} of {len(all_dates)} dates were dropped because "
+            "the asset or some factor had no return on them; the regression "
+            f"uses the {result['n_obs']} dates they all share."
+        )
 
     rolling_alpha_tail = None
     rolling_loadings_tail = None
@@ -597,29 +653,25 @@ def run_factor_regression(input_data: FactorRegressionInput) -> FactorRegression
                 if col != "alpha"
             }
 
+    # An undefined statistic is None. It used to be 0.0 for a t-statistic and
+    # 1.0 for a p-value -- a definite "no effect" where the regression had
+    # said nothing at all.
+    def _rounded(value: Any, digits: int) -> Optional[float]:
+        value = float(value)
+        return round(value, digits) if math.isfinite(value) else None
+
     return FactorRegressionResult(
-        warnings=[
-            "OLS standard errors: the t-statistics and p-values assume independent, homoskedastic residuals. Daily return residuals are neither, so a loading that is 'significant' here may not survive HAC (Newey-West) errors; read the p-values as a ranking of the loadings, not a test."
-        ],
+        warnings=warnings,
         symbol=input_data.symbol,
-        factors=names,
-        alpha=round(float(result["alpha"]), 6),
-        loadings={k: round(float(v), 6) for k, v in result["loadings"].items()},
-        t_stats={
-            k: round(float(v), 4) if not (v != v) else 0.0
-            for k, v in result["t_stats"].items()
-        },
-        p_values={
-            k: round(float(v), 4) if not (v != v) else 1.0
-            for k, v in result["p_values"].items()
-        },
-        r_squared=round(float(result["r_squared"]), 4),
-        adj_r_squared=(
-            round(float(result["adj_r_squared"]), 4)
-            if not (result["adj_r_squared"] != result["adj_r_squared"])
-            else 0.0
-        ),
+        factors=list(names),
+        alpha=_rounded(result["alpha"], 6),
+        loadings={k: _rounded(v, 6) for k, v in result["loadings"].items()},
+        t_stats={k: _rounded(v, 4) for k, v in result["t_stats"].items()},
+        p_values={k: _rounded(v, 4) for k, v in result["p_values"].items()},
+        r_squared=_rounded(result["r_squared"], 4),
+        adj_r_squared=_rounded(result["adj_r_squared"], 4),
         n_obs=result["n_obs"],
+        n_dates_dropped=n_dates_dropped,
         rolling_alpha_tail=rolling_alpha_tail,
         rolling_loadings_tail=rolling_loadings_tail,
     )
@@ -917,6 +969,7 @@ def run_hurst_analysis(input_data: HurstInput) -> HurstResult:
         max_window=input_data.max_window,
     )
 
+    warnings = list(result.get("warnings", []))
     rolling_current = None
     rolling_regime_fractions = None
     if input_data.rolling_window:
@@ -930,26 +983,43 @@ def run_hurst_analysis(input_data: HurstInput) -> HurstResult:
         if not valid.empty:
             rolling_current = round(float(valid.iloc[-1]), 4)
             total = len(valid)
+            # Each rolling value is an estimate on `rolling_window`
+            # observations, so it is labelled with the library's band for
+            # that length -- the same rule as the headline regime, not a
+            # fixed 0.55/0.45 that a short window's noise crosses on its own.
+            labels = [
+                classify_regime(float(v), input_data.rolling_window, input_data.method)
+                for v in valid
+            ]
             rolling_regime_fractions = {
-                "trending": round(float((valid > 0.55).sum() / total), 3),
-                "random_walk": round(
-                    float(((valid >= 0.45) & (valid <= 0.55)).sum() / total), 3
-                ),
-                "mean_reverting": round(float((valid < 0.45).sum() / total), 3),
+                name: round(labels.count(name) / total, 3)
+                for name in ("trending", "random_walk", "mean_reverting")
             }
+        else:
+            warnings.append(
+                f"No rolling value: a window of {input_data.rolling_window} is "
+                f"too short for min_window={input_data.min_window} or longer "
+                f"than the {len(returns)} returns available."
+            )
 
-    h = result["hurst"]
-    r2 = result["fit_r_squared"]
+    def _rounded(value: Any) -> Optional[float]:
+        value = float(value)
+        return round(value, 4) if math.isfinite(value) else None
 
     return HurstResult(
         symbol=input_data.symbol,
-        hurst=round(float(h), 4) if not (h != h) else 0.0,
+        hurst=_rounded(result["hurst"]),
+        hurst_raw=_rounded(result["hurst_raw"]),
+        bias_correction=round(float(result["bias_correction"]), 4),
         regime=result["regime"],
-        fit_r_squared=round(float(r2), 4) if not (r2 != r2) else 0.0,
+        regime_band=_rounded(result["regime_band"]),
+        fit_r_squared=_rounded(result["fit_r_squared"]),
         method=result["method"],
         n_obs=result["n_obs"],
+        max_window_used=result["max_window_used"],
         rolling_current=rolling_current,
         rolling_regime_fractions=rolling_regime_fractions,
+        warnings=warnings,
     )
 
 
@@ -1172,8 +1242,13 @@ def scan_pairs(input_data: PairScannerInput) -> PairScannerResult:
     """
     Test all ticker combinations for cointegration and return the top pairs
     ranked by half-life (shortest first = fastest mean-reversion = most tradeable).
-    Fetches each ticker's prices once, then evaluates all O(n²/2) combinations.
+    Fetches each ticker's prices once, then evaluates all O(n²/2) combinations,
+    each in both regression orders, and gates on the larger p-value after a
+    Benjamini-Hochberg adjustment across every pair that produced one.
     """
+    from standard_quant_tools.analysis.cointegration import (
+        benjamini_hochberg as _benjamini_hochberg,
+    )
     from standard_quant_tools.analysis.cointegration import cointegration_test as _coint
     from standard_quant_tools.analysis.cointegration import compute_spread as _spread
     from standard_quant_tools.analysis.cointegration import (
@@ -1240,6 +1315,11 @@ def scan_pairs(input_data: PairScannerInput) -> PairScannerResult:
                 )
                 batch = {}
 
+    # Pass one: a p-value for every pair, in BOTH regression orders.
+    # Engle-Granger is not symmetric -- on 24 random walks, 65 of 276
+    # verdicts flipped when the columns were swapped -- so a pair is judged
+    # on the larger of its two p-values.
+    tested: Dict[Tuple[str, str], Dict[str, Any]] = {}
     for a, b in all_pairs:
         try:
             if batch:
@@ -1250,20 +1330,43 @@ def scan_pairs(input_data: PairScannerInput) -> PairScannerResult:
                         "(degenerate or perfectly collinear series)"
                     )
                 result = {
-                    "cointegrated": bool(row["cointegrated"]),
                     "p_value": float(row["p_value"]),
+                    "p_value_reverse": float(row["p_value_reverse"]),
                     "hedge_ratio": float(row["hedge_ratio"]),
                     "adf_statistic": float(row["adf_statistic"]),
                     "half_life_days": float(row["half_life_days"]),
                 }
             else:
-                result = _coint(prices[a], prices[b])  # type: ignore[arg-type]
+                result = dict(_coint(prices[a], prices[b]))  # type: ignore[arg-type]
+                result["p_value_reverse"] = float(
+                    _coint(prices[b], prices[a])["p_value"]  # type: ignore[arg-type]
+                )
             n_tested += 1
+            tested[(a, b)] = result
+        except Exception as exc:
+            n_tested += 1
+            failed_pairs.append(PairFailure(symbol_a=a, symbol_b=b, reason=str(exc)))
 
-            if (
-                not result["cointegrated"]
-                or result["p_value"] > input_data.p_value_threshold
-            ):
+    # Pass two: the screen is many tests at once. At 5% per pair, 276
+    # unrelated pairs clear the bar about 14 times by chance, so the gate is
+    # the Benjamini-Hochberg adjusted p-value across every pair that got one
+    # (unless the caller asked for none).
+    keys = list(tested)
+    p_both = np.array(
+        [max(tested[k]["p_value"], tested[k]["p_value_reverse"]) for k in keys],
+        dtype=float,
+    )
+    p_bh = _benjamini_hochberg(p_both)
+    threshold = input_data.p_value_threshold
+    use_bh = input_data.multiple_testing == "benjamini_hochberg"
+    n_with_p = int(np.isfinite(p_both).sum())
+    n_uncorrected = int(np.sum(np.nan_to_num(p_both, nan=2.0) <= threshold))
+
+    for position, (a, b) in enumerate(keys):
+        result = tested[(a, b)]
+        try:
+            gate = p_bh[position] if use_bh else p_both[position]
+            if not (gate <= threshold):
                 continue
 
             hl = result["half_life_days"]
@@ -1289,6 +1392,12 @@ def scan_pairs(input_data: PairScannerInput) -> PairScannerResult:
                     symbol_a=a,
                     symbol_b=b,
                     p_value=round(float(result["p_value"]), 4),
+                    p_value_reverse=round(float(result["p_value_reverse"]), 4),
+                    p_value_both=round(float(p_both[position]), 4),
+                    p_value_bh=round(float(p_bh[position]), 4),
+                    direction_consistent=bool(
+                        (result["p_value"] < 0.05) == (result["p_value_reverse"] < 0.05)
+                    ),
                     hedge_ratio=round(float(result["hedge_ratio"]), 4),
                     half_life_days=round(float(hl), 2),
                     adf_statistic=round(float(result["adf_statistic"]), 4),
@@ -1297,8 +1406,25 @@ def scan_pairs(input_data: PairScannerInput) -> PairScannerResult:
                 )
             )
         except Exception as exc:
-            n_tested += 1
             failed_pairs.append(PairFailure(symbol_a=a, symbol_b=b, reason=str(exc)))
+
+    warnings: List[str] = []
+    expected_false = n_with_p * threshold
+    if n_with_p > 1:
+        warnings.append(
+            f"{n_with_p} pairs were tested. If none were cointegrated, about "
+            f"{expected_false:.1f} would clear p <= {threshold:g} by chance; "
+            f"{n_uncorrected} cleared it before adjustment. "
+            + (
+                "The pairs returned passed the Benjamini-Hochberg adjustment, "
+                f"so about {threshold:.0%} of them are expected to be false "
+                "discoveries."
+                if use_bh
+                else "multiple_testing='none': the pairs returned are not "
+                "adjusted for the number tested, and that many false ones "
+                "are expected among them."
+            )
+        )
 
     passing.sort(key=lambda p: p.half_life_days)
     top = passing[: input_data.max_pairs]
@@ -1319,6 +1445,11 @@ def scan_pairs(input_data: PairScannerInput) -> PairScannerResult:
         pairs=top,
         failed_pairs=failed_pairs,
         failed_tickers=failed_tickers,
+        n_pairs_with_p_value=n_with_p,
+        n_pairs_significant_uncorrected=n_uncorrected,
+        expected_false_positives=round(expected_false, 2),
+        multiple_testing=input_data.multiple_testing,
+        warnings=warnings,
     )
 
 

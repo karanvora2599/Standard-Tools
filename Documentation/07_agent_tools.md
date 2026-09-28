@@ -231,6 +231,7 @@ CORE TOOLS (14)
 8. run_factor_regression
    — Multi-factor OLS: alpha, loadings, t-stats, p-values, R², optional rolling.
      High R² = returns well explained by factors. Positive alpha = real edge.
+     One unique name per factor ticker; linearly dependent factors are refused.
 
 9. run_cointegration_test
    — Engle-Granger test for a pair: p-value, hedge ratio, half-life, z-score signal.
@@ -241,8 +242,9 @@ CORE TOOLS (14)
       sector or style tilts. Use to diagnose hidden concentration risk.
 
 11. run_hurst_analysis
-    — Hurst exponent (DFA or R/S). H > 0.55 = trending, 0.45–0.55 = random walk,
-      H < 0.45 = mean-reverting. Choose strategy accordingly.
+    — Hurst exponent (DFA or R/S, R/S corrected for its small-sample bias). H above
+      0.5 + regime_band = trending, below 0.5 − regime_band = mean-reverting; the band
+      is 0.05 on long series and wider on short ones. Choose strategy accordingly.
 
 ADVANCED TOOLS (5)
 12. run_regime_adaptive_backtest
@@ -250,9 +252,11 @@ ADVANCED TOOLS (5)
       the right strategy for the detected regime. Best for single-click strategy selection.
 
 13. scan_pairs
-    — Tests all O(n²/2) combinations in a ticker universe for cointegration. Returns
-      top N pairs sorted by half-life (shortest = fastest mean reversion = most tradeable).
-      Use before run_cointegration_test to narrow down candidates.
+    — Tests all O(n²/2) combinations in a ticker universe for cointegration, each in both
+      regression orders, gated on the larger p-value after a Benjamini-Hochberg adjustment
+      across every pair tested. Returns top N pairs sorted by half-life (shortest = fastest
+      mean reversion = most tradeable), with the number tested and the false positives
+      expected by chance. Use before run_cointegration_test to narrow down candidates.
 
 14. run_walk_forward_backtest
     — Gold-standard validation: optimise in-sample, test out-of-sample, repeat.
@@ -1362,7 +1366,7 @@ if result.rolling_alpha_tail:
 |---|---|---|---|
 | `symbol` | str | Yes | Asset to analyse |
 | `factor_tickers` | List[str] | Yes | Ticker proxies for each factor |
-| `factor_names` | List[str] | No | Human-readable labels; defaults to `factor_tickers` |
+| `factor_names` | List[str] | No | Human-readable labels, one per ticker in the same order and unique (`alpha` is reserved for the intercept); defaults to `factor_tickers`. A mismatched length or a repeated name is refused at input |
 | `start_date` | str | Yes | ISO date |
 | `end_date` | str | Yes | ISO date |
 | `rolling_window` | int | No | If set, return the last 20 bars of rolling loadings |
@@ -1373,6 +1377,9 @@ if result.rolling_alpha_tail:
 - **Loading**: Sensitivity to each factor. AAPL loading of 1.2 on SPY means it moves 1.2× the market.
 - **R²**: Fraction of return variance explained by all factors combined. Low R² = highly idiosyncratic.
 - **Rolling loadings**: Track whether factor exposures are stable or have drifted over time.
+- **Undefined statistics are `null`**, never a fabricated t = 0 or p = 1 (fewer observations than coefficients leaves them undefined).
+- **Linearly dependent factors are refused** with the factor(s) to drop named: two tickers with the same returns, a factor that is a sum or multiple of others, a constant factor. Their loadings are not identified.
+- **Dates**: a date is used only when the asset and every factor have a return on it; `n_dates_dropped` counts the rest and a warning says how many.
 
 **Fama-French 3-factor using ETF proxies:**
 
@@ -1810,7 +1817,7 @@ for candidate in candidates:
 
 ## Tool 14 — Hurst Exponent
 
-**When to use:** Regime detection before strategy selection. A trending regime (H > 0.55) favours momentum and trend-following. A mean-reverting regime (H < 0.45) favours contrarian strategies like RSI mean-reversion or Bollinger Band reversion. The rolling Hurst tracks how the regime evolves over time.
+**When to use:** Regime detection before strategy selection. A trending regime (H above the random-walk band, `regime_band`) favours momentum and trend-following. A mean-reverting regime (H below it) favours contrarian strategies like RSI mean-reversion or Bollinger Band reversion. The rolling Hurst tracks how the regime evolves over time.
 
 ```python
 from standard_quant_tools.agent.tools import run_hurst_analysis
@@ -1848,20 +1855,24 @@ if result.rolling_current is not None:
 | `end_date` | str | — | ISO date |
 | `method` | `Literal["dfa","rs"]` | `"dfa"` | `"dfa"` (Detrended Fluctuation Analysis) or `"rs"` (Rescaled Range) — any other value is rejected at input validation with a Pydantic error, not silently treated as `"rs"` |
 | `rolling_window` | int | None | If set, compute rolling Hurst and return regime fractions |
-| `min_window` | int | 10 | Smallest scale in the log-log fit. The exponent is the *slope across scales*, so the range is not a detail: too small a floor lets microstructure noise flatten it toward 0.5, which the regime call downstream reads as `random_walk` |
-| `max_window` | int? | None | Largest scale in the fit. `None` lets the estimator choose from the series length |
+| `min_window` | int | 10 | Smallest scale in the log-log fit, at least 4. The exponent is the *slope across scales*, so the range is not a detail: too small a floor lets microstructure noise flatten it toward 0.5, and a DFA box under four points has no residual to measure (white noise came back H = 1.5) |
+| `max_window` | int? | None | Largest scale in the fit; must exceed `min_window` (an inverted range is refused at input — it used to answer `hurst` 0.0). `None` lets the estimator choose from the series length; a larger value is lowered to `n//4` (DFA) or `n//2` (R/S) and `max_window_used` says so |
 
-**Regime table:**
+**HurstResult fields beyond the headline:** `hurst` and `fit_r_squared` are `null` when the series is too short for the window range (never 0.0, which read as strongly mean-reverting), with the reason in `warnings`; `hurst_raw` and `bias_correction` give the uncorrected R/S slope and what was subtracted from it; `regime_band` is the half-width of the random-walk band; `max_window_used` is the largest window fitted.
+
+**Regime table** (`band` = `regime_band`: 1.645 white-noise standard deviations of the estimate at this length, at least 0.05 — about 0.13 at 256 observations for DFA, 0.07 at 1 024, 0.05 from about 3 000):
 
 | H value | Regime | Strategy implication |
 |---|---|---|
-| > 0.55 | `trending` | Use SMA crossover or MACD — momentum persists |
-| 0.45–0.55 | `random_walk` | No persistent edge; reduce position sizing |
-| < 0.45 | `mean_reverting` | Use RSI mean-reversion or Bollinger Band reversion |
+| > 0.5 + band | `trending` | Use SMA crossover or MACD — momentum persists |
+| within the band | `random_walk` | No persistent edge; reduce position sizing |
+| < 0.5 − band | `mean_reverting` | Use RSI mean-reversion or Bollinger Band reversion |
+
+`rolling_regime_fractions` labels each rolling value with the band for a `rolling_window`-length estimate — the same rule as the headline regime, not a fixed 0.55/0.45.
 
 **DFA vs R/S:**
 
-DFA (default) is unbiased for realistic sample sizes — iid returns produce H ≈ 0.50. R/S has an upward bias, giving H ≈ 0.58 for iid returns, which can misclassify a random walk as trending. Use R/S only to compare with published H estimates that used R/S.
+DFA (default) is unbiased for realistic sample sizes — iid returns produce H ≈ 0.50. Raw R/S has an upward bias that shrinks with length (+0.09 at 256 observations, +0.07 at 1 024), which labelled most white noise "trending"; the tool subtracts the Anis-Lloyd-Peters expectation, so corrected R/S also reads about 0.50 on iid returns. Use `hurst_raw` to compare with published R/S estimates that were not corrected.
 
 **Regime-conditional strategy selection:**
 
@@ -1970,11 +1981,10 @@ print(f"  Mean-reverting {fracs['mean_reverting']:.0%}  of windows")
 
 # Alert: if the current rolling regime differs from the historical majority
 dominant = max(fracs, key=fracs.get)
-current_regime = (
-    "trending" if result.rolling_current > 0.55 else
-    "mean_reverting" if result.rolling_current < 0.45 else
-    "random_walk"
-)
+from standard_quant_tools.analysis.hurst import classify_regime
+
+# The band for a 252-bar estimate, the same rule the fractions use.
+current_regime = classify_regime(result.rolling_current, 252, "dfa")
 if current_regime != dominant:
     print(f"\n⚠  Regime shift detected: historical={dominant}, current={current_regime}")
     print("   Consider re-evaluating strategy allocation.")

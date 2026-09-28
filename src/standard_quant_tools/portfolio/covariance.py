@@ -22,7 +22,8 @@ THREE ESTIMATORS, AND WHEN EACH IS RIGHT:
 - `ewma` — weights recent observations more. A different question from
   shrinkage: it is about regime rather than about estimation error, and it
   makes the conditioning WORSE, because a half-life of 60 days on 252 days
-  of data has an effective sample size closer to 87.
+  of data has an effective sample size (1 / sum of squared weights) of
+  about 155, not 252. It is reported as `effective_observations`.
 
 They are not alternatives to one another. `ewma` and `ledoit_wolf` answer
 different questions and shrinking an EWMA estimate is a reasonable thing to
@@ -96,6 +97,7 @@ def estimate_covariance(
     n_obs, n_assets = frame.shape
     values = frame.to_numpy(dtype=float)
     shrinkage: Optional[float] = None
+    effective = float(n_obs)
 
     if method == "sample":
         cov = np.cov(values, rowvar=False, ddof=1)
@@ -106,7 +108,13 @@ def estimate_covariance(
         cov = estimator.covariance_
         shrinkage = float(estimator.shrinkage_)
     else:
-        cov = _ewma_covariance(values, halflife or 60.0)
+        # `halflife or 60.0` turned an explicit 0 into the default 60 while
+        # -5 was refused: 0 is what an uninitialised config field arrives
+        # as, and it was answered as though 60 had been asked for. Only an
+        # absent halflife takes the default; 0 reaches the refusal below.
+        cov, effective = _ewma_covariance(
+            values, 60.0 if halflife is None else halflife
+        )
         if method == "ewma_shrunk":
             cov, shrinkage = _shrink_to_identity(cov, n_obs, n_assets)
 
@@ -124,8 +132,11 @@ def estimate_covariance(
         "assets": list(frame.columns),
         "n_observations": int(n_obs),
         "n_assets": int(n_assets),
+        "effective_observations": effective,
+        # Numbers per parameter from the observations the estimate actually
+        # rests on: under EWMA that is the effective count, not the rows.
         "observations_per_parameter": float(
-            n_obs * n_assets / (n_assets * (n_assets + 1) / 2)
+            effective * n_assets / (n_assets * (n_assets + 1) / 2)
         ),
         "shrinkage_intensity": shrinkage,
         "condition_number": condition,
@@ -142,26 +153,57 @@ def estimate_covariance(
             n_rows_dropped=n_rows_dropped,
             n_rows_total=int(len(kept_columns)),
             shortest=shortest,
+            effective=effective,
         ),
     }
 
 
-def _ewma_covariance(values: np.ndarray, halflife: float) -> np.ndarray:
+#: Fewer effective observations than this and there is no spread to
+#: estimate: the weights sit on essentially one row.
+MIN_EFFECTIVE_OBSERVATIONS = 2.0
+
+
+def _ewma_covariance(values: np.ndarray, halflife: float) -> "tuple[np.ndarray, float]":
     """
-    Exponentially weighted covariance about the WEIGHTED mean.
+    Exponentially weighted covariance about the WEIGHTED mean, and the
+    effective number of observations it rests on.
 
     Demeaning with the plain average would mix a full-sample centre into a
     recency-weighted spread, which shows up as extra variance whenever the
     mean has moved -- exactly the regimes EWMA is reached for.
+
+    THE EFFECTIVE COUNT IS CHECKED BEFORE THE DIVISION. The unbiasing
+    denominator is 1 - sum(w^2), and a short enough half-life puts all the
+    weight on the last row: below a half-life of about 0.019 the older
+    weights underflow, sum(w^2) is exactly 1, and the division escaped as a
+    raw numpy LinAlgError two calls later; between about 0.019 and 0.05 it
+    returned a matrix with a condition number of 1e12 to 1e17 and no
+    warning. 1 / sum(w^2) is the Kish effective sample size, and below two
+    there is no second observation to measure a spread against.
     """
-    if halflife <= 0:
-        raise ValidationError("covariance: halflife must be positive")
+    halflife = float(halflife)
+    if not np.isfinite(halflife) or halflife <= 0:
+        raise ValidationError(
+            f"covariance: halflife must be positive and finite, got {halflife!r}. "
+            "Omit it for the default of 60 observations."
+        )
     n = values.shape[0]
     decay = 0.5 ** (1.0 / halflife)
     weights = decay ** np.arange(n - 1, -1, -1)
     weights = weights / weights.sum()
+    effective = float(1.0 / (weights**2).sum())
+    if effective < MIN_EFFECTIVE_OBSERVATIONS:
+        raise ValidationError(
+            f"covariance: halflife={halflife:g} leaves {effective:.3f} "
+            f"effective observations of the {n} rows (1 / sum of squared "
+            "weights); an exponentially weighted covariance needs at least "
+            f"{MIN_EFFECTIVE_OBSERVATIONS:g}. The weight has collapsed onto "
+            "the last row, so there is no spread to estimate. Use a half-life "
+            "of at least one observation -- the default is 60."
+        )
     centered = values - (weights[:, None] * values).sum(axis=0)
-    return (centered * weights[:, None]).T @ centered / (1.0 - (weights**2).sum())
+    cov = (centered * weights[:, None]).T @ centered / (1.0 - (weights**2).sum())
+    return cov, effective
 
 
 def _shrink_to_identity(cov: np.ndarray, n_obs: int, n_assets: int):
@@ -191,8 +233,17 @@ def _warnings(
     n_rows_dropped: int = 0,
     n_rows_total: int = 0,
     shortest=None,
+    effective: Optional[float] = None,
 ) -> List[str]:
     out: List[str] = []
+    if method.startswith("ewma") and effective is not None and effective <= n_assets:
+        out.append(
+            f"The half-life leaves {effective:.1f} effective observations for "
+            f"{n_assets} assets. A covariance over more assets than effective "
+            "observations is rank-deficient by construction, whatever its row "
+            "count says: the smallest eigenvalues are weighting artefacts. "
+            "Lengthen the half-life or use fewer assets."
+        )
     if n_rows_dropped:
         out.append(
             f"{n_rows_dropped} of {n_rows_total} rows were dropped because at "

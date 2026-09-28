@@ -99,7 +99,9 @@ TOOL_DEFS = [
         "numerically, and an unbounded loss is REPORTED as unbounded: a "
         "short call has no worst case, so returning the edge of the scanned "
         "range as 'max loss' would be a finite number standing in for an "
-        "infinite risk.",
+        "infinite risk. Legs with different expiries (calendars, diagonals) "
+        "are valued at the FIRST expiry, later legs marked by Black-Scholes "
+        "at their remaining time; `payoff_basis` says which was done.",
         OptionStrategyInput,
     ),
     (

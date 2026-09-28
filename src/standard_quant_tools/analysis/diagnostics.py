@@ -54,6 +54,9 @@ from standard_quant_tools.error import ValidationError
 from standard_quant_tools.metrics.risk_metrics import (
     annualized_sharpe as _annualized_sharpe,
 )
+from standard_quant_tools.metrics.risk_metrics import (
+    has_no_dispersion,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -193,10 +196,16 @@ def ljung_box(
 
     centred = array - array.mean()
     denominator = float((centred**2).sum())
-    if denominator <= 0:
+    # The library's relative test, not `denominator <= 0`: a constant 0.1
+    # centres to rounding residue, not zeros, and the autocorrelations of
+    # that residue answered Q=964, p=0 -- "significant autocorrelation" in
+    # a series that never moved, which then fed GARCH's misspecification
+    # flag. Constants 0.5 and 0.3 were refused and 0.1 was not.
+    if denominator <= 0 or has_no_dispersion(array):
         raise ValidationError(
-            "ljung_box: the series has no variance, so it has no "
-            "autocorrelation to test."
+            "ljung_box: the series"
+            + (" (squared)" if squared else "")
+            + " does not vary, so it has no autocorrelation to test."
         )
 
     per_lag: List[Dict[str, Any]] = []
@@ -447,17 +456,27 @@ def seasonality(
         others = frame.loc[frame["k"] != key, "r"].to_numpy()
         # Welch t against everything else, which is the comparison actually
         # being made when someone says "Mondays are different".
-        se = math.sqrt(
-            array.var(ddof=1) / array.size + others.var(ddof=1) / others.size
-        )
+        own = array.var(ddof=1) / array.size
+        rest = others.var(ddof=1) / others.size if others.size > 1 else 0.0
+        se = math.sqrt(own + rest)
         t = float((array.mean() - others.mean()) / se) if se > 0 else 0.0
+        # The Welch-Satterthwaite degrees of freedom, which is what makes a
+        # Welch t a Welch t. The pooled n_a + n_b - 2 treated a period of six
+        # observations as if its variance were known from 260: with the
+        # 29th-31st of the month at four times the variance, the pooled df
+        # rejected 9.4% of the time under the null against a nominal 5%;
+        # this rejects 4.5%.
+        denominator = (own * own / (array.size - 1) if array.size > 1 else 0.0) + (
+            rest * rest / (others.size - 1) if others.size > 1 else 0.0
+        )
+        welch_df = (own + rest) ** 2 / denominator if denominator > 0 else 1.0
         # NOT doubled. P(F(1, df) > t^2) IS P(|T| > |t|) -- squaring the
         # statistic is what makes it two-sided, and the extra factor made
         # every per-period p-value exactly 2x too large. Wednesday at
         # t = -2.598 came back 1.931e-02 against a true 9.656e-03, and
         # `significant_after_correction` read False where the truth is
         # True. The three other `_f_sf` calls in this file get it right.
-        raw_p = _f_sf(t * t, 1, max(array.size + others.size - 2, 1))
+        raw_p = _f_sf(t * t, 1, max(welch_df, 1.0))
         rows.append(
             {
                 "period": labels.get(int(key), str(key)),
@@ -1025,6 +1044,15 @@ def structural_break_test(
         )
 
     y = values.to_numpy()
+    # A constant series has no mean to shift. Its residual sums of squares
+    # are rounding residue, and the F statistic of residue over residue was
+    # anything: 0 for a constant 0.01, 174 for 1.0, 464 with p=2e-29 --
+    # "significant" -- for 100.0.
+    if has_no_dispersion(y):
+        raise ValidationError(
+            "structural_break_test: the series does not vary, so there is "
+            "no mean or relationship that could have broken."
+        )
     if regressor is not None:
         x_series = pd.Series(regressor).astype(float).reindex(values.index)
         aligned = pd.DataFrame({"y": y, "x": x_series.to_numpy()}).dropna()
@@ -1053,12 +1081,20 @@ def structural_break_test(
 
     denominator = first_rss + second_rss
     d1, d2 = k, n - 2 * k
-    if denominator <= 0 or d2 <= 0:
+    # Relative to the series' own variation, not `<= 0`: an exact fit on
+    # both sides (y = 2x + 1 with the regressor) leaves residue of 1e-28,
+    # not 0, and the F statistic came back -10.7.
+    total = float(((y - y.mean()) ** 2).sum())
+    if denominator <= 1e-12 * total or d2 <= 0:
         raise ValidationError(
-            "structural_break_test: the split regressions leave no residual "
-            "variance, so the F statistic is undefined."
+            "structural_break_test: the split regressions fit the series "
+            "exactly on both sides of the break, so there is no residual "
+            "variance to test against and the F statistic is undefined."
         )
-    f_statistic = ((pooled_rss - denominator) / d1) / (denominator / d2)
+    # The models are nested -- the split fit contains the pooled one -- so
+    # the pooled residual cannot be smaller; a negative difference is
+    # rounding, and F is floored at 0.
+    f_statistic = max(0.0, ((pooled_rss - denominator) / d1) / (denominator / d2))
     p_value = _f_sf(f_statistic, d1, d2)
 
     warnings: List[str] = [

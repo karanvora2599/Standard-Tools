@@ -26,9 +26,10 @@ THE LIMITS, stated once rather than rediscovered:
   not a thing the market does, so a vega sum across strikes overstates what
   a realistic vol move costs.
 - **The smile fit is a fit.** It interpolates and it does not extrapolate.
-  Asking for the implied vol of a strike outside the fitted range returns a
-  refusal rather than a polynomial's opinion, because a quadratic taken
-  beyond its data will happily produce a negative variance.
+  The fitted strike range is returned beside the coefficients, and nothing
+  here evaluates the quadratic outside it: a quadratic taken beyond its
+  data will happily produce a negative variance, so a caller must not
+  either.
 - **`simulate_delta_hedge` is a single path unless you give it many.** One
   path tells you what happened, not what to expect; the dispersion across
   paths is the whole point, and the hedging error is proportional to
@@ -46,6 +47,7 @@ import pandas as pd
 
 from standard_quant_tools._special import (
     norm_cdf,
+    norm_cdf_array,
     norm_pdf,
 )
 from standard_quant_tools.analysis.pricing import price_option
@@ -176,6 +178,20 @@ def _option_inputs(
         _bounded(risk_free_rate, "risk_free_rate", low=-MAX_RATE, high=MAX_RATE)
     if dividend_yield is not None:
         _bounded(dividend_yield, "dividend_yield", low=-MAX_RATE, high=MAX_RATE)
+    # Each rate and the time can be inside its own bound while the product
+    # is not: option_greeks at r=-9, T=100 asked exp() for 900 and raised a
+    # bare OverflowError. Only implied_forward_price checked the product.
+    if time_to_expiry is not None:
+        for name, rate in (
+            ("risk_free_rate", risk_free_rate),
+            ("dividend_yield", dividend_yield),
+        ):
+            if rate is not None:
+                _bounded_exponent(
+                    float(rate) * float(time_to_expiry),
+                    f"{name} x time_to_expiry",
+                    "option inputs",
+                )
 
 
 # ── greeks beyond the first order ───────────────────────────────────────
@@ -195,9 +211,10 @@ def option_greeks(
     The full Black-Scholes greek set, including the second-order ones that
     explain why a delta-hedged book still loses money.
 
-    `price_option` returns delta, gamma, vega, theta and rho. Those tell you
-    the first-order risk. They do not tell you how that risk CHANGES, which
-    is what actually gets a hedged position into trouble:
+    `price_option` returns delta, gamma, vega, theta and rho for its
+    closed-form models (the binomial lattice returns delta and gamma only).
+    Those tell you the first-order risk. They do not tell you how that risk
+    CHANGES, which is what actually gets a hedged position into trouble:
 
     - **vanna** -- how delta moves when vol moves. A short-vol position that
       is delta-flat today is not delta-flat after a vol spike, and vanna is
@@ -354,11 +371,25 @@ def analyze_strategy(
     because those are the two questions actually asked of a structure and
     they are asked at different times.
 
+    LEGS THAT EXPIRE AT DIFFERENT TIMES ARE VALUED AT THE FIRST EXPIRY. The
+    payoff used to take every leg's intrinsic value as if all expired
+    together, so a same-strike calendar's two `max(S-K, 0)` terms cancelled
+    and the structure read as a certain loss of its debit at every spot, no
+    breakeven. When the option legs carry more than one `time_to_expiry`,
+    the P&L is evaluated at the earliest one: legs expiring then contribute
+    intrinsic value, and each later leg is marked with Black-Scholes at its
+    remaining time, its own volatility, and this call's rate and yield --
+    the standard calendar and diagonal P&L diagram. `payoff_basis` and
+    `evaluated_at_years` say which was done.
+
     BREAKEVENS ARE FOUND NUMERICALLY, by scanning the payoff for sign
-    changes and bisecting. A closed form exists for each named structure and
-    would have to be written once per structure; this works for an arbitrary
-    combination of legs, which is the point of accepting a leg list rather
-    than a strategy name.
+    changes. At expiry the payoff is piecewise linear and the strikes are
+    grid points, so no scanned segment straddles a kink and linear
+    interpolation is exact; a first-expiry curve is smooth, and each
+    crossing is bisected on the curve itself. A closed form exists for each
+    named structure and would have to be written once per structure; this
+    works for an arbitrary combination of legs, which is the point of
+    accepting a leg list rather than a strategy name.
 
     THE LIMIT WORTH KNOWING: max profit and max loss are reported over the
     SCANNED RANGE, not over all possible spots. A short call has unbounded
@@ -395,6 +426,7 @@ def analyze_strategy(
             )
         parsed.append(entry)
 
+    strikes = [leg["strike"] for leg in parsed if leg["option_type"] != "stock"]
     if spot_range is None:
         # From ZERO to twice the highest strike. The scan started at half
         # the lowest strike, so a long put's worst case (spot at zero) was
@@ -402,15 +434,32 @@ def analyze_strategy(
         # a bounded loss was labelled unbounded because it sat at the
         # scan's edge. Zero is a hard floor for a price, so only the
         # RIGHT edge can be unbounded.
-        strikes = [leg["strike"] for leg in parsed if leg["option_type"] != "stock"]
         anchor = max([spot] + strikes) if strikes else spot
-        grid = np.linspace(0.0, anchor * 2.0, 801)
+        scan = np.linspace(0.0, anchor * 2.0, 801)
     else:
-        grid = np.asarray(sorted(float(x) for x in spot_range), dtype=float)
-        if grid.size < 3:
+        scan = np.asarray(sorted(float(x) for x in spot_range), dtype=float)
+        if scan.size < 3:
             raise ValidationError(
                 "spot_range needs at least 3 points to find a breakeven"
             )
+    # THE STRIKES ARE GRID POINTS. An expiry payoff is piecewise linear with
+    # its kinks at the strikes, so its extrema sit at a strike or an edge;
+    # a grid that stepped over a strike missed the kink by up to one step,
+    # and a 99/100.1/101.2 butterfly reported a peak 8.6% under the truth.
+    # With every strike inside the scan added, max and min are exact and no
+    # segment between two grid points straddles a kink. `payoff_curve` is
+    # still sampled from the scan points alone, so its length and positions
+    # do not move.
+    inside = [k for k in strikes if scan[0] <= k <= scan[-1]]
+    grid = np.union1d(scan, inside) if inside else np.unique(scan)
+
+    # First-expiry valuation when the option legs do not expire together.
+    # Expiries within a relative 1e-9 of the earliest are the same expiry.
+    expiries = sorted(
+        {leg["time_to_expiry"] for leg in parsed if leg["option_type"] != "stock"}
+    )
+    horizon = expiries[0] if expiries else None
+    multi_expiry = len(expiries) > 1 and expiries[-1] > expiries[0] * (1.0 + 1e-9)
 
     # Net premium paid today. A long position costs money, so the payoff
     # curve sits below the intrinsic curve by exactly this.
@@ -434,17 +483,37 @@ def analyze_strategy(
         for key in totals:
             totals[key] += leg["quantity"] * greeks[key]
 
-    payoff = np.zeros_like(grid)
-    for leg in parsed:
-        if leg["option_type"] == "stock":
-            payoff += leg["quantity"] * grid
-        elif leg["option_type"] == "call":
-            payoff += leg["quantity"] * np.maximum(grid - leg["strike"], 0.0)
-        else:
-            payoff += leg["quantity"] * np.maximum(leg["strike"] - grid, 0.0)
-    profit = payoff - net_premium
+    def _profit_at(points: np.ndarray) -> np.ndarray:
+        """P&L at the evaluation date for each spot in `points`."""
+        points = np.asarray(points, dtype=float)
+        payoff = np.zeros_like(points)
+        for leg in parsed:
+            quantity = leg["quantity"]
+            if leg["option_type"] == "stock":
+                payoff += quantity * points
+                continue
+            remaining = leg["time_to_expiry"] - horizon if multi_expiry else 0.0
+            if multi_expiry and remaining > horizon * 1e-9:
+                payoff += quantity * _black_scholes_on_grid(
+                    points,
+                    leg["strike"],
+                    remaining,
+                    leg["volatility"],
+                    float(risk_free_rate),
+                    float(dividend_yield),
+                    leg["option_type"],
+                )
+            elif leg["option_type"] == "call":
+                payoff += quantity * np.maximum(points - leg["strike"], 0.0)
+            else:
+                payoff += quantity * np.maximum(leg["strike"] - points, 0.0)
+        return payoff - net_premium
 
-    breakevens = _find_breakevens(grid, profit)
+    profit = _profit_at(grid)
+
+    breakevens, plateaus = _find_breakevens(
+        grid, profit, refine=_profit_at if multi_expiry else None
+    )
     max_profit_i = int(np.argmax(profit))
     max_loss_i = int(np.argmin(profit))
     # Only the right edge is open: a spot of zero is a floor, not a
@@ -470,15 +539,35 @@ def analyze_strategy(
             "No breakeven in the scanned range: the position is profitable "
             "or loss-making everywhere it was evaluated."
         )
-    warnings.append(
-        "Payoff is AT EXPIRY (intrinsic only); the greeks are at today's "
-        "spot. Between now and expiry the position is worth neither."
-    )
+    for start, end in plateaus:
+        warnings.append(
+            f"The P&L is exactly zero from spot {start:.4g} to {end:.4g}: a "
+            "flat stretch, reported as one breakeven at its start rather than "
+            "one per scanned point."
+        )
+    if multi_expiry:
+        warnings.append(
+            f"Legs expire at different times ({[round(t, 6) for t in expiries]} "
+            f"years). The P&L is evaluated at the FIRST expiry, {horizon:.6g} "
+            "years: legs expiring then contribute intrinsic value, and each "
+            "later leg is marked with Black-Scholes at its remaining time and "
+            "its own volatility. That assumes the volatility is unchanged "
+            "then -- which is exactly the risk a calendar or diagonal carries. "
+            "The greeks are at today's spot."
+        )
+    else:
+        warnings.append(
+            "Payoff is AT EXPIRY (intrinsic only); the greeks are at today's "
+            "spot. Between now and expiry the position is worth neither."
+        )
 
+    scan_positions = np.searchsorted(grid, scan[::20])
     return {
         "n_legs": len(parsed),
         "net_premium": float(net_premium),
         "position": "debit" if net_premium > 0 else "credit",
+        "payoff_basis": "first_expiry_marked" if multi_expiry else "expiry",
+        "evaluated_at_years": (float(horizon) if horizon is not None else None),
         "breakevens": [float(b) for b in breakevens],
         "max_profit": float(profit[max_profit_i]),
         "max_profit_at_spot": float(grid[max_profit_i]),
@@ -488,26 +577,112 @@ def analyze_strategy(
         "max_loss_unbounded": bool(at_edge(max_loss_i)),
         "greeks": {k: float(v) for k, v in totals.items()},
         "payoff_curve": [
-            {"spot": float(s), "profit": float(p)}
-            for s, p in zip(grid[::20], profit[::20])
+            {"spot": float(grid[i]), "profit": float(profit[i])} for i in scan_positions
         ],
         "warnings": warnings,
     }
 
 
-def _find_breakevens(grid: np.ndarray, profit: np.ndarray) -> List[float]:
-    """Sign changes in the profit curve, refined by linear interpolation."""
+def _black_scholes_on_grid(
+    points: np.ndarray,
+    strike: float,
+    t: float,
+    vol: float,
+    rate: float,
+    dividend_yield: float,
+    option_type: str,
+) -> np.ndarray:
+    """
+    Black-Scholes values across an array of spots, for marking a leg that
+    outlives the evaluation date. At a spot of zero a call is worth nothing
+    and a put its discounted strike -- the limits, where log(S/K) is not
+    defined.
+    """
+    out = np.empty_like(points, dtype=float)
+    positive = points > 0
+    discount = math.exp(-rate * t)
+    growth = math.exp(-dividend_yield * t)
+    if option_type == "call":
+        out[~positive] = 0.0
+    else:
+        out[~positive] = strike * discount
+    s = points[positive]
+    if s.size:
+        sqrt_t = math.sqrt(t)
+        d1 = (np.log(s / strike) + (rate - dividend_yield + 0.5 * vol * vol) * t) / (
+            vol * sqrt_t
+        )
+        d2 = d1 - vol * sqrt_t
+        if option_type == "call":
+            out[positive] = s * growth * norm_cdf_array(d1) - strike * discount * (
+                norm_cdf_array(d2)
+            )
+        else:
+            out[positive] = strike * discount * norm_cdf_array(-d2) - s * growth * (
+                norm_cdf_array(-d1)
+            )
+    return out
+
+
+def _find_breakevens(
+    grid: np.ndarray,
+    profit: np.ndarray,
+    refine: Optional[Any] = None,
+) -> "tuple[List[float], List[tuple]]":
+    """
+    Sign changes in the profit curve, and the flat stretches where it is
+    exactly zero.
+
+    A RUN OF EXACT ZEROS IS ONE BREAKEVEN, at its first point. Every zero
+    grid point used to be its own breakeven, so a deep out-of-the-money put
+    whose premium underflowed to 0.0 reported 760 of them (10.0, 10.25,
+    10.5, ...). A run spanning two or more points is also returned as a
+    plateau, so the caller can say so.
+
+    Between two points of opposite sign the crossing is interpolated
+    linearly, which is exact for an expiry payoff (piecewise linear, with
+    the strikes on the grid). For a smooth curve -- a later leg marked at
+    the first expiry -- `refine` evaluates the curve and the crossing is
+    bisected on it.
+    """
     out: List[float] = []
-    for i in range(len(grid) - 1):
+    plateaus: List[tuple] = []
+    n = len(grid)
+    i = 0
+    while i < n - 1:
         a, b = profit[i], profit[i + 1]
         if a == 0.0:
+            end = i
+            while end + 1 < n and profit[end + 1] == 0.0:
+                end += 1
             out.append(float(grid[i]))
-        elif a * b < 0:
-            # Linear interpolation is exact here: the payoff is piecewise
-            # linear in spot, and a sign change between two grid points that
-            # straddle no strike lies on one segment.
-            out.append(float(grid[i] - a * (grid[i + 1] - grid[i]) / (b - a)))
-    return out
+            if end > i:
+                plateaus.append((float(grid[i]), float(grid[end])))
+            i = end + 1
+            continue
+        if a * b < 0:
+            if refine is None:
+                out.append(float(grid[i] - a * (grid[i + 1] - grid[i]) / (b - a)))
+            else:
+                out.append(_bisect_root(refine, float(grid[i]), float(grid[i + 1]), a))
+        i += 1
+    return out, plateaus
+
+
+def _bisect_root(curve: Any, low: float, high: float, value_at_low: float) -> float:
+    """A root of `curve` inside [low, high], where it changes sign."""
+    for _ in range(100):
+        mid = 0.5 * (low + high)
+        value = float(curve(np.array([mid]))[0])
+        if value == 0.0:
+            return mid
+        if (value < 0) == (value_at_low < 0):
+            low, value_at_low = mid, value
+        else:
+            high = mid
+        if high - low <= 1e-12 * max(1.0, abs(high)):
+            break
+    return 0.5 * (low + high)
 
 
 # ── the surface ─────────────────────────────────────────────────────────
@@ -550,9 +725,12 @@ def fit_volatility_smile(
     A smile with a curvature of +25 passes this check and one with -4 fails
     it.
 
-    IT DOES NOT EXTRAPOLATE. `implied_vol_at` refuses strikes outside the
-    fitted range, because a quadratic continued into the wings produces
-    negative variance at a perfectly ordinary distance from the money.
+    IT DOES NOT EXTRAPOLATE, and nothing here evaluates it for you. The
+    fitted range is returned as `strike_range`; the coefficients describe
+    the smile inside it only, and a caller evaluating
+    atm_vol + skew*x + curvature*x^2 must stay inside it, because a
+    quadratic continued into the wings produces negative variance at a
+    perfectly ordinary distance from the money.
     """
     k = np.asarray([float(x) for x in strikes], dtype=float)
     v = np.asarray([float(x) for x in implied_vols], dtype=float)
@@ -562,12 +740,20 @@ def fit_volatility_smile(
         )
     mask = np.isfinite(k) & np.isfinite(v) & (k > 0) & (v > 0)
     k, v = k[mask], v[mask]
-    if k.size < MIN_SMILE_STRIKES:
+    # DISTINCT strikes, not rows. Six quotes at two strikes passed a row
+    # count of six and came back with r_squared 1.0 and a curvature of
+    # 0.0039 -- the minimum-norm solution of an underdetermined fit, a
+    # number with no data behind it. Repeated quotes at one strike are
+    # still used in the fit; they just do not count as more strikes.
+    n_distinct = int(np.unique(k).size)
+    if n_distinct < MIN_SMILE_STRIKES:
         raise ValidationError(
-            f"fit_volatility_smile: {k.size} usable strikes, and a quadratic "
-            f"needs at least {MIN_SMILE_STRIKES} to be a fit rather than an "
-            "interpolation. Three points determine a parabola exactly and "
-            "tell you nothing about whether the shape is real."
+            f"fit_volatility_smile: {n_distinct} distinct usable strikes (from "
+            f"{k.size} quotes), and a quadratic needs at least "
+            f"{MIN_SMILE_STRIKES} to be a fit rather than an interpolation. "
+            "Three points determine a parabola exactly and tell you nothing "
+            "about whether the shape is real; repeated quotes at one strike "
+            "are not more strikes."
         )
     forward = _positive(forward, "forward")
     t = _positive(time_to_expiry, "time_to_expiry")
@@ -582,8 +768,24 @@ def fit_volatility_smile(
 
     fitted = design @ coefficients
     residual = v - fitted
+    # A FLAT SMILE HAS NO VARIANCE TO EXPLAIN, and its total sum of squares
+    # is float residue rather than an exact zero: [0.45]*7 has
+    # total_ss ~ 1e-32 against a residual of the same order, which
+    # reported r_squared = -8.00 on an exact fit and warned that "a
+    # quadratic does not describe this smile" ([0.2]*5 happened to give
+    # 1.0, because that mean is exact in float). A constant smile fitted to
+    # within float precision is a perfect fit and reports 1.0. Should the
+    # residual ever be larger than that, R^2 is undefined (NaN, null at the
+    # agent surface) rather than a ratio of two rounding errors.
+    from standard_quant_tools.metrics.risk_metrics import has_no_dispersion
+
     total_ss = float(((v - v.mean()) ** 2).sum())
-    r_squared = float(1.0 - (residual**2).sum() / total_ss) if total_ss > 0 else 1.0
+    scale = float(np.max(np.abs(v)))
+    if has_no_dispersion(v):
+        exact = float(np.max(np.abs(residual))) <= 1e-9 * scale
+        r_squared = 1.0 if exact else float("nan")
+    else:
+        r_squared = float(1.0 - (residual**2).sum() / total_ss)
 
     violations = _durrleman_violations(c0, c1, c2, x, t)
     for violation in violations:
@@ -601,7 +803,7 @@ def fit_volatility_smile(
             "stale rather than the market being free money -- check the "
             "inputs before trading it."
         )
-    if r_squared < 0.9:
+    if math.isfinite(r_squared) and r_squared < 0.9:
         warnings.append(
             f"R-squared of {r_squared:.2f}: a quadratic does not describe "
             "this smile. Common causes are a mixed-expiry input or a "
@@ -615,7 +817,8 @@ def fit_volatility_smile(
     )
 
     return {
-        "n_strikes": int(k.size),
+        "n_strikes": n_distinct,
+        "n_quotes": int(k.size),
         "forward": float(forward),
         "time_to_expiry": float(t),
         "atm_vol": float(c0),

@@ -160,10 +160,27 @@ may have correlated at +0.7 for five and −0.7 for five; the average is
 meaningless and a hedge sized on it is wrong in both regimes.
 
 The result reports the sign-flip count, the range, and — separately — the
-correlation **conditional on the joint worst decile**. Correlations move
-toward 1 when everything falls together, so a hedge computed on a calm
-sample fails precisely when it is needed. That conditional number is what a
+correlation **conditional on the joint worst decile**: the days on which
+*both* series sit in their own bottom 10%. Correlations move toward 1 when
+everything falls together, so a hedge computed on a calm sample fails
+precisely when it is needed. That conditional number is what a
 diversification claim has to survive.
+
+The joint decile is the intersection, and it is small: two independent
+series share about 1% of their days there, so `n_stress_observations`
+reports its size and below 20 days `stress_correlation` is null with a
+warning saying why. A year of daily data rarely clears that floor; ten years
+does. (The union of the two deciles — either asset down — is two opposing
+arms and reads about −0.6 on independent series, which is not a stress
+correlation.)
+
+Reading it: a correlation measured inside a truncated region is
+**attenuated**. A Gaussian pair at 0.8 measures about 0.4 inside its joint
+worst decile, and one at zero measures zero. The warning fires only when the
+stress correlation exceeds the full-sample one by 0.15 *and* by more than the
+sampling noise of so few days (a one-sided 5% Fisher z test), so it is
+conservative: when it fires, the co-movement in the tail is real and
+stronger than a Gaussian pair's would be.
 
 ### `test_autocorrelation`, `get_entropy_measures`
 
@@ -172,6 +189,11 @@ test per lag. Check 20 lags individually at 5% on white noise and you expect
 one to fire; reporting that as "returns are autocorrelated at lag 13" is an
 uncorrected multiple comparison and is how a great many spurious signals
 begin.
+
+A series that does not vary — a constant, at any level — is refused rather
+than tested: its centred values are rounding residue, and the residue's
+autocorrelations used to answer "significant" for some constants (0.1, 1.23)
+and be refused for others (0.5), depending on how the constant rounds.
 
 Set `squared=True` to test volatility clustering instead of direction. The
 two are cleanly separated on a simulated GARCH series — returns p = 0.12,
@@ -203,6 +225,17 @@ With a `regressor` it tests whether the **relationship** broke — a beta or a
 hedge ratio — rather than whether the mean moved. On a planted break from
 β = 0.5 to β = 2.0 it recovers 0.52 and 2.00.
 
+A constant series is refused (there is no mean to shift, and its F statistic
+was rounding residue over rounding residue — 464, "significant", for a
+constant 100.0), as is a regression that fits exactly on both sides of the
+break. The models are nested, so F is floored at 0.
+
+`detect_change_points` refuses a constant series the same way, and takes
+its prefix sums on the centred segment, so a series sitting at a price level
+far from zero does not turn every candidate split into cancellation noise.
+A split must also gain more than a rounding-sized fraction of the segment's
+own variation.
+
 ### `decompose_returns`
 
 **The arithmetic mean is not what you earned.** Compound growth is the
@@ -225,13 +258,13 @@ that is robust.
 | `compare_distributions` | Are these two samples the same distribution — in shape, not just mean |
 | `test_normality` | How far from normal, and how much does the tail exceed what a normal predicts |
 | `estimate_tail_index` | Which moments actually exist |
-| `get_correlation_stability` | Is this correlation a property of the pair or an average over regimes |
+| `get_correlation_stability` | Is this correlation a property of the pair or an average over regimes; the stress correlation is on days both series sit in their worst decile, with the day count |
 | `decompose_returns` | Where did the compound growth come from |
 | `get_sharpe_stability` | Did the edge decay; the rolling series the warning always promised is returned as `rolling_sharpe_ref` when `run_id` and `name` are given |
 | `get_drawdown_profile` | Every drawdown, not just the worst |
 | `test_autocorrelation` | Is there autocorrelation at all, jointly across lags |
 | `get_entropy_measures` | Is there structure a linear test would miss |
-| `run_seasonality_analysis` | Is this a calendar effect, corrected for having looked at all of them |
+| `run_seasonality_analysis` | Is this a calendar effect, corrected for having looked at all of them. Each period is a Welch t against the rest with Welch-Satterthwaite degrees of freedom, so a small period with a larger variance is not flagged for its size |
 | `get_lead_lag_matrix` | Which series move first — and does anything survive the search size |
 | `test_structural_break` | Did something break at this known point — `break_index` is a position in the series, and the result names the date it lands on |
 | `detect_change_points` | When did the process change, at an unknown date |

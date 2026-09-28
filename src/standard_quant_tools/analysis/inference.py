@@ -415,6 +415,13 @@ def compare_distributions(
     }
 
 
+#: The fewest joint worst-decile days a stress correlation is computed on.
+#: At 2520 independent daily pairs the set holds about 25; at 252 it holds
+#: five or fewer almost every time, and a correlation of five points is
+#: noise.
+STRESS_MIN_OBSERVATIONS = 20
+
+
 def rolling_correlation_stability(
     a: Sequence[float],
     b: Sequence[float],
@@ -440,6 +447,18 @@ def rolling_correlation_stability(
     precisely when it is needed. The correlation conditional on the joint
     worst decile is reported for that reason: it is the number a
     diversification claim has to survive.
+
+    THE JOINT WORST DECILE is the days on which BOTH series sit in their own
+    bottom 10%. Two independent series share about 1% of their days there,
+    so the set is small: `n_stress_observations` reports its size and below
+    `STRESS_MIN_OBSERVATIONS` (20) no correlation is reported. Reading the
+    number: a correlation measured inside a truncated region is ATTENUATED
+    -- for a Gaussian pair it sits well below the full-sample value (a pair
+    at 0.8 measures about 0.4 there). The warning fires when the stress
+    correlation exceeds the full-sample one by 0.15 AND by more than the
+    sampling noise of so few days (a one-sided 5% Fisher z test), so it is
+    conservative: when it fires, the tail co-movement is real and stronger
+    than a Gaussian pair's would be.
     """
     x = np.asarray([float(v) for v in a], dtype=float)
     y = np.asarray([float(v) for v in b], dtype=float)
@@ -473,15 +492,35 @@ def rolling_correlation_stability(
     flips = int((signs[1:] * signs[:-1] < 0).sum())
     within = float((np.abs(values - full) <= 0.2).mean())
 
-    # The joint worst decile: both series in their own bottom 10%.
+    # The joint worst decile: both series in their own bottom 10% on the
+    # same day. The intersection, not the union: the union adds every day
+    # on which ONE asset fell while the other did whatever it did, and on
+    # independent series that set is two opposing arms whose correlation
+    # is strongly negative -- about -0.6 at a true correlation of zero.
     threshold_x = np.percentile(x, 10)
     threshold_y = np.percentile(y, 10)
-    stress = (x <= threshold_x) | (y <= threshold_y)
-    stress_correlation = (
-        float(np.corrcoef(x[stress], y[stress])[0, 1]) if stress.sum() > 5 else None
-    )
+    stress = (x <= threshold_x) & (y <= threshold_y)
+    n_stress = int(stress.sum())
+    stress_correlation: Optional[float] = None
+    stress_note: Optional[str] = None
+    if n_stress < STRESS_MIN_OBSERVATIONS:
+        stress_note = (
+            f"Only {n_stress} day(s) fall in both series' worst decile, fewer "
+            f"than the {STRESS_MIN_OBSERVATIONS} a correlation needs, so "
+            "stress_correlation is not reported. Two independent series share "
+            "about 1% of their days there; a longer sample is the remedy."
+        )
+    elif has_no_dispersion(x[stress]) or has_no_dispersion(y[stress]):
+        stress_note = (
+            "One series does not move across the joint worst-decile days, so "
+            "a correlation there is undefined and is not reported."
+        )
+    else:
+        stress_correlation = float(np.corrcoef(x[stress], y[stress])[0, 1])
 
     warnings: List[str] = []
+    if stress_note is not None:
+        warnings.append(stress_note)
     if flips > 0:
         warnings.append(
             f"The rolling correlation changes SIGN {flips} time(s), ranging "
@@ -495,7 +534,20 @@ def rolling_correlation_stability(
             "correlation. The headline number describes a period that mostly "
             "did not happen."
         )
+    # The joint decile holds a few dozen days, and a correlation of 25
+    # independent points has a standard deviation near 0.2: a bare
+    # "above full plus 0.15" rule fired on about a fifth of independent
+    # pairs. So the excess must also clear the sampling noise of the stress
+    # set -- a one-sided 5% Fisher z test against the full-sample value,
+    # whose own noise is negligible beside it.
+    stress_excess_is_real = False
     if stress_correlation is not None and stress_correlation > full + 0.15:
+        clip = 1.0 - 1e-9
+        gap = math.atanh(min(stress_correlation, clip)) - math.atanh(
+            max(min(full, clip), -clip)
+        )
+        stress_excess_is_real = gap > 1.645 / math.sqrt(n_stress - 3)
+    if stress_excess_is_real:
         warnings.append(
             f"Correlation in the joint worst decile is {stress_correlation:.2f} "
             f"against a full-sample {full:.2f}. Diversification is weakest "
@@ -521,6 +573,7 @@ def rolling_correlation_stability(
         "sign_flips": flips,
         "fraction_within_0_2": within,
         "stress_correlation": stress_correlation,
+        "n_stress_observations": n_stress,
         "warnings": warnings,
     }
 

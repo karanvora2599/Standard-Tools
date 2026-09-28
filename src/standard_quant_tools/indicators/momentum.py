@@ -1,17 +1,37 @@
 import logging
-from typing import Any
+from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
 
 from standard_quant_tools.error import ValidationError
-from standard_quant_tools.validation import (
-    last_finite,
-    require_finite_array,
-    validate_series,
-)
+from standard_quant_tools.validation import require_finite_array, validate_series
 
 logger = logging.getLogger(__name__)
+
+
+class _LastFinite:
+    """
+    An indicator's latest finite reading, formatted only when a log record
+    is actually emitted.
+
+    A debug line must not be able to fail the computation it describes.
+    `last_finite` is the right call for a caller that NEEDS a reading -- it
+    refuses, with a reason, when the window is longer than the data -- but
+    as a logging argument it ran on every call at every log level and
+    raised on legitimate warm-up output. This renders "none" instead.
+    """
+
+    __slots__ = ("_series",)
+
+    def __init__(self, series: Any) -> None:
+        self._series = series
+
+    def __str__(self) -> str:
+        values = np.asarray(self._series, dtype=float)
+        finite = values[np.isfinite(values)]
+        return f"{finite[-1]:.4f}" if finite.size else "none"
+
 
 _cpp_core: Any = None
 try:
@@ -155,6 +175,14 @@ def stochastic_oscillator(
     )
 
     # ── C++ fast path ─────────────────────────────────────────────────────────
+    # Only the kernel call is inside the try. The debug line below used to be
+    # in here too, with `last_finite(d, ...)` as an argument -- evaluated
+    # whether or not DEBUG was on, and raising when %D had no finite value
+    # yet (k_period <= n < k_period + d_period - 1: 14 and 15 bars at the
+    # defaults). The except below swallowed that as a kernel failure, fell
+    # back to pandas, and the same line raised again there, so a valid call
+    # was refused by its own logging.
+    result: Optional[pd.DataFrame] = None
     if HAS_CPP and _cpp_core is not None:
         try:
             h_arr = high.to_numpy(dtype=np.float64)
@@ -163,44 +191,37 @@ def stochastic_oscillator(
             out = _cpp_core.stochastic_oscillator(
                 h_arr, l_arr, c_arr, k_period, d_period
             )
-            k = pd.Series(out[:, 0], index=close.index)
-            d = pd.Series(out[:, 1], index=close.index)
-            result = pd.DataFrame({"Stoch_K": k, "Stoch_D": d})
-            valid_k = k.dropna()
-            if not valid_k.empty:
-                logger.debug(
-                    "[stochastic] K last=%.2f  D last=%.2f",
-                    float(valid_k.iloc[-1]),
-                    last_finite(d, "d"),
-                )
-            return result
+            result = pd.DataFrame(
+                {"Stoch_K": out[:, 0], "Stoch_D": out[:, 1]}, index=close.index
+            )
         except Exception as exc:
             logger.warning("[stochastic] C++ failed (%s) — using pandas", exc)
 
     # ── Pandas fallback ───────────────────────────────────────────────────────
-    lowest_low = low.rolling(window=k_period).min()
-    highest_high = high.rolling(window=k_period).max()
+    if result is None:
+        lowest_low = low.rolling(window=k_period).min()
+        highest_high = high.rolling(window=k_period).max()
 
-    # A zero-range window (flat prices across the whole lookback) makes %K a
-    # 0/0. Raw pandas yields NaN there while the C++ kernel above yields 0.0,
-    # so the same call returned different values depending only on whether
-    # _sqt_core happened to be built. Match the compiled kernel's convention
-    # so the result is build-independent; `range_safe` also keeps this from
-    # being an unguarded division, consistent with the degenerate-window
-    # handling in spread_zscore/rolling_beta.
-    price_range = highest_high - lowest_low
-    range_safe = price_range.where(price_range > 0)
-    k = (100 * ((close - lowest_low) / range_safe)).where(
-        price_range.isna() | (price_range > 0), 0.0
-    )
-    d = k.rolling(window=d_period).mean()
+        # A zero-range window (flat prices across the whole lookback) makes
+        # %K a 0/0. Raw pandas yields NaN there while the C++ kernel above
+        # yields 0.0, so the same call returned different values depending
+        # only on whether _sqt_core happened to be built. Match the compiled
+        # kernel's convention so the result is build-independent;
+        # `range_safe` also keeps this from being an unguarded division,
+        # consistent with the degenerate-window handling in
+        # spread_zscore/rolling_beta.
+        price_range = highest_high - lowest_low
+        range_safe = price_range.where(price_range > 0)
+        k = (100 * ((close - lowest_low) / range_safe)).where(
+            price_range.isna() | (price_range > 0), 0.0
+        )
+        d = k.rolling(window=d_period).mean()
+        result = pd.DataFrame({"Stoch_K": k, "Stoch_D": d})
 
-    result = pd.DataFrame({"Stoch_K": k, "Stoch_D": d})
-    valid_k = k.dropna()
-    if not valid_k.empty:
+    if logger.isEnabledFor(logging.DEBUG):
         logger.debug(
-            "[stochastic] K last=%.2f  D last=%.2f",
-            float(valid_k.iloc[-1]),
-            last_finite(d, "d"),
+            "[stochastic] K last=%s  D last=%s",
+            _LastFinite(result["Stoch_K"]),
+            _LastFinite(result["Stoch_D"]),
         )
     return result

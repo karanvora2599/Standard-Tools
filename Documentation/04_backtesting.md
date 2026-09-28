@@ -236,10 +236,34 @@ daily equity bars and wrong for everything else the data layer now supports:
 1h, 5m, 1m and 24/7 markets. An hourly backtest reported a "Sharpe" annualized
 as though its bars were trading days.
 
-`periods_per_year` is now a parameter on `run_strategy`,
-`run_strategy_summary` and `batch_run_strategy`, defaulting to `252` so
-existing callers are unchanged. Python resolves the calendar; the kernel stays
-calendar-agnostic.
+<a id="bars-per-year"></a>
+**Bars per year.** The native kernels (`run_strategy`, `run_strategy_summary`,
+`batch_run_strategy`, `batch_backtest_crossover`) take `periods_per_year` and
+stay calendar-agnostic. The Python entry points — `run_strategy`,
+`backtest_grid`, `run_signal_panel_backtest` and `compute_stitched_metrics` —
+take `periods_per_year=` and `interval=` and resolve the number once, for
+both paths, in this order:
+
+1. `periods_per_year` if given (a positive whole number, not a bool);
+2. the `interval` the bars were fetched at (`"1d"` → 252, `"1wk"`/`"5d"` →
+   52, `"1mo"` → 12, `"3mo"` → 4);
+3. the median spacing of the (sorted, unique) date index, **bucketed**, not
+   divided — business days have a median gap of one calendar day, and
+   365.25 / 1 would say 365: daily → 252, weekly → 52, monthly → 12,
+   quarterly → 4;
+4. otherwise 252, with a warning naming both parameters — intraday bars
+   (their year depends on the venue's session length), irregular spacing, or
+   an index that is not dates.
+
+The value used comes back as `periods_per_year` and
+`periods_per_year_source` (`explicit`, `interval`, `inferred`, `default`);
+`backtest_grid` stamps them on `attrs`. Daily data gives exactly the numbers
+it always did. Before, all of these used 252 whatever the bars were: weekly
+bars reported a volatility √(252/52) = 2.2× too high, and monthly bars a CAGR
+of 38%/yr against a true 1.6% (so a Calmar off by far more), with no warning.
+The agent tools pass the interval they fetched (`"1d"`), so a holiday-gapped
+daily index never warns. The interval table lives in
+`metrics/annualization.py` and is shared with the modeling layer.
 
 **Calmar counts intervals, on both backends.** N level observations span N−1
 return intervals. Python was corrected first, which left the native kernel
@@ -322,7 +346,12 @@ compounds every close-to-close return, so LRCX's 10:1 split reported
 buy-and-hold at **−62%** against +276% true, and a short held through it
 printed a fictitious +93%. `run_strategy` now screens every bar-to-bar move
 beyond 35% (`SPLIT_SCREEN_THRESHOLD`) and emits a `SPLIT SCREEN` warning
-naming the dates and the moves. The wording depends on what is known about
+naming the dates and the moves. `run_portfolio_simulation` runs the same
+screen (one helper, `backtest/screens.py`) over every ticker that ever
+carries a weight, prefixing the ticker; it too takes `adjusted=` or reads
+each frame's `attrs`. It used to have none: a 10:1 split in one of two held
+tickers moved final equity by −43.9% and the only caveat was "cash went
+negative". The wording depends on what is known about
 the bars: pass `adjusted=` (a provider's `DataSetMetadata.adjusted`), or let
 the engine read `price_data.attrs["adjusted"]` — the Databento provider sets
 it to `False` on the frames it returns — and the warning says whether the
@@ -334,9 +363,10 @@ fill caveat, so it reaches every tool built on the engine;
 now starts from the engine's.
 
 **Validation:** `run_strategy` raises `ValidationError` if `initial_capital`
-isn't finite and `> 0`, or if `commission_pct`/`slippage_pct` isn't finite
-and `>= 0` — the same self-correcting-error pattern used everywhere else in
-this library. Previously a zero, negative, or non-finite `initial_capital`
+isn't finite and `> 0`, if `commission_pct`/`slippage_pct` isn't finite
+and `>= 0`, or if `risk_free_rate` isn't finite (any sign) — checked up front
+for both paths, as `backtest_grid` does — the same self-correcting-error
+pattern used everywhere else in this library. Previously a zero, negative, or non-finite `initial_capital`
 was accepted silently and produced `inf`/`nan` in `total_return`/
 `calmar_ratio` instead of raising.
 
@@ -367,10 +397,13 @@ bar into two legs:
 - **Intraday leg** (this bar's reference price → close), priced at *today's*
   position — a same-day entry only earns its own reference-to-close move.
 
-A held (unchanged) position sums these two legs rather than compounding them
-— a second-order, daily-bar-negligible difference from pure close-to-close
-(their product is the only gap, e.g. two 0.5% legs differ from true
-compounding by ~0.0025%).
+The two legs **compound**: `(1 + yesterday × overnight) × (1 + today ×
+intraday) − 1`, on the C++ and the Python path alike, so a held position
+earns exactly the close-to-close move and a lot's equity growth at zero cost
+equals its fill-to-fill return. They used to be added, which dropped the
+product term: small per bar, but over five years of daily bars the equity
+curve ended 0.2–0.5 points below the fill-to-fill trade log at zero cost.
+Every `next_open` and `hl2_exploratory` number moves slightly.
 
 ```python
 result_close = run_strategy(df, signals, fill_price="close")             # default
@@ -494,6 +527,16 @@ A missing column raises a `ValidationError` naming both the column and the
 fill mode, rather than surfacing as a bare `KeyError` from inside the return
 calculation. `signal_series` is validated for finiteness too.
 
+**The date index must be sorted and unique.** `price_data`'s index is bar
+order, so an unsorted one is refused (sort it with `df.sort_index()`), and a
+repeated date is refused by name — in `run_strategy` on both paths, in
+`backtest_grid`, and in `run_signal_panel_backtest` for every ticker's bars
+and for the signal panel. `signal_series` is read onto the bars by date, so
+its own row order does not matter, but a repeated signal date is refused
+too. Before, a reversed frame was backtested backwards (+9.9% became −19.8%,
+no warning), and a repeated bar raised a bare pandas `ValueError` natively
+while the Python path and the grid silently counted it twice.
+
 This contract used to be enforced only inside the `fill_price="close"` C++
 branch, which had two consequences worth knowing if you are upgrading:
 
@@ -535,6 +578,19 @@ signal, since `run_strategy` multiplies the signal value directly into
 `strategy_return = lagged_signal * market_return`. `return_pct` already
 scales with `position_size` — it is not silently treated as if every trade
 were exactly 1x/-1x.
+
+**How exactly the log reconciles with the equity curve.** At zero cost, a
+unit-size lot's `return_pct` is exactly the curve's growth over the lot's
+bars, under every `fill_price`. With costs they agree to first order only:
+`return_pct` charges each event's cost as a simple fraction of the lot's
+notional, while the curve deducts it from that bar's equity and compounds, so
+an entry cost forgoes the lot's growth and an exit cost is charged on the
+drifted notional. The gap is about `cost × |lot return|` per lot — at 15 bps
+over five years of daily bars, at most 0.11 points on one lot and 0.07–0.15
+points over the whole log, the log on the high side. A lot sized other than
+1 also differs at zero cost, because a fractional position compounds
+differently from its simple return. Read performance from the curve and
+attribution from the log; do not expect their sums to match to the cent.
 
 ---
 
@@ -650,7 +706,33 @@ results = backtest_grid(
 
 # 3 × 4 = 12 combinations, sorted best → worst Sharpe
 print(results[["fast_period", "slow_period", "sharpe_ratio", "total_return", "max_drawdown"]].head())
+print(results.attrs["n_unrankable"], results.attrs["warnings"])
 ```
+
+**Only a row that traded and has a finite metric is ranked.** The rest — a
+combination that never traded, or a ratio over an empty denominator (an
+infinite Sortino or Calmar) — keep their values and follow every ranked row
+in grid order; `attrs["n_unrankable"]` counts them and `attrs["warnings"]`
+says so. Before, pandas put `+inf` at the top of a descending sort, and a
+do-nothing combination (a slow average longer than the window) has no
+drawdown and no volatility, so it won `backtest_grid` under Calmar, Sortino,
+`max_drawdown` and `annualized_volatility` while a genuine +50% strategy in
+the same grid ranked last. Ties keep grid order (the sort is stable). Every
+ranked door shares the rule (`backtest/ranking.py`): `backtest_grid` on both
+paths, `compare_strategies`, the regime-adaptive walk-forward's choice between
+strategies, `run_strategy_matrix` and `run_backtest_optimization`, each of
+which reports `n_unrankable`.
+
+**A repeated grid value runs once.** Each axis is deduplicated, first
+occurrence first (`10` and `10.0` are one value), before the product is
+taken, so `{"fast_period": [10, 10, 20], "slow_period": [50, 50]}` runs two
+backtests, not six. `attrs["n_combinations"]` counts distinct combinations
+and `attrs["duplicate_values_dropped"]` names what was dropped. The row
+count is what a caller hands `deflated_sharpe_ratio` as `n_trials`, and six
+rows for two combinations tripled it and shrank the observed dispersion,
+nearly doubling the selection-bias benchmark. `run_backtest_optimization`'s
+`n_combinations` and `get_robustness_diagnostics`' `n_trials` are the
+distinct count.
 
 **The direction follows the metric, and only the tools know that.**
 `backtest_grid` is a library function: it sorts descending unless you pass
@@ -704,10 +786,12 @@ Pass `n_workers=1` to run sequentially (no subprocess overhead — useful in not
 
 **Validation:** `backtest_grid` applies the same checks as `run_strategy`
 (see [Running a Backtest](#running-a-backtest) above) — `initial_capital`
-must be finite and `> 0`, and `commission_pct`/`slippage_pct` must each be
-finite and `>= 0` — raising `ValidationError` up front rather than letting a
-bad value silently produce `inf`/`nan` metrics across every combination in
-the grid.
+must be finite and `> 0`, `commission_pct`/`slippage_pct` must each be
+finite and `>= 0`, `risk_free_rate` must be finite, and `price_data`'s index
+must be sorted and unique — raising `ValidationError` up front rather than
+letting a bad value silently produce `inf`/`nan` metrics across every
+combination in the grid. `periods_per_year=`/`interval=` are resolved once
+for the whole grid, as described under [bars per year](#bars-per-year).
 
 ---
 
@@ -1486,20 +1570,22 @@ trial in one call.
 |---|---|---|
 | `final_equity` | float | Portfolio value at end |
 | `total_return` | float | Net return as fraction (0.42 = +42%) |
-| `annualized_volatility` | float | Return std × √252 |
+| `annualized_volatility` | float | Return std × √`periods_per_year` |
 | `sharpe_ratio` | float | Annualized excess return / vol |
-| `sortino_ratio` | float | Annualized excess return / downside vol |
+| `sortino_ratio` | float | Annualized excess return / downside vol. `inf` with no downside and a positive mean excess; `nan` with no downside and no excess (a book that never moved) |
 | `max_drawdown` | float | Worst peak-to-trough decline (negative) |
-| `calmar_ratio` | float | CAGR / \|max drawdown\| |
+| `calmar_ratio` | float | CAGR / \|max drawdown\|. `inf` with no drawdown and a positive CAGR; `nan` when the curve never moved |
 | `win_rate` | float | Fraction of profitable trades |
-| `profit_factor` | float | Gross profit / gross loss. `inf` whenever gross loss is zero (no losing trades) — including the degenerate case where gross profit is *also* zero, e.g. every trade returning exactly 0.00%. Both backends agree on this; the C++ kernel previously returned `0.0` for that 0/0 case while Python returned `inf`. |
+| `profit_factor` | float | Gross profit / gross loss. `nan` when nothing traded (it used to read `0.0`, the value "every trade lost" produces). `inf` whenever gross loss is zero (no losing trades) — including the degenerate case where gross profit is *also* zero, e.g. every trade returning exactly 0.00%. Both backends agree on this; the C++ kernel previously returned `0.0` for that 0/0 case while Python returned `inf`. |
 | `num_trades` | int | Number of completed round-trips |
 | `avg_trade_return_pct` | float | Average trade P&L in % |
 | `turnover` | float | Position changed, summed over bars, in signal units — a flat→long→flat round trip is 2.0 |
 | `realized_cost_pct` | float | `turnover × (commission_pct + slippage_pct)`: exactly what the returns were reduced by |
 | `equity_curve` | pd.Series | Day-by-day portfolio value |
 | `trade_log` | pd.DataFrame | Per-trade entry/exit details (only with `include_trade_log=True`) |
-| `warnings` | list[str] | The look-ahead caveat for the chosen `fill_price`, and the split screen |
+| `warnings` | list[str] | The look-ahead caveat for the chosen `fill_price`, the split screen, and how the metrics were annualized when that was a guess |
+| `periods_per_year` | int | Bars per year every annualized metric used — see [bars per year](#bars-per-year) |
+| `periods_per_year_source` | str | `explicit`, `interval`, `inferred` or `default` |
 
 
 ## Two tools it is easy to miss

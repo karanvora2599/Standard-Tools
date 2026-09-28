@@ -36,7 +36,6 @@ import datetime as _dt
 import math
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
-from standard_quant_tools.analysis.derivatives import _positive
 from standard_quant_tools.delta_one.daycount import (
     CONVENTIONS,
     DEFAULT_CONVENTION,
@@ -56,13 +55,23 @@ _ONE_YEAR = (_dt.date(2026, 1, 1), _dt.date(2027, 1, 1))
 #: between the expiries", never the two expiry dates -- so ACT/ACT cannot
 #: split the period at a year boundary here and divides by an ordinary
 #: 365-day year. A roll whose period contains 29 February accrues
-#: marginally less than a date-aware ACT/ACT would say; the other three
-#: conventions have constant denominators and are exact.
+#: marginally less than a date-aware ACT/ACT would say; ACT/365F and ACT/360
+#: have constant denominators and are exact.
+#:
+#: 30/360 IS NOT HERE, because it is a rule for counting the NUMERATOR from
+#: dates -- every month 30 days, a 31st clamped to the 30th -- and a roll
+#: arrives as a count of actual days. Its denominator alone divides that
+#: count, which is ACT/360 reported under another name: a 20 March to
+#: 19 June quarterly roll is 91 actual days and 89 counted ones, so the
+#: roll yield came back 2.2% low and labelled "30/360". `roll_analysis`
+#: refuses it and names the exact remedy.
 DAY_COUNT_DENOMINATORS: Dict[str, float] = {
-    name: _day_count_parts(*_ONE_YEAR, convention=name)[1] for name in CONVENTIONS
+    name: _day_count_parts(*_ONE_YEAR, convention=name)[1]
+    for name in CONVENTIONS
+    if name != "30/360"
 }
 
-from ._numbers import positive
+from ._numbers import finite, non_negative, positive
 from .carry import observed_carry_rate
 
 __all__ = ["futures_curve", "roll_analysis"]
@@ -139,11 +148,21 @@ def futures_curve(
         )
 
     prices = [row["price"] for row in rows]
-    rising = all(b > a for a, b in zip(prices, prices[1:]))
-    falling = all(b < a for a, b in zip(prices, prices[1:]))
-    if rising:
+    # A step inside float noise of the price level is no step. Strict
+    # comparisons classified three contracts all at 5000 as "mixed" and
+    # warned about a kinked curve hiding a dislocated segment -- of a curve
+    # with no segments at all. A flat step inside a rising curve does not
+    # make it non-monotonic either, so the labels are WEAK: contango means
+    # no step down and at least one up.
+    tolerance = 1e-12 * max(prices)
+    steps = [b - a for a, b in zip(prices, prices[1:])]
+    any_up = any(step > tolerance for step in steps)
+    any_down = any(step < -tolerance for step in steps)
+    if not any_up and not any_down:
+        shape = "flat"
+    elif not any_down:
         shape = "contango"
-    elif falling:
+    elif not any_up:
         shape = "backwardation"
     else:
         shape = "mixed"
@@ -255,27 +274,50 @@ def roll_analysis(
     hard-coded 365 and named the convention nowhere -- not in the result,
     not in a warning, not in its own signature -- so a book financing
     ACT/360 compared its repo against someone else's convention.
+
+    30/360 IS REFUSED. It counts the days between two DATES, and this
+    function is given the days already counted; see
+    `DAY_COUNT_DENOMINATORS` for what it used to compute instead.
     """
     convention = _canonical_convention(day_count)
+    if convention not in DAY_COUNT_DENOMINATORS:
+        raise ValidationError(
+            f"roll_analysis: day_count={day_count!r} counts the days between "
+            "two DATES (every month 30 days, a 31st clamped), and a roll is "
+            "given here as days already counted, so it cannot be honoured: "
+            "dividing actual days by 360 is ACT/360 under another name. If "
+            "the roll really accrues 30/360, count the period from its dates "
+            "with daycount.day_count(start, end, convention='30/360')[0] and "
+            "pass that count as the days with day_count='ACT/360' -- the "
+            "denominators are the same 360. Otherwise use ACT/360 for a "
+            "money-market comparison."
+        )
     denominator = DAY_COUNT_DENOMINATORS[convention]
     f0 = positive(front_price, "front_price")
     f1 = positive(next_price, "next_price")
     m0 = positive(multiplier, "multiplier")
     m1 = positive(next_multiplier, "next_multiplier") if next_multiplier else m0
-    n = float(contracts_held)
-    if not math.isfinite(n) or n == 0:
+    n = finite(contracts_held, "contracts_held")
+    if n == 0:
         raise ValidationError(
             f"contracts_held={contracts_held!r} is not a position. Pass a "
             "signed non-zero size -- negative for a short, whose roll "
             "economics are the opposite sign of a long's."
         )
-    days = float(days_to_front_expiry)
-    if not math.isfinite(days) or days <= 0:
+    days = finite(days_to_front_expiry, "days_to_front_expiry")
+    if days <= 0:
         raise ValidationError(
             f"days_to_front_expiry={days_to_front_expiry!r} must be positive. "
             "A contract at or past expiry cannot be rolled, it can only be "
             "settled."
         )
+    # Costs, so none of them can be negative: a negative commission made
+    # the roll a CREDIT for trading (-10 per contract reported an execution
+    # cost of -199.01), and a NaN one passed every comparison below and
+    # came back as a NaN cost with no error.
+    cost_per_contract = non_negative(cost_per_contract, "cost_per_contract")
+    spread_ticks = non_negative(spread_ticks, "spread_ticks")
+    tick_value = non_negative(tick_value, "tick_value")
 
     if spread_ticks and not tick_value:
         # `spread_ticks * tick_value` with tick_value at its default of
@@ -314,7 +356,7 @@ def roll_analysis(
     # annualized break-even on an unchanged $7,540 cost. `futures_curve`
     # 140 lines above uses the expiry gap and always did.
     carry_years = (
-        float(days_between_expiries) / denominator
+        finite(days_between_expiries, "days_between_expiries") / denominator
         if days_between_expiries is not None
         else None
     )

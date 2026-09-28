@@ -27,6 +27,17 @@ accepted anywhere in `[-MAX_RATE, MAX_RATE]` (`MAX_RATE = 10.0`, matching
 case for an FX option's foreign rate and for a commodity whose convenience
 yield exceeds its storage cost. A `>= 0` guard refused exactly those.
 
+**So is `risk_free_rate`, and so is each rate times the time.** The rate had
+no bound at all: `r=-1e300` raised a bare `OverflowError`, `r=nan` priced to
+NaN (a null price at the agent surface, with no warning), and `r=1e300`
+returned a call worth exactly the spot. Both rates are now refused unless
+finite and within `±MAX_RATE`, and each product `rate × time_to_expiry` is
+refused above `MAX_EXPONENT = 700` (matching `analysis.derivatives`) — each
+factor can be inside its own bound while the product is not: `r=-9` at
+`T=100` asks `exp()` for 900. Negative rates inside the bound price
+normally. A price that still comes out non-finite is refused rather than
+returned.
+
 **Scope, stated explicitly:** `time_to_expiry` must be strictly `> 0`. An expired or expiring option's value is its intrinsic value (`max(S-K, 0)` / `max(K-S, 0)`) — not something these formulas are valid for. Compute that directly rather than calling `black_scholes_price` with `time_to_expiry=0`.
 
 ---
@@ -113,7 +124,9 @@ print(iv_result.implied_volatility)
 ```
 
 `get_option_pricing` bundles price + all five Greeks in one call (avoiding two
-separate round trips for a common combined need); `get_implied_volatility` is
+separate round trips for a common combined need) under every closed-form
+model; the binomial lattice returns delta and gamma only, with `vega`,
+`theta` and `rho` null and a note saying why. `get_implied_volatility` is
 the reverse direction (price known, volatility unknown).
 
 **Two things the tool does that this module does not.** `get_option_pricing`
@@ -134,10 +147,12 @@ and they are not the same number.
 from standard_quant_tools.error import ValidationError
 
 # spot/strike/time_to_expiry/volatility <= 0 or above their magnitude limits
-# (1e12 for a price, 100 for a year count or a volatility), and an unknown
-# option_type, all raise ValidationError with a message naming the offending
-# field and value. A negative dividend_yield does not: it is bounded on
-# magnitude at MAX_RATE and priced as given.
+# (1e12 for a price, 100 for a year count or a volatility), a risk_free_rate
+# or dividend_yield that is not finite or exceeds MAX_RATE in magnitude, a
+# rate x time_to_expiry above MAX_EXPONENT, and an unknown option_type, all
+# raise ValidationError with a message naming the offending field and value.
+# A negative rate or dividend_yield does not: both are bounded on magnitude
+# and priced as given.
 ```
 
 `black_scholes_price`/`black_scholes_greeks`/`implied_volatility` never raise anything other than `ValidationError` — there is no network call, external API, or optional dependency in this module to fail in a different way.

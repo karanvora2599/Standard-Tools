@@ -40,6 +40,7 @@ import numpy as np
 import pandas as pd
 
 from standard_quant_tools.error import ValidationError
+from standard_quant_tools.indicators.volatility import collapse_flat_windows
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +147,39 @@ def _stack_panel(
     return index, high, low, close, volume  # type: ignore[return-value]
 
 
+def _refuse_infinities(tickers: Sequence[str], **columns: Optional[np.ndarray]) -> None:
+    """Refuse +/-inf in any stacked column, naming the tickers that hold it.
+
+    WHY HERE. The per-ticker wrappers refuse an infinity at their own
+    boundary; the native kernel took it, and the Wilder recursions (rsi,
+    atr, adx) carry an inf into every later bar -- one inf bar left 0 of 55
+    later RSI and ATR values finite, and a stochastic %D that never
+    recovered, while bollinger_bands in the same call went back to finite
+    numbers. So the same universe was refused without the extension and
+    answered with it -- by NaN from the inf bar to the end of the history.
+
+    NaN is not refused here. It is how a missing bar is spelled, and the
+    kernel treats it as a gap: the windows that contain it are NaN and the
+    indicator resumes after it.
+    """
+    for column, matrix in columns.items():
+        if matrix is None:
+            continue
+        bad = np.isinf(matrix)
+        if not bad.any():
+            continue
+        rows = np.flatnonzero(bad.any(axis=1))
+        named = [tickers[i] for i in rows[:5]]
+        more = f" and {len(rows) - 5} more" if len(rows) > 5 else ""
+        raise ValidationError(
+            f"technical_indicators_panel: {int(bad.sum())} infinite "
+            f"{column.capitalize()} value(s) in {named}{more}. An infinity is "
+            "not a price, and a Wilder-smoothed indicator carries it into "
+            "every later bar. Replace it with NaN to mark the bar as "
+            "missing, or drop the bar."
+        )
+
+
 def technical_indicators_panel(
     ohlcv_by_ticker: Mapping[str, pd.DataFrame],
     indicators: Sequence[str],
@@ -191,7 +225,10 @@ def technical_indicators_panel(
 
     Raises:
         ValidationError: on an unknown indicator name, an empty universe, a
-            missing OHLC(V) column, or tickers with no bars in common.
+            missing OHLC(V) column, tickers with no bars in common, or a
+            +/-inf value on the shared bars. NaN is not refused by that
+            check: it marks a missing bar, which the native kernel treats
+            as a gap.
 
     Five of these run in the native kernel over the whole matrix; the rest
     loop the per-ticker wrappers, which is the same arithmetic and the same
@@ -216,6 +253,7 @@ def technical_indicators_panel(
         tickers,
         need_volume=bool(wanted & _VOLUME_INDICATORS),
     )
+    _refuse_infinities(tickers, high=high, low=low, close=close, volume=volume)
     native_wanted = wanted & _NATIVE_INDICATORS
     looped_wanted = wanted - _NATIVE_INDICATORS
     logger.debug(
@@ -247,6 +285,12 @@ def technical_indicators_panel(
                 stoch_d_period=stoch_d_period,
             )
         )
+        if "bollinger_bands" in raw:
+            # The per-ticker wrapper sets the bands to the price on a flat
+            # window; the panel column must be the wrapper's answer.
+            raw["bollinger_bands"] = collapse_flat_windows(
+                close, np.array(raw["bollinger_bands"]), bollinger_period
+            )
     elif native_wanted:
         raw.update(
             _panel_fallback(

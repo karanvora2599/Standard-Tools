@@ -134,6 +134,14 @@ Inputs are also validated for finiteness — a NaN in `asset_returns` or
 all-NaN coefficients that look like a completed regression. The same contract
 applies to `multi_factor_regression`.
 
+**A rank-deficient design is refused, not answered.** Where `rolling_factor_loadings`
+leaves a rank-deficient window NaN, `multi_factor_regression` — one regression, not a
+series of windows — raises `ValidationError` naming the dependent factor(s): a duplicated
+factor, one that is a sum or multiple of others (`c = a + b`, `b = 1.1 a`), or a constant
+one, which duplicates the intercept. Their loadings are not identified; least squares used
+to split one loading between two identical columns and report t-statistics that were
+rounding noise (NaN, or a confident 1.5e-7). Drop the named factor and rerun.
+
 ### Detecting regime shifts
 
 ```python
@@ -303,7 +311,13 @@ print("C++ cointegration active:", HAS_CPP)
 | `p_value` | `float` | MacKinnon cointegration p-value |
 | `critical_values` | `dict` | `{"1%":..., "5%":..., "10%":...}` — sample-size adjusted |
 | `half_life_days` | `float` | AR(1) mean-reversion half-life in bars |
+| `half_life_mean_reverting` | `bool` | The half-life's own Dickey-Fuller t-statistic clears the 5% Engle-Granger critical value |
+| `half_life_t_statistic`, `half_life_critical_value` | `float` | That test's statistic and critical value |
 | `n_obs` | `int` | Observations used after index alignment |
+
+`cointegration_test` refuses fewer than **20** aligned observations (the pair scan shares
+the floor). Below it the test answered p = nan at n = 0 and p = 0.85 at n = 8 as if either
+were a finding.
 
 ---
 
@@ -340,8 +354,26 @@ print(f"Half-life: {hl:.1f} bars")
 #   > 60 bars → slow; may need patience or tighter entry thresholds
 ```
 
-Internally fits `ΔS_t = α + β · S_{t-1} + ε` via OLS and computes `−ln(2) / β`.
-Returns `float('inf')` when the spread is not mean-reverting (β ≥ 0).
+Internally fits `ΔS_t = α + β · S_{t-1} + ε` via OLS and computes the discrete
+half-life `log(0.5) / log(1 + β)`. Returns `float('inf')` when β ≥ 0.
+
+**A finite half-life is not evidence of mean reversion.** On a random walk β is negative
+about half the time and small the rest: of 1 000 random walks of 250 observations, 95.5%
+came back with a finite half-life and 84% inside a 5–126 bar screen (median 36).
+`half_life_statistics(spread)` returns the half-life with the Dickey-Fuller t-statistic of
+the same regression, the 5% critical value it has to clear and a `mean_reverting` flag —
+which the random walks pass about 5% of the time. Pass `fitted_residual=True` for the
+residual of a regression of one price on another (MacKinnon's two-variable critical value,
+about −3.36 at 250 observations, instead of −2.87). `cointegration_test` and
+`delta_one.basis_history` report it beside their half-life.
+
+```python
+from standard_quant_tools.analysis.cointegration import half_life_statistics
+
+stats = half_life_statistics(spread, fitted_residual=True)
+if stats["mean_reverting"]:
+    print(f"Half-life {stats['half_life']:.1f} bars (t = {stats['t_statistic']:.2f})")
+```
 
 ---
 
@@ -363,6 +395,8 @@ exit_signal = z_rolling.abs() < 0.5
 ```
 
 > **Look-ahead bias warning** — with `window=None` (the default), `spread_zscore` normalises using the full-sample mean and standard deviation at **every** row, including bars that lie in the future relative to that row. This makes the static form unsuitable for generating historical trading signals in a backtest — each timestamp's z-score would be informed by returns that hadn't happened yet at that point in time. Use it only for descriptive statistics on a fixed historical sample (e.g. summarising how far the spread has strayed from its mean over the full period). Always pass an explicit `window` (20–60 bars is typical) when producing signals for backtesting or live trading.
+
+A spread that does not move gives 0.0 everywhere in the full-sample form and NaN in a flat rolling window. "Does not move" is the library's relative test (`has_no_dispersion`), not `std == 0`: a spread flat at 12.3456 has a standard deviation of about 7e-15, and the exact test divided rounding residue by rounding residue into a z-score of 0.99.
 
 ---
 
@@ -473,10 +507,27 @@ result = scan_cointegrated_pairs(prices)
 # MultiIndex (symbol_a, symbol_b); one row per pair
 result.columns
 # ['intercept', 'hedge_ratio', 'adf_statistic', 'optimal_lag', 'p_value',
-#  'cv_1pct', 'cv_5pct', 'cv_10pct', 'half_life_days', 'n_obs', 'cointegrated']
+#  'cv_1pct', 'cv_5pct', 'cv_10pct', 'half_life_days', 'n_obs', 'cointegrated',
+#  'p_value_reverse', 'p_value_both', 'direction_consistent', 'p_value_bh',
+#  'cointegrated_fdr']
 
-tradeable = result[result["cointegrated"] & result["half_life_days"].between(5, 60)]
+tradeable = result[
+    result["cointegrated_fdr"] & result["half_life_days"].between(5, 60)
+]
 ```
+
+**Both orders, and many tests.** Engle-Granger is not symmetric: on 24 random walks, 65 of
+276 verdicts flipped when the columns were swapped. Every pair is also tested with the
+series reversed, in the same native call: `p_value_reverse` is that p-value, `p_value_both`
+the larger of the two, and `direction_consistent` whether the two orders agree at 5%. And a
+screen is many tests — 276 unrelated pairs clear 5% about 14 times by chance — so
+`p_value_bh` is the Benjamini-Hochberg adjustment of `p_value_both` across every answerable
+pair and `cointegrated_fdr` is `p_value_bh <= fdr` (default 0.05). On those 276 random
+walks, none survive. Benjamini-Yekutieli is the conservative alternative when the pairs
+are strongly dependent (they share series); `benjamini_hochberg` is exported for
+recomputing either. `cointegrated` and `p_value` keep their single-order meaning. A
+degenerate pair (the same series twice, an exact affine pair) has NaN p-values and is not
+counted as a test. At least 20 aligned bars are required.
 
 **Arguments**
 
@@ -486,6 +537,7 @@ tradeable = result[result["cointegrated"] & result["half_life_days"].between(5, 
 | `pairs` | Which pairs to test. Defaults to every unordered combination. |
 | `autolag` | `"aic"` (default) or `"bic"`. |
 | `max_lag` | ADF max lag; `-1` for the automatic Schwert rule. |
+| `fdr` | False discovery rate for `cointegrated_fdr` (default 0.05). |
 
 **Measured**, 2 000 tickers × 2 000 bars: **5.31 min**, against 9.81 h for the per-pair
 loop. At 500 bars: 46.7 s against 61.7 min.
@@ -502,7 +554,10 @@ across pairs are then comparable. Either way it is stated rather than discovered
 
 `agent.tools.scan_pairs` takes this path only when the indexes are already identical, and
 falls back to the per-pair loop otherwise, so it never silently re-tests a pair on a
-shorter sample.
+shorter sample. Either way it gates each pair on `p_value_both` after the
+Benjamini-Hochberg adjustment across every pair that produced one (or unadjusted with
+`multiple_testing="none"`), and reports the number tested and how many would clear the
+threshold by chance.
 
 ---
 
@@ -706,9 +761,11 @@ The Hurst exponent H classifies the long-memory scaling behaviour of a return se
 
 | H value | Regime | Strategy implication |
 |---|---|---|
-| H > 0.55 | **Trending** | Momentum strategies — recent direction tends to continue |
-| 0.45 ≤ H ≤ 0.55 | **Random walk** | No persistent edge from past prices alone |
-| H < 0.45 | **Mean-reverting** | Contrarian / mean-reversion strategies — overshoots tend to reverse |
+| H > 0.5 + band | **Trending** | Momentum strategies — recent direction tends to continue |
+| within the band | **Random walk** | No persistent edge from past prices alone |
+| H < 0.5 − band | **Mean-reverting** | Contrarian / mean-reversion strategies — overshoots tend to reverse |
+
+**The band widens for short series** (`regime_band`, reported with every result). It is 1.645 standard deviations of the estimate on white noise of the same length, never narrower than 0.05, so about 5% of white-noise series are labelled on each side at every length. A fixed ±0.05 is that width only past about 3 000 observations: at 256 the DFA estimate of white noise has a standard deviation of 0.08, and the fixed band labelled 27% of white noise "trending" and 30% "mean_reverting". For DFA the band is about 0.13 at 256 observations, 0.07 at 1 024 and 0.05 from about 3 000; the table of white-noise standard deviations behind it is re-measured by the test suite. It is calibrated at the default scale range (`min_window=10`, automatic `max_window`); a narrower range is noisier than the band assumes.
 
 > **Input must be returns, not prices.** Pass `close.pct_change().dropna()` or log-returns — not the price series itself. The algorithm works on the scaling of cumulative return fluctuations.
 
@@ -767,10 +824,12 @@ Two methods are available:
 
 | Method | `method=` | Notes |
 |---|---|---|
-| Detrended Fluctuation Analysis | `"dfa"` (default) | Less biased for typical daily bar counts (200–2000). Recommended. |
-| Rescaled Range | `"rs"` | Classic method; biased upward for small samples. Available for comparison. |
+| Detrended Fluctuation Analysis | `"dfa"` (default) | Unbiased on white noise at typical daily bar counts (200–2000). Recommended. `min_window` must be at least 4: a box of two points fits its line exactly, and white noise came back H = 1.5. |
+| Rescaled Range | `"rs"` | Classic method, **corrected** for its small-sample upward bias (Anis-Lloyd-Peters). |
 
 Both methods are implemented in the C++ extension and in the Python fallback. DFA is the better default for financial time series of typical length.
+
+**The R/S correction.** The rescaled range of a short window is biased upward, and the bias shrinks with the window, so the raw log-log slope is too steep: +0.09 at 256 observations, +0.07 at 1 024, +0.05 at 4 096, on pure white noise — and with a 0.55 threshold the raw estimate labelled 60–75% of white-noise series "trending". Anis and Lloyd (1976), with Peters' (s − ½)/s factor, give the expected R/S of s independent values; the slope of its logarithm over the same window sizes the estimator fits is what white noise produces, and its excess over 0.5 is subtracted. It depends only on the window sizes, so it is a constant per (`min_window`, `max_window`). `hurst` is the corrected value, `hurst_raw` the slope as fitted and `bias_correction` the difference; `rolling_hurst` applies the same constant to every window and reports it in `.attrs["bias_correction"]`.
 
 > **`method` is validated** — `hurst_exponent` and `rolling_hurst` require `method` to be exactly `"dfa"` or `"rs"`; any other value (e.g. a typo like `"dfs"`) raises `ValidationError` immediately, in both the C++ and Python paths. Previously a typo silently fell back to `"rs"` while `result["method"]` echoed back the typo'd string, making the mistake invisible.
 
@@ -801,9 +860,9 @@ Using R/S instead of DFA:
 
 ```python
 result_rs = hurst_exponent(returns, method="rs")
-print(f"H (R/S)  : {result_rs['hurst']:.3f}")
+print(f"H (R/S)  : {result_rs['hurst']:.3f}  (raw {result_rs['hurst_raw']:.3f})")
 print(f"H (DFA)  : {result['hurst']:.3f}")
-# R/S tends to read slightly higher; DFA is preferred for short series
+# R/S is corrected for its small-sample bias; the raw slope reads higher
 ```
 
 Restricting the scaling range:
@@ -817,13 +876,18 @@ result = hurst_exponent(returns, method="dfa", min_window=20, max_window=100)
 
 | Key | Type | Description |
 |---|---|---|
-| `hurst` | `float` | Estimated H value (typically 0 < H < 1) |
-| `regime` | `str` | `"trending"`, `"random_walk"`, or `"mean_reverting"` |
+| `hurst` | `float` | Estimated H value (typically 0 < H < 1); for R/S after the small-sample correction |
+| `hurst_raw` | `float` | The log-log slope as fitted (differs from `hurst` for R/S only) |
+| `bias_correction` | `float` | What was subtracted from the raw R/S slope; `0.0` for DFA |
+| `regime` | `str` | `"trending"`, `"random_walk"`, `"mean_reverting"`, or `"unknown"` when there is no estimate |
+| `regime_band` | `float` | Half-width of the random-walk band around 0.5 at this length |
 | `fit_r_squared` | `float` | R² of the log-log scaling fit. Values > 0.90 indicate a reliable estimate. |
 | `method` | `str` | Method used (`"dfa"` or `"rs"`) |
 | `n_obs` | `int` | Observations used after dropping NaN |
+| `max_window_used` | `int` | The largest window fitted: `max_window`, lowered to `n//4` (DFA) or `n//2` (R/S) when it asks for more, with a warning saying so |
+| `warnings` | `list` | Why there is no estimate, or that `max_window` was lowered |
 
-> **Reliability guide** — `fit_r_squared` tells you how cleanly the series follows a power-law at the tested window sizes. Below 0.85, treat the H estimate with caution. Insufficient data (fewer than `min_window × 4` observations) returns `hurst=nan` and `regime="unknown"` rather than raising.
+> **Reliability guide** — `fit_r_squared` tells you how cleanly the series follows a power-law at the tested window sizes. Below 0.85, treat the H estimate with caution. Insufficient data (fewer than `min_window × 4` observations) returns `hurst=nan` and `regime="unknown"`, with the reason in `warnings`, rather than raising. A `max_window` at or below `min_window` is a caller error and raises `ValidationError`: the exponent is a slope across a range of window sizes.
 
 ---
 
@@ -878,20 +942,23 @@ returns = provider.get_ohlcv("SPY", "2018-01-01", "2024-01-01")["Close"].pct_cha
 # window=252 (one trading year), step=5 to compute every 5 bars
 rolling = rolling_hurst(returns, window=252, step=5)
 
-# Identify regime periods
-import numpy as np
-trending_mask = rolling > 0.55
-mean_rev_mask = rolling < 0.45
+# Identify regime periods -- against the band for a 252-bar estimate,
+# which is wider than 0.05: each value is an estimate on one window.
+band = rolling.attrs["regime_band"]
+trending_mask = rolling > 0.5 + band
+mean_rev_mask = rolling < 0.5 - band
 
+print(f"Band           : +/-{band:.3f}")
 print(f"Trending bars  : {trending_mask.sum()}")
 print(f"Mean-rev bars  : {mean_rev_mask.sum()}")
 
 # Fraction of time each regime was active
 total_valid = rolling.dropna()
-print(f"Fraction trending   : {(total_valid > 0.55).mean():.1%}")
-print(f"Fraction mean-rev   : {(total_valid < 0.45).mean():.1%}")
-print(f"Fraction random walk: {((total_valid >= 0.45) & (total_valid <= 0.55)).mean():.1%}")
+print(f"Fraction trending   : {(total_valid > 0.5 + band).mean():.1%}")
+print(f"Fraction mean-rev   : {(total_valid < 0.5 - band).mean():.1%}")
 ```
+
+`classify_regime(h, n_obs, method)` gives the label `hurst_exponent` would give an estimate made on `n_obs` observations; `run_hurst_analysis` uses it, with `n_obs` the rolling window, for its `rolling_regime_fractions`.
 
 > **`step` parameter without C++** — setting `step > 1` skips bars and fills them with `NaN`, reducing total calls proportionally. Even without the C++ extension, `step=5` makes a 2 000-bar series ~5× faster. With the C++ extension the entire pass runs in one shot regardless of `step`, so `step` becomes a resolution choice rather than a performance lever.
 
@@ -902,9 +969,9 @@ import plotly.graph_objects as go
 
 fig = go.Figure()
 fig.add_trace(go.Scatter(x=rolling.index, y=rolling, name="Rolling H (252d, step=5)"))
-fig.add_hline(y=0.55, line_dash="dash", line_color="green",
+fig.add_hline(y=0.5 + band, line_dash="dash", line_color="green",
               annotation_text="Trending threshold")
-fig.add_hline(y=0.45, line_dash="dash", line_color="red",
+fig.add_hline(y=0.5 - band, line_dash="dash", line_color="red",
               annotation_text="Mean-revert threshold")
 fig.add_hline(y=0.50, line_dash="dot", line_color="gray",
               annotation_text="Random walk")
@@ -966,8 +1033,8 @@ The `run_regime_adaptive_backtest` agent tool automates this entire flow — it 
 |---|---|---|---|
 | `series` | `pd.Series` | required | Return series (not price levels) |
 | `method` | `str` | `"dfa"` | `"dfa"` or `"rs"` |
-| `min_window` | `int` | `10` | Smallest sub-window for the scaling analysis |
-| `max_window` | `int` | `None` | Largest sub-window. `None` = auto (`n//4` for DFA, `n//2` for R/S). |
+| `min_window` | `int` | `10` | Smallest sub-window for the scaling analysis; at least 4 for DFA |
+| `max_window` | `int` | `None` | Largest sub-window; must exceed `min_window`. `None` = auto (`n//4` for DFA, `n//2` for R/S); a larger value is lowered to that and reported. |
 
 #### `rolling_hurst`
 
@@ -981,7 +1048,7 @@ The `run_regime_adaptive_backtest` agent tool automates this entire flow — it 
 
 #### Return values
 
-`rolling_hurst` returns a `pd.Series` indexed like the input series (after dropping NaN). The first `window - 1` rows are `NaN`. Skipped bars (when `step > 1`) are also `NaN`.
+`rolling_hurst` returns a `pd.Series` indexed like the input series (after dropping NaN). The first `window - 1` rows are `NaN`. Skipped bars (when `step > 1`) are also `NaN`. Each value equals `hurst_exponent` on that window alone, R/S correction included; `.attrs` carries `bias_correction` and `regime_band` (the band for a `window`-length estimate).
 
 ---
 

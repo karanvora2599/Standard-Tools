@@ -1,10 +1,11 @@
 """
 Infrastructure every tool runtime needs.
 
-Deliberately small. Only two things are genuinely shared across runtimes --
-the C++ extension probe, and `_run_backtest`, which the execution and
-validation tools both call and which is the reason those two categories
-live in ONE runtime rather than two. Everything else belongs to exactly one
+Deliberately small. Only three things are genuinely shared across runtimes --
+the C++ extension probe, the interval the backtest tools fetch bars at, and
+`_run_backtest`, which the execution and validation tools both call and
+which is the reason those two categories live in ONE runtime rather than
+two. Everything else belongs to exactly one
 runtime and lives there, so this module cannot quietly become the place
 where cross-runtime coupling accumulates.
 """
@@ -42,13 +43,25 @@ try:
 except ImportError:
     pass
 
+#: The interval every backtest tool fetches bars at: `get_ohlcv`'s default,
+#: which none of them overrides. Handed to the engine with the bars, so the
+#: annualization is the fetched interval's (252 for daily) rather than a
+#: guess from the spacing, and a holiday-gapped daily index never warns.
+#: A tool that ever fetches another interval must pass that one instead.
+FETCH_INTERVAL = "1d"
+
 
 def _run_backtest(
     input_data: BacktestInput,
     df: pd.DataFrame,
     signal_series: pd.Series,
+    interval: str = FETCH_INTERVAL,
 ) -> BacktestResult:
-    """Shared backtest execution used by all strategy-specific tools."""
+    """Shared backtest execution used by all strategy-specific tools.
+
+    `interval` is the interval `df` was fetched at, passed to the engine
+    for its annualization.
+    """
     logger.debug(
         "[backtest] %s  %s  %s → %s  capital=%.0f",
         input_data.strategy_type,
@@ -66,6 +79,7 @@ def _run_backtest(
         include_trade_log=True,
         fill_price=input_data.fill_price,
         risk_free_rate=input_data.risk_free_rate,
+        interval=interval,
     )
 
     trade_log_raw = results.get("trade_log", pd.DataFrame())

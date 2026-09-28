@@ -24,6 +24,7 @@ volatility POINT.
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any, Dict, List
 
 import pandas as pd
@@ -80,17 +81,50 @@ def _numeric_keys(mapping: Dict[str, float], field: str) -> Dict[float, float]:
     Converted here with the failing key named, because a silent skip would
     drop an expiry from a term structure and produce a shorter, plausible,
     wrong answer.
+
+    TWO KEYS THAT ARE THE SAME NUMBER ARE REFUSED. '0.25' and '0.250' are
+    distinct strings and one float, and the later quote silently replaced
+    the earlier one -- whichever the JSON object happened to list last.
     """
     out: Dict[float, float] = {}
+    spelled: Dict[float, str] = {}
     for key, value in mapping.items():
         try:
-            out[float(key)] = float(value)
+            number = float(key)
+            out_value = float(value)
         except (TypeError, ValueError):
             raise ValidationError(
                 f"{field}: key {key!r} is not a number. This map is keyed by "
                 "a numeric value written as a string (JSON has no numeric "
                 "keys), e.g. {'0.0833': 0.24}."
             ) from None
+        if number in out:
+            raise ValidationError(
+                f"{field}: keys {spelled[number]!r} and {key!r} are the same "
+                f"number {number:g}, so one quote would silently replace the "
+                "other. Keep one entry per value."
+            )
+        out[number] = out_value
+        spelled[number] = key
+    return out
+
+
+def _horizon_keys(mapping: Dict[str, float], field: str) -> Dict[int, float]:
+    """
+    A map keyed by a horizon in whole trading days.
+
+    `int()` truncated a fractional key, so '21.7' became 21 and then
+    collided with '21' -- the same silent replacement `_numeric_keys`
+    refuses, reached through the rounding instead of the spelling.
+    """
+    out: Dict[int, float] = {}
+    for number, value in _numeric_keys(mapping, field).items():
+        if not math.isfinite(number) or not float(number).is_integer():
+            raise ValidationError(
+                f"{field}: horizon {number:g} is not a whole number of "
+                "trading days. Horizons are integers, e.g. {'21': 0.24}."
+            )
+        out[int(number)] = value
     return out
 
 
@@ -135,12 +169,7 @@ def fit_volatility_smile(input_data: VolatilitySmileInput) -> VolatilitySmileRes
 def get_volatility_cone(input_data: VolatilityConeInput) -> VolatilityConeResult:
     implied = None
     if input_data.current_implied:
-        implied = {
-            int(key): value
-            for key, value in _numeric_keys(
-                input_data.current_implied, "current_implied"
-            ).items()
-        }
+        implied = _horizon_keys(input_data.current_implied, "current_implied")
     return VolatilityConeResult(
         **lib.volatility_cone(
             pd.Series(input_data.prices),
@@ -359,9 +388,10 @@ def get_option_pricing(input_data: OptionPricingInput) -> OptionPricingResult:
             delta=_round(result["delta"]),
             gamma=_round(result["gamma"]),
             vega=_round(result["vega"]),
-            # The lattice reports no analytic theta; a bumped one would be a
-            # different quantity from the closed-form thetas beside it.
-            theta=None,
+            # Per calendar day from every closed form. The lattice reports
+            # none (None): a bumped one would be a different quantity from
+            # the closed-form thetas beside it, and its notes say so.
+            theta=_round(result.get("theta")),
             rho=_round(result["rho"]),
         ),
         d1=_round(result["d1"]),

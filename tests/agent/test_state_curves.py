@@ -571,12 +571,26 @@ def _compare(dates, sort_by):
 
 class TestTheComparisonSortsInTheRightDirection:
     def test_by_volatility_the_quietest_wins(self, one_symbol):
+        """The quietest strategy that TRADED wins.
+
+        On this series the RSI rule never trades, so its volatility is 0.0.
+        This test used to accept it as the winner -- the whole list sorted
+        ascending with that 0.0 first -- which was the defect: a strategy
+        that did nothing is not the quietest one. It now ranks after every
+        strategy that traded and is counted in n_unrankable.
+        """
         result = _compare(one_symbol, "annualized_volatility")
 
-        volatilities = [s.annualized_volatility for s in result.strategies]
+        traded = [s for s in result.strategies if s.num_trades > 0]
+        idle = [s for s in result.strategies if s.num_trades == 0]
+        assert [s.strategy for s in idle] == ["rsi_mean_reversion"]
+        assert result.strategies[-len(idle) :] == idle
+        volatilities = [s.annualized_volatility for s in traded]
         assert all(v is not None for v in volatilities)
         assert volatilities == sorted(volatilities)
-        assert result.best_strategy == result.strategies[0].strategy
+        assert result.best_strategy == traded[0].strategy
+        assert result.n_unrankable == 1
+        assert any("never traded" in w for w in result.warnings)
         # The field existed nowhere on the row before, so this sort was a
         # tie between four identical absences.
         assert len(set(volatilities)) > 1
@@ -589,11 +603,20 @@ class TestTheComparisonSortsInTheRightDirection:
         assert result.best_strategy == result.strategies[0].strategy
 
     def test_the_other_two_silent_ties_are_fields_now(self, one_symbol):
+        """Every strategy that traded carries both metrics, ranked.
+
+        The strategy that never traded has no profit factor (null, where it
+        used to read 0.0 -- the value "every trade lost" produces) and ranks
+        last under either metric rather than by its placeholder.
+        """
         for metric in ("profit_factor", "avg_trade_return_pct"):
             result = _compare(one_symbol, metric)
-            values = [getattr(s, metric) for s in result.strategies]
+            ranked = result.strategies[: len(result.strategies) - result.n_unrankable]
+            values = [getattr(s, metric) for s in ranked]
             assert all(v is not None for v in values)
             assert values == sorted(values, reverse=True)
+            assert result.strategies[-1].num_trades == 0
+        assert result.n_unrankable == 1
 
 
 # ── the refusal that named an argument the caller did not have ───────────

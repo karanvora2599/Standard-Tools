@@ -46,7 +46,7 @@ watching, so `reset_spread_monitor` is explicit rather than automatic.
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from standard_quant_tools.analysis.liquidity_events import (
     DEFAULT_SLACK,
@@ -75,6 +75,9 @@ MONITOR_VERSION = 3
 #: standard deviation is too noisy to standardize against, and a detector
 #: built on it fires on its own estimation error.
 DEFAULT_WARMUP = 60
+
+#: The shortest warm-up a monitor is opened with, or resumed from.
+_MIN_WARMUP = 10
 
 #: CUSUM threshold for a STREAM, which is not the same problem the batch
 #: detector solves and does not take the same number.
@@ -172,19 +175,14 @@ def new_spread_monitor(
             "are three because there are three formulas: a ratio in basis "
             "points, an annualized rate, and a difference in points."
         )
-    if int(warmup) < 10:
-        raise ValidationError(
-            f"warmup={warmup} is too short. A baseline standard deviation "
-            "from fewer than about ten observations is mostly estimation "
-            "error, and a detector standardized against it fires on that."
-        )
+    warmup, threshold, slack = _detector_settings(warmup, threshold, slack)
     return {
         "version": MONITOR_VERSION,
         "channel": channel,
         "label": str(label),
-        "warmup": int(warmup),
-        "threshold": positive(threshold, "threshold"),
-        "slack": non_negative(slack, "slack"),
+        "warmup": warmup,
+        "threshold": threshold,
+        "slack": slack,
         "n": 0,
         # Welford's online mean and sum of squared deviations, so the
         # baseline is computed without keeping the warm-up observations --
@@ -196,10 +194,10 @@ def new_spread_monitor(
         "m2": 0.0,
         "baseline_mean": None,
         "baseline_std": None,
-        # Set at freeze time when the warm-up saw no real variation. The
-        # detector still runs -- a calm period before a real shock is the
-        # case this is for -- but every statistic against such a baseline is
-        # arithmetic rather than evidence, and says so.
+        # Set at freeze time when the warm-up saw no real variation. Nothing
+        # is tested against such a baseline -- a near-zero denominator turns
+        # any move into an enormous z -- and the monitor keeps accumulating
+        # until the window has dispersion to re-freeze on.
         "degenerate_baseline": False,
         "up": 0.0,
         "down": 0.0,
@@ -280,6 +278,7 @@ def update_spread_monitor(
     alert: Optional[Dict[str, Any]] = None
     warnings: List[str] = []
     crossed_this_call = False
+    froze_this_call = False
 
     for index, (a, b) in enumerate(zip(primary_values, reference_values)):
         value = _channel_value(channel, a, b, expiries, index)
@@ -294,11 +293,12 @@ def update_spread_monitor(
             state["m2"] += delta * (value - state["mean"])
             if state["n"] == state["warmup"]:
                 _freeze_baseline(state, warnings)
+                froze_this_call = True
             continue
 
         mean = state["baseline_mean"]
         std = state["baseline_std"]
-        if std is None or std <= 0:
+        if std is None or std <= 0 or state.get("degenerate_baseline"):
             # A zero baseline has no z at all, so this observation cannot be
             # tested. It used to `continue` and nothing else, which meant a
             # warm-up spent on a stalled or halted feed left the monitor
@@ -311,6 +311,14 @@ def update_spread_monitor(
             # for", and named a stale feed as the way to produce this. It
             # was wrong in precisely that case. So keep accumulating and
             # re-freeze as soon as the window has real dispersion.
+            #
+            # A NEAR-zero baseline is the same case and takes the same path.
+            # This used to divert only on exactly zero, so the whole band
+            # the degenerate flag names -- a coefficient of variation above
+            # zero and below `DEGENERATE_BASELINE_CV` -- went live on the
+            # denominator the flag exists to keep out: a warm-up at CV 1e-6
+            # followed by a 0.3 bp move reported a CUSUM statistic of
+            # 202,100, flagged degenerate and alerted anyway.
             _refreeze_if_possible(state, value, warnings)
             continue
 
@@ -337,6 +345,9 @@ def update_spread_monitor(
                 "baseline_mean": mean,
                 "baseline_std": std,
                 "shift_in_baseline_sd": (value - mean) / std,
+                # Always False now: a degenerate baseline is re-frozen before
+                # anything is tested against it. Kept so an alert still says
+                # so explicitly.
                 "degenerate_baseline": bool(state.get("degenerate_baseline")),
                 "message": (
                     f"{state['label']}: the spread has shifted {direction} "
@@ -354,12 +365,14 @@ def update_spread_monitor(
             "observations. Nothing can trigger until the baseline is fixed, "
             "and a quiet monitor here says nothing about the market."
         )
-    if crossed_this_call and state.get("degenerate_baseline"):
+    elif state.get("degenerate_baseline") and not froze_this_call:
+        # The freeze warning says this once; a later call that is still
+        # waiting says it again, or its statistic of 0.0 reads as quiet.
         warnings.append(
-            "This alert is measured against a baseline that saw no "
-            "variation, so its statistic is arithmetic rather than "
-            "evidence. Something did change; how MUCH it changed, in "
-            "standard deviations, is not a number this window can support."
+            "The baseline is still degenerate (no real dispersion since the "
+            "warm-up began), so the observations in this update were "
+            "untestable rather than quiet. The monitor re-freezes as soon as "
+            "the window has dispersion to standardize against."
         )
     if state["triggered"] and not crossed_this_call:
         warnings.append(
@@ -420,7 +433,9 @@ def reset_spread_monitor(
             "first_crossing_at": None,
             # The retry accumulators for a baseline that came out degenerate
             # belong to the baseline being learned; a reset that carried them
-            # over would resume a retry nobody asked for.
+            # over would resume a retry nobody asked for. Cleared, a retry on
+            # a kept degenerate baseline starts again from the warm-up's own
+            # accumulators, exactly as it does at freeze time.
             "degenerate_n": 0,
             "degenerate_mean": 0.0,
             "degenerate_m2": 0.0,
@@ -487,17 +502,31 @@ def _refreeze_if_possible(
     Try again on a baseline that came out degenerate.
 
     A frozen baseline is normally fixed for the life of the monitor, which
-    is what makes the statistic comparable across the stream. A baseline of
-    zero standard deviation is the exception: it can never standardize
+    is what makes the statistic comparable across the stream. A baseline
+    with no real dispersion is the exception: it can never standardize
     anything, so holding it is not stability, it is silence. This keeps
     feeding Welford past the warm-up and re-freezes the moment the window
     has dispersion to measure against.
+
+    THE WINDOW CONTINUES THE WARM-UP rather than starting after it. A retry
+    that began empty after a flat warm-up, then saw a step to a new flat
+    level, held only identical post-step values and never re-froze: the
+    step it existed to catch was the one thing it could not see. Seeded
+    with the warm-up's own count, mean and sum of squares, the step is
+    inside the window and supplies the dispersion.
     """
     # Welford again, on its own accumulators, the same one pass the warm-up
-    # uses at line 264 -- not a second variance formula.
-    count = int(state.get("degenerate_n", 0)) + 1
-    mean = float(state.get("degenerate_mean", 0.0))
-    m2 = float(state.get("degenerate_m2", 0.0))
+    # uses in `update_spread_monitor` -- not a second variance formula. An
+    # empty retry (just frozen, or just reset) starts from the warm-up.
+    count = int(state.get("degenerate_n", 0))
+    if count == 0:
+        count = int(state["warmup"])
+        mean = float(state["mean"])
+        m2 = float(state["m2"])
+    else:
+        mean = float(state.get("degenerate_mean", 0.0))
+        m2 = float(state.get("degenerate_m2", 0.0))
+    count += 1
     delta = value - mean
     mean += delta / count
     m2 += delta * (value - mean)
@@ -509,8 +538,7 @@ def _refreeze_if_possible(
     if count < 2 or m2 <= 0.0:
         return
     std = math.sqrt(m2 / (count - 1))
-    coefficient = abs(std / mean) if mean else (0.0 if std == 0 else float("inf"))
-    if std <= 0 or coefficient < DEGENERATE_BASELINE_CV:
+    if std <= 0 or _degenerate(mean, std):
         return
     state["baseline_mean"] = float(mean)
     state["baseline_std"] = float(std)
@@ -518,13 +546,26 @@ def _refreeze_if_possible(
     state["up"] = 0.0
     state["down"] = 0.0
     warnings.append(
-        f"The warm-up baseline had no dispersion, so it could not "
-        f"standardize anything. It has been re-frozen on the first "
-        f"{count} observations that did "
-        f"(mean {mean:.4f}, sd {std:.6g}), and the CUSUM accumulators were "
-        "reset with it. Everything before this point was untestable, not "
-        "quiet."
+        f"The warm-up baseline had no real dispersion, so it could not "
+        f"standardize anything. It has been re-frozen on the {count} "
+        "observations since the warm-up began, the first window with "
+        f"dispersion to measure against (mean {mean:.4f}, sd {std:.6g}), and "
+        "the CUSUM accumulators were reset with it. Everything before this "
+        "point was untestable, not quiet."
     )
+
+
+def _degenerate(mean: float, std: float) -> bool:
+    """
+    Whether a baseline is too still to standardize against.
+
+    The library's own threshold, not a new one. `liquidity_events` measured
+    this exact failure: a frozen-spread series produced a CUSUM peak of
+    286,431 while moving from 1.00 bps to 1.02 bps, because a near-zero
+    denominator turns any move into an enormous z.
+    """
+    coefficient = abs(std / mean) if mean else (0.0 if std == 0 else float("inf"))
+    return bool(coefficient < DEGENERATE_BASELINE_CV)
 
 
 def _freeze_baseline(state: Dict[str, Any], warnings: List[str]) -> None:
@@ -536,13 +577,9 @@ def _freeze_baseline(state: Dict[str, Any], warnings: List[str]) -> None:
     std = math.sqrt(max(variance, 0.0))
     state["baseline_mean"] = float(mean)
     state["baseline_std"] = float(std)
-
-    # The library's own threshold, not a new one. `liquidity_events`
-    # measured this exact failure: a frozen-spread series produced a CUSUM
-    # peak of 286,431 while moving from 1.00 bps to 1.02 bps, because a
-    # near-zero denominator turns any move into an enormous z.
-    coefficient = abs(std / mean) if mean else (0.0 if std == 0 else float("inf"))
-    state["degenerate_baseline"] = bool(coefficient < DEGENERATE_BASELINE_CV)
+    state["degenerate_baseline"] = _degenerate(
+        state["baseline_mean"], state["baseline_std"]
+    )
     if state["degenerate_baseline"]:
         warnings.append(
             f"The warm-up window saw effectively no variation (mean "
@@ -586,7 +623,142 @@ def _validated(state: Any) -> Dict[str, Any]:
             f"state carries channel={state['channel']!r}, which is not one "
             f"of {sorted(CHANNELS)}."
         )
-    return dict(state)
+    missing = [key for key in _CARRIED if key not in state]
+    if missing:
+        raise ValidationError(
+            f"state is missing {missing}. Pass back the `state` from the "
+            "previous update, not the whole result."
+        )
+    # THE SETTINGS AND ACCUMULATORS ARE RE-CHECKED ON EVERY RESUME. This
+    # used to stop at presence, version and channel, so an edited or
+    # corrupted state was trusted whole: threshold=-5 fired on the first
+    # tick after warm-up with a statistic of 0.0, warmup=1 froze a baseline
+    # on one observation, and a negative baseline_std was silently routed
+    # down the re-freeze path. The constructor's own checks, run again.
+    out = dict(state)
+    try:
+        out["warmup"], out["threshold"], out["slack"] = _detector_settings(
+            out["warmup"], out["threshold"], out["slack"], source="state."
+        )
+        _check_accumulators(out)
+    except ValidationError as exc:
+        raise ValidationError(
+            f"{str(exc).rstrip('.')}. A monitor's settings are fixed when it "
+            "is opened and its accumulators are written only by this module, "
+            "so a state that fails the checks a new monitor passes was edited "
+            "or corrupted after it was written. Resuming it would run a "
+            "detector nobody configured; open a new monitor instead."
+        ) from None
+    return out
+
+
+#: Every key `update_spread_monitor` reads, beyond the six checked first.
+_CARRIED = (
+    "label",
+    "mean",
+    "m2",
+    "baseline_mean",
+    "baseline_std",
+    "up",
+    "down",
+    "peak",
+    "triggered",
+    "n_alerts",
+)
+
+
+def _detector_settings(
+    warmup: Any, threshold: Any, slack: Any, *, source: str = ""
+) -> Tuple[int, float, float]:
+    """
+    The three numbers a detector is built from, checked one way.
+
+    Shared by `new_spread_monitor` and by every resume, so a state cannot
+    carry a setting the constructor would have refused.
+    """
+    count = _whole(warmup, f"{source}warmup")
+    if count < _MIN_WARMUP:
+        raise ValidationError(
+            f"{source}warmup={warmup!r} is too short. A baseline standard "
+            "deviation from fewer than about ten observations is mostly "
+            "estimation error, and a detector standardized against it fires "
+            "on that."
+        )
+    return (
+        count,
+        positive(threshold, f"{source}threshold"),
+        non_negative(slack, f"{source}slack"),
+    )
+
+
+def _check_accumulators(state: Dict[str, Any]) -> None:
+    """Every carried number finite and in range, the baseline consistent."""
+    if not isinstance(state["label"], str):
+        raise ValidationError(f"state.label={state['label']!r} is not a string.")
+    if not isinstance(state["triggered"], bool):
+        raise ValidationError(
+            f"state.triggered={state['triggered']!r} is not a bool; a string "
+            "such as 'false' is truthy and would read as triggered."
+        )
+    state["n"] = _whole(state["n"], "state.n", minimum=0)
+    state["n_alerts"] = _whole(state["n_alerts"], "state.n_alerts", minimum=0)
+    state["mean"] = finite(state["mean"], "state.mean")
+    for key in ("m2", "up", "down", "peak"):
+        state[key] = non_negative(state[key], f"state.{key}")
+    if "degenerate_n" in state:
+        state["degenerate_n"] = _whole(
+            state["degenerate_n"], "state.degenerate_n", minimum=0
+        )
+    if "degenerate_mean" in state:
+        state["degenerate_mean"] = finite(
+            state["degenerate_mean"], "state.degenerate_mean"
+        )
+    if "degenerate_m2" in state:
+        state["degenerate_m2"] = non_negative(
+            state["degenerate_m2"], "state.degenerate_m2"
+        )
+
+    frozen = state["n"] >= state["warmup"]
+    mean, std = state["baseline_mean"], state["baseline_std"]
+    if not frozen:
+        if mean is not None or std is not None:
+            raise ValidationError(
+                f"state has seen {state['n']} of its {state['warmup']} warm-up "
+                "observations and already carries a baseline; a baseline is "
+                "fixed only when the warm-up completes."
+            )
+        return
+    if mean is None or std is None:
+        raise ValidationError(
+            f"state has seen {state['n']} observations, past its warm-up of "
+            f"{state['warmup']}, and carries no baseline."
+        )
+    state["baseline_mean"] = finite(mean, "state.baseline_mean")
+    state["baseline_std"] = non_negative(std, "state.baseline_std")
+    # The flag decides whether anything is tested against the baseline, so
+    # it is recomputed rather than trusted: set False by hand on a baseline
+    # with no real dispersion, it would put that near-zero denominator live.
+    expected = _degenerate(state["baseline_mean"], state["baseline_std"])
+    flag = state.get("degenerate_baseline", False)
+    if flag is not expected:
+        raise ValidationError(
+            f"state.degenerate_baseline={flag!r} disagrees with its own "
+            f"baseline (mean {state['baseline_mean']:g}, sd "
+            f"{state['baseline_std']:g}), which is "
+            f"{'' if expected else 'not '}degenerate."
+        )
+
+
+def _whole(value: Any, name: str, *, minimum: Optional[int] = None) -> int:
+    """A count: a finite whole number, not a bool and not 60.5."""
+    number = finite(value, name)
+    if not number.is_integer():
+        raise ValidationError(
+            f"{name}={value!r} counts observations and must be a whole number."
+        )
+    if minimum is not None and number < minimum:
+        raise ValidationError(f"{name}={value!r} must be >= {minimum}.")
+    return int(number)
 
 
 def _floats(values: Sequence[float], name: str) -> List[float]:

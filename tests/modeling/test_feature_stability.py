@@ -27,6 +27,7 @@ import pandas as pd
 import pytest
 
 from standard_quant_tools.error import ValidationError
+from standard_quant_tools.modeling.analysis import feature_stability as fs_module
 from standard_quant_tools.modeling.analysis.feature_stability import (
     PSI_MODERATE,
     PSI_SIGNIFICANT,
@@ -36,6 +37,8 @@ from standard_quant_tools.modeling.analysis.feature_stability import (
     permutation_test_ic,
     population_stability_index,
 )
+from standard_quant_tools.modeling.validation import metrics as metrics_module
+from standard_quant_tools.modeling.validation.metrics import cross_sectional_ic
 
 
 def _panel(seed=1, n_dates=200, n_entities=25, break_at=None):
@@ -300,3 +303,66 @@ class TestPermutationTest:
         assert result["p_value"] > 0.5, (
             "a constant feature should be at least as unremarkable as its " "own null"
         )
+
+
+@pytest.fixture(params=[True, False], ids=["native", "python"])
+def ic_backend(request, monkeypatch):
+    """The observed IC and the within-date null each have a native and a
+    Python implementation; run once on each pair."""
+    if request.param:
+        if not (fs_module.HAS_CPP and metrics_module.HAS_CPP):
+            pytest.skip("native extension not built")
+    else:
+        monkeypatch.setattr(fs_module, "HAS_CPP", False)
+        monkeypatch.setattr(metrics_module, "HAS_CPP", False)
+    return request.param
+
+
+class TestAnInfinityHasNoRowToBelongTo:
+    """
+    The observed IC and the null it is tested against must be computed on
+    the same rows. With an inf in the feature they were not: the observed
+    IC kept the row (ranked as the extreme for spearman; for pearson it
+    made the date's IC 0.0) while the native null dropped it -- so a
+    pearson feature with a real edge was tested as an IC of 0.0 against a
+    null of sd 0.044, at p ~ 1. An infinity is refused, by name, on every
+    path; NaN still drops the row from both sides.
+    """
+
+    @pytest.mark.parametrize("null", ["within_date", "circular_shift"])
+    @pytest.mark.parametrize("method", ["spearman", "pearson"])
+    @pytest.mark.parametrize("sign", [1.0, -1.0])
+    def test_an_inf_feature_is_refused(self, ic_backend, null, method, sign):
+        panel = _panel(n_dates=40)
+        panel.loc[panel.index[::25], "real"] = sign * np.inf
+        with pytest.raises(ValidationError, match=r"'real' has 40 infinite"):
+            permutation_test_ic(
+                panel, "real", n_permutations=20, method=method, null=null
+            )
+
+    def test_an_inf_target_is_refused(self, ic_backend):
+        panel = _panel(n_dates=40)
+        panel.loc[panel.index[3], "target"] = np.inf
+        with pytest.raises(ValidationError, match=r"'target' has 1 infinite"):
+            permutation_test_ic(panel, "real", n_permutations=20)
+
+    @pytest.mark.parametrize("method", ["spearman", "pearson"])
+    def test_nan_rows_are_dropped_from_the_ic_and_the_null_alike(
+        self, ic_backend, method
+    ):
+        """The null case: a NaN feature row is not refused; the IC tested is
+        the IC of the complete rows, and a real edge is still found."""
+        panel = _panel(n_dates=60)
+        panel.loc[panel.index[::25], "real"] = np.nan
+        complete = panel.dropna(subset=["real"])
+        want = cross_sectional_ic(
+            complete["target"].to_numpy(),
+            complete["real"].to_numpy(),
+            complete["date"].to_numpy(),
+            method=method,
+        ).mean()
+        result = permutation_test_ic(
+            panel, "real", n_permutations=40, method=method, random_seed=3
+        )
+        assert result["observed_ic"] == pytest.approx(want, rel=1e-12)
+        assert result["significant_at_05"]

@@ -90,7 +90,24 @@ class OptionStrategyResult(_Result):
     n_legs: int = 0
     net_premium: Stat = None
     position: str = Field("", description="'debit' if it costs money, else 'credit'.")
-    breakevens: List[float] = Field(default_factory=list)
+    payoff_basis: str = Field(
+        "expiry",
+        description="'expiry' when every option leg expires together and the "
+        "payoff is intrinsic value. 'first_expiry_marked' when they do not: "
+        "the P&L is evaluated at the first expiry and later legs are marked "
+        "with Black-Scholes at their remaining time -- a calendar valued at "
+        "intrinsic everywhere read as a certain loss of its debit.",
+    )
+    evaluated_at_years: Stat = Field(
+        None,
+        description="The date the payoff is evaluated at, in years from "
+        "today: the (first) option expiry. Null for a stock-only position.",
+    )
+    breakevens: List[float] = Field(
+        default_factory=list,
+        description="Where the P&L changes sign. A stretch of exactly zero "
+        "P&L is one breakeven, at its start, not one per scanned point.",
+    )
     max_profit: Stat = None
     max_profit_at_spot: Stat = None
     max_profit_unbounded: bool = False
@@ -124,7 +141,13 @@ class ArbitrageViolation(BaseModel):
 
 
 class VolatilitySmileResult(_Result):
-    n_strikes: int = 0
+    n_strikes: int = Field(
+        0,
+        description="DISTINCT strikes fitted. Repeated quotes at one strike "
+        "are used but are not more strikes, and at least five distinct ones "
+        "are required.",
+    )
+    n_quotes: int = Field(0, description="Quotes used in the fit, repeats included.")
     forward: Stat = None
     time_to_expiry: Stat = None
     atm_vol: Stat = Field(None, description="The level: fitted vol at the forward.")
@@ -134,11 +157,18 @@ class VolatilitySmileResult(_Result):
         "expiries and underlyings. Negative for a typical equity smile.",
     )
     curvature: Stat = Field(None, description="Convexity; what a butterfly prices.")
-    r_squared: Stat = None
+    r_squared: Stat = Field(
+        None,
+        description="Share of the smile's variance the quadratic explains. "
+        "1.0 for a flat smile fitted exactly, which has no variance to "
+        "explain.",
+    )
     residual_std: Stat = None
     strike_range: List[float] = Field(
         default_factory=list,
-        description="The fit does not extrapolate beyond this.",
+        description="The fit does not extrapolate beyond this, and no tool "
+        "evaluates it outside: a quadratic continued into the wings reaches "
+        "negative variance. Keep any evaluation of the coefficients inside.",
     )
     arbitrage_violations: List[ArbitrageViolation] = Field(default_factory=list)
     fitted: List[SmilePoint] = Field(default_factory=list)

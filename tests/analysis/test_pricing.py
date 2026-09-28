@@ -430,3 +430,224 @@ class TestThroughTheTool:
         result = resolve("derivatives").dispatch("get_option_pricing", dict(BASE))
         assert result["price"] == pytest.approx(10.450584, abs=1e-6)
         assert result["greeks"]["theta"] is not None
+
+    @pytest.mark.parametrize("model", ["black_76", "bachelier"])
+    def test_every_closed_form_reports_a_theta(self, model):
+        """The documentation promised theta from every closed form and the
+        tool returned None for all but the default path."""
+        from standard_quant_tools.agent.runtimes import resolve
+
+        result = resolve("derivatives").dispatch(
+            "get_option_pricing", {**BASE, "model": model}
+        )
+        assert result["greeks"]["theta"] is not None
+        assert result["greeks"]["theta"] < 0
+
+
+# ── the rate and the yield ──────────────────────────────────────────────
+
+
+class TestTheRateIsBounded:
+    """
+    `risk_free_rate` had no bound in the pricers: r=-1e300 escaped as a
+    bare OverflowError out of every closed form, r=nan priced to NaN (a
+    null price at the agent surface, with no warning), r=1e300 returned a
+    call worth exactly the spot, and on the lattice r=nan was reported as
+    "no arbitrage-free probability" without naming the rate. Bounding each
+    factor is not enough either: r=-9 at T=100 is inside both bounds and
+    asks exp() for 900.
+    """
+
+    BAD = [float("nan"), float("inf"), -1e300, 1e300, 11.0, -11.0]
+
+    @pytest.mark.parametrize("rate", BAD)
+    @pytest.mark.parametrize("model", MODELS)
+    def test_price_option_refuses_it_by_name(self, rate, model):
+        with pytest.raises(ValidationError, match="risk_free_rate"):
+            price_option(**{**BASE, "risk_free_rate": rate, "model": model})
+
+    @pytest.mark.parametrize("rate", BAD)
+    def test_the_black_scholes_functions_refuse_it_by_name(self, rate):
+        from standard_quant_tools.analysis.options import (
+            black_scholes_greeks,
+            implied_volatility,
+        )
+
+        with pytest.raises(ValidationError, match="risk_free_rate"):
+            black_scholes_price(100.0, 100.0, 1.0, rate, 0.2)
+        with pytest.raises(ValidationError, match="risk_free_rate"):
+            black_scholes_greeks(100.0, 100.0, 1.0, rate, 0.2)
+        with pytest.raises(ValidationError, match="risk_free_rate"):
+            implied_volatility(10.0, 100.0, 100.0, 1.0, rate)
+
+    @pytest.mark.parametrize("yield_", [float("nan"), 1e300, -1e300])
+    def test_price_option_refuses_a_nonsense_yield_by_name(self, yield_):
+        with pytest.raises(ValidationError, match="dividend_yield"):
+            price_option(**{**BASE, "dividend_yield": yield_})
+
+    @pytest.mark.parametrize("model", MODELS)
+    def test_a_rate_times_time_past_what_exp_takes_is_refused(self, model):
+        with pytest.raises(ValidationError, match="time_to_expiry"):
+            price_option(
+                **{
+                    **BASE,
+                    "risk_free_rate": -9.0,
+                    "time_to_expiry": 100.0,
+                    "model": model,
+                }
+            )
+
+    def test_the_black_scholes_functions_refuse_the_product_too(self):
+        with pytest.raises(ValidationError, match="PRODUCT"):
+            black_scholes_price(100.0, 100.0, 100.0, -9.0, 0.2)
+
+    @pytest.mark.parametrize("model", MODELS)
+    def test_a_negative_rate_inside_the_bound_prices(self, model):
+        """The null case: a negative rate is ordinary."""
+        price = _price(risk_free_rate=-0.5, model=model)
+        assert math.isfinite(price) and price > 0
+
+    def test_the_tool_refuses_a_nan_rate_at_its_schema(self):
+        """A NaN rate used to come back as {"price": null} with no warning."""
+        import pydantic
+
+        from standard_quant_tools.agent.runtimes import resolve
+
+        with pytest.raises(pydantic.ValidationError, match="risk_free_rate"):
+            resolve("derivatives").dispatch(
+                "get_option_pricing", {**BASE, "risk_free_rate": float("nan")}
+            )
+
+
+class TestBlack76RefusesADividendYield:
+    """Black-76 prices an option on a forward, which already carries the
+    dividend. The yield was replaced by zero and q=0 and q=0.08 returned the
+    same 7.57708 with notes=None, sixteen lines below a Bachelier branch
+    that refuses the same input by name."""
+
+    def test_a_yield_is_refused_naming_the_model(self):
+        with pytest.raises(ValidationError, match="black_76"):
+            price_option(**{**BASE, "model": "black_76", "dividend_yield": 0.08})
+
+    def test_a_zero_yield_prices_as_before(self):
+        """The null case."""
+        assert _price(model="black_76", dividend_yield=0.0) == pytest.approx(
+            _price(model="black_76"), abs=0.0
+        )
+
+
+class TestThetaIsTheTimeDerivative:
+    """`price_option` was documented as returning theta and returned none.
+    Each closed form's theta is checked against a central difference of its
+    own price in T, per calendar day -- a sign or unit slip cannot match."""
+
+    @pytest.mark.parametrize(
+        "model, volatility, dividend_yield",
+        [
+            ("black_scholes", 0.25, 0.02),
+            ("black_76", 0.25, 0.0),
+            ("bachelier", 20.0, 0.0),
+        ],
+    )
+    @pytest.mark.parametrize("option_type", ["call", "put"])
+    def test_theta_matches_a_finite_difference(
+        self, model, volatility, dividend_yield, option_type
+    ):
+        kw = dict(
+            spot=100.0,
+            strike=95.0,
+            volatility=volatility,
+            risk_free_rate=0.04,
+            dividend_yield=dividend_yield,
+            option_type=option_type,
+            model=model,
+        )
+        t, h = 0.5, 1e-5
+        theta = price_option(time_to_expiry=t, **kw)["theta"]
+        up = price_option(time_to_expiry=t + h, **kw)["price"]
+        down = price_option(time_to_expiry=t - h, **kw)["price"]
+        assert theta == pytest.approx(-(up - down) / (2 * h) / 365.0, abs=1e-9)
+
+    def test_black_scholes_theta_agrees_with_the_tool_default_path(self):
+        from standard_quant_tools.analysis.options import black_scholes_greeks
+
+        raw = black_scholes_greeks(100.0, 95.0, 0.5, 0.04, 0.25, "call", 0.02)
+        mine = price_option(
+            spot=100.0,
+            strike=95.0,
+            time_to_expiry=0.5,
+            volatility=0.25,
+            risk_free_rate=0.04,
+            dividend_yield=0.02,
+        )
+        assert mine["theta"] == pytest.approx(raw["theta"] / 365.0, rel=1e-12)
+
+    def test_the_lattice_still_reports_none(self):
+        """The null case: no closed form, no theta, and a note saying so."""
+        result = price_option(**{**BASE, "model": "binomial"})
+        assert result["theta"] is None
+        assert any("theta" in note for note in result["notes"])
+
+
+class TestTheLatticeIsOneArrayOperationPerLevel:
+    """
+    The lattice rebuilt a Python list at every level with two pow() calls
+    per node: 6.2 s at the 5,000 steps the tool accepts. The recorded values
+    below are the list implementation's own output; the vectorised lattice
+    does the same arithmetic in the same order, so it must reproduce them --
+    the one place this file compares against recorded numbers, and it is to
+    prove the change moved nothing.
+    """
+
+    RECORDED = {
+        (200, "put", True): (
+            14.43556660509143,
+            -0.5873112950762788,
+            0.01819947515232781,
+        ),
+        (200, "call", False): (
+            7.119407119873651,
+            0.4368897292530496,
+            0.015522632849497791,
+        ),
+        (1000, "put", True): (
+            14.427952261859074,
+            -0.5873220578419195,
+            0.01818804628055013,
+        ),
+        (1000, "call", False): (
+            7.109965783819299,
+            0.4369160177357611,
+            0.01550781896067146,
+        ),
+    }
+
+    @pytest.mark.parametrize("key", list(RECORDED))
+    def test_it_reproduces_the_list_lattice(self, key):
+        steps, option_type, american = key
+        result = price_option(
+            spot=100.0,
+            strike=110.0,
+            time_to_expiry=1.0,
+            volatility=0.25,
+            risk_free_rate=0.05,
+            dividend_yield=0.02,
+            option_type=option_type,
+            model="binomial",
+            american=american,
+            steps=steps,
+        )
+        price, delta, gamma = self.RECORDED[key]
+        assert result["price"] == pytest.approx(price, abs=1e-10)
+        assert result["delta"] == pytest.approx(delta, abs=1e-10)
+        assert result["gamma"] == pytest.approx(gamma, abs=1e-10)
+
+    @pytest.mark.parametrize("american", [False, True])
+    def test_the_declared_maximum_is_fast(self, american):
+        import time
+
+        start = time.perf_counter()
+        price_option(
+            **{**BASE, "model": "binomial", "american": american, "steps": 5000}
+        )
+        assert time.perf_counter() - start < 2.0

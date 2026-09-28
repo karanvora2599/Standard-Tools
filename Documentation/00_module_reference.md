@@ -146,6 +146,15 @@ rolling_df = rolling_beta(asset_returns, benchmark_returns, window=60)
 # DataFrame with 'Rolling_Beta' column
 ```
 
+`calculate_beta` answers the same on both backends where the fit is degenerate: fewer than
+two overlapping points or a constant benchmark (the slope is unidentified) give NaN for
+`alpha`, `beta` and `r_squared`; a constant asset gives `beta` 0 and `r_squared` NaN (no
+variance to explain). The NumPy path used to return lstsq's minimum-norm solution for a
+constant benchmark. `rolling_beta` gives each window its own beta on both backends,
+including the windows after a large print has left (the NumPy fallback centres each window
+on its own means rather than using pandas' online rolling sums, which lost digits there);
+a window whose benchmark is flat is NaN.
+
 ### Multi-Factor Regression
 
 ```python
@@ -164,6 +173,10 @@ rolling = rolling_factor_loadings(asset_returns, factors, window=60)
 # DataFrame (dates × ["alpha", "mkt", "smb", "hml"])
 ```
 
+Linearly dependent factors (a duplicate, a sum or multiple of others, a constant) raise
+`ValidationError` naming the factor to drop; `rolling_factor_loadings` leaves such a
+window NaN instead.
+
 ### Cointegration & Pairs Spread
 
 ```python
@@ -171,13 +184,20 @@ from standard_quant_tools.analysis import (
     cointegration_test, compute_spread, half_life, spread_zscore
 )
 
-result = cointegration_test(ko_prices, pep_prices)
+result = cointegration_test(ko_prices, pep_prices)     # at least 20 aligned bars
 # {'cointegrated': True, 'hedge_ratio': 0.83, 'p_value': 0.003,
-#  'half_life_days': 14.2, 'critical_values': {'1%': -3.92, '5%': -3.35, '10%': -3.05}}
+#  'half_life_days': 14.2, 'half_life_mean_reverting': True, ...,
+#  'critical_values': {'1%': -3.92, '5%': -3.35, '10%': -3.05}}
 
 spread = compute_spread(ko_prices, pep_prices)           # pd.Series
 hl     = half_life(spread)                               # 14.2 (bars)
 z      = spread_zscore(spread, window=30)                # rolling z-score signal
+
+from standard_quant_tools.analysis.cointegration import (
+    half_life_statistics, scan_cointegrated_pairs,
+)
+half_life_statistics(spread, fitted_residual=True)       # half-life + Dickey-Fuller gate
+scan_cointegrated_pairs(prices)   # both regression orders, BH-adjusted p, cointegrated_fdr
 ```
 
 ### PCA on Returns
@@ -203,16 +223,21 @@ from standard_quant_tools.analysis.hurst import HAS_CPP
 print("C++ backend active:", HAS_CPP)     # True once _sqt_core is built
 
 result = hurst_exponent(returns)          # pass RETURNS not prices
-# {'hurst': 0.38, 'regime': 'mean_reverting', 'fit_r_squared': 0.97, 'method': 'dfa'}
+# {'hurst': 0.38, 'regime': 'mean_reverting', 'regime_band': 0.07,
+#  'fit_r_squared': 0.97, 'method': 'dfa', ...}
 
 rolling = rolling_hurst(returns, window=252, step=5)   # pd.Series of H values
 ```
 
 | H value | Regime | Implication |
 |---|---|---|
-| > 0.55 | trending | Momentum strategies have an edge |
-| 0.45 – 0.55 | random walk | No persistent signal from past prices |
-| < 0.45 | mean-reverting | Contrarian / mean-reversion strategies |
+| > 0.5 + band | trending | Momentum strategies have an edge |
+| within the band | random walk | No persistent signal from past prices |
+| < 0.5 − band | mean-reverting | Contrarian / mean-reversion strategies |
+
+The band (`regime_band`) is 1.645 white-noise standard deviations of the estimate at the
+series length, at least 0.05, so it is wider for short series. R/S is corrected for its
+small-sample bias (`hurst_raw` is the uncorrected slope).
 
 > The C++ extension accelerates `hurst_exponent` by 83–131× and `rolling_hurst`
 > by 274× (measured; see [16_performance.md](16_performance.md)). The API is identical with or without it — pure Python fallback is automatic. See [30_build_guide.md](30_build_guide.md).
@@ -514,7 +539,7 @@ What you do with an option price once you have one. `pricing.py` answers
 | Function | Description |
 |---|---|
 | `option_greeks(...)` | Full greek set including vanna, volga, charm, speed — validated against central finite differences |
-| `analyze_strategy(legs,...)` | Payoff, breakevens and aggregate greeks of an arbitrary multi-leg position |
+| `analyze_strategy(legs,...)` | Payoff, breakevens and aggregate greeks of an arbitrary multi-leg position; legs with different expiries are valued at the first one, later legs marked by Black-Scholes |
 | `fit_volatility_smile(...)` | Quadratic in log-moneyness, with a Durrleman arbitrage check |
 | `volatility_cone(prices,...)` | Realized-vol percentiles by horizon, with the independent-window count |
 | `analyze_vol_term_structure(...)` | Contango/backwardation and the forward vols a calendar spread prices |
@@ -531,17 +556,19 @@ Deep guide: [21_derivatives.md](21_derivatives.md)
 ## Microstructure estimators (`standard_quant_tools.analysis.microstructure_estimators`)
 
 Liquidity recovered from OHLCV, for the normal case where there is no tick
-feed. Each names what it is a proxy for and how it fails.
+feed. Each names what it is a proxy for and how it fails. Dated bars out of
+time order are sorted by their stamps (and the result says so); a repeated
+stamp is refused.
 
 | Function | Description |
 |---|---|
 | `roll_spread(prices,...)` | Effective spread from bid-ask bounce, with a `smallest_detectable_spread` floor |
 | `corwin_schultz_spread(ohlc)` | Spread from the high-low range; reports the negative fraction |
 | `amihud_illiquidity(ohlcv,...)` | Price move per dollar traded, reported as a percentile |
-| `kyle_lambda(ohlcv,...)` / `kyle_lambda(trades=, quotes=, freq=)` | Market depth from signed order flow. From bars the sign is the bar's own return, so the result says `circular=True`; from a tape the flow is Lee-Ready signed and the midpoint change is regressed on it |
+| `kyle_lambda(ohlcv,...)` / `kyle_lambda(trades=, quotes=, freq=)` | Market depth from signed order flow. From bars the sign is the bar's own return, so the result says `circular=True`; from a tape with quotes the flow is Lee-Ready signed and the midpoint change is regressed on it (`circular=False`); a tape without quotes is tick-rule signed off the trade prices it explains and says `circular=True` |
 | `order_flow_imbalance(ohlcv,...)` | Signed imbalance, with non-overlapping persistence |
-| `estimate_vpin(ohlcv,...)` | Flow one-sidedness in volume time; the trailing residue bucket is dropped and reported as `residual_volume` |
-| `intraday_volume_profile(bars, index_timezone=...)` | The U-shape, for scheduling — bucketed over the regular session when the index carries a zone, with `extended_hours_share` |
+| `estimate_vpin(ohlcv,...)` | Flow one-sidedness in volume time; the trailing residue bucket is dropped and reported as `residual_volume`, and a bar that did not move is split half to each side (`undirected_volume_share`) |
+| `intraday_volume_profile(bars, index_timezone=...)` | The U-shape, for scheduling — bucketed over the regular session (its edges, `bucket_span`), with `extended_hours_share` when the index carries a zone; every bucket is returned, empty ones with a zero share (`n_empty_buckets`), and `trough_bucket` is a bucket id |
 | `implementation_shortfall(...)` | Perold decomposition: delay, impact, opportunity, fees |
 
 Deep guide: [22_microstructure.md](22_microstructure.md)
@@ -557,7 +584,7 @@ and standard deviation cannot see.
 |---|---|---|
 | `bootstrap_statistic(...)` | `inference` | Block-bootstrap confidence interval for eleven statistics |
 | `compare_distributions(a, b)` | `inference` | KS plus a moment and tail comparison |
-| `rolling_correlation_stability(...)` | `inference` | Sign flips, range, and the joint-worst-decile correlation |
+| `rolling_correlation_stability(...)` | `inference` | Sign flips, range, and the correlation on days both series sit in their worst decile (null below 20 such days) |
 | `decompose_returns(...)` | `inference` | Arithmetic vs geometric, and the volatility drag |
 | `test_normality(values)` | `inference` | Jarque-Bera plus the tail ratio that actually matters |
 | `estimate_tail_index(...)` | `inference` | Hill estimator; which moments exist |

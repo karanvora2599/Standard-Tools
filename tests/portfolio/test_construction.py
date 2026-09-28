@@ -30,6 +30,7 @@ from standard_quant_tools.portfolio.construction import (
     factor_exposure_budget,
     hierarchical_risk_parity,
     liquidity_adjusted_var,
+    max_diversification,
     risk_parity,
 )
 
@@ -418,3 +419,164 @@ class TestLiquidityAdjustedVar:
             liquidity_adjusted_var(
                 self.POSITIONS, self.VOLS, self.VOLUMES, confidence=bad
             )
+
+
+# ── a zero-variance asset ───────────────────────────────────────────────
+
+
+def _book_with_cash(cash_level, seed=0, n=200):
+    """Four noisy assets and a constant CASH column. Constant at zero is an
+    exact-zero variance; constant at 1bp a day leaves float residue."""
+    rng = np.random.default_rng(seed)
+    frame = pd.DataFrame(
+        rng.normal(0.0, 0.01, (n, 4)), columns=["AAPL", "JPM", "MSFT", "XOM"]
+    )
+    frame["CASH"] = cash_level
+    return frame
+
+
+class TestAZeroVarianceAssetIsRefusedByName:
+    """
+    HRP splits capital in inverse proportion to variance. An exactly
+    constant column divided by zero and every weight came back NaN (null
+    at the agent surface, with only the boilerplate warnings); a column
+    constant at a non-zero level has a float-residue variance, and took
+    100% of the portfolio. Its siblings refused only an exact zero, so the
+    same 1bp cash sleeve got 100% from risk_parity and max_diversification
+    with converged=True.
+    """
+
+    @pytest.mark.parametrize("cash", [0.0, 1e-4], ids=["exact_zero", "one_bp"])
+    def test_hrp_refuses_a_constant_column_by_name(self, cash):
+        with pytest.raises(ValidationError, match="CASH"):
+            hierarchical_risk_parity(_book_with_cash(cash))
+
+    @pytest.mark.parametrize("cash", [0.0, 1e-4], ids=["exact_zero", "one_bp"])
+    def test_risk_parity_refuses_the_same_column(self, cash):
+        with pytest.raises(ValidationError, match="CASH"):
+            risk_parity(_book_with_cash(cash).cov())
+
+    @pytest.mark.parametrize("cash", [0.0, 1e-4], ids=["exact_zero", "one_bp"])
+    def test_max_diversification_refuses_the_same_column(self, cash):
+        with pytest.raises(ValidationError, match="CASH"):
+            max_diversification(_book_with_cash(cash).cov())
+
+    def test_a_float_residue_diagonal_is_refused(self):
+        """A variance of 1e-40 against 1e-4 is residue, not a quiet asset."""
+        cov = pd.DataFrame(
+            np.diag([1e-4, 2e-4, 1e-40]), index=list("ABC"), columns=list("ABC")
+        )
+        with pytest.raises(ValidationError, match=r"\['C'\]"):
+            risk_parity(cov)
+
+    def test_a_genuinely_quiet_asset_still_gets_its_weight(self):
+        """The null case: a T-bill sleeve a million times quieter than the
+        equities is a real asset, and inverse-variance weighting is the
+        right answer for it -- nothing is refused."""
+        rng = np.random.default_rng(3)
+        frame = pd.DataFrame(
+            {
+                "EQ1": rng.normal(0, 0.01, 300),
+                "EQ2": rng.normal(0, 0.01, 300),
+                "BILL": rng.normal(1e-4, 1e-5, 300),
+            }
+        )
+        result = hierarchical_risk_parity(frame)
+        assert all(np.isfinite(list(result["weights"].values())))
+        assert result["weights"]["BILL"] > 0.9
+        assert sum(result["weights"].values()) == pytest.approx(1.0)
+
+    def test_an_ordinary_book_is_unchanged(self):
+        """The null case for HRP: noisy assets only, finite weights summing
+        to one."""
+        result = hierarchical_risk_parity(_book_with_cash(0.0).drop(columns="CASH"))
+        weights = list(result["weights"].values())
+        assert all(np.isfinite(weights))
+        assert sum(weights) == pytest.approx(1.0)
+
+    def test_the_agent_result_never_carries_null_weights(self):
+        from standard_quant_tools.agent.runtimes import resolve
+
+        frame = _book_with_cash(0.0, n=60)
+        with pytest.raises(ValidationError, match="CASH"):
+            resolve("portfolio").dispatch(
+                "optimize_hierarchical_risk_parity",
+                {"returns": {c: frame[c].tolist() for c in frame.columns}},
+            )
+
+
+class TestTheEquicorrelationFloorAndThePositionSign:
+    """
+    One correlation shared by every pair is a correlation matrix only for
+    rho >= -1/(n-1). Below that the implied variance went negative and was
+    clamped: five $1m positions in 30%-vol names reported a VaR of exactly
+    $0.00 at rho=-0.30. Separately, the rows were aggregated as magnitudes,
+    so a long/short hedge was scored as a long/long doubling.
+    """
+
+    FIVE = {k: 1e6 for k in "ABCDE"}
+    VOL = {k: 0.30 for k in "ABCDE"}
+    # Enough volume that nothing takes more than a day: naive VaR only.
+    VOLUME = {k: 1e12 for k in "ABCDE"}
+
+    @staticmethod
+    def _one_leg_var():
+        """1e6 x 0.30 / sqrt(252) x z95, computed independently."""
+        z95 = 1.6448536269514722
+        return 1e6 * 0.30 / math.sqrt(252) * z95
+
+    def test_a_correlation_below_the_floor_is_refused_naming_it(self):
+        with pytest.raises(ValidationError, match=r"-1/\(n-1\)"):
+            liquidity_adjusted_var(self.FIVE, self.VOL, self.VOLUME, correlation=-0.30)
+
+    def test_above_the_floor_the_formula_answers(self):
+        v = self._one_leg_var()
+        result = liquidity_adjusted_var(
+            self.FIVE, self.VOL, self.VOLUME, correlation=-0.20
+        )
+        expected = math.sqrt(5 * v * v * 1.2 - 0.2 * 25 * v * v)
+        assert result["naive_var"] == pytest.approx(expected, rel=1e-9)
+        assert result["naive_var"] == pytest.approx(31_084.81, abs=0.01)
+
+    def test_at_the_floor_the_offset_is_reported(self):
+        result = liquidity_adjusted_var(
+            self.FIVE, self.VOL, self.VOLUME, correlation=-0.25
+        )
+        assert result["naive_var"] < 1e-3 * self._one_leg_var()
+        assert any("exactly offset" in w for w in result["warnings"])
+
+    def test_two_positions_still_reach_minus_one(self):
+        """The null case: at n=2 the floor is -1, the edge of the range."""
+        result = liquidity_adjusted_var(
+            {"A": 1e6, "B": 1e6},
+            {"A": 0.3, "B": 0.3},
+            {"A": 1e12, "B": 1e12},
+            correlation=-1.0,
+        )
+        assert result["naive_var"] == pytest.approx(0.0, abs=1e-6)
+
+    @pytest.mark.parametrize("rho, factor", [(0.9, 0.2), (-0.9, 3.8)])
+    def test_a_long_short_pair_is_a_hedge_at_positive_correlation(self, rho, factor):
+        """{+1m, -1m} at equal vol v: the P&L variance is v^2 (2 - 2 rho),
+        so rho=+0.9 gives v*sqrt(0.2) and rho=-0.9 gives v*sqrt(3.8). These
+        two came back swapped."""
+        v = self._one_leg_var()
+        result = liquidity_adjusted_var(
+            {"A": 1e6, "B": -1e6},
+            {"A": 0.3, "B": 0.3},
+            {"A": 1e12, "B": 1e12},
+            correlation=rho,
+        )
+        assert result["naive_var"] == pytest.approx(v * math.sqrt(factor), rel=1e-9)
+
+    def test_an_all_long_book_is_unchanged_by_the_sign(self):
+        """The null case: with every position long the signs are all +1."""
+        v = self._one_leg_var()
+        result = liquidity_adjusted_var(
+            {"A": 1e6, "B": 1e6},
+            {"A": 0.3, "B": 0.3},
+            {"A": 1e12, "B": 1e12},
+            correlation=0.9,
+        )
+        assert result["naive_var"] == pytest.approx(v * math.sqrt(3.8), rel=1e-9)
+        assert all(r["naive_1d_var"] > 0 for r in result["by_position"])

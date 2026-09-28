@@ -202,6 +202,52 @@ class TestThePenaltyIsScaledToTheSeries:
         assert "scaled to this series" in warning
 
 
+class TestAConstantHasNoChangePoint:
+    """
+    A constant series centres to rounding residue, and the prefix-sum costs
+    of that residue produced breaks: 20 of 42 constant/length combinations
+    "found" some, three at a time for 0.1 at n=300 against a derived
+    penalty of 3e-33. Refused now, as ljung_box refuses it.
+    """
+
+    @pytest.mark.parametrize("level,n", [(0.1, 300), (0.3, 100), (1.23, 1000)])
+    def test_a_constant_is_refused(self, level, n):
+        series = pd.Series(
+            np.full(n, level), index=pd.bdate_range("2020-01-01", periods=n)
+        )
+        with pytest.raises(ValidationError, match="does not vary"):
+            detect_change_points(series)
+
+    def test_a_shift_far_from_zero_is_found_where_it_is(self):
+        """
+        The planted case at a level far from zero: 1e6 with noise of 0.01.
+        The prefix-sum cost is a sum of squares minus a squared sum, both
+        near 3e14 here, and their difference -- the cost being compared --
+        is 0.03: uncentred, it was cancellation noise and the break was
+        placed at bar 91 instead of 150. Centred, it is exact.
+        """
+        rng = np.random.default_rng(7)
+        values = 1e6 + np.concatenate(
+            [rng.normal(0, 0.01, 150), rng.normal(0.03, 0.01, 150)]
+        )
+        series = pd.Series(values, index=pd.bdate_range("2020-01-01", periods=300))
+        result = detect_change_points(series, max_breaks=1)
+        assert result["n_breaks"] == 1
+        assert abs(result["breaks"][0]["index"] - 150) <= 5
+
+    def test_noise_far_from_zero_finds_no_break(self):
+        """
+        The null case at the same level. Uncentred, 32 of these 50
+        pure-noise series produced a break.
+        """
+        found = 0
+        for seed in range(50):
+            values = 1e6 + np.random.default_rng(seed).normal(0, 0.01, 300)
+            series = pd.Series(values, index=pd.bdate_range("2020-01-01", periods=300))
+            found += detect_change_points(series)["n_breaks"] > 0
+        assert found <= 2
+
+
 class TestPartialCorrelation:
     def test_a_common_factor_is_removed_entirely(self):
         """Two series that are ONLY a shared factor must have essentially no

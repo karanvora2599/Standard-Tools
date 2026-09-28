@@ -133,7 +133,12 @@ class DepthLevel(BaseModel):
     level: int = 0
     mean_bid_size: Optional[float] = None
     mean_ask_size: Optional[float] = None
-    mean_bid_distance_bps: Optional[float] = None
+    mean_bid_distance_bps: Optional[float] = Field(
+        None,
+        description="Mean distance below the mid, over uncrossed snapshots "
+        "only: a crossed book has no distance from its mid. Null when every "
+        "snapshot was crossed.",
+    )
     mean_ask_distance_bps: Optional[float] = None
     mean_bid_count: Optional[float] = Field(
         None,
@@ -151,7 +156,16 @@ class OrderBookResult(BaseModel):
     levels_available: int = 0
     levels_read: int = 0
     n_crossed: int = Field(
-        0, description="Snapshots with bid >= ask, excluded from price stats."
+        0,
+        description="Snapshots with bid >= ask, excluded from every statistic "
+        "measured from the mid (spread, microprice, depth slope, distance "
+        "per level) and kept in the size and imbalance statistics.",
+    )
+    n_nonfinite_touch: int = Field(
+        0,
+        description="Snapshots whose level 0 is not four finite numbers -- a "
+        "missing or infinite price or size -- excluded from EVERY statistic. "
+        "One infinite ask would otherwise turn every mean into null.",
     )
     mean_spread: Optional[float] = None
     mean_spread_bps: Optional[float] = None
@@ -328,7 +342,12 @@ def get_order_book_metrics(input_data: OrderBookInput) -> OrderBookResult:
             include_order_counts=input_data.include_order_counts,
         )
         profile = detail["profile"]
-        metrics["warnings"] = list(metrics["warnings"]) + list(detail["warnings"])
+        # Both summaries apply one touch rule to one book, so their crossed
+        # and non-finite counts are the same snapshots, worded identically:
+        # each exclusion is reported once.
+        metrics["warnings"] = list(metrics["warnings"]) + [
+            w for w in detail["warnings"] if w not in metrics["warnings"]
+        ]
     metrics["warnings"] = notes + list(metrics.get("warnings", []))
     return OrderBookResult(profile=profile, **metrics)
 

@@ -127,6 +127,60 @@ def _level_count_means(book: pd.DataFrame, level: int) -> Dict[str, Optional[flo
     return out
 
 
+def _touch_masks(
+    bid: np.ndarray, ask: np.ndarray, bid_size: np.ndarray, ask_size: np.ndarray
+) -> "tuple[np.ndarray, np.ndarray, np.ndarray]":
+    """
+    Which snapshots have a touch at all, which of those are crossed, and
+    which can be measured from the mid.
+
+    ONE RULE FOR BOTH SUMMARIES. A snapshot whose level 0 is not four
+    finite numbers has no touch: it is excluded from EVERY statistic,
+    because `nanmean` skips a NaN but not an infinity, and one infinite ask
+    in a hundred snapshots turned the mean spread, mid and microprice into
+    null while `n_crossed` said the book was clean (a bid is never `>=` an
+    infinite ask, and nothing is `>=` a NaN). A crossed or locked snapshot
+    (bid >= ask) is a stale
+    side or a feed artefact: it is excluded from everything measured FROM
+    THE MID -- spread, microprice, depth slope, distance from the mid -- and
+    kept in the size and imbalance statistics, whose sizes are still sizes.
+    See the CHANGELOG entry of 2026-09-27.
+    """
+    finite = (
+        np.isfinite(bid)
+        & np.isfinite(ask)
+        & np.isfinite(bid_size)
+        & np.isfinite(ask_size)
+    )
+    crossed = finite & (bid >= ask)
+    priced = finite & ~crossed
+    return finite, crossed, priced
+
+
+def _touch_notes(n_nonfinite: int, n_crossed: int, n: int) -> List[str]:
+    """The warnings for `_touch_masks`, worded identically wherever they are
+    raised, so a tool that runs two summaries over one book reports each
+    exclusion once."""
+    notes: List[str] = []
+    if n_nonfinite:
+        notes.append(
+            f"{n_nonfinite} of {n} snapshots have a NON-FINITE touch -- a "
+            "missing or infinite price or size at level 0 -- and are "
+            "excluded from every statistic rather than averaged in. A "
+            "snapshot with no touch has no spread, no mid and no imbalance; "
+            "a vendor gap or a placeholder is the usual cause."
+        )
+    if n_crossed:
+        notes.append(
+            f"{n_crossed} of {n} snapshots are crossed or locked (bid >= "
+            "ask). Those are excluded from every statistic measured from the "
+            "mid -- spread, microprice, depth slope, distance from the mid -- "
+            "rather than averaged in: a crossed book is a stale side or a "
+            "feed artefact, and its negative spread drags a mean toward zero."
+        )
+    return notes
+
+
 def book_metrics(
     book: pd.DataFrame,
     *,
@@ -146,6 +200,10 @@ def book_metrics(
     predicts the next tick; cumulative imbalance predicts where a size order
     ends up. A book that is bid at level 0 and heavily offered behind it is
     about to tick up and is a bad place to buy size.
+
+    Snapshots with no finite touch are counted (`n_nonfinite_touch`) and
+    excluded from every mean; crossed ones (`n_crossed`) from every mean
+    taken from the mid. `_touch_masks` has the rule and the reason.
     """
     if not isinstance(book, pd.DataFrame) or book.empty:
         raise ValidationError("book must be a non-empty DataFrame of snapshots.")
@@ -178,17 +236,11 @@ def book_metrics(
     touch_bid, touch_ask = bid_prices[:, 0], ask_prices[:, 0]
     touch_bid_size, touch_ask_size = bid_sizes[:, 0], ask_sizes[:, 0]
 
-    warnings: List[str] = []
-    crossed = touch_bid >= touch_ask
-    if crossed.any():
-        warnings.append(
-            f"{int(crossed.sum())} of {len(book)} snapshots are crossed or "
-            "locked (bid >= ask). Those are excluded from the spread and "
-            "microprice statistics rather than averaged in -- a crossed book "
-            "is a stale side or a feed artefact, and its negative spread "
-            "drags a mean toward zero."
-        )
-    usable = ~crossed
+    finite, crossed, usable = _touch_masks(
+        touch_bid, touch_ask, touch_bid_size, touch_ask_size
+    )
+    n_nonfinite = int((~finite).sum())
+    warnings: List[str] = _touch_notes(n_nonfinite, int(crossed.sum()), len(book))
 
     mid = (touch_bid + touch_ask) / 2.0
     micro = microprice(touch_bid, touch_bid_size, touch_ask, touch_ask_size)
@@ -217,7 +269,14 @@ def book_metrics(
             np.nan,
         )
 
-    slope = _depth_slope(bid_prices, bid_sizes, ask_prices, ask_sizes, mid, depth)
+    slope = _depth_slope(
+        bid_prices[usable],
+        bid_sizes[usable],
+        ask_prices[usable],
+        ask_sizes[usable],
+        mid[usable],
+        depth,
+    )
 
     if depth == 1:
         warnings.append(
@@ -241,7 +300,8 @@ def book_metrics(
     touch_sign = np.sign(touch_imbalance)
     cumulative_sign = np.sign(cumulative_imbalance)
     comparable = (
-        np.isfinite(touch_imbalance)
+        finite
+        & np.isfinite(touch_imbalance)
         & np.isfinite(cumulative_imbalance)
         & (touch_sign != 0)
         & (cumulative_sign != 0)
@@ -274,16 +334,17 @@ def book_metrics(
         "levels_available": int(available),
         "levels_read": int(depth),
         "n_crossed": int(crossed.sum()),
+        "n_nonfinite_touch": n_nonfinite,
         **counts,
         "mean_spread": _mean(spread[usable]),
         "mean_spread_bps": _mean(spread_bps[usable]),
         "mean_mid": _mean(mid[usable]),
         "mean_microprice": _mean(micro[usable]),
         "mean_microprice_lean": _mean(lean[usable]),
-        "mean_touch_imbalance": _mean(touch_imbalance),
-        "mean_cumulative_imbalance": _mean(cumulative_imbalance),
-        "mean_touch_size": _mean(touch_total),
-        "mean_cumulative_size": _mean(cumulative_total),
+        "mean_touch_imbalance": _mean(touch_imbalance[finite]),
+        "mean_cumulative_imbalance": _mean(cumulative_imbalance[finite]),
+        "mean_touch_size": _mean(touch_total[finite]),
+        "mean_cumulative_size": _mean(cumulative_total[finite]),
         "depth_slope": slope,
         "warnings": warnings,
     }
@@ -435,7 +496,17 @@ def depth_profile(
     level where the feed carries `bid_count_{i}` / `ask_count_{i}`, which is
     how many orders the size is spread over -- and therefore how far back a
     new order joining that level would sit.
+
+    A CROSSED BOOK HAS NO DISTANCE FROM ITS MID. Every snapshot used to be
+    measured, so an all-crossed book reported the bid 1.5 bps ABOVE the
+    mid and the ask below it -- negative distances, with no count and no
+    warning. The same rule as `book_metrics` now applies (`_touch_masks`):
+    distances come from uncrossed snapshots with a finite touch, sizes from
+    every snapshot with a finite touch, and both exclusions are counted.
+    See the CHANGELOG entry of 2026-09-27.
     """
+    if not isinstance(book, pd.DataFrame) or book.empty:
+        raise ValidationError("book must be a non-empty DataFrame of snapshots.")
     available = _levels_present(book)
     if available == 0:
         raise ValidationError(
@@ -443,11 +514,19 @@ def depth_profile(
             "column contract."
         )
     depth = available if levels is None else min(int(levels), available)
+    if depth < 1:
+        raise ValidationError(f"levels={levels} must be at least 1.")
 
-    mid = (
-        book["bid_price_0"].to_numpy(dtype=float)
-        + book["ask_price_0"].to_numpy(dtype=float)
-    ) / 2.0
+    touch_bid = book["bid_price_0"].to_numpy(dtype=float)
+    touch_ask = book["ask_price_0"].to_numpy(dtype=float)
+    finite, crossed, usable = _touch_masks(
+        touch_bid,
+        touch_ask,
+        book["bid_size_0"].to_numpy(dtype=float),
+        book["ask_size_0"].to_numpy(dtype=float),
+    )
+    n_nonfinite = int((~finite).sum())
+    mid = (touch_bid + touch_ask) / 2.0
 
     rows: List[Dict[str, Any]] = []
     for i in range(depth):
@@ -456,27 +535,33 @@ def depth_profile(
         with np.errstate(invalid="ignore", divide="ignore"):
             bid_distance = np.where(mid > 0, (mid - bid_price) / mid * 10_000.0, np.nan)
             ask_distance = np.where(mid > 0, (ask_price - mid) / mid * 10_000.0, np.nan)
+        bid_size = book[f"bid_size_{i}"].to_numpy(dtype=float)
+        ask_size = book[f"ask_size_{i}"].to_numpy(dtype=float)
         rows.append(
             {
                 "level": i,
-                "mean_bid_size": _mean(book[f"bid_size_{i}"].to_numpy(dtype=float)),
-                "mean_ask_size": _mean(book[f"ask_size_{i}"].to_numpy(dtype=float)),
-                "mean_bid_distance_bps": _mean(bid_distance),
-                "mean_ask_distance_bps": _mean(ask_distance),
+                "mean_bid_size": _mean(bid_size[finite]),
+                "mean_ask_size": _mean(ask_size[finite]),
+                "mean_bid_distance_bps": _mean(bid_distance[usable]),
+                "mean_ask_distance_bps": _mean(ask_distance[usable]),
                 **(_level_count_means(book, i) if include_order_counts else {}),
             }
         )
 
+    warnings = _touch_notes(n_nonfinite, int(crossed.sum()), len(book))
+    warnings.append(
+        "Size is reported PER LEVEL rather than summed. A sum is what "
+        "makes a thin book look deep: ten levels of a hundred is not the "
+        "same market as one level of a thousand, and only the first can "
+        "be lifted in one trade."
+    )
     return {
         "n_snapshots": int(len(book)),
         "levels_read": int(depth),
+        "n_crossed": int(crossed.sum()),
+        "n_nonfinite_touch": n_nonfinite,
         "profile": rows,
-        "warnings": [
-            "Size is reported PER LEVEL rather than summed. A sum is what "
-            "makes a thin book look deep: ten levels of a hundred is not the "
-            "same market as one level of a thousand, and only the first can "
-            "be lifted in one trade."
-        ],
+        "warnings": warnings,
     }
 
 

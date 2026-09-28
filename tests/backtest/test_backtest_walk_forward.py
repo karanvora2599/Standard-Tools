@@ -36,15 +36,40 @@ class TestStitchOosReturns:
 
 
 class TestComputeStitchedMetrics:
-    def test_empty_series_returns_zeros(self):
+    def test_an_empty_window_has_no_ratios(self):
+        """An empty out-of-sample window reports no Sharpe, Sortino or Calmar.
+
+        This test used to pin all three at 0.0, which reads as "measured,
+        and no edge" when nothing was measured. The return and drawdown of an
+        account that did nothing are 0.0, and stay so.
+        """
         metrics = compute_stitched_metrics(pd.Series(dtype=float))
-        assert metrics == {
-            "total_return": 0.0,
-            "sharpe_ratio": 0.0,
-            "sortino_ratio": 0.0,
-            "max_drawdown": 0.0,
-            "calmar_ratio": 0.0,
-        }
+        assert metrics["total_return"] == 0.0
+        assert metrics["max_drawdown"] == 0.0
+        for ratio in ("sharpe_ratio", "sortino_ratio", "calmar_ratio"):
+            assert metrics[ratio] is None
+        assert any("empty" in w for w in metrics["warnings"])
+
+    def test_a_window_with_bars_still_reports_every_ratio(self):
+        dates = pd.date_range("2022-01-03", periods=60, freq="B")
+        returns = pd.Series(
+            np.random.default_rng(3).normal(0.0005, 0.01, 60), index=dates
+        )
+        metrics = compute_stitched_metrics(returns)
+        for ratio in ("sharpe_ratio", "sortino_ratio", "calmar_ratio"):
+            assert isinstance(metrics[ratio], float)
+        assert metrics["periods_per_year"] == 252
+        assert metrics["warnings"] == []
+
+    def test_weekly_returns_are_annualized_by_52(self):
+        dates = pd.date_range("2020-01-03", periods=156, freq="W-FRI")
+        returns = pd.Series(
+            np.random.default_rng(4).normal(0.002, 0.02, 156), index=dates
+        )
+        metrics = compute_stitched_metrics(returns)
+        assert metrics["periods_per_year"] == 52
+        expected = returns.mean() / returns.std() * np.sqrt(52)
+        assert metrics["sharpe_ratio"] == pytest.approx(expected, rel=1e-12)
 
     def test_compounding_beats_naive_average_on_plus20_minus20_example(self):
         """

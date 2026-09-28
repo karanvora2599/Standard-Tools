@@ -19,12 +19,14 @@ returned 1.4e-06 on seventy identical ticks rather than 0, slipped past a
 
 from __future__ import annotations
 
+import json
 import math
 
 import numpy as np
 import pandas as pd
 import pytest
 
+from standard_quant_tools.analysis.liquidity_events import DEGENERATE_BASELINE_CV
 from standard_quant_tools.analysis.order_book import (
     book_metrics,
     depth_profile,
@@ -247,6 +249,170 @@ class TestSpreadMonitor:
                 primary=[100.0, 101.0],
                 reference=[100.3],
             )
+
+
+def _warm(cv, seed=0, n=60, level_bps=30.0):
+    """A warm-up at `level_bps` whose spread varies by `cv` of its level."""
+    rng = np.random.default_rng(seed)
+    bps = level_bps + rng.normal(0.0, 1.0, n) * cv * level_bps
+    reference = np.full(n, 100.0)
+    out = update_spread_monitor(
+        new_spread_monitor(warmup=n),
+        primary=list(reference * (1 + bps / 10_000.0)),
+        reference=list(reference),
+    )
+    return out, bps
+
+
+def _at(bps, n):
+    return dict(primary=[100.0 * (1 + bps / 10_000.0)] * n, reference=[100.0] * n)
+
+
+class TestADegenerateBaselineIsNeverTested:
+    """The flag was computed and nothing acted on it.
+
+    `update_spread_monitor` diverted to the re-freeze only on a standard
+    deviation of exactly zero, so the whole band the degenerate flag names
+    -- a coefficient of variation above zero and below
+    `DEGENERATE_BASELINE_CV` -- went live on a near-zero denominator. A
+    warm-up at CV 1e-6 followed by a 0.3 bp move reported a CUSUM statistic
+    of 202,100 with `degenerate_baseline: True` beside it.
+    """
+
+    def test_a_near_zero_baseline_re_freezes_instead_of_going_live(self):
+        out, _ = _warm(1e-6)
+        assert out["degenerate_baseline"] is True
+        moved = update_spread_monitor(out["state"], **_at(30.3, 20))
+        assert moved["triggered"] is True, "a 0.3 bp step off a still feed"
+        assert moved["statistic"] < 1e3, moved["statistic"]
+        assert any("re-frozen" in w for w in moved["warnings"])
+
+    def test_the_whole_degenerate_band_takes_the_same_path(self):
+        """CV 9e-4 has a non-zero sd, so the zero check let it through."""
+        out, _ = _warm(9e-4)
+        assert out["degenerate_baseline"] is True
+        moved = update_spread_monitor(out["state"], **_at(30.3, 20))
+        alert = moved["alert"]
+        assert alert is not None
+        assert alert["degenerate_baseline"] is False
+        assert alert["baseline_std"] >= DEGENERATE_BASELINE_CV * abs(
+            alert["baseline_mean"]
+        )
+
+    def test_a_flat_warm_up_then_a_step_to_a_new_flat_level_is_caught(self):
+        """The retry used to start EMPTY after the warm-up. A step to a new
+
+        flat level then filled it with identical values -- no dispersion,
+        no re-freeze, and the step it existed to catch went unseen. It now
+        continues the warm-up's own window, so the step is inside it."""
+        state = update_spread_monitor(new_spread_monitor(warmup=60), **_at(30.0, 60))[
+            "state"
+        ]
+        moved = update_spread_monitor(state, **_at(90.0, 40))
+        assert moved["triggered"] is True
+        assert 0.0 < moved["statistic"] < 1e4
+        assert any("re-frozen" in w for w in moved["warnings"])
+
+    def test_a_still_degenerate_update_says_it_tested_nothing(self):
+        """Statistic 0.0 on a baseline that can test nothing is not quiet."""
+        out = update_spread_monitor(new_spread_monitor(warmup=60), **_at(30.0, 60))
+        still = update_spread_monitor(out["state"], **_at(30.0, 5))
+        assert still["degenerate_baseline"] is True
+        assert still["statistic"] == 0.0
+        assert any("untestable rather than quiet" in w for w in still["warnings"])
+
+    def test_a_real_baseline_is_tested_exactly_as_before(self):
+        """The null case: CV 1e-2 is not degenerate, is never re-frozen, and
+
+        its statistic is the textbook CUSUM against the warm-up's own mean
+        and sample sd, recomputed here from scratch."""
+        out, warm = _warm(1e-2)
+        assert out["degenerate_baseline"] is False
+        moved = update_spread_monitor(out["state"], **_at(30.3, 20))
+        assert not any("re-frozen" in w for w in moved["warnings"])
+
+        mean, sd = float(np.mean(warm)), float(np.std(warm, ddof=1))
+        assert moved["baseline_mean"] == pytest.approx(mean, rel=1e-9)
+        assert moved["baseline_std"] == pytest.approx(sd, rel=1e-9)
+        value = (100.0 * (1 + 30.3 / 10_000.0) / 100.0 - 1.0) * 10_000.0
+        up = down = 0.0
+        for _ in range(20):
+            z = (value - mean) / sd
+            up, down = max(0.0, up + z - 0.5), max(0.0, down - z - 0.5)
+        assert moved["statistic"] == pytest.approx(max(up, down), rel=1e-9)
+
+
+class TestAResumedStateIsCheckedLikeANewOne:
+    """A resumed state was checked for presence, version and channel only.
+
+    So an edited or corrupted state was trusted whole: threshold=-5 fired
+    on the first tick after warm-up with a statistic of 0.0, warmup=1 fixed
+    a baseline on one observation, and a negative baseline_std was routed
+    silently down the re-freeze path.
+    """
+
+    @staticmethod
+    def _state():
+        primary, reference = TestSpreadMonitor()._feed(n=80, shift=0.0)
+        return update_spread_monitor(
+            new_spread_monitor(warmup=60), primary=primary, reference=reference
+        )["state"]
+
+    @pytest.mark.parametrize(
+        "field, value",
+        [
+            ("threshold", -5.0),
+            ("threshold", float("nan")),
+            ("slack", -3.0),
+            ("warmup", 1),
+            ("warmup", 60.5),
+            ("warmup", True),
+            ("n", -1),
+            ("baseline_std", -1.0),
+            ("baseline_mean", float("inf")),
+            ("up", float("nan")),
+            ("peak", -1.0),
+            ("m2", -2.0),
+            ("triggered", "false"),
+            ("label", 5),
+            ("degenerate_baseline", True),
+        ],
+    )
+    def test_an_edited_field_is_refused_by_name(self, field, value):
+        state = self._state()
+        state[field] = value
+        with pytest.raises(ValidationError, match=f"state.{field}"):
+            update_spread_monitor(state, primary=[100.3], reference=[100.0])
+        with pytest.raises(ValidationError, match=f"state.{field}"):
+            reset_spread_monitor(state)
+
+    def test_a_baseline_cannot_be_hidden_from_a_frozen_monitor(self):
+        state = self._state()
+        state["baseline_std"] = None
+        with pytest.raises(ValidationError, match="no baseline"):
+            update_spread_monitor(state, primary=[100.3], reference=[100.0])
+
+    def test_the_degenerate_flag_is_recomputed_not_trusted(self):
+        """The flag decides whether anything is tested against the baseline.
+
+        Set False by hand on a baseline at CV 9e-4, it would put that
+        near-zero denominator live again."""
+        state = _warm(9e-4)[0]["state"]
+        assert state["degenerate_baseline"] is True
+        state["degenerate_baseline"] = False
+        with pytest.raises(ValidationError, match="disagrees with its own baseline"):
+            update_spread_monitor(state, **_at(30.3, 1))
+
+    def test_an_unedited_state_resumes_identically(self):
+        """The null case, through a JSON round trip, which is how a state
+
+        travels between processes."""
+        state = self._state()
+        direct = update_spread_monitor(state, primary=[100.4], reference=[100.0])
+        travelled = update_spread_monitor(
+            json.loads(json.dumps(state)), primary=[100.4], reference=[100.0]
+        )
+        assert direct == travelled
 
 
 class TestTheThreeChannels:

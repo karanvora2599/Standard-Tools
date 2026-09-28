@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from standard_quant_tools.delta_one.daycount import CONVENTIONS as _CONVENTIONS
 from standard_quant_tools.delta_one.streaming import (
@@ -235,7 +235,7 @@ class RollAnalysisInput(BaseModel):
     )
     spread_ticks: float = Field(0.0, ge=0, description="Ticks crossed per leg.")
     tick_value: float = Field(0.0, ge=0, description="Currency per tick.")
-    day_count: Literal["ACT/365F", "ACT/360", "30/360", "ACT/ACT"] = Field(
+    day_count: Literal["ACT/365F", "ACT/360", "ACT/ACT"] = Field(
         "ACT/365F",
         description=(
             "Convention behind BOTH annualized numbers here -- roll_yield "
@@ -246,7 +246,12 @@ class RollAnalysisInput(BaseModel):
             "year is a lower rate. Compare a repo quoted ACT/360 against "
             "the ACT/360 number, not the default. A roll is given in DAYS "
             "rather than dates, so ACT/ACT cannot split the period at a "
-            "year boundary and divides by an ordinary 365-day year. "
+            "year boundary and divides by an ordinary 365-day year, and "
+            "30/360 is not offered at all: it is a rule for counting the "
+            "days between two DATES, and dividing days already counted by "
+            "360 is ACT/360 under another name. For a roll that really "
+            "accrues 30/360, pass the 30/360 day count of each period as "
+            "the days, with ACT/360 -- the denominators are the same 360. "
             + _DAY_COUNT_DESCRIPTION
         ),
     )
@@ -288,7 +293,10 @@ class HedgeEffectivenessInput(BaseModel):
         ..., min_length=3, description="Periodic returns as decimals, oldest first."
     )
     hedge_returns: List[float] = Field(
-        ..., min_length=3, description="The hedge instrument's returns, same dates."
+        ...,
+        min_length=3,
+        description="The hedge instrument's returns, same dates. Paired with "
+        "portfolio_returns by POSITION, so the two must be the same length.",
     )
     hedge_ratio: float = Field(
         ...,
@@ -303,6 +311,21 @@ class HedgeEffectivenessInput(BaseModel):
     periods_per_year: int = Field(
         252, ge=1, le=31_536_000, description="252 for daily, 52 weekly, 12 monthly."
     )
+
+    @model_validator(mode="after")
+    def _same_length(self) -> "HedgeEffectivenessInput":
+        # Two lists carry no dates, so the only pairing is by position; the
+        # library refuses unequal lengths too, and this says so at the
+        # schema, before a call is spent on it.
+        if len(self.portfolio_returns) != len(self.hedge_returns):
+            raise ValueError(
+                f"portfolio_returns has {len(self.portfolio_returns)} "
+                f"observations and hedge_returns has {len(self.hedge_returns)}. "
+                "They are paired by position, so the shorter would silently "
+                "truncate the longer and nothing says which end is missing. "
+                "Pass the two over the same dates."
+            )
+        return self
 
 
 class IndexConstituent(BaseModel):
@@ -470,7 +493,10 @@ class EtfFairValueInput(BaseModel):
         "NAV that disagrees with them.",
     )
     cash_component: float = Field(
-        0.0, description="Per-share cash in the creation basket."
+        0.0,
+        description="Per-share cash in the creation basket. Must be finite: "
+        "an infinite one priced the fund at a 10,000 bp discount to its "
+        "basket and recommended redeeming.",
     )
     creation_unit_shares: Optional[float] = Field(
         None,
@@ -494,14 +520,22 @@ class TotalReturnSwapInput(BaseModel):
     initial_price: float = Field(..., gt=0, description="Underlying at inception.")
     current_price: float = Field(..., gt=0, description="Underlying now.")
     financing_rate: float = Field(
-        ..., ge=-10, le=10, description="Reference rate as a decimal."
+        ...,
+        ge=-1,
+        le=1,
+        description="Reference rate as a DECIMAL: 0.043 is 4.3%. Bounded at "
+        "100% a year either way because a larger value is a percent given "
+        "for a fraction far more often than a rate any swap is financed at "
+        "-- 4.5 for 4.5% financed $100m at 450% a year and reported a "
+        "financing leg of about -$226m over six months.",
     )
     spread_bps: float = Field(
         0.0,
         ge=-10_000,
         le=10_000,
-        description="Spread over the reference. This is the negotiated part "
-        "and where the product's economics are.",
+        description="Spread over the reference, in BASIS POINTS (45 is "
+        "0.45%). This is the negotiated part and where the product's "
+        "economics are.",
     )
     dividends: float = Field(
         0.0,
@@ -551,8 +585,11 @@ class TotalReturnFutureInput(BaseModel):
     dividend_yield: float = Field(0.0, ge=-10, le=10, description="Decimal.")
     comparison_spread_bps: Optional[float] = Field(
         None,
+        ge=-100_000,
+        le=100_000,
         description="What the same exposure costs elsewhere, typically the "
-        "TRS quote. Supplying it turns a measurement into a decision.",
+        "TRS quote, in bps. Supplying it turns a measurement into a "
+        "decision. Bounded like the quote it is compared with.",
     )
 
 
@@ -596,10 +633,14 @@ class IndexRebalanceInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     old_weights: Dict[str, float] = Field(
-        ..., min_length=1, description="Index weights before the change."
+        ...,
+        min_length=1,
+        description="Index weights before the change, as FRACTIONS summing "
+        "to about 1 (0.35% is 0.0035). A set summing above 1.5 is refused as "
+        "percent- or bps-scaled, since every flow is weight x indexed_assets.",
     )
     new_weights: Dict[str, float] = Field(
-        ..., min_length=1, description="Index weights after it."
+        ..., min_length=1, description="Index weights after it, on the same scale."
     )
     indexed_assets: float = Field(
         ...,

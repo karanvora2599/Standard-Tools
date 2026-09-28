@@ -83,7 +83,9 @@ def basis_scan(
     a shift beside that level.
 
     Returns every pair it could evaluate in `ranked`, ordered by absolute
-    z-score, plus `skipped` for the ones it could not, each with the reason.
+    z-score -- a pair whose basis does not move, or whose z-score is
+    undefined, is flagged `basis_flat` and ranked last -- plus `skipped` for
+    the ones it could not, each with the reason.
     A pair is never silently dropped: a spot and futures series that do not
     align is a data problem, and a scan that quietly returned fewer rows
     than it was given would hide it.
@@ -149,15 +151,27 @@ def basis_scan(
             skipped.append({"label": label, "reason": str(exc)})
             continue
 
+        # A flat basis -- no dispersion, or a z-score that came back
+        # undefined -- has no position in its own history to rank. It is
+        # flagged and sorts last. `basis_history` returns a float z-score,
+        # never None, so the old `zscore is None` test for this was never
+        # true: a basis flat at a constant bps level scored z=0.99 on
+        # rounding residue and was ranked FIRST.
+        zscore = history["zscore"]
+        basis_flat = bool(history.get("basis_flat")) or not (
+            zscore is not None and np.isfinite(zscore)
+        )
         row: Dict[str, Any] = {
             "label": label,
             "n_observations": history["n_observations"],
             "current_basis_bps": history["current_basis_bps"],
             "mean_bps": history["mean_bps"],
             "std_bps": history["std_bps"],
-            "zscore": history["zscore"],
+            "zscore": zscore,
             "percentile": history["percentile"],
             "half_life_observations": history["half_life_observations"],
+            "half_life_mean_reverting": history.get("half_life_mean_reverting"),
+            "basis_flat": basis_flat,
             "annualized": history.get("annualized"),
             "warnings": list(history.get("warnings", [])),
         }
@@ -189,15 +203,10 @@ def basis_scan(
         ranked.append(row)
 
     # ORDERED BY |z|. A basis that is always wide is not news; one sitting
-    # away from its own history is. A None z-score (a degenerate basis with
-    # no dispersion) sorts last rather than first, which is what an
-    # unguarded sort on None would otherwise do.
+    # away from its own history is. A flat basis (no dispersion, or an
+    # undefined z-score) sorts last rather than first.
     ranked.sort(
-        key=lambda r: (
-            abs(r["zscore"])
-            if r["zscore"] is not None and np.isfinite(r["zscore"])
-            else -np.inf
-        ),
+        key=lambda r: (-np.inf if r["basis_flat"] else abs(r["zscore"])),
         reverse=True,
     )
 
@@ -208,13 +217,13 @@ def basis_scan(
             "are listed in `skipped` with a reason each. They are not "
             "absences of signal."
         )
-    flat = [r for r in ranked if r["zscore"] is None]
+    flat = [r for r in ranked if r["basis_flat"]]
     if flat:
         warnings.append(
-            f"{len(flat)} pairs have no basis dispersion at all, so their "
-            "z-score is undefined and they sort last. A perfectly constant "
-            "basis usually means a stale or synthetic series rather than a "
-            "perfectly tracked one."
+            f"{len(flat)} pairs have no basis dispersion at all (or no "
+            "defined z-score), so they are flagged `basis_flat` and sort "
+            "last. A perfectly constant basis usually means a stale or "
+            "synthetic series rather than a perfectly tracked one."
         )
     if detect_shifts:
         fired = [r for r in ranked if r.get("shift_detected")]

@@ -145,9 +145,18 @@ class TestLjungBox:
         )
         assert ljung_box(_ar1(0.0, n=40, seed=5))["lags"] <= 8
 
-    def test_a_constant_series_has_no_autocorrelation_to_test(self):
-        with pytest.raises(ValidationError, match="no variance"):
-            ljung_box(pd.Series(np.full(100, 0.5)))
+    @pytest.mark.parametrize("level", [0.5, 0.1, 1.23, 0.017])
+    def test_a_constant_series_has_no_autocorrelation_to_test(self, level):
+        """
+        0.5 was refused and 0.1 was not: a constant 0.1 centres to rounding
+        residue rather than zeros, and the residue's autocorrelations
+        answered Q=964, p=0, "significant autocorrelation". Every constant
+        is refused now, whichever way its binary representation rounds.
+        """
+        with pytest.raises(ValidationError, match="does not vary"):
+            ljung_box(pd.Series(np.full(100, level)))
+        with pytest.raises(ValidationError, match="does not vary"):
+            ljung_box(pd.Series(np.full(100, level)), squared=True)
 
     def test_more_lags_than_observations_is_refused(self):
         with pytest.raises(ValidationError, match="fewer than"):
@@ -156,6 +165,30 @@ class TestLjungBox:
 
 class TestSeasonality:
     IDX = pd.bdate_range("2015-01-01", periods=1500)
+
+    def test_a_small_noisy_period_is_not_flagged_by_its_size(self):
+        """
+        The null case for the per-period Welch t. The 29th-31st of the month
+        hold about eight business days a year each; at four times the
+        variance of the rest and no effect at all, the pooled n_a + n_b - 2
+        degrees of freedom rejected them 9.4% of the time at a nominal 5%.
+        The Welch-Satterthwaite degrees of freedom bring that back to about
+        5%.
+        """
+        idx = pd.bdate_range("2023-01-01", "2023-12-31")
+        rng = np.random.default_rng(8)
+        rejections = tests = 0
+        for _ in range(200):
+            values = rng.normal(0, 0.01, idx.size)
+            values[idx.day >= 29] *= 4.0
+            rows = seasonality(pd.Series(values, index=idx), by="day_of_month")[
+                "by_period"
+            ]
+            for row in rows:
+                if row["period"] in ("day 29", "day 30", "day 31"):
+                    tests += 1
+                    rejections += row["p_value_raw"] < 0.05
+        assert rejections / tests <= 0.07
 
     def test_the_joint_false_positive_rate_is_near_nominal(self):
         fires = sum(
@@ -576,3 +609,32 @@ class TestStructuralBreak:
         short.iloc[50:] = np.nan
         with pytest.raises(ValidationError, match="does not cover"):
             structural_break_test(series, 100, regressor=short)
+
+    @pytest.mark.parametrize("level", [0.01, 0.001, 1.0, 100.0])
+    def test_a_constant_series_is_refused(self, level):
+        """
+        The F statistic of rounding residue over rounding residue was
+        anything: 0 for 0.01, 174 for 1.0, and 464 with p=2e-29 --
+        "significant" -- for 100.0.
+        """
+        with pytest.raises(ValidationError, match="does not vary"):
+            structural_break_test(pd.Series(np.full(60, level)), 30)
+
+    def test_an_exact_fit_on_both_sides_is_refused(self):
+        """y = 2x + 1 exactly: the residual is 1e-28, not 0, and F was -10.7."""
+        x = pd.Series(np.random.default_rng(10).normal(0, 1, 60))
+        with pytest.raises(ValidationError, match="exactly"):
+            structural_break_test(2.0 * x + 1.0, 30, regressor=x)
+
+    def test_the_f_statistic_is_never_negative(self):
+        """The null case: nested models, so F is floored at 0."""
+        for seed in range(30):
+            series = pd.Series(np.random.default_rng(seed).normal(0, 1, 80))
+            result = structural_break_test(series, 40)
+            assert result["f_statistic"] >= 0.0
+            assert 0.0 <= result["p_value"] <= 1.0
+
+    def test_a_one_sd_shift_is_still_found(self):
+        rng = np.random.default_rng(11)
+        series = pd.Series(np.concatenate([rng.normal(0, 1, 60), rng.normal(1, 1, 60)]))
+        assert structural_break_test(series, 60)["p_value"] < 0.01

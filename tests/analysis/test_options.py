@@ -116,6 +116,27 @@ class TestBlackScholesPriceValidation:
 
         assert options.MAX_RATE == SHARED
 
+    def test_the_exponent_bound_is_the_one_the_rest_of_the_library_uses(self):
+        """Restated for the same reason and pinned the same way. `pricing`
+        takes both through `options`, so all three modules agree."""
+        from standard_quant_tools.analysis import pricing
+        from standard_quant_tools.analysis.derivatives import MAX_EXPONENT
+
+        assert options.MAX_EXPONENT == MAX_EXPONENT
+        assert pricing._validate_rates is options._validate_rates
+
+    def test_a_risk_free_rate_past_the_magnitude_bound_raises(self):
+        """The rate had no bound at all: r=-1e300 raised a bare
+        OverflowError and r=nan priced to NaN."""
+        for rate in (float("nan"), -1e300, 11.0):
+            with pytest.raises(ValidationError, match="risk_free_rate"):
+                black_scholes_price(HULL_S, HULL_K, HULL_T, rate, HULL_SIGMA, "call")
+
+    def test_a_negative_risk_free_rate_prices(self):
+        """The null case: the bound is on magnitude, never on sign."""
+        price = black_scholes_price(HULL_S, HULL_K, HULL_T, -0.01, HULL_SIGMA, "call")
+        assert math.isfinite(price) and price > 0
+
 
 class TestBlackScholesGreeks:
     def test_call_delta_bounds(self):

@@ -335,13 +335,19 @@ for pair in result.pairs:
 | Field | Type | Description |
 |---|---|---|
 | `n_pairs_tested` | `int` | Total combinations evaluated |
-| `n_pairs_cointegrated` | `int` | Pairs passing p-value and half-life filters |
+| `n_pairs_with_p_value` | `int` | Pairs that produced a p-value in both regression orders: the tests the adjustment counts |
+| `n_pairs_significant_uncorrected` | `int` | Pairs whose `p_value_both` clears `p_value_threshold` before adjustment |
+| `expected_false_positives` | `float` | `n_pairs_with_p_value × p_value_threshold`: how many would clear it by chance if none were cointegrated |
+| `multiple_testing` | `str` | `"benjamini_hochberg"` (default) or `"none"`, as requested |
+| `n_pairs_cointegrated` | `int` | Pairs passing the p-value gate and the half-life filters |
 | `n_pairs_returned` | `int` | Pairs in the result (capped at `max_pairs`) |
 | `pairs` | `List[PairResult]` | Sorted by `half_life_days` ascending |
 | `failed_pairs` | `List[PairFailure]` | Pairs where the cointegration test itself raised (e.g. degenerate/insufficient data) — distinct from a pair that was tested and simply didn't qualify |
 | `failed_tickers` | `Dict[str, str]` | Tickers whose price fetch failed, mapped to the error message; excluded from all pairwise testing |
 
-Each `PairResult` contains: `symbol_a`, `symbol_b`, `p_value`, `hedge_ratio`, `half_life_days`, `adf_statistic`, `current_zscore`, `signal`. Each `PairFailure` contains: `symbol_a`, `symbol_b`, `reason`.
+Each `PairResult` contains: `symbol_a`, `symbol_b`, `p_value` (a regressed on b), `p_value_reverse` (b on a), `p_value_both` (the larger), `p_value_bh` (`p_value_both` after the Benjamini-Hochberg adjustment across every pair tested), `direction_consistent`, `hedge_ratio`, `half_life_days`, `adf_statistic`, `current_zscore`, `signal`. Each `PairFailure` contains: `symbol_a`, `symbol_b`, `reason`.
+
+**The gate.** Engle-Granger is not symmetric — on 24 random walks, 65 of 276 verdicts flipped when the columns were swapped — so a pair is judged on the larger of its two p-values. And a screen is many tests: at 5% per pair, 276 unrelated pairs clear the bar about 14 times by chance. With the default `multiple_testing="benjamini_hochberg"`, `p_value_threshold` is a false discovery rate applied to `p_value_bh`; with `"none"` it is applied to `p_value_both` pair by pair, and the warning says how many of the returned pairs are expected to be false.
 
 **Why failures are reported explicitly:** before this, a pair whose cointegration test raised an exception was silently absorbed into `n_pairs_tested` with no trace — indistinguishable from a pair that was tested cleanly and just didn't pass the p-value/half-life filters. `failed_pairs` and `failed_tickers` make that distinction visible instead of requiring the caller to guess.
 
@@ -1294,8 +1300,9 @@ for run in result.top_results:
 |---|---|---|
 | `symbol` | `str` | Ticker |
 | `strategy` | `str` | Strategy name |
-| `n_combinations` | `int` | Total parameter combinations tested |
+| `n_combinations` | `int` | Distinct parameter combinations run; a value repeated on an axis is run and counted once, so this is the right `n_trials` for a deflated Sharpe |
 | `sort_by` | `str` | Metric used to rank |
+| `n_unrankable` | `int` | Combinations that never traded or whose `sort_by` value is undefined or infinite; they are listed after every rankable one instead of competing for first place |
 | `best_params` | `dict` | Parameter combination of the top-ranked run |
 | `best_sharpe` | `float` | Sharpe ratio of the top-ranked run |
 | `best_return` | `float` | Total return of the top-ranked run |

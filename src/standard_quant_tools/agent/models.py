@@ -884,17 +884,59 @@ class FactorRegressionInput(BaseModel):
         ),
     )
 
+    @model_validator(mode="after")
+    def _names_label_the_tickers_one_to_one(self) -> "FactorRegressionInput":
+        # Names and tickers were zipped, so a short name list silently
+        # dropped the unnamed factors from the regression, and a repeated
+        # name overwrote one factor with another before it was fitted.
+        if not self.factor_tickers:
+            raise ValueError("factor_tickers must name at least one factor.")
+        if self.factor_names is not None and len(self.factor_names) != len(
+            self.factor_tickers
+        ):
+            raise ValueError(
+                f"factor_names has {len(self.factor_names)} name(s) for "
+                f"{len(self.factor_tickers)} factor_tickers; give one name per "
+                "ticker, in the same order, or omit factor_names."
+            )
+        names = self.factor_names or self.factor_tickers
+        repeated = sorted({n for n in names if names.count(n) > 1})
+        if repeated:
+            raise ValueError(
+                f"factor names must be unique; repeated: {repeated}. Each "
+                "factor is one column of the regression, and a repeated name "
+                "would overwrite one factor with another."
+            )
+        if "alpha" in names:
+            raise ValueError(
+                "'alpha' is reserved for the intercept in t_stats and "
+                "p_values; name the factor something else."
+            )
+        return self
+
 
 class FactorRegressionResult(BaseModel):
     symbol: str
     factors: List[str]
-    alpha: float
-    loadings: Dict[str, float]
-    t_stats: Dict[str, float]
-    p_values: Dict[str, float]
-    r_squared: float
-    adj_r_squared: float
+    alpha: Stat = None
+    loadings: Dict[str, Stat]
+    t_stats: Dict[str, Stat] = Field(
+        ...,
+        description="None where the statistic is undefined (too few "
+        "observations), never a fabricated 0.",
+    )
+    p_values: Dict[str, Stat] = Field(
+        ...,
+        description="None where the statistic is undefined, never a " "fabricated 1.",
+    )
+    r_squared: Stat = None
+    adj_r_squared: Stat = None
     n_obs: int
+    n_dates_dropped: int = Field(
+        0,
+        description="Dates dropped because some factor or the asset had no "
+        "return on them (different listing dates, holidays, gaps).",
+    )
     rolling_alpha_tail: Optional[List[float]] = None
     rolling_loadings_tail: Optional[Dict[str, List[float]]] = None
     warnings: List[str] = Field(
@@ -1202,13 +1244,14 @@ class HurstInput(BaseModel):
 
     min_window: int = Field(
         10,
-        gt=1,
+        ge=4,
         le=10_000,
         description=(
-            "Smallest scale in the log-log fit. The exponent is the SLOPE "
-            "across scales, so the window range is not a detail: too small "
-            "a floor lets microstructure noise flatten it toward 0.5, and "
-            "the regime call downstream reads that as 'random walk'."
+            "Smallest scale in the log-log fit, at least 4. The exponent is "
+            "the SLOPE across scales, so the window range is not a detail: "
+            "too small a floor lets microstructure noise flatten it toward "
+            "0.5, and a DFA box under four points has no residual to measure "
+            "and runs to the 1.5 clip on white noise."
         ),
     )
     max_window: Optional[int] = Field(
@@ -1216,8 +1259,10 @@ class HurstInput(BaseModel):
         gt=1,
         le=100_000,
         description=(
-            "Largest scale in the fit. None lets the estimator choose from "
-            "the series length."
+            "Largest scale in the fit; must exceed min_window. None lets the "
+            "estimator choose from the series length (n//4 for DFA, n//2 for "
+            "R/S), and a larger value is lowered to that -- max_window_used "
+            "reports what was fitted."
         ),
     )
 
@@ -1236,16 +1281,53 @@ class HurstInput(BaseModel):
         ),
     )
 
+    @model_validator(mode="after")
+    def _window_range_is_a_range(self) -> "HurstInput":
+        # The exponent is a slope across window sizes. An inverted or empty
+        # range used to come back as hurst 0.0, "strongly mean-reverting",
+        # for any series at all.
+        if self.max_window is not None and self.max_window <= self.min_window:
+            raise ValueError(
+                f"max_window ({self.max_window}) must be greater than "
+                f"min_window ({self.min_window}): the exponent is a slope "
+                "across a range of window sizes. Raise max_window, lower "
+                "min_window, or leave max_window unset."
+            )
+        return self
+
 
 class HurstResult(BaseModel):
     symbol: str
-    hurst: float
-    regime: str  # "trending" | "random_walk" | "mean_reverting"
-    fit_r_squared: float
+    hurst: Stat = Field(
+        None,
+        description="The exponent; for R/S after the small-sample "
+        "correction. None when the series is too short for the window range "
+        "or has no scaling to fit (a constant series).",
+    )
+    hurst_raw: Stat = Field(
+        None, description="The uncorrected log-log slope (differs for R/S only)."
+    )
+    bias_correction: float = Field(
+        0.0,
+        description="Subtracted from the raw R/S slope: what white noise "
+        "gives above 0.5 over these window sizes (Anis-Lloyd-Peters). 0.0 "
+        "for DFA.",
+    )
+    regime: str  # "trending" | "random_walk" | "mean_reverting" | "unknown"
+    regime_band: Stat = Field(
+        None,
+        description="Half-width of the random-walk band around 0.5 at this "
+        "length: 1.645 white-noise standard deviations, at least 0.05.",
+    )
+    fit_r_squared: Stat = None
     method: str
     n_obs: int
+    max_window_used: Optional[int] = Field(
+        None, description="The largest window actually fitted."
+    )
     rolling_current: Optional[float] = None
     rolling_regime_fractions: Optional[Dict[str, float]] = None
+    warnings: List[str] = Field(default_factory=list)
 
 
 # ──────────────────────────────────────────────
@@ -1612,7 +1694,21 @@ class PairScannerInput(BaseModel):
         126.0, gt=0, le=100_000, description="Maximum half-life in bars (~6 months)."
     )
     p_value_threshold: float = Field(
-        0.05, gt=0, le=1, description="Maximum cointegration p-value."
+        0.05,
+        gt=0,
+        le=1,
+        description="The level a pair must clear. Applied to p_value_both "
+        "(the larger of the two regression orders' p-values), after the "
+        "Benjamini-Hochberg adjustment across every pair tested unless "
+        "multiple_testing='none' -- so with the default it is a false "
+        "discovery rate.",
+    )
+    multiple_testing: Literal["benjamini_hochberg", "none"] = Field(
+        "benjamini_hochberg",
+        description="How the screen accounts for testing many pairs. At 5% "
+        "per pair, 276 unrelated pairs pass about 14 times by chance; "
+        "'benjamini_hochberg' controls the share of false discoveries among "
+        "the pairs returned. 'none' gates each pair on its own p-value.",
     )
     zscore_window: int = Field(
         30, gt=0, le=100_000, description="Rolling window for spread z-score signal."
@@ -1622,7 +1718,21 @@ class PairScannerInput(BaseModel):
 class PairResult(BaseModel):
     symbol_a: str
     symbol_b: str
-    p_value: float
+    p_value: float = Field(..., description="symbol_a regressed on symbol_b.")
+    p_value_reverse: Stat = Field(None, description="symbol_b regressed on symbol_a.")
+    p_value_both: Stat = Field(
+        None,
+        description="The larger of the two: Engle-Granger is not symmetric, "
+        "and a pair is cointegrated in both orders or not at all.",
+    )
+    p_value_bh: Stat = Field(
+        None,
+        description="p_value_both after the Benjamini-Hochberg adjustment "
+        "across every pair tested.",
+    )
+    direction_consistent: bool = Field(
+        True, description="Both regression orders agree at 5%."
+    )
     hedge_ratio: float
     half_life_days: float
     adf_statistic: float
@@ -1645,6 +1755,24 @@ class PairScannerResult(BaseModel):
     # with one that was tested and simply didn't qualify.
     failed_pairs: List[PairFailure] = []
     failed_tickers: Dict[str, str] = {}  # ticker -> fetch-error message
+    n_pairs_with_p_value: int = Field(
+        0,
+        description="Pairs that produced a p-value in both orders: the "
+        "number of tests the multiple-testing adjustment counts.",
+    )
+    n_pairs_significant_uncorrected: int = Field(
+        0,
+        description="Pairs whose p_value_both clears p_value_threshold "
+        "before any multiple-testing adjustment.",
+    )
+    expected_false_positives: Stat = Field(
+        None,
+        description="n_pairs_with_p_value x p_value_threshold: how many "
+        "pairs would clear the threshold uncorrected if none were "
+        "cointegrated.",
+    )
+    multiple_testing: str = "benjamini_hochberg"
+    warnings: List[str] = Field(default_factory=list)
 
 
 # ──────────────────────────────────────────────
@@ -1952,6 +2080,16 @@ class RegimeAdaptiveWalkForwardResult(BaseModel):
     stitched_oos_calmar: float
     worst_oos_window: int
     longest_losing_window_streak: int
+    n_unrankable: int = Field(
+        0,
+        description=(
+            "Window-by-strategy candidates whose best in-sample row had no "
+            "rankable sort_by value -- no combination traded, or the metric "
+            "was undefined or infinite -- and so could not be selected over "
+            "a strategy that had one."
+        ),
+    )
+    warnings: List[str] = Field(default_factory=list)
 
 
 # ──────────────────────────────────────────────
@@ -2362,6 +2500,15 @@ class CompareStrategiesResult(BaseModel):
     best_strategy: str
     buy_and_hold_return: float
     strategies: List[StrategyComparison]  # sorted by sort_by, best first
+    n_unrankable: int = Field(
+        0,
+        description=(
+            "Strategies with no rankable sort_by value -- they never traded, "
+            "or the metric is undefined or infinite -- listed after every "
+            "ranked one instead of competing for first place."
+        ),
+    )
+    warnings: List[str] = Field(default_factory=list)
 
 
 # ──────────────────────────────────────────────
@@ -2534,12 +2681,25 @@ class OptimizationRun(BaseModel):
 class BacktestOptResult(BaseModel):
     symbol: str
     strategy: str
-    n_combinations: int
+    n_combinations: int = Field(
+        ...,
+        description="Distinct parameter combinations run; a value repeated "
+        "on an axis is run and counted once.",
+    )
     sort_by: str
     best_params: Dict[str, Any]
     best_sharpe: float
     best_return: float
     top_results: List[OptimizationRun]
+    n_unrankable: int = Field(
+        0,
+        description=(
+            "Combinations with no rankable sort_by value -- they never "
+            "traded, or the metric is undefined or infinite -- ranked after "
+            "every other one instead of competing for first place."
+        ),
+    )
+    warnings: List[str] = Field(default_factory=list)
 
 
 # ──────────────────────────────────────────────
@@ -4256,7 +4416,12 @@ class OptionPricingInput(BaseModel):
     )
     risk_free_rate: float = Field(
         ...,
-        description="Annualized continuously-compounded risk-free rate (e.g. 0.05 = 5%).",
+        ge=-10,
+        le=10,
+        description="Annualized continuously-compounded risk-free rate (e.g. "
+        "0.05 = 5%). Bounded to +/-10 (1,000%) on magnitude, never on sign: "
+        "a negative rate prices normally, and a larger magnitude is a unit "
+        "error.",
     )
     volatility: float = Field(
         ..., gt=0, description="Annualized volatility (e.g. 0.20 = 20%)."
@@ -4315,9 +4480,10 @@ class OptionGreeks(BaseModel):
     )
     theta: Optional[float] = Field(
         ...,
-        description="Price change per CALENDAR DAY, the conventional quote. "
-        "None for models this library does not compute it for -- Black-76 "
-        "among them -- which is a gap rather than a zero.",
+        description="Price change per CALENDAR DAY, the conventional quote, "
+        "from the closed form of black_scholes, black_76 and bachelier. None "
+        "for the binomial lattice, which has no closed form for it -- a gap "
+        "rather than a zero.",
     )
     rho: Optional[float] = Field(
         ...,
@@ -4354,7 +4520,11 @@ class ImpliedVolatilityInput(BaseModel):
     strike: float = Field(..., gt=0, description="Option strike price.")
     time_to_expiry: float = Field(..., gt=0, description="Time to expiry in years.")
     risk_free_rate: float = Field(
-        ..., description="Annualized continuously-compounded risk-free rate."
+        ...,
+        ge=-10,
+        le=10,
+        description="Annualized continuously-compounded risk-free rate. "
+        "Bounded to +/-10 (1,000%) on magnitude, never on sign.",
     )
     option_type: Literal["call", "put"] = Field("call", description="Option type.")
     dividend_yield: float = Field(
@@ -6452,6 +6622,14 @@ class StrategyMatrixResult(BaseModel):
         ),
     )
     notes: List[str] = Field(default_factory=list)
+    n_unrankable: int = Field(
+        0,
+        description=(
+            "Cells with no rankable sort_by value -- they never traded, or "
+            "the metric is undefined -- listed after every ranked cell and "
+            "never chosen as best_overall or a ticker's best."
+        ),
+    )
 
 
 # ── describe_temporal_contract ──────────────────────────────────────────
@@ -6839,7 +7017,14 @@ class EstimateCovarianceInput(BaseModel):
             "conditioning worse. 'ewma_shrunk' does both."
         ),
     )
-    halflife: float = Field(60.0, gt=0.0, description="EWMA half-life in observations.")
+    halflife: float = Field(
+        60.0,
+        gt=0.0,
+        description="EWMA half-life in observations. A half-life that leaves "
+        "fewer than 2 effective observations (below about 0.63) is refused: "
+        "the weight collapses onto the last row and there is no spread to "
+        "estimate.",
+    )
     periods_per_year: int = Field(
         252, ge=1, description="Used to annualize the matrix."
     )
@@ -6850,11 +7035,17 @@ class EstimateCovarianceResult(BaseModel):
     assets: List[str]
     n_observations: int
     n_assets: int
+    effective_observations: Optional[float] = Field(
+        None,
+        description="The observations the estimate rests on: the row count, "
+        "or under EWMA 1 / sum of squared weights (a 60-day half-life on 252 "
+        "rows is about 155).",
+    )
     observations_per_parameter: float = Field(
         ...,
-        description="Numbers available per estimated parameter. A covariance "
-        "over N assets has N(N+1)/2 of them, and this is the honest measure "
-        "of how thin the estimate is.",
+        description="Numbers available per estimated parameter, from "
+        "effective_observations. A covariance over N assets has N(N+1)/2 of "
+        "them, and this is the honest measure of how thin the estimate is.",
     )
     shrinkage_intensity: Optional[float] = Field(
         None,

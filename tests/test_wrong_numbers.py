@@ -507,11 +507,22 @@ class TestSeasonalityPValuesAreNotDoubled:
             index=index,
         )
 
+        # Against scipy's Welch test itself. This compared with the pooled
+        # n - 2 degrees of freedom, which is not the Welch t the statistic
+        # is: a small period with a larger variance than the rest was tested
+        # as if its variance were known, and rejected too often.
+        weekdays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+        day = index.dayofweek.to_numpy()
         for row in seasonality(series)["by_period"]:
 
-            expected = 2 * scipy_stats.t.sf(abs(row["t_statistic"]), n - 2)
-
-            assert row["p_value_raw"] == pytest.approx(expected, rel=1e-6), row[
+            key = weekdays.index(row["period"])
+            welch = scipy_stats.ttest_ind(
+                series.to_numpy()[day == key],
+                series.to_numpy()[day != key],
+                equal_var=False,
+            )
+            assert row["t_statistic"] == pytest.approx(welch.statistic, rel=1e-9)
+            assert row["p_value_raw"] == pytest.approx(welch.pvalue, rel=1e-6), row[
                 "period"
             ]
 
@@ -1299,7 +1310,16 @@ class TestStatisticsMatchTheirDefinitions:
 
         up = change > 0
 
-        assert got == pytest.approx(volume[up].sum() / volume.sum(), rel=1e-9)
+        # A bar with no direction -- here only the first, which has no
+        # return -- counts half to each side, the rule the signed imbalance
+        # applies to a zero return. This expectation used to count it as
+        # not-buy, which read a flat series as all selling.
+
+        still = change == 0
+
+        expected = (volume[up].sum() + 0.5 * volume[still].sum()) / volume.sum()
+
+        assert got == pytest.approx(expected, rel=1e-9)
 
         assert abs(got - up.mean()) > 0.3, "the test data must separate the two"
 

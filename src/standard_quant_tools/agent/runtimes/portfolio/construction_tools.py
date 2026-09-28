@@ -89,7 +89,9 @@ class HRPInput(BaseModel):
         ...,
         description="Asset name -> return series. All the same length. "
         "Returns rather than a covariance matrix, because HRP needs the "
-        "correlation structure to build its tree.",
+        "correlation structure to build its tree. A series with no variance "
+        "(a cash sleeve, a halted name) is refused by name: HRP splits "
+        "capital by inverse variance, so its weight is undefined.",
     )
     periods_per_year: int = Field(
         252,
@@ -160,9 +162,13 @@ class LiquidityVarInput(BaseModel):
         0.0,
         ge=-1,
         le=1,
-        description="Assumed correlation between positions. At 0 risks add "
-        "in quadrature; at 1 they add linearly, which is the crisis case -- "
-        "and crisis is when liquidation horizons matter.",
+        description="Assumed correlation between the positions' asset "
+        "RETURNS, one value for every pair; a short position's sign is "
+        "applied on top, so a long/short pair at +0.9 is a hedge. At 0 risks "
+        "add in quadrature; at 1 they add linearly, which is the crisis case "
+        "-- and crisis is when liquidation horizons matter. With n positions "
+        "it must be at least -1/(n-1) (-0.25 for five): below that no set of "
+        "assets has these correlations, and the value is refused.",
     )
     impact_coefficient: float = Field(
         0.1,

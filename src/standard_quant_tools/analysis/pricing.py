@@ -37,9 +37,15 @@ import logging
 import math
 from typing import Any, Dict, Optional
 
+import numpy as np
+
 from standard_quant_tools._special import (
     norm_cdf,
     norm_pdf,
+)
+from standard_quant_tools.analysis.options import (
+    _require_finite_price,
+    _validate_rates,
 )
 from standard_quant_tools.error import ValidationError
 
@@ -155,6 +161,13 @@ def price_option(
                 "exp(rate x time) overflows a float at about 710, so a value "
                 "this far out is a unit error rather than an extreme case."
             )
+    # The rate and the yield were missing from the loop above: r=-1e300
+    # raised a bare OverflowError out of all three closed forms, r=nan
+    # priced to NaN, and on the lattice r=nan was reported as "no
+    # arbitrage-free probability" without naming the rate. The bound is the
+    # one `analysis.options` applies, and it also refuses a rate x time
+    # past what exp() can take (r=-9 at T=100).
+    _validate_rates(risk_free_rate, dividend_yield, time_to_expiry)
 
     _validate(spot, strike, time_to_expiry, volatility, option_type, model)
     if american and model not in AMERICAN_CAPABLE:
@@ -168,7 +181,7 @@ def price_option(
         )
 
     if model == "binomial":
-        return _binomial(
+        result = _binomial(
             spot,
             strike,
             time_to_expiry,
@@ -179,7 +192,7 @@ def price_option(
             american,
             steps,
         )
-    if model == "bachelier":
+    elif model == "bachelier":
         if dividend_yield:
             # The normal model prices a forward-like underlying and has no
             # carry term; the dividend was silently discarded with
@@ -190,23 +203,38 @@ def price_option(
                 "been silently ignored. Pass dividend_yield=0 and a forward "
                 "that already carries the dividend, or use model='black_scholes'."
             )
-        return _bachelier(
+        result = _bachelier(
             spot, strike, time_to_expiry, volatility, risk_free_rate, option_type
         )
-    # black_76 is Black-Scholes on a forward: no carry, because the forward
-    # already contains it. Modelled as a zero dividend yield against a
-    # discounted-forward spot rather than as separate arithmetic.
-    carry = 0.0 if model == "black_76" else dividend_yield
-    return _black_scholes(
-        spot,
-        strike,
-        time_to_expiry,
-        volatility,
-        risk_free_rate,
-        option_type,
-        carry,
-        forward=(model == "black_76"),
-    )
+    else:
+        if model == "black_76" and dividend_yield:
+            # Refused for the reason the bachelier branch above refuses it:
+            # the yield was replaced by a zero carry below and returned the
+            # same price at q=0 and q=0.08 with notes=None.
+            raise ValidationError(
+                f"price_option: model='black_76' prices an option on a "
+                f"FORWARD, which already carries the dividend; dividend_yield="
+                f"{dividend_yield} cannot be used and would have been silently "
+                "ignored. Pass dividend_yield=0 with the forward, or use "
+                "model='black_scholes' with spot and the yield."
+            )
+        # black_76 is Black-Scholes on a forward: no carry, because the
+        # forward already contains it. Modelled as a zero dividend yield
+        # against a discounted-forward spot rather than as separate
+        # arithmetic.
+        carry = 0.0 if model == "black_76" else dividend_yield
+        result = _black_scholes(
+            spot,
+            strike,
+            time_to_expiry,
+            volatility,
+            risk_free_rate,
+            option_type,
+            carry,
+            forward=(model == "black_76"),
+        )
+    _require_finite_price(result["price"], f"price_option(model={model!r})")
+    return result
 
 
 def _rho(price, strike, t, discount, signed_nd2, forward: bool) -> float:
@@ -249,6 +277,11 @@ def _black_scholes(
     d1 = (math.log(spot / strike) + (drift + 0.5 * vol * vol) * t) / (vol * sqrt_t)
     d2 = d1 - vol * sqrt_t
 
+    # The time-decay term every closed form shares: the discounted density
+    # at d1 times vol / (2 sqrt T), on the forward for Black-76.
+    decay = (
+        (discount if forward else growth) * spot * _norm_pdf(d1) * vol / (2.0 * sqrt_t)
+    )
     if option_type == "call":
         price = (
             discount * (spot * _norm_cdf(d1) - strike * _norm_cdf(d2))
@@ -257,6 +290,13 @@ def _black_scholes(
         )
         delta = discount * _norm_cdf(d1) if forward else growth * _norm_cdf(d1)
         rho = _rho(price, strike, t, discount, _norm_cdf(d2), forward)
+        theta = (
+            rate * price - decay
+            if forward
+            else -decay
+            - rate * strike * discount * _norm_cdf(d2)
+            + dividend_yield * spot * growth * _norm_cdf(d1)
+        )
     else:
         price = (
             discount * (strike * _norm_cdf(-d2) - spot * _norm_cdf(-d1))
@@ -265,6 +305,13 @@ def _black_scholes(
         )
         delta = -discount * _norm_cdf(-d1) if forward else -growth * _norm_cdf(-d1)
         rho = _rho(price, strike, t, discount, -_norm_cdf(-d2), forward)
+        theta = (
+            rate * price - decay
+            if forward
+            else -decay
+            + rate * strike * discount * _norm_cdf(-d2)
+            - dividend_yield * spot * growth * _norm_cdf(-d1)
+        )
 
     gamma = (
         (growth if not forward else discount) * _norm_pdf(d1) / (spot * vol * sqrt_t)
@@ -274,8 +321,12 @@ def _black_scholes(
         "price": float(price),
         "delta": float(delta),
         "gamma": float(gamma),
-        # Per 1% of vol and per calendar day, which is how a desk quotes them.
+        # Vega per 1% of vol, theta per calendar day and rho per 1% of rate,
+        # which is how a desk quotes them. Theta is -dPrice/dT: under
+        # Black-76 the FORWARD is held fixed as time passes, so its theta
+        # is r x price minus the decay term, not the Black-Scholes formula.
         "vega": float(vega / 100.0),
+        "theta": float(theta / 365.0),
         "rho": float(rho / 100.0),
         "d1": float(d1),
         "d2": float(d2),
@@ -306,11 +357,16 @@ def _bachelier(spot, strike, t, vol, rate, option_type) -> Dict[str, Any]:
         delta = -discount * _norm_cdf(-d)
     gamma = discount * _norm_pdf(d) / (vol * sqrt_t)
     vega = discount * sqrt_t * _norm_pdf(d)
+    # -dPrice/dT with the underlying held fixed, the same for both sides:
+    # discounting pays r x price back, and the undiscounted value grows by
+    # vol x n(d) / (2 sqrt T).
+    theta = rate * price - discount * vol * _norm_pdf(d) / (2.0 * sqrt_t)
     return {
         "price": float(price),
         "delta": float(delta),
         "gamma": float(gamma),
         "vega": float(vega / 100.0),
+        "theta": float(theta / 365.0),
         "rho": float(-t * price / 100.0),
         "d1": float(d),
         "d2": float(d),
@@ -329,6 +385,13 @@ def _binomial(
     the first two time steps already contain the three spot nodes a central
     difference needs, so delta and gamma are exact for the tree rather than
     being a finite difference of it.
+
+    ONE ARRAY OPERATION PER LEVEL. The lattice was a Python list rebuilt at
+    every level with two `pow` calls per node -- O(n^2) interpreted work,
+    6.2 s at the 5,000 steps the tool accepts. The backward induction is
+    now a numpy expression per level with the same arithmetic in the same
+    order, and the node prices are formed only where they are read (every
+    level for an American exercise check, the first three for the greeks).
     """
     if steps < 10:
         raise ValidationError("binomial: steps must be at least 10")
@@ -346,22 +409,30 @@ def _binomial(
     discount = math.exp(-rate * dt)
     sign = 1.0 if option_type == "call" else -1.0
 
-    prices = [spot * (up ** (steps - i)) * (down**i) for i in range(steps + 1)]
-    values = [max(sign * (p - strike), 0.0) for p in prices]
+    # u^k and d^k once, then S u^(level-i) d^i by slicing: the same factors
+    # the list version computed per node, so the same prices to the bit.
+    exponents = np.arange(steps + 1, dtype=float)
+    up_powers = np.power(up, exponents)
+    down_powers = np.power(down, exponents)
 
-    node_cache: Dict[int, list] = {}
+    def _node_prices(level: int) -> np.ndarray:
+        return spot * up_powers[level::-1] * down_powers[: level + 1]
+
+    values = np.maximum(sign * (_node_prices(steps) - strike), 0.0)
+
+    node_cache: Dict[int, Any] = {}
     for step in range(steps - 1, -1, -1):
-        prices = [spot * (up ** (step - i)) * (down**i) for i in range(step + 1)]
-        values = [
-            discount * (probability * values[i] + (1.0 - probability) * values[i + 1])
-            for i in range(step + 1)
-        ]
-        if american:
-            values = [max(v, sign * (prices[i] - strike)) for i, v in enumerate(values)]
-        if step <= 2:
-            node_cache[step] = (list(prices), list(values))
+        values = discount * (
+            probability * values[:-1] + (1.0 - probability) * values[1:]
+        )
+        if american or step <= 2:
+            prices = _node_prices(step)
+            if american:
+                values = np.maximum(values, sign * (prices - strike))
+            if step <= 2:
+                node_cache[step] = (prices.tolist(), values.tolist())
 
-    price = values[0]
+    price = float(values[0])
     p1, v1 = node_cache[1]
     p2, v2 = node_cache[2]
     delta = (v1[0] - v1[1]) / (p1[0] - p1[1])
@@ -374,6 +445,7 @@ def _binomial(
         "delta": float(delta),
         "gamma": float(gamma),
         "vega": None,
+        "theta": None,
         "rho": None,
         "d1": None,
         "d2": None,
@@ -381,10 +453,10 @@ def _binomial(
         "american": bool(american),
         "steps": int(steps),
         "notes": [
-            "vega and rho are not returned: the lattice has no closed form "
-            "for them, and a bumped reprice would be a different number from "
-            "the analytic ones the other models report. Price with "
-            "black_scholes for a European vega."
+            "vega, theta and rho are not returned: the lattice has no closed "
+            "form for them, and a bumped reprice would be a different number "
+            "from the analytic ones the other models report. Price with "
+            "black_scholes for a European vega and theta."
         ],
     }
 

@@ -177,7 +177,9 @@ Three conditions produce a `ValidationError` rather than a number, because in ea
 
 **You need more observations than assets.** A sample covariance built from *n* observations has rank at most *n − 1*, so with observations ≤ assets it is singular *by construction*. That is not a numerical nuisance — it hands the optimizer a whole null space of directions with exactly zero in-sample variance. Measured on 5 observations of 6 assets, the SLSQP path reported `expected_volatility` of 1.19e-07 with `converged=True`, for weights whose actual out-of-sample volatility was **23.1%**. The closed-form path had always caught this (its matrix inverse fails); the constrained path inverts nothing and did not. Both now check the same condition before either solver runs, so they cannot disagree about whether an input is solvable. Perfect collinearity (a duplicated ticker, a share class tracking another exactly) is rejected on the same grounds even when there are plenty of rows.
 
-**`max_sharpe` needs a risk-free rate below the minimum-variance return.** The closed-form tangency portfolio normalizes `Σ⁻¹(μ − rf·1)` by its own sum, `B − rf·A`. The resulting excess return is `(μ−rf)'Σ⁻¹(μ−rf)` divided by that sum — and the numerator is a quadratic form in a positive-definite Σ, so it is *always positive*. The sign is therefore entirely the denominator's, and once `rf` reaches the global minimum-variance portfolio's expected return (`B/A`) the normalization flips you onto the **inefficient** branch. An objective named `max_sharpe` then returned the *minimum*-Sharpe portfolio with `converged=True`: on μ=[0.10, 0.08], Σ=[[.04,.01],[.01,.05]], rf=0.20, Sharpe **−0.66**. The supremum genuinely is not attained in that regime, so it is reported. Bounded requests (`allow_short=False` and/or `max_weight` set) still solve — bounds make the feasible set compact — so the restriction is specific to the unconstrained closed form.
+**`max_sharpe` needs a risk-free rate below the minimum-variance return.** The closed-form tangency portfolio normalizes `Σ⁻¹(μ − rf·1)` by its own sum, `B − rf·A`. The resulting excess return is `(μ−rf)'Σ⁻¹(μ−rf)` divided by that sum — and the numerator is a quadratic form in a positive-definite Σ, so it is *always positive*. The sign is therefore entirely the denominator's, and once `rf` reaches the global minimum-variance portfolio's expected return (`B/A`) the normalization flips you onto the **inefficient** branch. An objective named `max_sharpe` then returned the *minimum*-Sharpe portfolio with `converged=True`: on μ=[0.10, 0.08], Σ=[[.04,.01],[.01,.05]], rf=0.20, Sharpe **−0.66**. The supremum genuinely is not attained in that regime, so it is reported.
+
+**Bounded requests are refused when no portfolio inside the bounds beats the rate.** Bounds (`allow_short=False` and/or `max_weight` set) make the feasible set compact, so a maximum always *exists* — but when every attainable excess return is negative, the maximum of a negative Sharpe is the portfolio that divides the shortfall by the most volatility. Long-only with rf=10% over assets returning 4%/10% vol, 3%/30% and 5%/20% returned 100% in the 3% asset, dominated by both others, with `converged=True` and no warning; at `max_weight=5` the same regime returned a 5x-levered Sharpe of −1.06. The bounded path now computes the highest expected return any portfolio inside the bounds can earn (a linear programme, solved exactly) and refuses when the rate is at or above it, naming that return. When a positive-excess portfolio does exist but the solver ends in the negative region from its equal-weight start, it restarts from the highest-return portfolio; if it still ends there, `converged` is false and a warning says why.
 
 **A solver reporting success is not a valid answer.** `result.success` is the
 solver's opinion of its own run, not a statement that the returned vector
@@ -450,6 +452,20 @@ different numbers, with nothing to say which permutation was the answer.
 Columns are now sorted by name before anything reads them, so the weights
 are a function of the universe and its returns alone.
 
+**A zero-variance asset is refused by name.** HRP splits capital in inverse
+proportion to variance, and it had no guard: an exactly constant column (a
+cash sleeve, a halted name) divided by zero and every weight came back NaN —
+nulls at the agent surface, with only the usual warnings — while a column
+constant at a non-zero level (1bp a day) has a float-residue variance of
+about 1e-40 and took **100%** of the portfolio. A column that is constant on
+its own scale, or whose variance is at or below 1e-20 of the largest in the
+universe (a volatility ratio of 1e-10), is now refused naming the asset. A
+genuinely quiet asset — T-bills next to equities, around 1e-6 of the largest
+variance — is not affected. `optimize_risk_parity`,
+`optimize_max_diversification` and every other tool that takes a covariance
+apply the same relative floor to its diagonal; they refused only an exact
+zero, and gave the 1bp sleeve 100% with `converged=True`.
+
 ### `optimize_max_diversification`
 
 Maximizes the **diversification ratio** — the weighted average of the
@@ -563,6 +579,19 @@ which is the crisis case — and crisis is exactly when liquidation horizons
 matter, so an honest stress uses a correlation well above the historical
 average.
 
+It is one correlation between the assets' **returns**, shared by every pair,
+and two things follow. First, it has a floor: an equicorrelation matrix over
+*n* positions is a correlation matrix only for ρ ≥ −1/(n−1). Below that the
+implied variance is negative and was clamped to zero — five $1m positions in
+30%-vol names at ρ = −0.30 reported a VaR of exactly **$0.00**. A correlation
+below the floor (−0.25 for five positions) is refused naming it; at the floor
+itself the positions offset exactly and a warning says the zero is a
+statement about the assumption. Second, a short position's P&L is the
+negative of its asset's return, so the aggregate uses **signed** position
+risks: {+$1m, −$1m} at ρ = +0.9 is a hedge carrying √0.2 of one leg's risk.
+The rows used to be aggregated as magnitudes, which scored that hedge as a
+long/long doubling (√3.8). The per-position rows still report magnitudes.
+
 ### `run_portfolio_scenarios`
 
 What a portfolio does under **named** shocks rather than under a
@@ -627,6 +656,22 @@ on a live panel one such history silently removed **400 of 512 rows** with
 zero a warning names the count and the asset with the shortest history, so
 the choice — drop the asset, or start the window where every asset has
 data — is the caller's rather than the estimator's.
+
+**It says how many observations the EWMA estimate rests on.** Exponential
+weighting lowers the effective sample size, `1 / Σw²`: a 60-observation
+half-life on 252 rows rests on about 155 effective observations, not 252.
+The result reports `effective_observations` (the row count for `sample` and
+`ledoit_wolf`), `observations_per_parameter` is computed from it, and a
+warning fires when there are no more effective observations than assets —
+the estimate is rank-deficient by construction then, whatever the row count
+says. Two half-lives used to be mishandled. `halflife=0` was read as the
+default 60 (`halflife or 60`), while −5 was refused; 0 is now refused and
+only an absent half-life takes the default. And a half-life short enough to
+put all the weight on the last row — fewer than 2 effective observations,
+below about 0.63 — is refused before the estimate: below about 0.019 the
+unbiasing denominator `1 − Σw²` was exactly zero and a raw numpy
+`LinAlgError` escaped, and between 0.019 and 0.05 a matrix with a condition
+number of 1e12–1e17 came back without a warning.
 
 ## Planning the transition
 

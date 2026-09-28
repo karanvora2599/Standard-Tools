@@ -17,10 +17,11 @@ code, just not what the two OOS aggregate fields are computed from anymore.
 """
 
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
+from standard_quant_tools.metrics.annualization import resolve_periods_per_year
 from standard_quant_tools.metrics.return_metrics import cumulative_return
 from standard_quant_tools.metrics.risk_metrics import (
     calmar_ratio,
@@ -47,27 +48,52 @@ def stitch_oos_returns(window_returns: List[pd.Series]) -> pd.Series:
 def compute_stitched_metrics(
     oos_returns: pd.Series,
     initial_capital: float = 10_000.0,
-) -> Dict[str, float]:
+    periods_per_year: Optional[int] = None,
+    interval: Optional[str] = None,
+) -> Dict[str, Any]:
     """
     Build one equity curve from the stitched OOS returns and compute
     metrics off it — the economically correct alternative to averaging
     each window's independently-computed metrics.
+
+    `periods_per_year` / `interval` annualize the ratios exactly as
+    run_strategy's do (explicit, then the interval, then the spacing of
+    `oos_returns`' index, then 252 with a warning); the value used and any
+    warning are returned as "periods_per_year" and "warnings".
+
+    An empty out-of-sample window has no ratios: sharpe_ratio,
+    sortino_ratio and calmar_ratio are None, not 0.0 -- a 0.0 Sharpe reads
+    as "measured, and no edge", and nothing was measured. Its return and
+    drawdown are 0.0, which is what an account that did nothing has.
     """
     if oos_returns.empty:
         return {
             "total_return": 0.0,
-            "sharpe_ratio": 0.0,
-            "sortino_ratio": 0.0,
+            "sharpe_ratio": None,
+            "sortino_ratio": None,
             "max_drawdown": 0.0,
-            "calmar_ratio": 0.0,
+            "calmar_ratio": None,
+            "periods_per_year": None,
+            "warnings": [
+                "compute_stitched_metrics: the out-of-sample window is empty, "
+                "so it has no Sharpe, Sortino or Calmar."
+            ],
         }
+    ppy, _source, warnings = resolve_periods_per_year(
+        oos_returns.index,
+        periods_per_year=periods_per_year,
+        interval=interval,
+        where="compute_stitched_metrics",
+    )
     equity_curve = initial_capital * (1 + oos_returns).cumprod()
     return {
         "total_return": float(cumulative_return(equity_curve)),
-        "sharpe_ratio": float(sharpe_ratio(oos_returns)),
-        "sortino_ratio": float(sortino_ratio(oos_returns)),
+        "sharpe_ratio": float(sharpe_ratio(oos_returns, 0.0, ppy)),
+        "sortino_ratio": float(sortino_ratio(oos_returns, 0.0, ppy)),
         "max_drawdown": float(max_drawdown(equity_curve)),
-        "calmar_ratio": float(calmar_ratio(equity_curve)),
+        "calmar_ratio": float(calmar_ratio(equity_curve, ppy)),
+        "periods_per_year": ppy,
+        "warnings": warnings,
     }
 
 

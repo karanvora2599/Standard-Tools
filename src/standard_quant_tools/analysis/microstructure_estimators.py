@@ -97,6 +97,56 @@ def _enough(n: int, who: str, minimum: int = MIN_OBSERVATIONS) -> None:
         )
 
 
+def _in_time_order(data: Any, who: str) -> "tuple[Any, Optional[str]]":
+    """
+    Bars in time order, or a refusal -- and a note when they had to be sorted.
+
+    Every estimator here reads consecutive ROWS as consecutive moments: a
+    covariance of successive changes, a two-bar range, a return per dollar,
+    a rolling window, a bucket walk. Handed a dated frame out of order, each
+    answered on the shuffled sequence, and a shuffled random walk -- white
+    noise by construction -- came back from `roll_spread` as a spread of
+    16.99 flagged `significant`. A DatetimeIndex states the order, so the
+    bars are stable-sorted by it and the result says they were.
+
+    A REPEATED STAMP IS REFUSED rather than sorted, because nothing says
+    which of two bars at one moment came first: it is two sources
+    concatenated or a feed that repeated itself, and either way the
+    sequence these estimators read is not there. A missing stamp (NaT) is
+    refused for the same reason. A positional index is taken as already in
+    order, which is what a list of closes is.
+    """
+    index = getattr(data, "index", None)
+    if not isinstance(index, pd.DatetimeIndex):
+        return data, None
+    if index.hasnans:
+        raise ValidationError(
+            f"{who}: {int(index.isna().sum())} bar(s) have no timestamp (NaT), "
+            "so they cannot be placed in the sequence this estimator reads. "
+            "Drop them or restore their stamps."
+        )
+    if index.has_duplicates:
+        repeated = index[index.duplicated(keep="first")]
+        raise ValidationError(
+            f"{who}: {len(repeated)} bar(s) share a timestamp with an earlier "
+            f"one (first repeat: {repeated[0]}). Two bars at one moment are "
+            "two sources concatenated or a feed that repeated itself, and "
+            "nothing says which came first. Keep one bar per timestamp -- "
+            "e.g. `bars[~bars.index.duplicated(keep='last')]` -- or pass "
+            "the bars without their dates if the row order is the sequence."
+        )
+    if index.is_monotonic_increasing:
+        return data, None
+    steps_back = int((np.diff(index.asi8) < 0).sum())
+    return data.sort_index(kind="stable"), (
+        f"The bars were NOT in time order ({steps_back} step(s) back in "
+        "time) and were sorted by their timestamps before estimating. Every "
+        "estimator here reads consecutive rows as consecutive moments, so "
+        "on the rows as given the answer would have described a sequence "
+        "that never happened."
+    )
+
+
 # ── spread from the covariance of price changes ─────────────────────────
 
 
@@ -128,7 +178,8 @@ def roll_spread(
     could not measure it" and "it was zero" are different facts and only one
     of them is true.
     """
-    values = pd.Series(prices).astype(float).dropna()
+    values, order_note = _in_time_order(pd.Series(prices), "roll_spread")
+    values = values.astype(float).dropna()
     _enough(len(values), "roll_spread")
 
     changes = values.diff().dropna()
@@ -185,7 +236,7 @@ def roll_spread(
         bool(covariance < -2.0 * covariance_se) if math.isfinite(covariance) else None
     )
 
-    warnings: List[str] = []
+    warnings: List[str] = [order_note] if order_note else []
     if spread is not None and significant is False:
         warnings.append(
             f"THIS ESTIMATE IS NOT DISTINGUISHABLE FROM ZERO. The serial "
@@ -365,6 +416,7 @@ def corwin_schultz_spread(ohlc: pd.DataFrame) -> Dict[str, Any]:
     estimator was built for however the arithmetic is patched.
     """
     frame = _require_columns(ohlc, ["high", "low"], "corwin_schultz_spread")
+    frame, order_note = _in_time_order(frame, "corwin_schultz_spread")
     frame = frame.dropna()
     _enough(len(frame), "corwin_schultz_spread")
     require_tradeable_bars(frame["high"], frame["low"], "corwin_schultz_spread")
@@ -382,7 +434,7 @@ def corwin_schultz_spread(ohlc: pd.DataFrame) -> Dict[str, Any]:
     # Corwin-Schultz's own recommendation. Applied, and reported.
     floored = np.where(negative, 0.0, spread)
 
-    warnings: List[str] = []
+    warnings: List[str] = [order_note] if order_note else []
     if negative_fraction > 0.33:
         warnings.append(
             f"{negative_fraction:.0%} of daily estimates came out NEGATIVE "
@@ -461,6 +513,7 @@ def amihud_illiquidity(
     illiquid here even if its book is deep.
     """
     frame = _require_columns(ohlcv, ["close", "volume"], "amihud_illiquidity")
+    frame, order_note = _in_time_order(frame, "amihud_illiquidity")
     frame = frame.dropna()
     frame = frame[(frame["close"] > 0) & (frame["volume"] > 0)]
     _enough(len(frame), "amihud_illiquidity")
@@ -510,6 +563,8 @@ def amihud_illiquidity(
         "several scaling conventions, so do not compare these against a "
         "paper's numbers without checking its scaling.",
     ]
+    if order_note:
+        warnings.insert(0, order_note)
     if percentile is not None and percentile > 90:
         warnings.append(
             f"The current reading sits at the {percentile:.0f}th percentile "
@@ -571,13 +626,28 @@ def kyle_lambda(
     offer, and the result says `circular=True` so nobody sizes an order
     off it without knowing.
 
+    A TAPE WITHOUT QUOTES IS CIRCULAR TOO. The tick rule signs each print
+    by the change from the previous print, and the price that moves is
+    then the last TRADE price -- so the sign is read off the same price
+    changes the regression explains, and an up-tick is a buy in x and a
+    rise in y. On prints bouncing half a cent around a constant price
+    (true lambda zero) it returned a positive lambda with an r_squared of
+    0.31 at 100 ms buckets. Only a tape WITH quotes -- a Lee-Ready sign
+    against the prevailing quote, and the midpoint as the price -- is
+    `circular=False`. See the CHANGELOG entry of 2026-09-27.
+
     R-SQUARED IS THE NUMBER TO CHECK. A lambda from a regression that
     explains 2% of the variance is a number with a standard error larger
     than itself. It is returned next to the estimate rather than buried.
     """
+    order_note: Optional[str] = None
     if trades is not None:
         frame, data, sign_source = _kyle_data_from_trades(trades, quotes, freq)
-        circular = False
+        # Circular unless the sign came from somewhere other than the prices
+        # being explained. `circular = False` for every tape stood here, so
+        # a tape without quotes -- tick-rule signs over last trade prices --
+        # reported a lambda built from the bid-ask bounce as a measurement.
+        circular = sign_source != "lee_ready"
     else:
         if ohlcv is None:
             raise ValidationError(
@@ -585,6 +655,7 @@ def kyle_lambda(
                 "with `quotes` for a Lee-Ready sign)."
             )
         frame = _require_columns(ohlcv, ["close", "volume"], "kyle_lambda")
+        frame, order_note = _in_time_order(frame, "kyle_lambda")
         frame = frame.dropna()
         frame = frame[(frame["close"] > 0) & (frame["volume"] > 0)]
         _enough(len(frame), "kyle_lambda")
@@ -629,14 +700,14 @@ def kyle_lambda(
     mean_volume = float(frame["volume"].mean())
     # What lambda says a 1%-of-ADV order costs, which is the interpretable form.
     impact_1pct = lam * 0.01 * mean_volume
-    warnings: List[str] = []
+    warnings: List[str] = [order_note] if order_note else []
     if r_squared < 0.05:
         warnings.append(
             f"R-squared is {r_squared:.3f}: signed volume explains almost "
             "none of the price variation, so this lambda has a standard "
             "error larger than itself. Do not size an order off it."
         )
-    if circular:
+    if sign_source == "return_sign":
         warnings.append(
             "CIRCULAR: from bars the flow is signed by the TICK RULE on the "
             "bar's own return, so x = sign(y) * volume is regressed on y. "
@@ -644,6 +715,21 @@ def kyle_lambda(
             "nothing -- shuffling the returns and permuting the volume left "
             "80% of a live estimate intact. Pass trades (and quotes) for a "
             "Lee-Ready sign that does not know the answer."
+        )
+    elif circular:
+        # Not "misclassification attenuates the slope": on this path the
+        # sign and the price change are read off the same prints, so the
+        # error runs the other way and the bounce alone makes a slope.
+        warnings.append(
+            f"CIRCULAR: without quotes the tape is signed by the TICK RULE, "
+            "the sign of each print's change from the one before, and the "
+            "price regressed on that flow is the last TRADE price per "
+            f"{freq} bucket -- the same prints. An up-tick is a buy in x and "
+            "a rise in y, so the bid-ask bounce alone produces a positive "
+            "lambda and a respectable r_squared on a market with no impact "
+            "at all. Where impact is real the slope can land near it, but "
+            "nothing in this result separates the two. Pass quotes for a "
+            "Lee-Ready sign and the midpoint as the price."
         )
     else:
         if lam <= 0:
@@ -671,8 +757,9 @@ def kyle_lambda(
         "mean_price": mean_price,
         "mean_volume": mean_volume,
         "rolling": rolling,
-        # Whether the sign was read off the dependent variable (bars) or
-        # from the tape (trades), and which rule signed it.
+        # Whether the sign was read off the prices being explained (bars,
+        # or a tape without quotes) or from the quotes, and which rule
+        # signed it.
         "circular": bool(circular),
         "sign_source": sign_source,
         "freq": freq if trades is not None else None,
@@ -764,6 +851,7 @@ def order_flow_imbalance(
     assuming otherwise.
     """
     frame = _require_columns(ohlcv, ["close", "volume"], "order_flow_imbalance")
+    frame, order_note = _in_time_order(frame, "order_flow_imbalance")
     frame = frame.dropna()
     frame = frame[frame["volume"] > 0]
     _enough(len(frame), "order_flow_imbalance")
@@ -786,7 +874,9 @@ def order_flow_imbalance(
     # Does today's imbalance say anything about tomorrow's return? Lined up
     # BY POSITION: the next bar is the next row. Reindexing by label raised
     # "cannot reindex on an axis with duplicate labels" on any dated frame
-    # with a repeated stamp. See the CHANGELOG entry of 2026-09-27.
+    # with a repeated stamp. See the CHANGELOG entry of 2026-09-27. (A
+    # repeated stamp is now refused by name before this point, and a dated
+    # frame is in time order by the time it gets here.)
     forward = returns.shift(-1).to_numpy()[complete]
     pair = pd.DataFrame({"imb": imbalance.to_numpy(), "fwd": forward}).dropna()
     predictive = float(pair["imb"].corr(pair["fwd"])) if len(pair) > 10 else None
@@ -805,11 +895,12 @@ def order_flow_imbalance(
         float(imbalance.autocorr(lag=1)) if len(imbalance) > 10 else None
     )
 
-    warnings = [
+    warnings = [order_note] if order_note else []
+    warnings.append(
         "Buy/sell volume is split by the TICK RULE on daily bars, which is "
         "a much weaker signing than trade-versus-quote matching. Treat this "
-        "as a coarse directional summary, not as order flow.",
-    ]
+        "as a coarse directional summary, not as order flow."
+    )
     warnings.append(
         "`persistence` is measured on NON-OVERLAPPING windows. The rolling "
         "series shares window-1 of its observations with the previous "
@@ -850,8 +941,21 @@ def order_flow_imbalance(
         # field name that `analysis/microstructure.py` computes correctly
         # size-weighted. Measured on the same synthetic tape: 0.495050 here
         # against 0.000979 there, a factor of 506, same package.
+        #
+        # A bar with no direction (a zero return, or the first bar, which
+        # has no return) counts HALF to each side -- the rule the signed
+        # sum above applies to a zero return, whose sign adds nothing to
+        # either side while its volume stays in the total. It counted as
+        # not-buy, so a flat series read as all selling (0.0) beside a mean
+        # imbalance of exactly zero.
         "buy_volume_fraction": (
-            float(frame["volume"][direction > 0].sum() / frame["volume"].sum())
+            float(
+                (
+                    frame["volume"][direction > 0].sum()
+                    + 0.5 * frame["volume"][~(direction.abs() > 0)].sum()
+                )
+                / frame["volume"].sum()
+            )
             if float(frame["volume"].sum()) > 0
             else float("nan")
         ),
@@ -893,6 +997,7 @@ def estimate_vpin(
     is not the VPIN of the paper, and it is labelled accordingly.
     """
     frame = _require_columns(ohlcv, ["close", "volume"], "estimate_vpin")
+    frame, order_note = _in_time_order(frame, "estimate_vpin")
     frame = frame.dropna()
     frame = frame[frame["volume"] > 0]
     _enough(len(frame), "estimate_vpin")
@@ -905,19 +1010,34 @@ def estimate_vpin(
 
     # Walk the bars, filling equal-volume buckets and splitting each bar's
     # volume by the sign of its return.
+    #
+    # A BAR WITH NO DIRECTION IS SPLIT HALF AND HALF. `s >= 0` stood here,
+    # so every zero return -- and the first bar, which has none -- was all
+    # buying: a flat close series came back at the maximum, 1.0, and 1-second
+    # bars (about a quarter of them zero-return) were biased upward in every
+    # bucket. Half each is what the tick rule can say about a bar that did
+    # not move, what `order_flow_imbalance` does with a sign of zero, and
+    # what bulk-volume classification gives at a zero standardized return.
+    # See the CHANGELOG entry of 2026-09-27.
     buys: List[float] = []
     sells: List[float] = []
     current_buy = current_sell = filled = 0.0
     signs = np.sign(returns.to_numpy())
+    undirected_share = (
+        float(volume[signs == 0].sum() / total_volume) if total_volume > 0 else 0.0
+    )
     for v, s in zip(volume, signs):
         remaining = float(v)
         while remaining > 0:
             room = bucket_size - filled
             take = min(remaining, room)
-            if s >= 0:
+            if s > 0:
                 current_buy += take
-            else:
+            elif s < 0:
                 current_sell += take
+            else:
+                current_buy += take / 2.0
+                current_sell += take / 2.0
             filled += take
             remaining -= take
             if filled >= bucket_size * (1.0 - 1e-12):
@@ -966,6 +1086,17 @@ def estimate_vpin(
         "of flow; calling that 'informed trading' is a model assumption, "
         "not a measurement.",
     ]
+    if order_note:
+        warnings.insert(0, order_note)
+    if undirected_share >= 0.25:
+        warnings.append(
+            f"{undirected_share:.0%} of the volume sat on bars whose close did "
+            "not move, and the tick rule cannot say which side initiated it: "
+            "it is split half to each side, so it adds volume to the buckets "
+            "and nothing to their imbalance. At this share the bars are too "
+            "fine or too quiet for tick-rule signing, and the reading is "
+            "diluted toward zero by flow nobody classified."
+        )
     if percentile is not None and percentile > 90:
         warnings.append(
             f"The current reading is at the {percentile:.0f}th percentile of "
@@ -978,6 +1109,7 @@ def estimate_vpin(
         "n_buckets": int(imbalance.size),
         "bucket_volume": float(bucket_size),
         "residual_volume": residual_volume,
+        "undirected_volume_share": undirected_share,
         "window": window,
         "current_vpin": current,
         "current_percentile": percentile,
@@ -1030,7 +1162,21 @@ def intraday_volume_profile(
     bars) or a tz-aware index, and the profile is bucketed over
     `session` in `exchange_timezone` with the extended-hours share
     reported beside it. A naive index with no `index_timezone` is taken
-    as already in session time.
+    as already in session time: its bars are profiled as given, over
+    the session's buckets -- unless a bar falls outside the session,
+    when the buckets span the bars' own times of day and a warning says
+    so, since without a zone nothing places that bar.
+
+    EVERY BUCKET IS REPORTED, EMPTY ONES INCLUDED, and the bucket edges
+    are the session's rather than the first and last bar's. Only the
+    occupied buckets used to come back, so on bars from the open and the
+    close alone the midday trough -- the number this exists to measure --
+    was missing: `trough_share` came back 0.40 where the truth was zero,
+    `u_shaped` False on the most extreme U there is, and `trough_bucket`
+    a position in the shortened list that pointed at the close. An empty
+    bucket now has a zero share, `trough_bucket` is a bucket id, and the
+    empty ones are counted and named. See the CHANGELOG entry of
+    2026-09-27.
     """
     frame = pd.DataFrame(bars)
     lower = {str(c).lower(): c for c in frame.columns}
@@ -1048,7 +1194,9 @@ def intraday_volume_profile(
     volume = pd.Series(frame[lower["volume"]].astype(float).values, index=frame.index)
     volume = volume.dropna()
     extended_share: Optional[float] = None
-    if index_timezone is not None or volume.index.tz is not None:
+    lo_m, hi_m = _session_bounds(session)
+    zoned = index_timezone is not None or volume.index.tz is not None
+    if zoned:
         local = (
             volume.index.tz_localize(index_timezone)
             if volume.index.tz is None
@@ -1056,7 +1204,6 @@ def intraday_volume_profile(
         ).tz_convert(exchange_timezone)
         stamps = local.tz_localize(None)
         session_minutes = stamps.hour * 60 + stamps.minute
-        lo_m, hi_m = _session_bounds(session)
         regular = (session_minutes >= lo_m) & (session_minutes < hi_m)
         total_all = float(volume.sum())
         extended_share = (
@@ -1093,32 +1240,66 @@ def intraday_volume_profile(
         )
 
     n_buckets = max(3, int(n_buckets))
-    lo, hi = int(minutes.min()), int(minutes.max())
-    span = max(hi - lo, 1)
-    bucket = np.minimum(((minutes - lo) / span * n_buckets).astype(int), n_buckets - 1)
+    # THE SESSION'S EDGES, NOT THE DATA'S. They were the first and last bar
+    # of the sample, so the buckets moved with whatever the sample held: on
+    # bars that stopped at 15:19 the "close" bucket started at 14:52. A zoned
+    # index has already been cut to the session. A naive one is taken as
+    # session time and profiled as given, so when a bar falls OUTSIDE the
+    # session that assumption is broken, the buckets span the bars' own
+    # times of day instead, and the result says so -- that is usually a UTC
+    # or extended-hours feed passed without the `index_timezone` that would
+    # have placed it.
+    lo, hi = lo_m, hi_m
+    outside_note: Optional[str] = None
+    if not zoned:
+        outside = (minutes < lo_m) | (minutes >= hi_m)
+        if outside.any():
+            lo, hi = int(minutes.min()), int(minutes.max()) + 1
+            outside_note = (
+                f"{int(outside.sum())} of {len(minutes)} bars fall outside the "
+                f"{session[0]}-{session[1]} session, and with no zone to place "
+                "them they are profiled as given: the buckets span the bars' "
+                f"own {_clock(lo)}-{_clock(hi)} instead, so the open and close "
+                "buckets are not the session's. If these stamps are UTC or "
+                "carry extended hours, pass index_timezone ('UTC' for a "
+                "Databento extract) and only the session is profiled."
+            )
+    span = hi - lo
+    position = np.floor((np.asarray(minutes) - lo) / span * n_buckets).astype(int)
+    bucket = np.clip(position, 0, n_buckets - 1)
 
-    grouped = volume.groupby(bucket).agg(["sum", "mean", "count"])
-    total = float(grouped["sum"].sum())
+    # EVERY BUCKET, EMPTY ONES INCLUDED. `groupby` keeps only the buckets
+    # some bar fell in, and the trough, the U and `trough_bucket` were then
+    # computed over that shortened list -- see the docstring.
+    grouped = (
+        volume.groupby(bucket).agg(["sum", "mean", "count"]).reindex(range(n_buckets))
+    )
+    counts = grouped["count"].fillna(0).astype(int).to_numpy()
+    sums = grouped["sum"].fillna(0.0).to_numpy(dtype=float)
+    total = float(sums.sum())
     profile: List[Dict[str, Any]] = []
-    for index, row in grouped.iterrows():
-        start_minute = lo + span * int(index) / n_buckets
+    for index in range(n_buckets):
         profile.append(
             {
-                "bucket": int(index),
-                "start_time": f"{int(start_minute) // 60:02d}:{int(start_minute) % 60:02d}",
-                "share_of_volume": float(row["sum"] / total) if total > 0 else 0.0,
-                "mean_volume": float(row["mean"]),
-                "n_bars": int(row["count"]),
+                "bucket": index,
+                "start_time": _clock(lo + span * index / n_buckets),
+                "share_of_volume": float(sums[index] / total) if total > 0 else 0.0,
+                "mean_volume": (
+                    float(grouped["mean"].iloc[index]) if counts[index] else None
+                ),
+                "n_bars": int(counts[index]),
             }
         )
+    empty = [p["bucket"] for p in profile if p["n_bars"] == 0]
 
     shares = np.array([p["share_of_volume"] for p in profile])
-    even = 1.0 / len(shares)
+    even = 1.0 / n_buckets
     first, last = shares[0], shares[-1]
     trough = float(shares.min())
+    # A position in `profile`, which is now also the bucket's id.
     trough_bucket = int(np.argmin(shares))
     u_shaped = bool(
-        first > even and last > even and trough_bucket not in (0, len(shares) - 1)
+        first > even and last > even and trough_bucket not in (0, n_buckets - 1)
     )
 
     warnings = [
@@ -1135,6 +1316,17 @@ def intraday_volume_profile(
             "a name whose volume is dominated by one scheduled auction all "
             "produce this."
         )
+    if outside_note:
+        warnings.insert(0, outside_note)
+    if empty:
+        warnings.append(
+            f"{len(empty)} of {n_buckets} buckets hold no bars at all "
+            f"(bucket(s) {empty}). They are reported with a zero share rather "
+            "than dropped, so the trough and the U are measured over the "
+            "whole day, and an empty bucket IS the trough when there is one. "
+            "Before scheduling against it, check whether each is real -- a "
+            "halt, a lunch break, a thin name -- or a gap in the data."
+        )
     if last > 0.20:
         warnings.append(
             f"The final bucket carries {last:.0%} of the day's volume. "
@@ -1146,7 +1338,8 @@ def intraday_volume_profile(
 
     return {
         "n_bars": int(len(volume)),
-        "n_buckets": len(profile),
+        "n_buckets": int(n_buckets),
+        "n_empty_buckets": len(empty),
         "profile": profile,
         "u_shaped": u_shaped,
         "open_share": float(first),
@@ -1155,9 +1348,16 @@ def intraday_volume_profile(
         "trough_bucket": trough_bucket,
         "open_to_trough_ratio": float(first / trough) if trough > 0 else None,
         "session": list(session),
+        "bucket_span": [_clock(lo), _clock(hi)],
         "extended_hours_share": extended_share,
         "warnings": warnings,
     }
+
+
+def _clock(minute: float) -> str:
+    """Minutes after midnight as HH:MM, truncated to the minute."""
+    whole = int(minute)
+    return f"{whole // 60:02d}:{whole % 60:02d}"
 
 
 def _session_bounds(session) -> "tuple[int, int]":

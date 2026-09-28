@@ -539,6 +539,10 @@ def permutation_test_ic(
     numerator and denominator, so a p of exactly 0 is never reported --
     200 permutations cannot distinguish "p < 0.005" from "p = 0", and
     printing 0.0 claims a precision the sample size does not have.
+
+    Rows with a NaN feature or target are dropped from both the observed IC
+    and the null. A +/-inf feature or target is refused with a
+    ValidationError rather than dropped; replace it with NaN to drop it.
     """
     check_ic_method(method, what="permutation_test")
     _require(panel, feature)
@@ -559,6 +563,27 @@ def permutation_test_ic(
     dates = frame["date"].to_numpy()
     target = frame["target"].to_numpy(dtype=float)
     values = frame[feature].to_numpy(dtype=float)
+
+    # +/-inf is refused, not dropped. The observed IC and its null must be
+    # computed on the same rows, and they were not: the observed IC kept an
+    # inf row (ranked as the extreme for spearman; for pearson it made the
+    # date's IC 0.0), while the native null dropped it. Measured with one
+    # +inf per date, the spearman IC tested was 0.180 against 0.201 on the
+    # rows the null used, and a pearson IC of 0.0 was tested against a null
+    # of sd 0.044, so p was ~1 whatever the feature did. Masking both sides
+    # would make them agree, but on a row set no other feature-lab IC uses
+    # -- cross_sectional_ic ranks an inf -- so this test would silently
+    # answer about a different sample from the IC reported beside it.
+    for name, column in ((feature, values), ("target", target)):
+        n_inf = int(np.isinf(column).sum())
+        if n_inf:
+            raise ValidationError(
+                f"permutation_test_ic: {name!r} has {n_inf} infinite value(s). "
+                "An infinity is a failed division upstream, not an "
+                "observation, and the IC and its null would disagree about "
+                "which rows it belongs to. Replace it with NaN to drop those "
+                "rows, or fix the feature so it cannot divide by zero."
+            )
 
     observed_series = cross_sectional_ic(target, values, dates, method=method)
     observed = float(observed_series.mean()) if len(observed_series) else float("nan")

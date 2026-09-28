@@ -45,28 +45,34 @@ Two things genuinely did not exist anywhere and had to be written:
 | A year fraction. No `year_fraction`, no day-count convention, five inline `/365.0` sites | `delta_one/daycount.py` |
 | `tracking_error` as a function (it was a local variable inside `information_ratio`) | `delta_one/hedging.py` |
 
+A date here is an ISO string, a `datetime.date` or a `Timestamp`, never a
+number. `pd.Timestamp(20260320)` is 20,260,320 nanoseconds after the epoch,
+so a YYYYMMDD integer became 1970-01-01 and a swap priced across two of
+them accrued no financing. An integer has several date encodings and
+nothing says which, so `daycount` refuses it and names the string to pass.
+
 ## 2. The tools
 
 | Tool | Answers |
 |---|---|
 | `analyze_cash_futures_basis` | Is this future rich, and which carry component explains it |
 | `solve_forward_carry` | What financing / dividend / borrow does this quote imply |
-| `analyze_basis_history` | Is this basis wide *for this name*; with `run_id` and `name` the basis, its annualized form and its z-scores are published as an `analytic_frame` |
-| `analyze_futures_curve` | What does the term structure look like, and what does a calendar spread price *(`curve_curvature` is null below FOUR contracts: a second difference needs three carries and three contracts give two)* |
-| `analyze_roll` | What does moving this position to the next contract cost *(roll yield is annualized over the gap BETWEEN the two expiries, so it needs `days_between_expiries`; without it that field is null rather than annualized over the wrong period. `spread_ticks` needs `tick_value` to become a cost and is refused without it — at the old default of zero the bid-ask crossed on both legs was charged as nothing, 83% of the spread cost on a live roll)*. Takes a `day_count` — `ACT/365F`, `ACT/360`, `30/360` or `ACT/ACT` — and echoes it on the result: the same 91-day quarterly roll is 160.376 bp under the default ACT/365F and 158.179 under ACT/360, so compare a repo quoted ACT/360 against the ACT/360 number. The schema carries the rationale for each of the four, including that none of them adjusts for business days, because this library has no holiday calendar |
+| `analyze_basis_history` | Is this basis wide *for this name*; with `run_id` and `name` the basis, its annualized form and its z-scores are published as an `analytic_frame`. The half-life comes with its Dickey-Fuller test (`half_life_mean_reverting`, `half_life_t_statistic`, `half_life_critical_value`) because a random walk produces a finite half-life most of the time, and a basis that does not move is flagged `basis_flat` |
+| `analyze_futures_curve` | What does the term structure look like, and what does a calendar spread price *(`curve_curvature` is null below FOUR contracts: a second difference needs three carries and three contracts give two. `shape` is `contango` with no step down, `backwardation` with no step up, `flat` when every contract is at one price, and `mixed` only for a real kink)* |
+| `analyze_roll` | What does moving this position to the next contract cost *(roll yield is annualized over the gap BETWEEN the two expiries, so it needs `days_between_expiries`; without it that field is null rather than annualized over the wrong period. `spread_ticks` needs `tick_value` to become a cost and is refused without it — at the old default of zero the bid-ask crossed on both legs was charged as nothing, 83% of the spread cost on a live roll)*. Takes a `day_count` — `ACT/365F`, `ACT/360` or `ACT/ACT` — and echoes it on the result: the same 91-day quarterly roll is 160.376 bp under the default ACT/365F and 158.179 under ACT/360, so compare a repo quoted ACT/360 against the ACT/360 number. `30/360` is refused: it counts the days between two DATES, a roll arrives as days already counted, and dividing those by 360 was ACT/360 reported under the 30/360 name (2.2% low on a 20 March to 19 June roll). For a roll that really accrues 30/360, pass each period's 30/360 day count as the days under ACT/360 — the denominators are the same 360. Commission, ticks and tick value are costs and must be finite and non-negative. The schema carries the rationale for each of the library's four conventions, including that none of them adjusts for business days, because this library has no holiday calendar |
 | `size_futures_hedge` | How many contracts, and what does rounding leave behind |
-| `analyze_hedge_effectiveness` | Did that hedge actually work |
+| `analyze_hedge_effectiveness` | Did that hedge actually work *(the two return lists are paired by position and must be the same length; unequal ones used to be truncated to the shorter, silently. `tracking_error` in the library refuses the same, and still joins two dated Series on their shared dates)* |
 | `analyze_index_basket` | Is this basket rich to its index, and which name explains it |
 | `compare_delta_one_expressions` | Which of these six ways of holding it is cheapest |
 | `optimize_replication_basket` | What is the smallest basket that tracks this |
-| `analyze_etf_fair_value` | Is this ETF premium real after costs *(priced against the BASKET when one is supplied -- that is what a creation actually buys -- and against NAV otherwise; `priced_against` says which)* |
-| `price_total_return_swap` | What is this swap worth, leg by leg |
-| `analyze_total_return_future` | What financing spread does this TRF embed |
+| `analyze_etf_fair_value` | Is this ETF premium real after costs *(priced against the BASKET when one is supplied -- that is what a creation actually buys -- and against NAV otherwise; `priced_against` says which. `cash_component` and `tolerance_bps` must be finite -- an infinite cash component recommended a redemption with a 10,000 bp edge)* |
+| `price_total_return_swap` | What is this swap worth, leg by leg *(`financing_rate` is a decimal, bounded at ±100% on the tool because a larger value is a percent given for a fraction far more often than a real rate -- 4.5 financed $100m at 450% a year. The library bounds it and `spread_bps` as it bounds every rate, and warns above 100%)* |
+| `analyze_total_return_future` | What financing spread does this TRF embed *(`dividend_yield` and `comparison_spread_bps` are bounded like the reference rate and the quote)* |
 | `analyze_dividend_points` | How many index points of dividend before expiry |
-| `analyze_index_rebalance` | What will this index change force people to trade |
+| `analyze_index_rebalance` | What will this index change force people to trade *(weights are fractions summing to about 1; a set summing above 1.5 is refused as percent- or bps-scaled -- percent weights on $800bn forced $40 trillion of buying -- and one more than 1% off 1 is flagged as not a whole index)* |
 | `detect_basis_dislocation` | Has this basis *structurally shifted*, or just moved |
-| `monitor_spread_stream` | Watch any spread on a live feed, one stateful call at a time; a resumed call that changes the channel, label, warm-up, threshold or slack is refused by name (open a new monitor — the accumulators were learned under the old values), and the default threshold is the streaming calibration of 15.0, not the batch detector's 9.0, which on pure noise fires on nothing 45% of the time by 5,000 observations against 7% at 15.0 |
-| `scan_basis_dislocations` | Which of these pairs is wide *for itself*, ranked; the detector's reference fraction, threshold, slack and break count are inputs, echoed on the result |
+| `monitor_spread_stream` | Watch any spread on a live feed, one stateful call at a time; a resumed call that changes the channel, label, warm-up, threshold or slack is refused by name (open a new monitor — the accumulators were learned under the old values), a resumed `state` whose settings or accumulators fail the checks a new monitor passes is refused as edited, and the default threshold is the streaming calibration of 15.0, not the batch detector's 9.0, which on pure noise fires on nothing 45% of the time by 5,000 observations against 7% at 15.0 |
+| `scan_basis_dislocations` | Which of these pairs is wide *for itself*, ranked; the detector's reference fraction, threshold, slack and break count are inputs, echoed on the result. A pair whose basis does not move (or whose z-score is undefined) is flagged `basis_flat` and ranked last — a basis flat at a constant bps level used to score z = 0.99 on rounding residue and rank first |
 
 The first nine shipped alone, deliberately: the floor for a runtime is
 eight, shipping exactly at it means one tool failing review makes the whole
@@ -343,3 +349,21 @@ triggered until reset, because by its own baseline the world is still
 abnormal. Whether that is a spike to acknowledge or a new level to watch
 from are opposite conclusions that look identical in the accumulators, so
 `reset` asks which rather than guessing.
+
+**A baseline with no real dispersion is never tested against.** When the
+warm-up's coefficient of variation is below the library's
+`DEGENERATE_BASELINE_CV` (a stale feed, a pegged spread) the baseline is
+flagged degenerate and nothing is standardized by it: the monitor keeps
+accumulating, continuing the warm-up's own window, and re-freezes once
+that window has dispersion, resetting the CUSUM with it. Until then every
+update says its ticks were untestable rather than quiet. The flag used to
+be acted on only at a standard deviation of exactly zero, so a warm-up at
+CV 1e-6 followed by twenty ticks 0.3 bp higher ended at a statistic of
+202,100; it now re-freezes, still alerts, and ends at 136.5.
+
+**A resumed state is checked like a new one.** Warm-up, threshold and
+slack pass the constructor's own checks again on every call, every carried
+accumulator must be finite and in range, the baseline must exist exactly
+when the warm-up is complete, and the degenerate flag is recomputed from it
+rather than trusted. A state that fails was edited or corrupted after it
+was written, and is refused rather than resumed.

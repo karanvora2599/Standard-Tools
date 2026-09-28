@@ -276,3 +276,84 @@ class TestTheScanRanksOnTheAxisItClaims:
         got = basis_scan(self._pairs(), detect_shifts=False, top_n=1)
         assert len(got["ranked"]) == 1
         assert got["n_evaluated"] == 3, "the count is of what was evaluated"
+
+
+class TestAFlatBasisIsNotRanked:
+    """
+    A basis flat at a constant bps level has a standard deviation of
+    rounding residue (about 7e-15), not 0. The exact `sigma == 0` test
+    passed, the full-sample z-score came back 0.99, and the scan's flat
+    check -- `zscore is None`, which a float never is -- let the pair rank
+    FIRST, with no warning.
+    """
+
+    @staticmethod
+    def _flat(n=300, seed=4):
+        rng = np.random.default_rng(seed)
+        spot = 6000 * np.cumprod(1 + rng.normal(0, 0.01, n))
+        return {
+            "label": "FLAT",
+            "spot": spot.tolist(),
+            "futures": (spot * (1 + 12.3456 / 1e4)).tolist(),
+        }
+
+    def test_basis_history_flags_it(self):
+        from standard_quant_tools.delta_one.basis import basis_history
+
+        pair = self._flat()
+        got = basis_history(spot=pair["spot"], futures=pair["futures"])
+        assert got["basis_flat"] is True
+        assert got["zscore"] == 0.0
+        assert any("does not move" in w for w in got["warnings"])
+
+    @pytest.mark.parametrize("window", [None, 20])
+    def test_the_scan_ranks_it_last_and_says_so(self, window):
+        pairs = TestTheScanRanksOnTheAxisItClaims._pairs() + [self._flat()]
+        got = basis_scan(pairs, detect_shifts=False, window=window)
+        assert got["ranked"][-1]["label"] == "FLAT"
+        assert got["ranked"][-1]["basis_flat"] is True
+        assert any("basis_flat" in w for w in got["warnings"])
+
+    def test_a_moving_basis_is_not_flagged(self):
+        """The null case."""
+        got = basis_scan(
+            TestTheScanRanksOnTheAxisItClaims._pairs(), detect_shifts=False
+        )
+        assert not any(r["basis_flat"] for r in got["ranked"])
+        assert not any("basis_flat" in w for w in got["warnings"])
+
+
+class TestTheBasisHalfLifeIsGated:
+    """
+    A finite AR(1) half-life is what a random walk produces most of the
+    time; it now arrives with the Dickey-Fuller test of the same
+    regression, and a warning when it does not clear it.
+    """
+
+    @staticmethod
+    def _basis(phi, n=500, seed=8):
+        rng = np.random.default_rng(seed)
+        spot = 6000 * np.cumprod(1 + rng.normal(0, 0.01, n))
+        basis = np.zeros(n)
+        for i in range(1, n):
+            basis[i] = phi * basis[i - 1] + rng.normal(0, 2.0)
+        basis += 15.0
+        return spot.tolist(), (spot * (1 + basis / 1e4)).tolist()
+
+    def test_a_random_walk_basis_is_not_called_mean_reverting(self):
+        from standard_quant_tools.delta_one.basis import basis_history
+
+        spot, futures = self._basis(1.0)
+        got = basis_history(spot=spot, futures=futures)
+        assert got["half_life_mean_reverting"] is False
+        if np.isfinite(got["half_life_observations"]):
+            assert any("not evidence of mean" in w for w in got["warnings"])
+
+    def test_a_mean_reverting_basis_is(self):
+        from standard_quant_tools.delta_one.basis import basis_history
+
+        spot, futures = self._basis(0.8)
+        got = basis_history(spot=spot, futures=futures)
+        assert got["half_life_mean_reverting"] is True
+        assert got["half_life_t_statistic"] < got["half_life_critical_value"]
+        assert not any("not evidence of mean" in w for w in got["warnings"])

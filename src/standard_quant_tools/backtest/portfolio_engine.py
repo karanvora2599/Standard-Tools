@@ -27,6 +27,7 @@ from standard_quant_tools.backtest.costs import (
     percentage_commission,
     short_borrow_cost,
 )
+from standard_quant_tools.backtest.screens import split_screen_warnings
 from standard_quant_tools.error import ValidationError
 
 logger = logging.getLogger(__name__)
@@ -336,6 +337,7 @@ def run_portfolio_simulation(
     borrow_fee_bps: float = 0.0,
     margin_interest_rate: float = 0.0,
     max_adv_participation: Optional[float] = None,
+    adjusted: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
     Simulate a single shared-cash portfolio account rebalanced at the dates
@@ -416,6 +418,12 @@ def run_portfolio_simulation(
             ValidationError — fails closed (can't estimate liquidity means
             the trade is rejected), not open (silently treated as
             unconstrained).
+        adjusted: whether the bars are split- and dividend-adjusted, when
+            the caller knows; otherwise read per ticker from
+            `price_data[t].attrs['adjusted']`. Used only to phrase the split
+            screen: every held ticker's close-to-close moves beyond 35% are
+            named in `warnings`, with the ticker, exactly as run_strategy
+            names them.
 
     Post-trade enforcement, and what max_gross_leverage/max_position_pct
     actually bound: target_shares for a rebalance are sized from equity_now
@@ -724,6 +732,24 @@ def run_portfolio_simulation(
         raise ValidationError(
             f"rebalance date {date}: position(s) exceed "
             f"max_position_pct={max_position_pct}: {over.to_dict()}"
+        )
+
+    # ── The split screen, shared with run_strategy ───────────────────────
+    # This engine compounds every held ticker's bar return exactly as
+    # run_strategy does, so an unadjusted split is a real -50% (or -90%)
+    # bar here too -- a 10:1 split injected into one of two held tickers
+    # moved final equity by -43.9%, and the only thing the result said was
+    # "cash went negative". Only tickers that ever carry a weight are
+    # screened: a split in a name never held cannot move the equity.
+    split_warnings: List[str] = []
+    held = np.abs(weights_mat).max(axis=0) > 1e-12
+    for t, i in ticker_pos.items():
+        if not held[i]:
+            continue
+        closes = pd.Series(price_matrices["Close"][:, i], index=master_index)
+        flag = adjusted if adjusted is not None else price_data[t].attrs.get("adjusted")
+        split_warnings.extend(
+            f"{t}: {message}" for message in split_screen_warnings(closes, flag)
         )
 
     rebalance_dates = set(target_weights.index)
@@ -1305,7 +1331,7 @@ def run_portfolio_simulation(
                 )
             prev_date = date
 
-    warnings: List[str] = []
+    warnings: List[str] = list(split_warnings)
     if fill_price == "close" and rebalance_dates:
         warnings.append(
             "fill_price='close': each rebalance executes at the same bar's own Close, "

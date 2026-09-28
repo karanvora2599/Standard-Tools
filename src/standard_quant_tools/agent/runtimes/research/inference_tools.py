@@ -158,8 +158,16 @@ class CorrelationStabilityResult(_Result):
     fraction_within_0_2: Stat = None
     stress_correlation: Stat = Field(
         None,
-        description="Correlation conditional on the joint worst decile. This "
-        "is the number a diversification claim has to survive.",
+        description="Correlation on the days BOTH series sit in their own "
+        "worst decile. This is the number a diversification claim has to "
+        "survive. None when fewer than 20 such days exist. Attenuated by the "
+        "truncation (a Gaussian pair at 0.8 measures about 0.4 here), so a "
+        "value above the full-sample one is a strong signal.",
+    )
+    n_stress_observations: int = Field(
+        0,
+        description="Days in the joint worst decile. About 1% of the sample "
+        "for independent series.",
     )
 
 
@@ -267,9 +275,10 @@ INFERENCE_TOOL_DEFS = [
         "may have correlated at +0.7 for five and -0.7 for five; the average "
         "is meaningless and a hedge sized on it is wrong in both regimes. "
         "Reports the sign-flip count, the range, and separately the "
-        "correlation conditional on the joint worst decile -- because "
-        "correlations move toward 1 when everything falls together, so a "
-        "hedge computed on a calm sample fails precisely when it is needed.",
+        "correlation on the days BOTH series sit in their worst decile (with "
+        "the day count; none below 20 days) -- because correlations move "
+        "toward 1 when everything falls together, so a hedge computed on a "
+        "calm sample fails precisely when it is needed.",
         CorrelationStabilityInput,
     ),
     (

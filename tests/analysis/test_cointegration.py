@@ -71,6 +71,9 @@ class TestCointegrationTestKeys:
             "p_value",
             "critical_values",
             "half_life_days",
+            "half_life_mean_reverting",
+            "half_life_t_statistic",
+            "half_life_critical_value",
             "n_obs",
         }
 
@@ -539,3 +542,191 @@ class TestADegeneratePairHasNoQuestionToAnswer:
         monkeypatch.setattr(coint_module, "HAS_CPP", False)
         with pytest.raises(ValidationError):
             cointegration_test(a, affine)
+
+
+# ── the minimum sample ─────────────────────────────────────────────────────────
+
+
+class TestMinimumObservations:
+    """
+    cointegration_test and scan_cointegrated_pairs share one floor of 20
+    aligned observations. Below it the single test answered p=nan with
+    cointegrated=False at n=0, p=0.85 at n=8, and at n=1 refused with
+    "series_b is constant" -- true, and not the reason.
+    """
+
+    @staticmethod
+    def _pair(n, seed=3):
+        rng = np.random.default_rng(seed)
+        dates = pd.date_range("2020-01-01", periods=n, freq="B")
+        walk = np.cumsum(rng.normal(0, 1, n)) + 50.0
+        return (
+            pd.Series(1.5 * walk + rng.normal(0, 0.5, n), index=dates),
+            pd.Series(walk, index=dates),
+        )
+
+    @pytest.mark.parametrize("n", [0, 1, 8, 19])
+    def test_fewer_than_twenty_are_refused(self, n):
+        a, b = self._pair(max(n, 1))
+        with pytest.raises(ValidationError, match="at least 20"):
+            cointegration_test(a.iloc[:n], b.iloc[:n])
+
+    def test_twenty_answer(self):
+        a, b = self._pair(20)
+        result = cointegration_test(a, b)
+        assert result["n_obs"] == 20
+        assert 0.0 <= result["p_value"] <= 1.0
+
+    def test_the_scan_shares_the_floor(self):
+        a, b = self._pair(60)
+        frame = pd.DataFrame({"A": a, "B": b})
+        with pytest.raises(ValidationError, match="at least 20"):
+            scan_cointegrated_pairs(frame.iloc[:19])
+        assert len(scan_cointegrated_pairs(frame.iloc[:20])) == 1
+
+
+# ── half_life_statistics ───────────────────────────────────────────────────────
+
+
+class TestHalfLifeStatistics:
+    """
+    half_life() returns a finite number on most random walks: the fitted
+    AR(1) coefficient is negative about half the time and a small negative
+    coefficient is a long but finite half-life. Measured on 1000 random
+    walks of 250 observations, 95.5% finite and 84% inside a 5-126 screen.
+    The Dickey-Fuller t-statistic of the same regression is the gate.
+    """
+
+    def test_random_walks_are_rarely_called_mean_reverting(self):
+        from standard_quant_tools.analysis.cointegration import half_life_statistics
+
+        rng = np.random.default_rng(40)
+        flagged = finite = 0
+        trials = 200
+        for _ in range(trials):
+            walk = pd.Series(np.cumsum(rng.normal(0, 1, 250)))
+            stats = half_life_statistics(walk)
+            flagged += stats["mean_reverting"]
+            finite += np.isfinite(stats["half_life"])
+        assert finite > trials * 0.5  # what half_life alone would have said
+        assert flagged <= trials * 0.08
+
+    def test_a_planted_ar1_is_flagged_with_its_half_life(self):
+        """phi = 0.9: a shock halves after log(0.5)/log(0.9) = 6.58 bars."""
+        from standard_quant_tools.analysis.cointegration import half_life_statistics
+
+        rng = np.random.default_rng(41)
+        values = np.zeros(5000)
+        for i in range(1, values.size):
+            values[i] = 0.9 * values[i - 1] + rng.normal()
+        stats = half_life_statistics(pd.Series(values))
+        assert stats["mean_reverting"] is True
+        assert stats["half_life"] == pytest.approx(6.58, rel=0.2)
+        assert stats["t_statistic"] < stats["critical_value"]
+
+    def test_a_fitted_residual_faces_the_stricter_critical_value(self):
+        from standard_quant_tools.analysis.cointegration import half_life_statistics
+
+        spread = pd.Series(np.random.default_rng(42).normal(0, 1, 250))
+        plain = half_life_statistics(spread)
+        fitted = half_life_statistics(spread, fitted_residual=True)
+        assert fitted["critical_value"] < plain["critical_value"] < -2.8
+
+    def test_a_flat_spread_is_not_mean_reverting(self):
+        from standard_quant_tools.analysis.cointegration import half_life_statistics
+
+        stats = half_life_statistics(pd.Series([12.3456] * 100))
+        assert stats["mean_reverting"] is False
+        assert stats["half_life"] == float("inf")
+
+    def test_cointegration_test_reports_the_gate(self, cointegrated_pair):
+        a, b = cointegrated_pair
+        result = cointegration_test(a, b)
+        assert result["half_life_mean_reverting"] is True
+        assert result["half_life_t_statistic"] < result["half_life_critical_value"]
+
+
+# ── the pair scan: both orders and many tests ──────────────────────────────────
+
+
+class TestScanDirectionAndMultiplicity:
+    @staticmethod
+    def _walks(k, n=500, seed=50):
+        rng = np.random.default_rng(seed)
+        return {f"R{i:02d}": np.cumsum(rng.normal(0, 1, n)) + 100.0 for i in range(k)}
+
+    def test_the_new_columns_do_not_depend_on_column_order(self):
+        """
+        Engle-Granger is not symmetric: swapping the columns flipped 65 of
+        276 verdicts on random walks. The pair-level columns are the same
+        whichever series comes first.
+        """
+        frame = pd.DataFrame(self._walks(8))
+        forward = scan_cointegrated_pairs(frame)
+        backward = scan_cointegrated_pairs(frame[frame.columns[::-1]])
+        for (a, b), row in forward.iterrows():
+            other = backward.loc[(b, a)]
+            assert row["p_value_both"] == pytest.approx(other["p_value_both"])
+            assert row["p_value_bh"] == pytest.approx(other["p_value_bh"])
+            assert row["p_value"] == pytest.approx(other["p_value_reverse"])
+            assert bool(row["cointegrated_fdr"]) is bool(other["cointegrated_fdr"])
+            assert bool(row["direction_consistent"]) is bool(
+                other["direction_consistent"]
+            )
+
+    def test_a_planted_pair_survives_the_false_discovery_control(self):
+        data = self._walks(20)
+        rng = np.random.default_rng(51)
+        data["P"] = 1.3 * data["R00"] + rng.normal(0, 1.0, 500)
+        out = scan_cointegrated_pairs(pd.DataFrame(data))
+        survivors = list(out.index[out["cointegrated_fdr"]])
+        assert ("R00", "P") in survivors
+        assert len(survivors) <= 2
+
+    def test_random_walks_alone_leave_at_most_one_survivor(self):
+        """
+        The null case. 190 unrelated pairs clear 5% about ten times by
+        chance in one order; the adjusted screen keeps essentially none.
+        """
+        out = scan_cointegrated_pairs(pd.DataFrame(self._walks(20, seed=52)))
+        assert int(out["cointegrated_fdr"].sum()) <= 1
+        assert (out["p_value_bh"] >= out["p_value_both"] - 1e-12).all()
+
+    def test_a_degenerate_pair_is_not_counted_as_a_test(self):
+        data = self._walks(4)
+        data["DUP"] = 0.9 * data["R00"] + 5.0
+        out = scan_cointegrated_pairs(pd.DataFrame(data))
+        row = out.loc[("R00", "DUP")]
+        assert np.isnan(row["p_value_both"]) and np.isnan(row["p_value_bh"])
+        assert bool(row["cointegrated_fdr"]) is False
+
+    def test_benjamini_hochberg_matches_the_textbook_step_up(self):
+        from standard_quant_tools.analysis.cointegration import benjamini_hochberg
+
+        p = [0.01, 0.04, 0.03, 0.20, float("nan")]
+        # m = 4 answerable. Sorted 0.01, 0.03, 0.04, 0.20 scale to 0.04,
+        # 0.06, 0.0533, 0.20; the step-up minimum makes the middle two
+        # 0.0533 each.
+        adjusted = benjamini_hochberg(p)
+        np.testing.assert_allclose(
+            adjusted[:4], [0.04, 0.04 * 4 / 3, 0.04 * 4 / 3, 0.20], rtol=1e-12
+        )
+        assert np.isnan(adjusted[4])
+
+
+class TestFlatSpreadZscore:
+    def test_a_spread_flat_at_an_awkward_level_is_zero_not_residue(self):
+        """
+        A spread flat at 12.3456 has a standard deviation of about 7e-15,
+        not 0, so the exact `sigma == 0` test passed and the z-score was
+        rounding residue over rounding residue. The 0.0 convention holds at
+        any level.
+        """
+        spread = pd.Series([12.3456] * 100)
+        assert spread.std() != 0.0
+        assert (spread_zscore(spread) == 0.0).all()
+
+    def test_a_flat_rolling_window_is_undefined(self):
+        spread = pd.Series([12.3456] * 60)
+        z = spread_zscore(spread, window=20)
+        assert z.isna().all()

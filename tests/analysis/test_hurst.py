@@ -47,13 +47,24 @@ def mean_reverting_returns():
 
 class TestHurstExponentKeys:
     def test_returns_required_keys(self, iid_returns):
+        """
+        The raw R/S slope, the correction applied to it, the width of the
+        random-walk band and the largest window actually fitted are part of
+        the answer: a caller comparing against a published R/S figure needs
+        the raw one, and a regime label means nothing without its band.
+        """
         result = hurst_exponent(iid_returns)
         assert set(result.keys()) == {
             "hurst",
+            "hurst_raw",
+            "bias_correction",
             "regime",
+            "regime_band",
             "fit_r_squared",
             "method",
             "n_obs",
+            "max_window_used",
+            "warnings",
         }
 
     def test_hurst_is_float(self, iid_returns):
@@ -271,3 +282,151 @@ class TestRollingHurst:
         assert (
             mean_early > mean_late
         ), f"Expected early H ({mean_early:.3f}) > late H ({mean_late:.3f})"
+
+
+# ── R/S small-sample correction and the length-aware regime band ──────────────
+
+
+def _fgn(hurst, n, seed):
+    """Exact fractional Gaussian noise by Cholesky of its autocovariance."""
+    k = np.arange(n, dtype=float)
+    gamma = 0.5 * (
+        np.abs(k + 1) ** (2 * hurst)
+        - 2 * np.abs(k) ** (2 * hurst)
+        + np.abs(k - 1) ** (2 * hurst)
+    )
+    cov = gamma[np.abs(np.subtract.outer(np.arange(n), np.arange(n)))]
+    chol = np.linalg.cholesky(cov)
+    return pd.Series(chol @ np.random.default_rng(seed).standard_normal(n))
+
+
+class TestRescaledRangeCorrection:
+    def test_white_noise_is_not_called_trending_by_rs(self):
+        """
+        The uncorrected rescaled range is biased upward by about 0.07 at
+        1024 observations, and with a fixed 0.55 threshold it labelled about
+        two thirds of pure white-noise series "trending". Corrected, the
+        mean sits at 0.5 and the labels fall to the band's nominal rate.
+        """
+        rng = np.random.default_rng(11)
+        values, trending = [], 0
+        for _ in range(120):
+            result = hurst_exponent(pd.Series(rng.standard_normal(1024)), method="rs")
+            values.append(result["hurst"])
+            trending += result["regime"] == "trending"
+        assert 0.48 <= float(np.mean(values)) <= 0.52
+        assert trending <= 12
+
+    def test_the_correction_is_reported_next_to_the_raw_slope(self):
+        rng = np.random.default_rng(12)
+        result = hurst_exponent(pd.Series(rng.standard_normal(1024)), method="rs")
+        assert 0.05 < result["bias_correction"] < 0.09
+        assert result["hurst"] == pytest.approx(
+            result["hurst_raw"] - result["bias_correction"], abs=1e-12
+        )
+
+    def test_dfa_is_not_corrected(self, iid_returns):
+        result = hurst_exponent(iid_returns, method="dfa")
+        assert result["bias_correction"] == 0.0
+        assert result["hurst"] == result["hurst_raw"]
+
+    def test_persistent_noise_is_still_called_trending(self):
+        """The planted case: exact fGn at H=0.7 is labelled trending."""
+        trending = sum(
+            hurst_exponent(_fgn(0.7, 1024, seed), method="rs")["regime"] == "trending"
+            for seed in range(30)
+        )
+        assert trending >= 27
+
+    def test_rolling_rs_equals_the_single_window_value(self):
+        """One correction constant per (window, min_window), so each rolling
+        value is exactly what hurst_exponent gives on that window alone."""
+        series = pd.Series(np.random.default_rng(13).standard_normal(500))
+        rolling = rolling_hurst(series, window=200, step=41, method="rs")
+        positions = np.where(rolling.notna())[0]
+        assert positions.size >= 5
+        for i in positions:
+            alone = hurst_exponent(series.iloc[i - 199 : i + 1], method="rs")
+            assert rolling.iloc[i] == pytest.approx(alone["hurst"], abs=1e-12)
+            assert rolling.attrs["bias_correction"] == alone["bias_correction"]
+            assert rolling.attrs["regime_band"] == alone["regime_band"]
+
+
+class TestRegimeBand:
+    @pytest.mark.parametrize("method", ["dfa", "rs"])
+    @pytest.mark.parametrize("n", [256, 1024])
+    def test_the_null_table_matches_the_estimator(self, method, n):
+        """
+        The band is built from a table of white-noise standard deviations.
+        Re-measured here, so a change to either estimator that the table
+        does not follow fails instead of silently mislabelling.
+        """
+        from standard_quant_tools.analysis.hurst import null_standard_deviation
+
+        rng = np.random.default_rng(1000 + n)
+        values = [
+            hurst_exponent(pd.Series(rng.standard_normal(n)), method=method)["hurst"]
+            for _ in range(300)
+        ]
+        measured = float(np.std(values))
+        assert measured == pytest.approx(null_standard_deviation(n, method), rel=0.15)
+
+    def test_short_white_noise_is_labelled_at_the_nominal_rate(self):
+        """
+        At 256 observations the DFA estimate of white noise has a standard
+        deviation of 0.08; the fixed +/-0.05 band labelled 27% of such
+        series trending and 30% mean-reverting. The band now widens with
+        the noise.
+        """
+        rng = np.random.default_rng(14)
+        labels = [
+            hurst_exponent(pd.Series(rng.standard_normal(256)))["regime"]
+            for _ in range(200)
+        ]
+        assert labels.count("trending") <= 20
+        assert labels.count("mean_reverting") <= 20
+
+    def test_the_band_narrows_with_length_and_has_a_floor(self):
+        from standard_quant_tools.analysis.hurst import regime_band
+
+        assert regime_band(256, "dfa") > regime_band(1024, "dfa") > 0.05
+        assert regime_band(100_000, "dfa") == 0.05
+        assert regime_band(100_000, "rs") == 0.05
+
+
+class TestWindowRefusals:
+    def test_dfa_refuses_a_two_point_box(self, iid_returns):
+        """
+        A DFA box of two points fits its line exactly; the fluctuation is
+        floating-point residue and white noise came back H=1.5, trending.
+        """
+        with pytest.raises(ValidationError, match="at least 4"):
+            hurst_exponent(iid_returns, method="dfa", min_window=2)
+        with pytest.raises(ValidationError, match="at least 4"):
+            rolling_hurst(iid_returns, window=200, method="dfa", min_window=3)
+
+    def test_dfa_answers_from_a_four_point_box(self):
+        series = pd.Series(np.random.default_rng(15).standard_normal(2048))
+        result = hurst_exponent(series, method="dfa", min_window=4)
+        assert 0.4 <= result["hurst"] <= 0.6
+
+    @pytest.mark.parametrize("max_window", [20, 50])
+    def test_an_inverted_window_range_is_refused(self, iid_returns, max_window):
+        """
+        min_window=50 with max_window=20 used to come back as NaN, which
+        the agent tool then reported as 0.0 -- "strongly mean-reverting" --
+        for any series at all.
+        """
+        with pytest.raises(ValidationError, match="greater than min_window"):
+            hurst_exponent(iid_returns, min_window=50, max_window=max_window)
+
+    def test_a_clamped_max_window_is_reported(self, iid_returns):
+        result = hurst_exponent(iid_returns, method="dfa", max_window=5000)
+        assert result["max_window_used"] == len(iid_returns) // 4
+        assert any("lowered" in w for w in result["warnings"])
+
+    def test_a_short_series_is_nan_with_a_reason(self):
+        result = hurst_exponent(pd.Series(np.random.default_rng(16).normal(0, 1, 30)))
+        assert np.isnan(result["hurst"])
+        assert result["regime"] == "unknown"
+        assert any("too few" in w for w in result["warnings"])

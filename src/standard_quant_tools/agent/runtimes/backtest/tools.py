@@ -209,6 +209,7 @@ from standard_quant_tools.agent.models import (
     WalkForwardWindow,
 )
 from standard_quant_tools.agent.runtimes._shared import (
+    FETCH_INTERVAL,
     _run_backtest,
 )
 from standard_quant_tools.backtest.artifacts import load_artifact, save_artifact
@@ -221,6 +222,7 @@ from standard_quant_tools.backtest.panel import (
 from standard_quant_tools.backtest.portfolio_engine import (
     run_portfolio_simulation as _portfolio_engine_run,
 )
+from standard_quant_tools.backtest.ranking import rank_order, unrankable_note
 from standard_quant_tools.backtest.robustness import (
     block_bootstrap_ci as _block_bootstrap_ci,
 )
@@ -247,6 +249,7 @@ from standard_quant_tools.backtest.walk_forward import (
 )
 from standard_quant_tools.data.factory import DataFactory
 from standard_quant_tools.error import ValidationError
+from standard_quant_tools.metrics.annualization import periods_per_year_for_interval
 from standard_quant_tools.metrics.diagnostics import (
     drawdown_periods,
     exposure_stats,
@@ -479,16 +482,29 @@ def compare_strategies(input_data: CompareStrategiesInput) -> CompareStrategiesR
     # a volatility, so `annualized_volatility` sorts ascending -- the same
     # rule, from the same set, as every grid sort in this module.
     lower_is_better = input_data.sort_by in _LOWER_IS_BETTER
-    comparisons.sort(
-        # A metric a run could not compute sorts last either way rather
-        # than winning a minimum by being absent.
-        key=lambda c: (
-            getattr(c, input_data.sort_by, None)
-            if getattr(c, input_data.sort_by, None) is not None
-            else (float("inf") if lower_is_better else float("-inf"))
-        ),
-        reverse=not lower_is_better,
+    # Only a strategy that traded and has a finite metric is ranked -- the
+    # rule every ranked door shares (backtest/ranking.py). A strategy that
+    # never traded has no drawdown and no volatility, so it won both of
+    # those sorts, and a +inf Sortino won that one; a metric a run could
+    # not compute sorts last either way rather than winning by being absent.
+    order, n_unrankable = rank_order(
+        [getattr(c, input_data.sort_by, None) for c in comparisons],
+        [c.num_trades for c in comparisons],
+        ascending=lower_is_better,
     )
+    comparisons = [comparisons[i] for i in order]
+    warnings: List[str] = []
+    if n_unrankable:
+        warnings.append(
+            unrankable_note(
+                n_unrankable, len(comparisons), input_data.sort_by, "strategy"
+            )
+        )
+    if n_unrankable == len(comparisons):
+        warnings.append(
+            "No strategy could be ranked, so best_strategy is the first in "
+            "the list by default, not a winner."
+        )
     logger.debug(
         "[compare_strategies] winner=%s  sharpe=%.3f  return=%.2f%%  vs B&H=%.2f%%",
         comparisons[0].strategy,
@@ -503,6 +519,8 @@ def compare_strategies(input_data: CompareStrategiesInput) -> CompareStrategiesR
         best_strategy=comparisons[0].strategy,
         buy_and_hold_return=bh.total_return,
         strategies=comparisons,
+        n_unrankable=n_unrankable,
+        warnings=warnings,
     )
 
 
@@ -561,6 +579,7 @@ def run_regime_adaptive_backtest(
         ascending=False,
         n_workers=input_data.n_workers,
         risk_free_rate=input_data.risk_free_rate,
+        interval=FETCH_INTERVAL,
     )
 
     best_row = grid_df.iloc[0]
@@ -593,9 +612,9 @@ def run_regime_adaptive_backtest(
     )
     bt_result = _run_backtest(dummy_input, df, signals)
 
-    n_combos = 1
-    for vals in param_grid.values():
-        n_combos *= len(vals)
+    # The rows the grid actually ran: distinct combinations, which is what
+    # the product of the axis lengths overstates when an axis repeats a value.
+    n_combos = len(grid_df)
 
     logger.debug(
         "[regime_adaptive] H=%.4f  regime=%s  strategy=%s  best_params=%s  combos=%d",
@@ -681,6 +700,9 @@ def run_regime_adaptive_walkforward_backtest(
     oos_signal_tails: List[pd.Series] = []
     cursor = 0
     first_test_start = train_bars
+    lower_is_better = input_data.sort_by in _LOWER_IS_BETTER
+    n_unrankable_total = 0
+    unranked_windows: List[int] = []
 
     while cursor + train_bars + test_bars <= n:
         train_df = df.iloc[cursor : cursor + train_bars]
@@ -693,7 +715,7 @@ def run_regime_adaptive_walkforward_backtest(
         regime = hurst_result["regime"]
         fit_r2 = hurst_result["fit_r_squared"]
 
-        best_overall: Optional[Dict[str, Any]] = None
+        candidates: List[Dict[str, Any]] = []
         for strat_name in STRATEGY_REGISTRY:
             param_grid = (
                 grid_overrides.get(strat_name) or _DEFAULT_PARAM_GRIDS[strat_name]
@@ -720,42 +742,44 @@ def run_regime_adaptive_walkforward_backtest(
                 n_workers=1,
                 fill_price=input_data.fill_price,
                 risk_free_rate=input_data.risk_free_rate,
+                interval=FETCH_INTERVAL,
             )
+            # The grid puts each strategy's best RANKABLE row first.
             best_row = grid_df.iloc[0]
-            # The sort above puts each strategy's own best row first; this
-            # comparison picks between the four strategies and has to face
-            # the same direction, or the grid would return the lowest
-            # volatility per strategy and then the highest of those four.
-            lower_is_better = input_data.sort_by in _LOWER_IS_BETTER
-            metric_val = float(
-                best_row.get(
-                    input_data.sort_by,
-                    float("inf") if lower_is_better else -float("inf"),
-                )
-            )
-            if best_overall is None or (
-                metric_val < best_overall["metric_val"]
-                if lower_is_better
-                else metric_val > best_overall["metric_val"]
-            ):
-                param_keys = list(param_grid.keys())
-                best_params: Dict[str, Any] = {
-                    k: (
-                        int(best_row[k])
-                        if isinstance(param_grid[k][0], int)
-                        else float(best_row[k])
-                    )
-                    for k in param_keys
-                }
-                best_overall = {
+            param_keys = list(param_grid.keys())
+            candidates.append(
+                {
                     "strategy": strat_name,
-                    "params": best_params,
-                    "metric_val": metric_val,
+                    "params": {
+                        k: (
+                            int(best_row[k])
+                            if isinstance(param_grid[k][0], int)
+                            else float(best_row[k])
+                        )
+                        for k in param_keys
+                    },
+                    "metric_val": best_row.get(input_data.sort_by),
+                    "num_trades": best_row.get("num_trades", 0),
                     "sharpe": float(best_row.get("sharpe_ratio", 0.0)),
                     "return": float(best_row.get("total_return", 0.0)),
                 }
+            )
 
-        assert best_overall is not None  # STRATEGY_REGISTRY is never empty
+        # The choice between strategies obeys the same rule as the grid
+        # inside each one, and faces the same direction. It used to be a
+        # bare `metric_val > best`, which accepted +inf -- so a strategy
+        # whose best row was a do-nothing parameter set with an infinite
+        # Sortino or Calmar won the window -- and a NaN first candidate
+        # could never be displaced, since nothing compares greater than NaN.
+        order, n_unrankable = rank_order(
+            [c["metric_val"] for c in candidates],
+            [c["num_trades"] for c in candidates],
+            ascending=lower_is_better,
+        )
+        n_unrankable_total += n_unrankable
+        if n_unrankable == len(candidates):
+            unranked_windows.append(len(windows))
+        best_overall = candidates[int(order[0])]
         strategy_name = best_overall["strategy"]
         best_params = best_overall["params"]
 
@@ -775,6 +799,7 @@ def run_regime_adaptive_walkforward_backtest(
             slippage_pct=input_data.slippage_pct,
             fill_price=input_data.fill_price,
             risk_free_rate=input_data.risk_free_rate,
+            interval=FETCH_INTERVAL,
         )
 
         windows.append(
@@ -822,9 +847,26 @@ def run_regime_adaptive_walkforward_backtest(
         slippage_pct=input_data.slippage_pct,
         fill_price=input_data.fill_price,
         risk_free_rate=input_data.risk_free_rate,
+        interval=FETCH_INTERVAL,
     )
     worst_window = min(windows, key=lambda w: w.out_of_sample_return)
 
+    ra_warnings: List[str] = []
+    if n_unrankable_total:
+        ra_warnings.append(
+            unrankable_note(
+                n_unrankable_total,
+                len(windows) * len(STRATEGY_REGISTRY),
+                input_data.sort_by,
+                "window-by-strategy candidate",
+            )
+        )
+    if unranked_windows:
+        ra_warnings.append(
+            f"Window(s) {unranked_windows}: no strategy had a rankable "
+            f"{input_data.sort_by} in sample, so the first strategy in the "
+            "registry was carried out of sample by default, not selected."
+        )
     result = RegimeAdaptiveWalkForwardResult(
         symbol=input_data.symbol,
         n_windows=len(windows),
@@ -841,6 +883,8 @@ def run_regime_adaptive_walkforward_backtest(
         stitched_oos_calmar=round(stitched["calmar_ratio"], 4),
         worst_oos_window=worst_window.window_index,
         longest_losing_window_streak=longest_losing_streak(oos_returns),
+        n_unrankable=n_unrankable_total,
+        warnings=ra_warnings,
     )
     logger.debug(
         "[regime_adaptive_wf] windows=%d  stitched_sharpe=%.3f  stitched_return=%.2f%%  strategy_stability=%s",
@@ -936,6 +980,7 @@ def run_walk_forward_backtest(input_data: WalkForwardInput) -> WalkForwardResult
             n_workers=1,
             fill_price=input_data.fill_price,
             risk_free_rate=input_data.risk_free_rate,
+            interval=FETCH_INTERVAL,
         )
 
         best_row = grid_df.iloc[0]
@@ -972,6 +1017,7 @@ def run_walk_forward_backtest(input_data: WalkForwardInput) -> WalkForwardResult
             slippage_pct=input_data.slippage_pct,
             fill_price=input_data.fill_price,
             risk_free_rate=input_data.risk_free_rate,
+            interval=FETCH_INTERVAL,
         )
 
         windows.append(
@@ -1018,6 +1064,7 @@ def run_walk_forward_backtest(input_data: WalkForwardInput) -> WalkForwardResult
         slippage_pct=input_data.slippage_pct,
         fill_price=input_data.fill_price,
         risk_free_rate=input_data.risk_free_rate,
+        interval=FETCH_INTERVAL,
     )
     avg_is_sharpe = float(np.mean([w.in_sample_sharpe for w in windows]))
     avg_is_return = float(np.mean([w.in_sample_return for w in windows]))
@@ -1094,26 +1141,28 @@ def run_backtest_optimization(input_data: BacktestOptInput) -> BacktestOptResult
         n_workers=input_data.n_workers,
         fill_price=input_data.fill_price,
         risk_free_rate=input_data.risk_free_rate,
+        interval=FETCH_INTERVAL,
     )
 
+    # Distinct combinations: the grid runs a repeated axis value once, so
+    # this is the number a caller may hand deflated_sharpe_ratio as n_trials.
     n_combinations = len(grid_df)
     top_n = min(input_data.top_n, 20, n_combinations)
     top_df = grid_df.head(top_n)
+    n_unrankable = int(grid_df.attrs.get("n_unrankable", 0))
+    # The grid's own account of what it did: repeated values it dropped,
+    # rows it could not rank, and how it annualized.
+    opt_warnings: List[str] = list(grid_df.attrs.get("warnings", []))
+    if n_combinations and n_unrankable == n_combinations:
+        opt_warnings.append(
+            "No combination could be ranked, so best_params is the first "
+            "combination in grid order by default, not a winner."
+        )
 
-    metric_cols = {
-        "total_return",
-        "annualized_volatility",
-        "sharpe_ratio",
-        "sortino_ratio",
-        "max_drawdown",
-        "calmar_ratio",
-        "win_rate",
-        "profit_factor",
-        "num_trades",
-        "avg_trade_return_pct",
-        "final_equity",
-    }
-    param_cols = [c for c in grid_df.columns if c not in metric_cols]
+    # The grid's own parameter names, not "every column that is not a known
+    # metric": the Python grid path also carries turnover, realized cost and
+    # each row's warnings, which that rule reported as parameters.
+    param_cols = [k for k in input_data.param_grid if k in grid_df.columns]
 
     top_results = [
         OptimizationRun(
@@ -1155,6 +1204,8 @@ def run_backtest_optimization(input_data: BacktestOptInput) -> BacktestOptResult
         best_sharpe=round(float(best_row.get("sharpe_ratio", 0.0)), 4),
         best_return=round(float(best_row.get("total_return", 0.0)), 6),
         top_results=top_results,
+        n_unrankable=n_unrankable,
+        warnings=opt_warnings,
     )
 
 
@@ -1274,6 +1325,7 @@ def run_signal_panel_backtest(
         include_trade_log=input_data.include_trade_log,
         fill_price=input_data.fill_price,
         risk_free_rate=input_data.risk_free_rate,
+        interval=FETCH_INTERVAL,
     )
 
     per_ticker: Dict[str, BacktestResult] = {}
@@ -1348,6 +1400,10 @@ def run_signal_panel_backtest(
         )
         for message, names in raised_by.items()
     ]
+    # The panel's own caveats (how it annualized, when that was a guess).
+    panel_warnings.extend(
+        str(m) for m in raw.get("warnings", []) if str(m) not in raised_by
+    )
 
     logger.debug(
         "[signal_panel_backtest] portfolio  sharpe=%.3f  return=%.2f%%",
@@ -1404,7 +1460,9 @@ def _metrics_with_day0_cost(
     )
     returns = equity_with_start.pct_change(fill_method=None).dropna()
     total_return = float(equity_curve.iloc[-1]) / initial_capital - 1.0
-    num_years = len(equity_curve) / 252
+    # The fetched interval's year, not a literal 252 that would stay put if
+    # these tools ever fetched weekly or monthly bars.
+    num_years = len(equity_curve) / periods_per_year_for_interval(FETCH_INTERVAL)
     annualized_return = (
         (1.0 + total_return) ** (1.0 / num_years) - 1.0 if num_years > 0 else 0.0
     )
@@ -1939,6 +1997,7 @@ def get_robustness_diagnostics(
         sort_by=input_data.sort_by,
         ascending=input_data.sort_by in _LOWER_IS_BETTER,
         risk_free_rate=input_data.risk_free_rate,
+        interval=FETCH_INTERVAL,
     )
     sensitivity = _parameter_sensitivity(grid_df, metric_col=input_data.sort_by)
 
@@ -1957,12 +2016,14 @@ def get_robustness_diagnostics(
         float(grid_df["sharpe_ratio"].std()) if len(grid_df) > 1 else 0.0
     )
 
-    # grid_df's sharpe_ratio column is annualized (run_strategy -> sharpe_ratio's
-    # default periods_per_year=252), but deflated_sharpe_ratio's formula requires
-    # the non-annualized, per-period Sharpe (its z-score already scales by
-    # sqrt(n_obs - 1) itself). De-annualize before the DSR call, then re-annualize
-    # expected_max_sharpe for reporting so it's on the same scale as best_sharpe.
-    _ANNUALIZATION = np.sqrt(252.0)
+    # grid_df's sharpe_ratio column is annualized by the grid's own
+    # periods_per_year (its attrs say which), but deflated_sharpe_ratio's
+    # formula requires the non-annualized, per-period Sharpe (its z-score
+    # already scales by sqrt(n_obs - 1) itself). De-annualize by that same
+    # number before the DSR call, then re-annualize expected_max_sharpe for
+    # reporting so it's on the same scale as best_sharpe. n_trials is the
+    # grid's row count, which is the DISTINCT combinations it ran.
+    _ANNUALIZATION = np.sqrt(float(grid_df.attrs.get("periods_per_year", 252)))
     dsr = _deflated_sharpe_ratio(
         observed_sharpe=best_sharpe / _ANNUALIZATION,
         sharpe_trials_std=sharpe_trials_std / _ANNUALIZATION,
@@ -1981,6 +2042,7 @@ def get_robustness_diagnostics(
         commission_pct=input_data.commission_pct,
         slippage_pct=input_data.slippage_pct,
         risk_free_rate=input_data.risk_free_rate,
+        interval=FETCH_INTERVAL,
     )
     best_returns = best_result["equity_curve"].pct_change(fill_method=None).fillna(0.0)
 
@@ -1993,7 +2055,7 @@ def get_robustness_diagnostics(
         seed=input_data.random_seed,
     )
 
-    warnings: List[str] = []
+    warnings: List[str] = list(grid_df.attrs.get("warnings", []))
     if len(grid_df) < 5:
         warnings.append(
             f"Only {len(grid_df)} trial(s) searched — parameter sensitivity and "
@@ -2130,6 +2192,7 @@ def run_backtest_compact(input_data: BacktestCompactInput) -> BacktestResultV2:
         include_trade_log=True,
         fill_price=input_data.fill_price,
         risk_free_rate=input_data.risk_free_rate,
+        interval=FETCH_INTERVAL,
     )
     equity_curve = results["equity_curve"]
     returns = equity_curve.pct_change(fill_method=None).fillna(0.0)
@@ -2198,7 +2261,9 @@ def run_backtest_compact(input_data: BacktestCompactInput) -> BacktestResultV2:
         strategy_name=input_data.strategy_type,
         summary=PerformanceSummary(
             total_return=round(float(results["total_return"]), 6),
-            annualized_return=round(float(cagr(equity_curve)), 6),
+            annualized_return=round(
+                float(cagr(equity_curve, results["periods_per_year"])), 6
+            ),
             annualized_volatility=round(float(results["annualized_volatility"]), 6),
             sharpe_ratio=round(float(results["sharpe_ratio"]), 4),
             sortino_ratio=round(float(results["sortino_ratio"]), 4),
@@ -2270,6 +2335,7 @@ def get_backtest_diagnostics(
         include_trade_log=True,
         fill_price=input_data.fill_price,
         risk_free_rate=input_data.risk_free_rate,
+        interval=FETCH_INTERVAL,
     )
     equity_curve = results["equity_curve"]
     trade_log = results.get("trade_log", pd.DataFrame())
@@ -2473,6 +2539,7 @@ def compare_cost_models(
             include_trade_log=True,
             fill_price=input_data.fill_price,
             risk_free_rate=input_data.risk_free_rate,
+            interval=FETCH_INTERVAL,
         )
 
     gross = _run(0.0, 0.0)
@@ -2487,7 +2554,10 @@ def compare_cost_models(
                 commission_pct=scenario.commission_pct,
                 slippage_pct=scenario.slippage_pct,
                 total_return=round(float(result["total_return"]), 6),
-                annualized_return=round(float(cagr(result["equity_curve"])), 6),
+                annualized_return=round(
+                    float(cagr(result["equity_curve"], result["periods_per_year"])),
+                    6,
+                ),
                 sharpe_ratio=round(float(result["sharpe_ratio"]), 4),
                 max_drawdown=round(float(result["max_drawdown"]), 6),
                 n_trades=int(result["num_trades"]),
@@ -2611,6 +2681,7 @@ def run_strategy_matrix(input_data: StrategyMatrixInput) -> StrategyMatrixResult
                     slippage_pct=input_data.slippage_pct,
                     fill_price=input_data.fill_price,
                     risk_free_rate=input_data.risk_free_rate,
+                    interval=FETCH_INTERVAL,
                 )
             except Exception as exc:
                 failures[f"{ticker}/{strategy}"] = str(exc)
@@ -2638,13 +2709,32 @@ def run_strategy_matrix(input_data: StrategyMatrixInput) -> StrategyMatrixResult
             f"sort_by={key!r} is not a reported metric; expected one of "
             f"{sorted(MatrixCell.model_fields)}"
         )
-    cells.sort(key=lambda c: getattr(c, key), reverse=True)
+    # The rule every ranked door shares (backtest/ranking.py): only a cell
+    # that traded and has a finite metric is ranked. `cells.sort` with a NaN
+    # Sharpe among the keys gave an undefined order, and a cell that never
+    # traded won max_drawdown outright with its 0.0.
+    order, n_unrankable = rank_order(
+        [getattr(c, key) for c in cells], [c.num_trades for c in cells]
+    )
+    cells = [cells[i] for i in order]
+    ranked = cells[: len(cells) - n_unrankable]
+    best_overall = ranked[0] if ranked else None
 
     best_per_ticker: Dict[str, str] = {}
-    for cell in cells:
+    for cell in ranked:
         best_per_ticker.setdefault(cell.ticker, cell.strategy)
 
     notes: List[str] = []
+    if n_unrankable:
+        notes.append(unrankable_note(n_unrankable, len(cells), key, "cell"))
+        unranked_tickers = sorted(
+            {c.ticker for c in cells} - set(best_per_ticker), key=str
+        )
+        if unranked_tickers:
+            notes.append(
+                f"No strategy has a rankable {key} on {unranked_tickers}, so "
+                "those tickers have no entry in best_per_ticker."
+            )
     if failures:
         notes.append(
             f"{len(failures)} of {len(input_data.tickers) * len(input_data.strategies)} "
@@ -2664,8 +2754,9 @@ def run_strategy_matrix(input_data: StrategyMatrixInput) -> StrategyMatrixResult
         strategies=input_data.strategies,
         n_backtests=len(cells),
         cells=cells,
-        best_overall=cells[0],
+        best_overall=best_overall,
         best_per_ticker=best_per_ticker,
         failures=failures,
         notes=notes,
+        n_unrankable=n_unrankable,
     )

@@ -33,7 +33,9 @@ has no ADD in it, so its cancel or fill has no measurable lifetime and no
 measurable queue position. Those are counted SEPARATELY rather than folded
 in as zero -- a left-censored order treated as instantaneous would make
 every average lifetime shorter than the truth, and the bias is largest for
-exactly the resting orders a queue study is about.
+exactly the resting orders a queue study is about. The same orders sit
+ahead of every early arrival, so a window with no snapshot reports its queue
+figures as LOWER BOUNDS and counts the size it never saw.
 
 A CLEAR (`R`) wipes the book. The accumulators reset on one rather than
 carrying a stale level into the next session, which would report queue
@@ -137,11 +139,43 @@ def queue_positions(events: pd.DataFrame) -> Dict[str, Any]:
     joined an empty queue. What is NOT honest is treating a cancel or fill
     with no matching add as a zero-lifetime order, and that is why the
     left-censored ones are counted apart.
+
+    NOR IS IT MARKET STRUCTURE, and the result now says which it is. A
+    window that opens mid-session with no snapshot starts every level
+    EMPTY, so each queue-ahead figure counts only the size added inside the
+    window: with 1,000 shares resting before it opened, five 100-share
+    arrivals read 0, 100, 200, 300 and 400 where the queue was 1,000 to
+    1,400, and the one that "joined an empty level" is warm-up rather than
+    a fact about the market. Until a snapshot
+    or a CLEAR tells the window what the book held, every reading is a
+    LOWER BOUND: `n_unseeded_adds` counts them and `queue_is_lower_bound`
+    says whether there are any.
+
+    THE SIZE AN UNSEEN ORDER TAKES WITH IT IS NOT TAKEN FROM A SEEN ONE.
+    Resting size is tracked per ORDER, so a cancel or fill of an order this
+    window never saw added (and no snapshot showed) removes nothing from
+    the level -- that size was never in the running total -- and is
+    counted instead: `n_unseen_decrements` events, `unseen_size` shares of
+    resting size the queue figures never included. Level-only bookkeeping
+    subtracted it from the orders the window HAD seen, pushing an
+    already-short queue further toward zero without a trace. See the
+    CHANGELOG entry of 2026-09-27.
     """
     resting: Dict[Any, float] = {}
+    # order_id -> [level key, size still resting], for every order this
+    # window saw added (a snapshot add included).
+    orders: Dict[Any, List[Any]] = {}
     ahead: List[float] = []
     n_snapshot_orders = 0
-    for action, side, price, size, is_snapshot in zip(
+    # The book the window opened on is known once a snapshot seeds it or a
+    # CLEAR empties it; an add before either is measured against a book
+    # whose earlier contents were never seen.
+    seeded = False
+    n_unseeded_adds = 0
+    n_unseen_decrements = 0
+    unseen_size = 0.0
+    for order_id, action, side, price, size, is_snapshot in zip(
+        events["order_id"].to_numpy(),
         events["action"].to_numpy(),
         events["side"].to_numpy(),
         pd.to_numeric(events["price"], errors="coerce").to_numpy(dtype="float64"),
@@ -150,6 +184,8 @@ def queue_positions(events: pd.DataFrame) -> Dict[str, Any]:
     ):
         if action == CLEAR:
             resting.clear()
+            orders.clear()
+            seeded = True
             continue
         if not np.isfinite(price) or not np.isfinite(size):
             continue
@@ -161,18 +197,40 @@ def queue_positions(events: pd.DataFrame) -> Dict[str, Any]:
             # against the mbp-10 book for the same sequence numbers.
             if is_snapshot:
                 n_snapshot_orders += 1
+                seeded = True
             else:
                 ahead.append(resting.get(key, 0.0))
+                if not seeded:
+                    n_unseeded_adds += 1
             resting[key] = resting.get(key, 0.0) + size
+            orders[order_id] = [key, size]
         elif action in (CANCEL, FILL):
-            resting[key] = max(0.0, resting.get(key, 0.0) - size)
+            known = orders.get(order_id)
+            if known is None:
+                n_unseen_decrements += 1
+                unseen_size += size
+                continue
+            level, remaining = known
+            taken = min(size, remaining)
+            resting[level] = max(0.0, resting.get(level, 0.0) - taken)
+            if remaining - taken > 0:
+                known[1] = remaining - taken
+            else:
+                del orders[order_id]
+    warm_up = {
+        "n_snapshot_orders": int(n_snapshot_orders),
+        "n_unseeded_adds": int(n_unseeded_adds),
+        "queue_is_lower_bound": bool(n_unseeded_adds > 0),
+        "n_unseen_decrements": int(n_unseen_decrements),
+        "unseen_size": float(unseen_size),
+    }
     if not ahead:
         return {
             "n_adds": 0,
             "mean_queue_ahead": None,
             "median_queue_ahead": None,
             "share_joining_empty": None,
-            "n_snapshot_orders": int(n_snapshot_orders),
+            **warm_up,
         }
     values = np.asarray(ahead, dtype="float64")
     return {
@@ -180,9 +238,11 @@ def queue_positions(events: pd.DataFrame) -> Dict[str, Any]:
         "mean_queue_ahead": float(values.mean()),
         "median_queue_ahead": float(np.median(values)),
         # A high share means the level is usually empty when you arrive,
-        # which is a different market from one where you always queue.
+        # which is a different market from one where you always queue --
+        # unless `queue_is_lower_bound`, when it is partly the window's own
+        # warm-up.
         "share_joining_empty": float((values == 0.0).mean()),
-        "n_snapshot_orders": int(n_snapshot_orders),
+        **warm_up,
     }
 
 
@@ -368,9 +428,38 @@ def order_event_metrics(
             "lifetime is longer than anything this window can see."
         )
 
+    queue = queue_positions(frame)
+    if queue["queue_is_lower_bound"]:
+        removed = (
+            f" {queue['n_unseen_decrements']:,} cancel(s) or fill(s) removed "
+            f"{queue['unseen_size']:,.0f} shares of orders this window never "
+            "saw added -- size that was resting, possibly ahead, and is in "
+            "none of the queue figures."
+            if queue["n_unseen_decrements"]
+            else ""
+        )
+        warnings.append(
+            "WARNING: no snapshot or CLEAR opened this window, so every price "
+            "level starts EMPTY and "
+            f"{queue['n_unseeded_adds']:,} of {queue['n_adds']:,} queue-ahead "
+            "readings are LOWER BOUNDS: they count only size added inside "
+            "the window, and `share_joining_empty` is partly the window's "
+            f"own warm-up rather than the market.{removed} Read a window that "
+            "opens with the venue's snapshot for queue positions that "
+            "describe the book."
+        )
+    elif queue["n_unseen_decrements"]:
+        warnings.append(
+            f"NOTE: {queue['n_unseen_decrements']:,} cancel(s) or fill(s) "
+            f"removed {queue['unseen_size']:,.0f} shares of orders neither "
+            "the snapshot nor this window showed resting. That size is in "
+            "none of the queue figures; a snapshot that does not cover the "
+            "whole book is the usual cause."
+        )
+
     return {
         "n_events": rates["n_events"],
-        "queue": queue_positions(frame),
+        "queue": queue,
         "lifetimes": lifetimes,
         "rates": rates,
         "warnings": warnings,

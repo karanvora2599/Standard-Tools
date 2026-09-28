@@ -382,6 +382,19 @@ class TestTheLifetimeTailIsReported:
         assert cancelled["p90_seconds"] == pytest.approx(0.01)
         assert cancelled["p99_seconds"] == pytest.approx(30.0, rel=1e-3)
 
+    def test_a_window_with_no_snapshot_says_its_queue_is_a_lower_bound(self):
+        """Every order here was added inside the window and none of the
+        levels was seeded, so the queue figures count only what the window
+        saw arrive -- and the result has to say so where a caller reads
+        the queue, not only in the warnings."""
+        result = dispatch(
+            "get_order_event_metrics", {"events": self._events([(10, 0.01)])}
+        )
+        assert result["queue"]["queue_is_lower_bound"] is True
+        assert result["queue"]["n_unseeded_adds"] == result["queue"]["n_adds"]
+        assert result["queue"]["n_unseen_decrements"] == 0
+        assert any("LOWER BOUNDS" in w for w in result["warnings"])
+
     def test_two_orders_of_magnitude_put_the_quartile_on_the_median(self):
         """Sixty orders at 10 ms and forty at 1 s: the median and the lower
         quartile are the same 10 ms, the mean is forty times either, and the
@@ -511,10 +524,16 @@ def _london_day(n_buckets: int = 13):
     The volume in each bucket is set so `open_share` is exactly the first
     entry of LONDON_SHARES, which is what makes the assertion a planted
     answer rather than a restatement of the computation.
+
+    The buckets divide the SESSION, 08:00 to 16:30. This fixture used to
+    plant its shares over the bars' own first and last times (08:00 to
+    16:25), which were the profile's edges while those edges moved with
+    the data; the profile now buckets the session it is given, so the
+    planted answer is laid on the same edges.
     """
     stamps = pd.date_range("2026-03-02 08:00", "2026-03-02 16:25", freq="5min")
     minutes = stamps.hour * 60 + stamps.minute
-    low, high = int(minutes.min()), int(minutes.max())
+    low, high = 8 * 60, 16 * 60 + 30
     buckets = np.minimum(
         ((minutes - low) / (high - low) * n_buckets).astype(int), n_buckets - 1
     )
@@ -546,6 +565,37 @@ class TestTheSessionBelongsToTheVenue:
         assert result["extended_hours_share"] == pytest.approx(0.0)
         assert result["session"] == ["08:00", "16:30"]
         assert result["n_bars"] == len(volume)
+
+    def test_an_empty_bucket_reaches_the_caller_as_the_trough(self):
+        """A London day with no trading from 11:00 to 13:00. Every bucket
+        comes back, the empty ones with a zero share and a count, and the
+        trough is named by its bucket id."""
+        timestamps, volume = _london_day()
+        kept = [
+            (t, v)
+            for t, v in zip(timestamps, volume)
+            if not ("T11:" in t or "T12:" in t)
+        ]
+        result = dispatch(
+            "get_intraday_volume_profile",
+            {
+                "volume": [v for _, v in kept],
+                "timestamps": [t for t, _ in kept],
+                "index_timezone": "Europe/London",
+                "exchange_timezone": "Europe/London",
+                "session_start": "08:00",
+                "session_end": "16:30",
+            },
+        )
+        assert result["n_buckets"] == 13
+        assert len(result["profile"]) == 13
+        assert result["n_empty_buckets"] >= 2
+        assert result["trough_share"] == 0.0
+        trough = result["profile"][result["trough_bucket"]]
+        assert trough["bucket"] == result["trough_bucket"]
+        assert trough["n_bars"] == 0
+        assert "11:" in trough["start_time"] or "12:" in trough["start_time"]
+        assert result["bucket_span"] == ["08:00", "16:30"]
 
     def test_the_new_york_default_refuses_and_names_the_session(self):
         timestamps, volume = _london_day()

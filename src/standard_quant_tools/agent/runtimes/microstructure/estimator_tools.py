@@ -20,9 +20,12 @@ is most of how a liquidity proxy actually gets used.
 ONE EXCEPTION, AND IT IS THE POINT OF THE EXCEPTION. `estimate_kyle_lambda`
 also takes a tick tape and a quote panel by reference, because its bars
 estimate is circular by construction -- the bar's own return signs the
-volume that return is then regressed on. A tape signs the flow from the
-prints instead, and it is a tape rather than a list because a session of
-them does not belong in a payload. See the CHANGELOG entry of 2026-09-22.
+volume that return is then regressed on. A tape with its quotes signs the
+flow against the prevailing quote instead, and it is a tape rather than a
+list because a session of them does not belong in a payload. See the
+CHANGELOG entry of 2026-09-22. A tape WITHOUT quotes is circular in the same
+way as bars -- the tick rule reads the sign off the trade prices being
+explained -- and says so; see the CHANGELOG entry of 2026-09-27.
 """
 
 from __future__ import annotations
@@ -188,13 +191,15 @@ class KyleLambdaInput(BaseModel):
     """
     Two ways in, and they do not measure the same thing.
 
-    A TAPE (`trades_ref`, ideally with `quotes_ref`) signs each print
+    A TAPE WITH QUOTES (`trades_ref` and `quotes_ref`) signs each print
     against the quote that preceded it, so the sign is evidence rather than
     a restatement of the answer. BARS (`close`, `volume`) have no sign in
     them: the only one available is the bar's own return, which is the very
-    thing the regression explains, and the result says `circular=True`.
-    Prefer the tape wherever one exists. See the CHANGELOG entry of
-    2026-09-22.
+    thing the regression explains, and the result says `circular=True`. A
+    tape WITHOUT quotes falls back to the tick rule on the trade prices the
+    regression explains, and is `circular=True` for the same reason. Prefer
+    the tape with its quotes wherever one exists. See the CHANGELOG entries
+    of 2026-09-22 and 2026-09-27.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -211,18 +216,22 @@ class KyleLambdaInput(BaseModel):
     trades_ref: Optional[str] = Field(
         None,
         description="An `sqt://tick_tape/...` from fetch_tick_tape. THE "
-        "PATH TO PREFER: the tape is signed print by print and bucketed at "
-        "`freq`, so lambda is estimated from a sign the regression does not "
-        "already know. Mutually exclusive with `close`/`volume`.",
+        "PATH TO PREFER, WITH `quotes_ref`: the tape is signed print by "
+        "print against the prevailing quote and bucketed at `freq`, so "
+        "lambda is estimated from a sign the regression does not already "
+        "know. Mutually exclusive with `close`/`volume`.",
     )
     quotes_ref: Optional[str] = Field(
         None,
         description="An `sqt://quote_panel/...` from fetch_quote_panel, "
         "alongside `trades_ref`. WITH quotes the sign is Lee-Ready and the "
         "price that moves is the MIDPOINT, which keeps the bid-ask bounce "
-        "out of the slope; without them the tape falls back to the tick "
-        "rule on trade prices, which is materially worse. Requires "
-        "`trades_ref`.",
+        "out of the slope. WITHOUT them the result is CIRCULAR "
+        "(`circular=True`): the tape falls back to the tick rule, which "
+        "signs each print by its change from the one before, and the price "
+        "regressed is the last trade price -- the same prints -- so the "
+        "bounce alone produces a positive lambda on a market with no impact. "
+        "Requires `trades_ref`.",
     )
     freq: Literal["1s", "5s", "10s", "30s", "1min", "5min"] = Field(
         "1min",
@@ -491,17 +500,20 @@ class KyleLambdaResult(_Result):
     mean_volume: Stat = None
     circular: bool = Field(
         True,
-        description="True when the flow was signed by the bar's own return, "
-        "which is the variable the regression explains: lambda is positive "
-        "by construction and r_squared measures nothing. READ THIS FIRST. "
-        "Only a tape (`trades_ref`) makes it False.",
+        description="True when the sign was read from the prices the "
+        "regression explains: bars (`return_sign`, the bar's own return) or "
+        "a tape without quotes (`tick_rule`, each print's change from the "
+        "one before, regressed on the last trade price). Lambda then carries "
+        "the bid-ask bounce or is positive by construction, and r_squared "
+        "measures nothing. READ THIS FIRST. Only `trades_ref` WITH "
+        "`quotes_ref` makes it False.",
     )
     sign_source: str = Field(
         "return_sign",
         description="What signed the flow: 'lee_ready' (tape and quotes, "
         "each print matched against the quote preceding it), 'tick_rule' "
-        "(tape without quotes, signed off the previous print's price) or "
-        "'return_sign' (bars, the circular case).",
+        "(tape without quotes, signed off the previous print's price -- "
+        "circular) or 'return_sign' (bars -- circular).",
     )
     freq: Optional[str] = Field(
         None,
@@ -534,6 +546,15 @@ class OrderFlowResult(_Result):
 class VpinResult(_Result):
     n_buckets: int = 0
     bucket_volume: Stat = None
+    undirected_volume_share: Stat = Field(
+        None,
+        description="Fraction of the volume on bars whose close did not "
+        "move (and the first bar, which has no return). The tick rule "
+        "cannot say who initiated it, so it is split half to each side: it "
+        "fills buckets and adds nothing to their imbalance. A flat market "
+        "reads as balanced flow, not as one-sided flow; above about a "
+        "quarter the bars are too fine or too quiet for this signing.",
+    )
     window: int = 0
     current_vpin: Stat = None
     current_percentile: Stat = None
@@ -547,24 +568,56 @@ class ProfileBucket(BaseModel):
     bucket: int = 0
     start_time: str = ""
     share_of_volume: Stat = None
-    mean_volume: Stat = None
-    n_bars: int = 0
+    mean_volume: Stat = Field(
+        None, description="Null for an empty bucket: no bar, so no mean."
+    )
+    n_bars: int = Field(
+        0,
+        description="Bars that fell in this bucket. Zero is reported, not "
+        "dropped: an empty bucket has a zero share and can be the trough.",
+    )
 
 
 class VolumeProfileResult(_Result):
     n_bars: int = 0
-    n_buckets: int = 0
+    n_buckets: int = Field(
+        0,
+        description="The buckets asked for, every one of them in `profile`, "
+        "empty ones included.",
+    )
+    n_empty_buckets: int = Field(
+        0,
+        description="Buckets no bar fell in. They carry a zero share, so a "
+        "midday with no trading is the trough rather than missing from the "
+        "profile. Check whether each is a halt or break, or a gap in the "
+        "data, before scheduling against it.",
+    )
     profile: List[ProfileBucket] = Field(default_factory=list)
     u_shaped: bool = False
     open_share: Stat = None
     close_share: Stat = None
-    trough_share: Stat = None
-    trough_bucket: int = 0
-    open_to_trough_ratio: Stat = None
+    trough_share: Stat = Field(
+        None, description="The smallest bucket share, over every bucket."
+    )
+    trough_bucket: int = Field(
+        0,
+        description="The id of the trough bucket -- the `bucket` field of the "
+        "profile entry it names, which is also its position in `profile`.",
+    )
+    open_to_trough_ratio: Stat = Field(
+        None, description="Null when the trough bucket is empty (a zero share)."
+    )
     session: List[str] = Field(
         default_factory=list,
         description="The session the buckets were measured over, as it was "
         "read: [start, end] in exchange_timezone.",
+    )
+    bucket_span: List[str] = Field(
+        default_factory=list,
+        description="[start, end) of the times of day the buckets divide. The "
+        "session's, unless a naive index (no index_timezone) carried bars "
+        "outside it: then the bars' own first and last times, and a warning "
+        "says so.",
     )
     extended_hours_share: Stat = Field(
         None,
@@ -733,10 +786,12 @@ ESTIMATOR_TOOL_DEFS = [
         "Lee-Ready against the quote before it and bucketed at `freq`, and "
         "the sign is then evidence rather than a restatement of the answer. "
         "Measured side by side on the same live tape, the circular estimate "
-        "was 3.2x the signed one while its r_squared looked 2.7x better. "
-        "PREFER THE TAPE WHENEVER ONE EXISTS; use bars only when it does "
-        "not, and read `circular`, `sign_source` and r_squared before sizing "
-        "anything off the number.",
+        "was 3.2x the signed one while its r_squared looked 2.7x better. A "
+        "tape WITHOUT `quotes_ref` is circular too -- the tick rule signs "
+        "each print off the trade prices the regression explains -- and "
+        "says `circular=True`. PREFER THE TAPE WITH ITS QUOTES WHENEVER ONE "
+        "EXISTS; use bars only when it does not, and read `circular`, "
+        "`sign_source` and r_squared before sizing anything off the number.",
         KyleLambdaInput,
     ),
     (
@@ -762,7 +817,9 @@ ESTIMATOR_TOOL_DEFS = [
         "one-sidedness and not the VPIN of the paper. And VPIN is contested: "
         "Andersen and Bondarenko (2014) argue it is largely a transformation "
         "of volatility. Calling one-sided flow 'informed trading' is a model "
-        "assumption, not a measurement.",
+        "assumption, not a measurement. A bar whose close did not move is "
+        "split half to each side, so a flat market reads as balanced flow; "
+        "`undirected_volume_share` says how much of the volume that was.",
         VpinInput,
     ),
     (
@@ -782,7 +839,10 @@ ESTIMATOR_TOOL_DEFS = [
         "the day or refused outright. Pass index_timezone ('UTC' for a "
         "Databento extract) when the timestamps carry no offset, so "
         "extended-hours bars can be told from session ones instead of "
-        "stretching the open bucket back to 4am.",
+        "stretching the open bucket back to 4am. The buckets divide the "
+        "session, and every one is returned -- an empty bucket with a zero "
+        "share, counted in n_empty_buckets -- so a midday with no trading "
+        "is the trough, and trough_bucket is a bucket id.",
         VolumeProfileInput,
     ),
 ]

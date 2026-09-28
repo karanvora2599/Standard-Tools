@@ -37,7 +37,10 @@ class OptionGreeksInput(BaseModel):
         ..., gt=0, description="Annualized volatility as a decimal (0.20 = 20%)."
     )
     risk_free_rate: float = Field(
-        0.0, description="Continuously-compounded annual risk-free rate."
+        0.0,
+        ge=-10,
+        le=10,
+        description="Continuously-compounded annual risk-free rate, as a decimal. Bounded to +/-10 (1,000%) on magnitude, never on sign: a negative rate prices normally, and a larger magnitude is a unit error.",
     )
     option_type: Literal["call", "put"] = Field("call")
     dividend_yield: float = Field(
@@ -66,7 +69,11 @@ class OptionStrategyLeg(BaseModel):
         None, gt=0, description="Required for option legs."
     )
     time_to_expiry: Optional[float] = Field(
-        None, gt=0, description="Required for option legs, in years."
+        None,
+        gt=0,
+        description="Required for option legs, in years. Legs may differ: a "
+        "calendar or diagonal is valued at the FIRST expiry, with later legs "
+        "marked by Black-Scholes at their remaining time and own volatility.",
     )
 
 
@@ -77,7 +84,12 @@ class OptionStrategyInput(BaseModel):
         ..., min_length=1, description="The legs of the structure."
     )
     spot: float = Field(..., gt=0, description="Current underlying price.")
-    risk_free_rate: float = Field(0.0)
+    risk_free_rate: float = Field(
+        0.0,
+        ge=-10,
+        le=10,
+        description="Continuously-compounded annual risk-free rate, as a decimal. Bounded to +/-10 (1,000%) on magnitude, never on sign: a negative rate prices normally, and a larger magnitude is a unit error.",
+    )
     dividend_yield: float = Field(
         0.0,
         ge=-10,
@@ -143,7 +155,12 @@ class PutCallParityInput(BaseModel):
     spot: float = Field(..., gt=0)
     strike: float = Field(..., gt=0)
     time_to_expiry: float = Field(..., gt=0, description="Years.")
-    risk_free_rate: float = Field(...)
+    risk_free_rate: float = Field(
+        ...,
+        ge=-10,
+        le=10,
+        description="Continuously-compounded annual risk-free rate, as a decimal. Bounded to +/-10 (1,000%) on magnitude, never on sign: a negative rate prices normally, and a larger magnitude is a unit error.",
+    )
     dividend_yield: float = Field(
         0.0,
         ge=-10,
@@ -163,7 +180,12 @@ class ImpliedForwardInput(BaseModel):
 
     spot: float = Field(..., gt=0)
     time_to_expiry: float = Field(..., gt=0, description="Years.")
-    risk_free_rate: float = Field(...)
+    risk_free_rate: float = Field(
+        ...,
+        ge=-10,
+        le=10,
+        description="Continuously-compounded annual risk-free rate, as a decimal. Bounded to +/-10 (1,000%) on magnitude, never on sign: a negative rate prices normally, and a larger magnitude is a unit error.",
+    )
     dividend_yield: float = Field(
         0.0,
         ge=-10,
@@ -206,7 +228,12 @@ class DeltaHedgeInput(BaseModel):
     realized_vol: float = Field(
         ..., gt=0, description="The vol the underlying actually realizes."
     )
-    risk_free_rate: float = Field(0.0)
+    risk_free_rate: float = Field(
+        0.0,
+        ge=-10,
+        le=10,
+        description="Continuously-compounded annual risk-free rate, as a decimal. Bounded to +/-10 (1,000%) on magnitude, never on sign: a negative rate prices normally, and a larger magnitude is a unit error.",
+    )
     option_type: Literal["call", "put"] = Field("call")
     n_hedges: int = Field(
         21, ge=1, le=2000, description="Rehedges over the option's life."
@@ -227,7 +254,12 @@ class OptionScenariosInput(BaseModel):
     strike: float = Field(..., gt=0)
     time_to_expiry: float = Field(..., gt=0, description="Years.")
     volatility: float = Field(..., gt=0)
-    risk_free_rate: float = Field(0.0)
+    risk_free_rate: float = Field(
+        0.0,
+        ge=-10,
+        le=10,
+        description="Continuously-compounded annual risk-free rate, as a decimal. Bounded to +/-10 (1,000%) on magnitude, never on sign: a negative rate prices normally, and a larger magnitude is a unit error.",
+    )
     dividend_yield: float = Field(
         0.0,
         ge=-10,

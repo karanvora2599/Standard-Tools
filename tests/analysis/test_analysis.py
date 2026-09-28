@@ -1,9 +1,12 @@
 """Tests for regression and analysis functions: beta, alpha, R-squared."""
 
+from fractions import Fraction
+
 import numpy as np
 import pandas as pd
 import pytest
 
+from standard_quant_tools.analysis import regression
 from standard_quant_tools.analysis.regression import calculate_beta, rolling_beta
 from standard_quant_tools.error import ValidationError
 
@@ -142,3 +145,123 @@ class TestRollingBeta:
         valid = result["Rolling_Beta"].dropna()
         assert valid.empty
         assert not np.isinf(result["Rolling_Beta"]).any()
+
+
+# ── Both backends ────────────────────────────────────────────────────────────
+
+
+@pytest.fixture(params=[True, False], ids=["native", "numpy"])
+def backend(request, monkeypatch):
+    """Run the test once on the native kernels and once on the NumPy path."""
+    if request.param:
+        if not regression.HAS_CPP:
+            pytest.skip("C++ extension not built")
+    else:
+        monkeypatch.setattr(regression, "HAS_CPP", False)
+        monkeypatch.setattr(regression, "_cpp_core", None)
+    return request.param
+
+
+def _exact_beta(y, x):
+    """The window's OLS slope in exact rational arithmetic."""
+    fx = [Fraction(float(v)) for v in x]
+    fy = [Fraction(float(v)) for v in y]
+    mx, my = sum(fx) / len(fx), sum(fy) / len(fy)
+    num = sum((a - mx) * (b - my) for a, b in zip(fx, fy))
+    return float(num / sum((a - mx) ** 2 for a in fx))
+
+
+def _dated(values):
+    return pd.Series(values, index=pd.bdate_range("2021-01-04", periods=len(values)))
+
+
+class TestCalculateBetaDegenerateDesigns:
+    """
+    One policy for both backends. A benchmark the intercept column spans
+    leaves the slope unidentified; the NumPy path used to return lstsq's
+    minimum-norm solution there (beta 2e-6, alpha 7e-4 on a constant
+    benchmark) while the native path returned NaN.
+    """
+
+    @pytest.mark.parametrize("level", [0.01, 250.0, -3.0e-7])
+    def test_a_constant_benchmark_has_no_beta(self, backend, level):
+        rng = np.random.default_rng(4)
+        asset = _dated(rng.normal(0.0005, 0.01, 60))
+        result = calculate_beta(asset, _dated(np.full(60, level)))
+        assert all(np.isnan(v) for v in result.values()), result
+
+    def test_a_constant_asset_has_a_beta_but_no_r_squared(self, backend):
+        rng = np.random.default_rng(5)
+        result = calculate_beta(
+            _dated(np.full(40, 0.003)), _dated(rng.normal(0, 0.01, 40))
+        )
+        assert result["beta"] == pytest.approx(0.0, abs=1e-12)
+        assert result["alpha"] == pytest.approx(0.003, abs=1e-12)
+        assert np.isnan(result["r_squared"])
+
+    def test_one_moved_benchmark_value_is_a_real_fit(self, backend):
+        """The null case: the smallest departure from a constant benchmark
+        identifies the slope, and both backends report the same one."""
+        x = np.full(30, 0.01)
+        x[7] = 0.02
+        rng = np.random.default_rng(6)
+        y = 0.001 + 1.5 * x + rng.normal(0, 1e-4, 30)
+        result = calculate_beta(_dated(y), _dated(x))
+        assert result["beta"] == pytest.approx(_exact_beta(y, x), rel=1e-9)
+        assert 0.0 <= result["r_squared"] <= 1.0
+
+
+class TestRollingBetaIsExactPerWindow:
+    """
+    Every window's own beta, on both backends, after a large print has left.
+
+    The native kernel rebuilds its sliding sums when a second moment falls
+    four decades below its peak. The fallback used pandas' rolling cov/var,
+    which are online too and were not fixed: under pandas 2.x the windows
+    after one 1e8 print among 0.01-scale returns were wrong by a median
+    factor of 1 and at worst 3.4e3.
+    """
+
+    @pytest.mark.parametrize("magnitude", [1e5, 1e8])
+    @pytest.mark.parametrize("side", ["asset", "benchmark"])
+    def test_every_window_after_the_print_is_the_exact_beta(
+        self, backend, magnitude, side
+    ):
+        window = 60
+        for seed in range(6):
+            rng = np.random.default_rng(seed)
+            x = rng.normal(0, 0.01, 200)
+            y = 0.001 + 1.3 * x + rng.normal(0, 0.001, 200)
+            (y if side == "asset" else x)[100] = magnitude
+            got = rolling_beta(_dated(y), _dated(x), window)["Rolling_Beta"]
+            for i in range(160, 200, 3):
+                want = _exact_beta(y[i - 59 : i + 1], x[i - 59 : i + 1])
+                assert abs(got.iloc[i] - want) <= 1e-9 * abs(want), (seed, i)
+
+    def test_a_flat_benchmark_window_is_nan_and_only_those(self, backend):
+        rng = np.random.default_rng(2)
+        x = np.r_[rng.normal(0, 0.01, 50), np.full(40, 0.01), rng.normal(0, 0.01, 50)]
+        y = 0.7 * x + rng.normal(0, 0.001, 140)
+        got = rolling_beta(_dated(y), _dated(x), 20)["Rolling_Beta"].to_numpy()
+        flat = np.zeros(140, dtype=bool)
+        flat[69:90] = True  # windows ending 69..89 lie wholly inside the run
+        warm_up = np.arange(140) < 19
+        np.testing.assert_array_equal(np.isnan(got), flat | warm_up)
+
+    def test_a_clean_series_is_the_exact_beta(self, backend):
+        """The null case: ordinary returns, every window to rounding."""
+        rng = np.random.default_rng(7)
+        x = rng.normal(0, 0.01, 300)
+        y = 0.8 * x + rng.normal(0, 0.002, 300)
+        got = rolling_beta(_dated(y), _dated(x), 60)["Rolling_Beta"]
+        assert got.index.equals(_dated(y).index)
+        assert got.iloc[:59].isna().all()
+        for i in range(59, 300, 11):
+            want = _exact_beta(y[i - 59 : i + 1], x[i - 59 : i + 1])
+            assert abs(got.iloc[i] - want) <= 1e-12 * abs(want)
+
+    def test_fewer_bars_than_the_window_is_all_nan(self, backend):
+        rng = np.random.default_rng(8)
+        x = rng.normal(0, 0.01, 10)
+        got = rolling_beta(_dated(2 * x), _dated(x), 20)
+        assert len(got) == 10 and got["Rolling_Beta"].isna().all()

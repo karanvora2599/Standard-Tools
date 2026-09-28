@@ -34,15 +34,15 @@ scoped to four categories rather than all of them, so it advertises 58 of the
 
 | Runtime | Tools | Schema cost | Categories | Deep documentation |
 |---|---:|---:|---|---|
-| `research` | 42 | 61 KB | `screener`, `analysis`, `quant_research` | [08_analysis.md](08_analysis.md), [23_inference.md](23_inference.md) |
+| `research` | 42 | 62 KB | `screener`, `analysis`, `quant_research` | [08_analysis.md](08_analysis.md), [23_inference.md](23_inference.md) |
 | `modeling` | 37 | 171 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
 | `backtest` | 35 | 86 KB | `backtest_execution`, `backtest_validation`, `custom_signal` | [04_backtesting.md](04_backtesting.md), [24_overfitting.md](24_overfitting.md) |
 | `meta` | 25 | 24 KB | `discovery`, `provenance` | [27_meta.md](27_meta.md), [10_auditability.md](10_auditability.md) |
 | `data` | 21 | 34 KB | *(one surface)* | [26_data.md](26_data.md) |
-| `portfolio` | 19 | 35 KB | `portfolio_risk` | [05_portfolio.md](05_portfolio.md) |
-| `delta_one` | 18 | 43 KB | *(one surface)* | [28_delta_one.md](28_delta_one.md) |
-| `microstructure` | 17 | 30 KB | *(one surface)* | [22_microstructure.md](22_microstructure.md) |
-| `derivatives` | 12 | 21 KB | *(one surface)* | [21_derivatives.md](21_derivatives.md) |
+| `portfolio` | 19 | 36 KB | `portfolio_risk` | [05_portfolio.md](05_portfolio.md) |
+| `delta_one` | 18 | 44 KB | *(one surface)* | [28_delta_one.md](28_delta_one.md) |
+| `microstructure` | 17 | 31 KB | *(one surface)* | [22_microstructure.md](22_microstructure.md) |
+| `derivatives` | 12 | 23 KB | *(one surface)* | [21_derivatives.md](21_derivatives.md) |
 | `feature_lab` | 11 | 38 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
 | **Total** | **237** | | | |
 
@@ -212,7 +212,7 @@ Correlation matrix, avg pairwise correlation, most/least correlated pair, and di
 
 #### `get_correlation_stability`
 
-Whether a correlation is a property of the pair or an average over two different regimes. Two assets correlating at 0.0 over ten years may have correlated at +0.7 for five and -0.7 for five; the average is meaningless and a hedge sized on it is wrong in both regimes. Reports the sign-flip count, the range, and separately the correlation conditional on the joint worst decile -- because correlations move toward 1 when everything falls together, so a hedge computed on a calm sample fails precisely when it is needed.
+Whether a correlation is a property of the pair or an average over two different regimes. Two assets correlating at 0.0 over ten years may have correlated at +0.7 for five and -0.7 for five; the average is meaningless and a hedge sized on it is wrong in both regimes. Reports the sign-flip count, the range, and separately the correlation on the days BOTH series sit in their worst decile (with the day count; none below 20 days) -- because correlations move toward 1 when everything falls together, so a hedge computed on a calm sample fails precisely when it is needed.
 
 **Required:** `a`, `b`  
 **Optional:** `window`
@@ -260,14 +260,14 @@ Engle-Granger cointegration: hedge ratio, half-life, spread z-score signal.
 
 #### `run_factor_regression`
 
-Multi-factor OLS regression: alpha, loadings, t-stats, p-values, R².
+Multi-factor OLS regression: alpha, loadings, t-stats, p-values, R². One unique name per factor ticker; linearly dependent factors are refused by name; dates missing from any series are dropped and counted.
 
 **Required:** `symbol`, `factor_tickers`, `start_date`, `end_date`  
 **Optional:** `factor_names`, `rolling_window`
 
 #### `run_hurst_analysis`
 
-Hurst exponent (DFA/R-S): regime classification and optional rolling breakdown.
+Hurst exponent (DFA, or R/S corrected for its small-sample upward bias): regime classification against a random-walk band that widens for short series (regime_band), and optional rolling breakdown. hurst is null when the series is too short for the window range.
 
 **Required:** `symbol`, `start_date`, `end_date`  
 **Optional:** `min_window`, `max_window`, `method`, `rolling_window`
@@ -302,11 +302,11 @@ ADF, KPSS and the variance ratio, with the four-way verdict spelled out. The two
 
 #### `scan_pairs`
 
-Scan a ticker universe for cointegrated pairs, ranked by half-life.  
+Scan a ticker universe for cointegrated pairs, ranked by half-life. Each pair is tested in both regression orders (Engle-Granger is not symmetric) and gated on the larger p-value after a Benjamini-Hochberg adjustment across every pair tested; reports the number tested and how many would pass by chance.  
 *Long-running: served only with `--enable-long-running`.*
 
 **Required:** `tickers`, `start_date`, `end_date`  
-**Optional:** `max_pairs`, `min_half_life`, `max_half_life`, `p_value_threshold`, `zscore_window`
+**Optional:** `max_pairs`, `min_half_life`, `max_half_life`, `p_value_threshold`, `multiple_testing`, `zscore_window`
 
 #### `test_autocorrelation`
 
@@ -1500,7 +1500,7 @@ The spread implied by the HIGH-LOW RANGE (Corwin-Schultz 2012). A day's range co
 
 #### `estimate_kyle_lambda`
 
-Market DEPTH: the price impact of a unit of signed order flow, from a regression of price change on signed volume. The one measure here with a direct trading interpretation -- multiply by the size you intend to trade for an estimate of the impact you will cause. IT MATTERS ENORMOUSLY WHICH WAY YOU CALL IT. From BARS (`close`, `volume`) the only sign available is the bar's own return, so sign(y) * volume is regressed on y: lambda is positive by construction, r_squared measures nothing, and the result says `circular=True`. From a TAPE (`trades_ref` from fetch_tick_tape, with `quotes_ref` from fetch_quote_panel) each print is signed Lee-Ready against the quote before it and bucketed at `freq`, and the sign is then evidence rather than a restatement of the answer. Measured side by side on the same live tape, the circular estimate was 3.2x the signed one while its r_squared looked 2.7x better. PREFER THE TAPE WHENEVER ONE EXISTS; use bars only when it does not, and read `circular`, `sign_source` and r_squared before sizing anything off the number.
+Market DEPTH: the price impact of a unit of signed order flow, from a regression of price change on signed volume. The one measure here with a direct trading interpretation -- multiply by the size you intend to trade for an estimate of the impact you will cause. IT MATTERS ENORMOUSLY WHICH WAY YOU CALL IT. From BARS (`close`, `volume`) the only sign available is the bar's own return, so sign(y) * volume is regressed on y: lambda is positive by construction, r_squared measures nothing, and the result says `circular=True`. From a TAPE (`trades_ref` from fetch_tick_tape, with `quotes_ref` from fetch_quote_panel) each print is signed Lee-Ready against the quote before it and bucketed at `freq`, and the sign is then evidence rather than a restatement of the answer. Measured side by side on the same live tape, the circular estimate was 3.2x the signed one while its r_squared looked 2.7x better. A tape WITHOUT `quotes_ref` is circular too -- the tick rule signs each print off the trade prices the regression explains -- and says `circular=True`. PREFER THE TAPE WITH ITS QUOTES WHENEVER ONE EXISTS; use bars only when it does not, and read `circular`, `sign_source` and r_squared before sizing anything off the number.
 
 *No required arguments.*  
 **Optional:** `close`, `volume`, `trades_ref`, `quotes_ref`, `freq`, `window`
@@ -1514,7 +1514,7 @@ The effective spread implied by BID-ASK BOUNCE, from trade prices alone (Roll 19
 
 #### `estimate_vpin`
 
-Flow one-sidedness measured in VOLUME time rather than clock time (Easley, Lopez de Prado and O'Hara 2012) -- information arrives with volume, so the series is cut into equal-volume buckets. TWO HONEST CAVEATS. This is built from daily bars with tick-rule signing; the original is a trade-level measure where each bucket holds hundreds of trades, so what comes back is a defensible series of one-sidedness and not the VPIN of the paper. And VPIN is contested: Andersen and Bondarenko (2014) argue it is largely a transformation of volatility. Calling one-sided flow 'informed trading' is a model assumption, not a measurement.
+Flow one-sidedness measured in VOLUME time rather than clock time (Easley, Lopez de Prado and O'Hara 2012) -- information arrives with volume, so the series is cut into equal-volume buckets. TWO HONEST CAVEATS. This is built from daily bars with tick-rule signing; the original is a trade-level measure where each bucket holds hundreds of trades, so what comes back is a defensible series of one-sidedness and not the VPIN of the paper. And VPIN is contested: Andersen and Bondarenko (2014) argue it is largely a transformation of volatility. Calling one-sided flow 'informed trading' is a model assumption, not a measurement. A bar whose close did not move is split half to each side, so a flat market reads as balanced flow; `undirected_volume_share` says how much of the volume that was.
 
 **Required:** `close`, `volume`  
 **Optional:** `n_buckets`, `window`
@@ -1542,7 +1542,7 @@ What an execution ACTUALLY cost, decomposed after Perold. Every other cost tool 
 
 #### `get_intraday_volume_profile`
 
-How volume distributes across the trading day, and what that implies for a participation schedule. The U-shape is the fact every execution schedule is built on: volume concentrates at the open and close with a midday trough routinely a third of the opening bucket, so a schedule spread evenly across the CLOCK over-participates at lunch -- paying impact into a thin book -- and under-participates at the close, missing the cheapest liquidity of the day. Needs INTRADAY bars with timestamps; daily bars are refused rather than aggregated into a meaningless single bucket. SET THE SESSION FOR THE VENUE THE BARS CAME FROM -- exchange_timezone, session_start, session_end -- because the default is US equity regular hours, and a London or Tokyo tape measured against it is bucketed over the wrong part of the day or refused outright. Pass index_timezone ('UTC' for a Databento extract) when the timestamps carry no offset, so extended-hours bars can be told from session ones instead of stretching the open bucket back to 4am.
+How volume distributes across the trading day, and what that implies for a participation schedule. The U-shape is the fact every execution schedule is built on: volume concentrates at the open and close with a midday trough routinely a third of the opening bucket, so a schedule spread evenly across the CLOCK over-participates at lunch -- paying impact into a thin book -- and under-participates at the close, missing the cheapest liquidity of the day. Needs INTRADAY bars with timestamps; daily bars are refused rather than aggregated into a meaningless single bucket. SET THE SESSION FOR THE VENUE THE BARS CAME FROM -- exchange_timezone, session_start, session_end -- because the default is US equity regular hours, and a London or Tokyo tape measured against it is bucketed over the wrong part of the day or refused outright. Pass index_timezone ('UTC' for a Databento extract) when the timestamps carry no offset, so extended-hours bars can be told from session ones instead of stretching the open bucket back to 4am. The buckets divide the session, and every one is returned -- an empty bucket with a zero share, counted in n_empty_buckets -- so a midday with no trading is the trough, and trough_bucket is a bucket id.
 
 **Required:** `volume`, `timestamps`  
 **Optional:** `n_buckets`, `exchange_timezone`, `session_start`, `session_end`, `index_timezone`
@@ -1563,7 +1563,7 @@ Depth-book statistics a top-of-book quote cannot give: the microprice, imbalance
 
 #### `get_order_event_metrics`
 
-Order-level statistics a depth book cannot produce: how much size rests AHEAD of an order at its own price level when it arrives, how long orders live before they are cancelled or filled, cancels per add and per trade, and event intensity by action. Aggregated depth destroys all four -- 5,000 shares at the bid may be one order or two hundred, and size that disappears may have been cancelled or filled, which mean opposite things about who wanted to trade. Orders already resting when the window opened are counted and EXCLUDED from the lifetime averages rather than folded in as instantaneous, which would bias every average toward impatience precisely where the long-resting orders are. Takes events inline or as an `sqt://order_event_panel` reference.
+Order-level statistics a depth book cannot produce: how much size rests AHEAD of an order at its own price level when it arrives, how long orders live before they are cancelled or filled, cancels per add and per trade, and event intensity by action. Aggregated depth destroys all four -- 5,000 shares at the bid may be one order or two hundred, and size that disappears may have been cancelled or filled, which mean opposite things about who wanted to trade. Orders already resting when the window opened are counted and EXCLUDED from the lifetime averages rather than folded in as instantaneous, which would bias every average toward impatience precisely where the long-resting orders are. The same orders sit ahead of every early arrival: without an opening snapshot every level starts empty, and `queue.queue_is_lower_bound` says the queue figures count only size added inside the window. Takes events inline or as an `sqt://order_event_panel` reference.
 
 *No required arguments.*  
 **Optional:** `events`, `ref`, `max_events`
@@ -1596,7 +1596,7 @@ Price an option and understand what holding it does to you: the second-order gre
 
 #### `analyze_option_strategy`
 
-The payoff, breakevens and aggregate greeks of an arbitrary multi-leg position -- any combination of calls, puts and stock, rather than a fixed menu of named structures. Breakevens are found numerically, and an unbounded loss is REPORTED as unbounded: a short call has no worst case, so returning the edge of the scanned range as 'max loss' would be a finite number standing in for an infinite risk.
+The payoff, breakevens and aggregate greeks of an arbitrary multi-leg position -- any combination of calls, puts and stock, rather than a fixed menu of named structures. Breakevens are found numerically, and an unbounded loss is REPORTED as unbounded: a short call has no worst case, so returning the edge of the scanned range as 'max loss' would be a finite number standing in for an infinite risk. Legs with different expiries (calendars, diagonals) are valued at the FIRST expiry, later legs marked by Black-Scholes at their remaining time; `payoff_basis` says which was done.
 
 **Required:** `legs`, `spot`  
 **Optional:** `risk_free_rate`, `dividend_yield`, `spot_range`

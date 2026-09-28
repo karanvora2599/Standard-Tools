@@ -32,6 +32,7 @@ from __future__ import annotations
 import datetime as _dt
 from typing import Any, Dict, Union
 
+import numpy as np
 import pandas as pd
 
 from standard_quant_tools.constants import (
@@ -94,6 +95,14 @@ def to_date(value: DateLike, name: str) -> _dt.date:
     Accepts what a JSON payload actually carries (an ISO string) as well as
     the three Python types, because refusing a string here would push the
     parsing into every caller and they would not all do it the same way.
+
+    A NUMBER IS REFUSED, not read. `pd.Timestamp(20260320)` is 20,260,320
+    NANOSECONDS after the epoch, so a YYYYMMDD integer -- the standard
+    encoding in exchange files -- became 1970-01-01, and a swap priced
+    across two such dates accrued no financing at all. An integer carries
+    at least four live date encodings (YYYYMMDD, epoch seconds, millis or
+    nanos, spreadsheet serials) and nothing in the value says which, so
+    this does not guess; the fix on the caller's side is one `str()`.
     """
     if value is None:
         raise ValidationError(f"{name} is required and was not given")
@@ -101,6 +110,25 @@ def to_date(value: DateLike, name: str) -> _dt.date:
         return value.date()
     if isinstance(value, _dt.date):
         return value
+    if isinstance(value, (bool, int, float, np.bool_, np.integer, np.floating)):
+        hint = ""
+        if (
+            isinstance(value, (int, np.integer))
+            and not isinstance(value, bool)
+            and 19000101 <= int(value) <= 21001231
+        ):
+            hint = (
+                f" If it is YYYYMMDD, pass it as the string '{int(value)}' "
+                "or as a datetime.date."
+            )
+        raise ValidationError(
+            f"{name}={value!r} is a number, not a date. A number has several "
+            "date encodings (YYYYMMDD, epoch seconds or nanoseconds, "
+            "spreadsheet serials) and read as a timestamp it is nanoseconds "
+            "after 1970-01-01, so it is refused rather than guessed. Pass an "
+            "ISO string ('2026-03-20'), a datetime.date, or a pandas "
+            "Timestamp." + hint
+        )
     try:
         stamp = pd.Timestamp(value)
     except (TypeError, ValueError) as exc:

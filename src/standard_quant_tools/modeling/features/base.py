@@ -23,6 +23,15 @@ from typing import Any, Callable, Dict, List, Optional
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+# Bars per year, by interval. The table and its lookup live in
+# `metrics.annualization`, shared with the backtest engine so that a
+# feature and a backtest over the same bars annualize by the same number;
+# re-exported here for this module's existing importers.
+from standard_quant_tools.metrics.annualization import (  # noqa: F401
+    _PERIODS_PER_YEAR,
+    periods_per_year_for_interval,
+)
+
 
 class TemporalSupport(str, Enum):
     # The FORMULA is causal: this feature at date t reads only data from t
@@ -67,49 +76,6 @@ class FeatureScope(str, Enum):
 RESERVED_PANEL_COLUMNS = frozenset(
     {"date", "entity", "target", "label_end_date", "event"}
 )
-
-
-# Bars per year, by interval, for annualizing a per-bar volatility.
-#
-# Only intervals whose constant is unambiguous are listed. Daily, weekly and
-# monthly are calendar-derived and need no assumption about session length.
-# INTRADAY IS DELIBERATELY ABSENT: bars-per-year at "1h" depends on how many
-# trading hours the venue is open (6.5 for US equities, 8.5 for the LSE,
-# ~24 for crypto), and only an exchange calendar can say which. Picking one
-# silently would make an "annualized" volatility wrong by a fixed
-# multiplicative factor for every other market -- a number that looks
-# precise and is not. With a calendar named on the dataset, `modeling.calendar`
-# reads the session length and the sessions per year off it.
-_PERIODS_PER_YEAR = {
-    "1d": 252,
-    "5d": 52,
-    "1wk": 52,
-    "1mo": 12,
-    "3mo": 4,
-}
-
-
-def periods_per_year_for_interval(
-    interval: str, calendar: Optional[str] = None
-) -> Optional[int]:
-    """
-    Bars per year for `interval`.
-
-    A daily-or-coarser interval is a constant. An intraday interval is
-    bars per session times sessions per year, both read off the named
-    exchange calendar, and None without one -- the caller then refuses or
-    warns rather than assuming a venue.
-    """
-    known = _PERIODS_PER_YEAR.get(str(interval).strip())
-    if known is not None:
-        return known
-    if calendar is None:
-        return None
-    from ..calendar import interval_minutes, periods_per_year
-
-    if interval_minutes(interval) is None:
-        return None
-    return periods_per_year(interval, calendar)
 
 
 class FeatureContext(BaseModel):

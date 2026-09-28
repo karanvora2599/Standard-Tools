@@ -498,6 +498,51 @@ static void test_run_strategy_summary_edge_cases() {
     }
 }
 
+static void test_no_trade_ratios_are_undefined_not_inf() {
+    // A parameter set that never trades has no downside, no drawdown and no
+    // trade. Sortino and Calmar are 0/0 and the profit factor has nothing to
+    // count, so all three are NaN on both kernels. They were +inf, +inf and
+    // 0.0, and the +inf ranked a do-nothing grid row above every real
+    // strategy under sort_by="sortino_ratio" or "calmar_ratio".
+    std::vector<double> prices  = {100.0, 104.0, 99.0, 107.0, 103.0};
+    std::vector<double> signals = {0.0, 0.0, 0.0, 0.0, 0.0};
+    std::vector<double> refs    = {100.0, 103.0, 100.0, 105.0, 104.0};
+    const std::size_t n = prices.size();
+
+    for (const double* ref : {static_cast<const double*>(nullptr),
+                              static_cast<const double*>(refs.data())}) {
+        auto r = sqt::run_strategy(prices.data(), signals.data(), n,
+                                   10000.0, 0.001, 0.0005, 252.0, ref);
+        auto s = sqt::run_strategy_summary(prices.data(), signals.data(), n,
+                                           10000.0, 0.001, 0.0005, 252.0, ref);
+        CHECK(r.num_trades == 0);
+        CHECK(std::isnan(r.sortino_ratio));
+        CHECK(std::isnan(r.calmar_ratio));
+        CHECK(std::isnan(r.profit_factor));
+        check_all_fields_match(r, s);
+    }
+}
+
+static void test_empty_denominator_follows_the_numerator_sign() {
+    // Null case for the rule above: it is the numerator, not the absence of
+    // trades, that decides. A position that only ever rose keeps +inf on
+    // both kernels (x/0), and a flat book under a NEGATIVE policy rate has a
+    // positive excess every bar and no downside, so its Sortino is +inf too.
+    std::vector<double> up      = {100.0, 101.0, 103.0, 104.0, 106.0};
+    std::vector<double> long_on = {1.0, 1.0, 1.0, 1.0, 1.0};
+    auto s_up = sqt::run_strategy_summary(up.data(), long_on.data(), up.size(),
+                                          10000.0, 0.0, 0.0);
+    CHECK_INF(s_up.sortino_ratio);
+    CHECK_INF(s_up.calmar_ratio);
+    CHECK_INF(s_up.profit_factor);
+
+    std::vector<double> flat_signal = {0.0, 0.0, 0.0, 0.0, 0.0};
+    auto r = sqt::run_strategy(up.data(), flat_signal.data(), up.size(),
+                               10000.0, 0.0, 0.0, 252.0, nullptr, -0.02);
+    CHECK_INF(r.sortino_ratio);
+    CHECK(std::isnan(r.calmar_ratio));  // no growth and no drawdown: 0/0
+}
+
 static void test_run_strategy_summary_multi_trade_count() {
     // Hand-constructed multi-trade series: long -> flat -> short -> flat ->
     // long, still open at the end. Targeted check on the new scalar
@@ -600,8 +645,12 @@ static void test_ref_prices_two_leg_decomposition_hand_computed() {
     // the implementation:
     //     overnight[i] = (ref[i] - close[i-1]) / close[i-1]  at exec[i-1]
     //     intraday[i]  = (close[i] - ref[i])   / ref[i]      at exec[i]
-    //     gross[i]     = exec[i-1]*overnight[i] + exec[i]*intraday[i]
+    //     gross[i]     = (1 + exec[i-1]*overnight[i]) * (1 + exec[i]*intraday[i]) - 1
     // with exec[i] = signals[i-1] and exec[i-1] = signals[i-2] (0.0 at i==1).
+    //
+    // The legs compound. This test used to pin their SUM, which was the
+    // defect: g2 below came out 0.0977 where holding 110 -> 121 earns
+    // exactly 0.10.
     //
     // Note what this makes true and a naive reading would not expect:
     // setting ref[i] = close[i] does NOT reduce this to the close-to-close
@@ -615,15 +664,17 @@ static void test_ref_prices_two_leg_decomposition_hand_computed() {
     std::vector<double> signals = {1.0, 1.0, 0.0};
     const std::size_t n = prices.size();
 
-    const double g1 = 0.0 * ((105.0 - 100.0) / 100.0)
-                    + 1.0 * ((110.0 - 105.0) / 105.0);
-    const double g2 = 1.0 * ((115.0 - 110.0) / 110.0)
-                    + 1.0 * ((121.0 - 115.0) / 115.0);
+    const double g1 = (1.0 + 0.0 * ((105.0 - 100.0) / 100.0))
+                    * (1.0 + 1.0 * ((110.0 - 105.0) / 105.0)) - 1.0;
+    const double g2 = (1.0 + 1.0 * ((115.0 - 110.0) / 110.0))
+                    * (1.0 + 1.0 * ((121.0 - 115.0) / 115.0)) - 1.0;
     const double expected_equity = 10000.0 * (1.0 + g1) * (1.0 + g2);
 
     auto r = sqt::run_strategy(prices.data(), signals.data(), n,
                                10000.0, 0.0, 0.0, 252.0, refs.data());
     CHECK_NEAR(r.final_equity, expected_equity, 1e-9);
+    // Held through bar 2, the account earns exactly the close-to-close move.
+    CHECK_NEAR(g2, 121.0 / 110.0 - 1.0, 1e-15);
 
     // And it is genuinely different from the close-fill path on this input,
     // so the assertion above is not vacuously satisfiable by ignoring refs.
@@ -650,6 +701,38 @@ static void test_ref_prices_trade_log_uses_the_fill_price() {
     // Entry fills at refs[1] = 105, exit at refs[2] = 115: +9.5238%.
     // Booking it against prices[0]=100 -> prices[1]=110 would give +10.00%.
     CHECK_NEAR(r.avg_trade_return_pct, (115.0 - 105.0) / 105.0 * 100.0, 1e-9);
+}
+
+static void test_ref_prices_zero_cost_curve_is_the_hand_built_one() {
+    // A hand-built account at zero cost: carry yesterday's position from the
+    // prior close to today's fill, re-size at the fill, carry today's
+    // position to the close. Entry, a held bar, an exit, a short opened on
+    // the fill and flushed at the last close.
+    std::vector<double> prices  = {100.0, 102.0, 101.0, 105.0, 103.0, 108.0, 110.0};
+    std::vector<double> refs    = {100.0, 101.0, 103.0, 102.0, 106.0, 104.0, 109.0};
+    std::vector<double> signals = {0.0, 1.0, 1.0, 0.0, -1.0, -1.0, 0.0};
+    const std::size_t n = prices.size();
+
+    std::vector<double> expected(n, 10000.0);
+    for (std::size_t i = 1; i < n; ++i) {
+        const double held_overnight = (i >= 2) ? signals[i - 2] : 0.0;
+        const double held_intraday  = signals[i - 1];
+        const double at_fill  = expected[i - 1]
+                              * (1.0 + held_overnight * (refs[i] / prices[i - 1] - 1.0));
+        expected[i] = at_fill * (1.0 + held_intraday * (prices[i] / refs[i] - 1.0));
+    }
+
+    auto r = sqt::run_strategy(prices.data(), signals.data(), n,
+                               10000.0, 0.0, 0.0, 252.0, refs.data());
+    for (std::size_t i = 0; i < n; ++i) CHECK_NEAR(r.equity_curve[i], expected[i], 1e-9);
+    // The unit long lot fills at refs[2] = 103 and exits at refs[4] = 106.
+    // Over its span the account grows by exactly the fill-to-fill ratio,
+    // which the trade log reports -- the two reconcile at zero cost. With
+    // the legs added, the held bar alone put them 0.03 points apart.
+    CHECK_NEAR(r.equity_curve[4] / r.equity_curve[1], 106.0 / 103.0, 1e-12);
+    auto s = sqt::run_strategy_summary(prices.data(), signals.data(), n,
+                                       10000.0, 0.0, 0.0, 252.0, refs.data());
+    CHECK_NEAR(s.final_equity, expected[n - 1], 1e-9);
 }
 
 static void test_ref_prices_summary_matches_full_random() {
@@ -1084,6 +1167,8 @@ int main() {
     test_summary_matches_run_strategy_under_a_rate();
     test_run_strategy_summary_matches_run_strategy_random();
     test_run_strategy_summary_edge_cases();
+    test_no_trade_ratios_are_undefined_not_inf();
+    test_empty_denominator_follows_the_numerator_sign();
     test_run_strategy_summary_multi_trade_count();
     test_batch_run_strategy_matches_serial_reference();
     test_batch_run_strategy_single_test();
@@ -1092,6 +1177,7 @@ int main() {
     test_ref_prices_null_equals_close_to_close();
     test_ref_prices_two_leg_decomposition_hand_computed();
     test_ref_prices_trade_log_uses_the_fill_price();
+    test_ref_prices_zero_cost_curve_is_the_hand_built_one();
     test_ref_prices_summary_matches_full_random();
 
     // batch_backtest_crossover

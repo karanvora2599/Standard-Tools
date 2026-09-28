@@ -786,3 +786,271 @@ class TestImpliedForward:
         )
         assert result["forward"] < 100.0
         assert result["basis"] < 0
+
+
+# ── structures whose legs expire at different times ─────────────────────
+
+
+def _bs_call(spot, strike, t, vol):
+    """Black-Scholes call at r = q = 0, written out here so the planted
+    answer does not come from the code under test."""
+    d1 = (math.log(spot / strike) + 0.5 * vol * vol * t) / (vol * math.sqrt(t))
+    d2 = d1 - vol * math.sqrt(t)
+    cdf = lambda x: 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))  # noqa: E731
+    return spot * cdf(d1) - strike * cdf(d2)
+
+
+class TestACalendarIsValuedAtTheFirstExpiry:
+    """
+    Long a 9-month 100 call, short a 1-month 100 call, spot 100, vol 0.2,
+    r = q = 0. Valued with every leg at intrinsic, the two max(S-K, 0) terms
+    cancel and the calendar read as a certain loss of its 4.60 debit at
+    every spot, with no breakeven and nothing in the warnings about the
+    expiries differing. At the first expiry the long leg still has eight
+    months of time value, and the P&L peaks at the strike.
+    """
+
+    LEGS = [
+        {
+            "option_type": "call",
+            "strike": 100.0,
+            "quantity": 1,
+            "volatility": 0.2,
+            "time_to_expiry": 0.75,
+        },
+        {
+            "option_type": "call",
+            "strike": 100.0,
+            "quantity": -1,
+            "volatility": 0.2,
+            "time_to_expiry": 1 / 12,
+        },
+    ]
+
+    def _result(self):
+        return analyze_strategy(self.LEGS, spot=100.0)
+
+    def _profit(self, s, net):
+        return _bs_call(s, 100.0, 0.75 - 1 / 12, 0.2) - max(s - 100.0, 0.0) - net
+
+    def test_it_is_evaluated_at_the_first_expiry(self):
+        result = self._result()
+        assert result["payoff_basis"] == "first_expiry_marked"
+        assert result["evaluated_at_years"] == pytest.approx(1 / 12)
+
+    def test_the_peak_is_the_long_legs_time_value_at_the_strike(self):
+        result = self._result()
+        net = result["net_premium"]
+        expected = _bs_call(100.0, 100.0, 0.75 - 1 / 12, 0.2) - net
+        assert result["max_profit"] == pytest.approx(expected, abs=1e-9)
+        assert result["max_profit_at_spot"] == 100.0
+        assert result["max_profit"] == pytest.approx(1.9092, abs=1e-4)
+
+    def test_the_breakevens_are_the_roots_of_the_horizon_pnl(self):
+        result = self._result()
+        net = result["net_premium"]
+        assert len(result["breakevens"]) == 2
+        for root, (low, high) in zip(
+            result["breakevens"], [(80.0, 100.0), (100.0, 120.0)]
+        ):
+            # An independent bisection on the written-out P&L.
+            f_low = self._profit(low, net)
+            for _ in range(200):
+                mid = 0.5 * (low + high)
+                if (self._profit(mid, net) < 0) == (f_low < 0):
+                    low, f_low = mid, self._profit(mid, net)
+                else:
+                    high = mid
+            assert root == pytest.approx(0.5 * (low + high), abs=1e-7)
+        assert result["breakevens"][0] == pytest.approx(96.053, abs=1e-3)
+        assert result["breakevens"][1] == pytest.approx(104.626, abs=1e-3)
+
+    def test_the_worst_case_is_the_debit_and_it_is_bounded(self):
+        result = self._result()
+        assert result["max_loss"] == pytest.approx(-result["net_premium"], abs=1e-9)
+        assert not result["max_loss_unbounded"]
+
+    def test_a_warning_names_the_different_expiries(self):
+        result = self._result()
+        assert any("different times" in w for w in result["warnings"])
+        assert not any("AT EXPIRY" in w for w in result["warnings"])
+
+    def test_a_single_expiry_structure_is_unchanged(self):
+        """The null case: a straddle has one expiry, is evaluated at it,
+        and keeps its expiry warning."""
+        leg = dict(self.LEGS[0], time_to_expiry=0.25, volatility=0.25)
+        result = analyze_strategy(
+            [leg, dict(leg, option_type="put")], spot=100.0, risk_free_rate=0.0
+        )
+        assert result["payoff_basis"] == "expiry"
+        assert result["evaluated_at_years"] == pytest.approx(0.25)
+        premium = result["net_premium"]
+        assert result["breakevens"] == pytest.approx(
+            [100 - premium, 100 + premium], abs=1e-9
+        )
+        assert any("AT EXPIRY" in w for w in result["warnings"])
+
+
+class TestTheScanIsExactAtTheKinks:
+    """
+    An expiry payoff is piecewise linear with its kinks at the strikes. A
+    grid that stepped over a strike missed the kink: a 99/100.1/101.2
+    butterfly reported 0.9360 at 100.188 against a true 1.1 - debit at
+    100.1, 8.6% short. And every grid point where the profit was exactly
+    zero was its own breakeven: a deep out-of-the-money put whose premium
+    underflowed to 0.0 reported 760 of them.
+    """
+
+    @staticmethod
+    def _fly():
+        leg = {"option_type": "call", "volatility": 0.2, "time_to_expiry": 0.25}
+        return analyze_strategy(
+            [
+                dict(leg, strike=99.0, quantity=1),
+                dict(leg, strike=100.1, quantity=-2),
+                dict(leg, strike=101.2, quantity=1),
+            ],
+            spot=100.0,
+        )
+
+    def test_a_narrow_butterfly_peaks_exactly_at_its_body(self):
+        result = self._fly()
+        assert result["max_profit"] == pytest.approx(
+            1.1 - result["net_premium"], abs=1e-12
+        )
+        assert result["max_profit_at_spot"] == 100.1
+
+    def test_the_payoff_curve_keeps_its_positions(self):
+        """The strikes join the scan, not the sampled curve: it is still
+        every 20th of the 801 scan points."""
+        result = self._fly()
+        spots = [p["spot"] for p in result["payoff_curve"]]
+        assert spots == pytest.approx(list(np.linspace(0.0, 202.4, 801)[::20]))
+
+    def test_a_zero_premium_put_has_one_breakeven_not_hundreds(self):
+        result = analyze_strategy(
+            [
+                {
+                    "option_type": "put",
+                    "strike": 10.0,
+                    "quantity": 1,
+                    "volatility": 0.1,
+                    "time_to_expiry": 0.01,
+                }
+            ],
+            spot=100.0,
+        )
+        assert result["net_premium"] == 0.0
+        assert result["breakevens"] == [10.0]
+        assert any("exactly zero" in w for w in result["warnings"])
+
+    def test_a_vertical_spread_is_exact_too(self):
+        """The null case for the grid change: the vertical spread's cap is
+        still width minus debit, now to rounding."""
+        leg = {"option_type": "call", "volatility": 0.25, "time_to_expiry": 0.5}
+        result = analyze_strategy(
+            [dict(leg, strike=95.0, quantity=1), dict(leg, strike=105.0, quantity=-1)],
+            spot=100.0,
+        )
+        assert result["max_profit"] == pytest.approx(
+            10.0 - result["net_premium"], abs=1e-9
+        )
+        assert len(result["breakevens"]) == 1
+        assert not any("exactly zero" in w for w in result["warnings"])
+
+
+class TestAFlatSmileIsAPerfectFit:
+    """
+    [0.45]*7 over strikes 70-130 is fitted exactly by the constant term,
+    and its total sum of squares is float residue rather than zero: it
+    reported r_squared = -8.00 and "a quadratic does not describe this
+    smile". [0.2]*5 happened to give 1.0 because that mean is exact in
+    float.
+    """
+
+    @pytest.mark.parametrize("level", [0.1, 0.35, 0.45, 0.7])
+    @pytest.mark.parametrize("n", [5, 7])
+    def test_a_constant_smile_has_r_squared_one_and_no_warning(self, level, n):
+        result = fit_volatility_smile(
+            np.linspace(70.0, 130.0, n),
+            [level] * n,
+            forward=100.0,
+            time_to_expiry=0.5,
+        )
+        assert result["r_squared"] == 1.0
+        assert result["atm_vol"] == pytest.approx(level, abs=1e-12)
+        assert not any("does not describe" in w for w in result["warnings"])
+
+    def test_a_planted_quadratic_is_still_exact(self):
+        """The null case: a smile with real dispersion keeps 1 - SSR/SST."""
+        strikes = np.array([80, 85, 90, 95, 100, 105, 110, 115, 120], dtype=float)
+        x = np.log(strikes / 100.0)
+        result = fit_volatility_smile(
+            strikes, 0.25 - 0.3 * x + 0.8 * x**2, forward=100.0, time_to_expiry=0.5
+        )
+        assert result["r_squared"] == pytest.approx(1.0, abs=1e-9)
+
+
+class TestTheSmileCountsDistinctStrikes:
+    """Six quotes at two strikes passed a row count of six and came back
+    with r_squared 1.0 and a curvature of 0.0039 -- the minimum-norm
+    solution of an underdetermined fit."""
+
+    def test_repeated_quotes_at_two_strikes_are_refused(self):
+        with pytest.raises(ValidationError, match="at least 5"):
+            fit_volatility_smile(
+                [90.0] * 3 + [110.0] * 3,
+                [0.20, 0.21, 0.22, 0.20, 0.21, 0.22],
+                forward=100.0,
+                time_to_expiry=0.5,
+            )
+
+    def test_a_duplicate_beside_enough_distinct_strikes_still_fits(self):
+        """The null case: nine distinct strikes plus a repeat."""
+        strikes = [80, 85, 90, 95, 100, 105, 110, 115, 120, 100]
+        x = np.log(np.asarray(strikes, dtype=float) / 100.0)
+        result = fit_volatility_smile(
+            strikes, 0.25 - 0.3 * x + 0.8 * x**2, forward=100.0, time_to_expiry=0.5
+        )
+        assert result["n_strikes"] == 9
+        assert result["n_quotes"] == 10
+        assert result["curvature"] == pytest.approx(0.8, abs=1e-9)
+
+
+class TestTheRateTimesTheExpiryIsBounded:
+    """Each factor inside its own bound is not enough: r=-9 at T=100 asked
+    exp() for 900 and raised a bare OverflowError out of option_greeks."""
+
+    def test_an_overflowing_product_is_refused_by_name(self):
+        with pytest.raises(ValidationError, match="risk_free_rate x time_to_expiry"):
+            option_greeks(
+                spot=100.0,
+                strike=100.0,
+                time_to_expiry=100.0,
+                volatility=0.2,
+                risk_free_rate=-9.0,
+            )
+
+    def test_a_dividend_product_is_refused_by_name(self):
+        with pytest.raises(ValidationError, match="dividend_yield x time_to_expiry"):
+            option_greeks(
+                spot=100.0,
+                strike=100.0,
+                time_to_expiry=100.0,
+                volatility=0.2,
+                risk_free_rate=0.0,
+                dividend_yield=8.0,
+            )
+
+    def test_a_long_dated_negative_rate_inside_the_bound_prices(self):
+        """The null case: r=-0.5 over ten years is an exponent of 5, and the
+        put is worth about its discounted strike less the spot."""
+        result = option_greeks(
+            spot=100.0,
+            strike=100.0,
+            time_to_expiry=10.0,
+            volatility=0.2,
+            risk_free_rate=-0.5,
+            option_type="put",
+        )
+        assert result["price"] == pytest.approx(100.0 * math.exp(5.0) - 100.0, rel=1e-3)

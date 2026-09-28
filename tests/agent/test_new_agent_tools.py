@@ -737,6 +737,83 @@ class TestScanPairs:
         assert result.n_pairs_tested == 3
 
 
+class TestScanPairsMultipleTesting:
+    """
+    Every ticker is its own series here. `patched_long` returns one frame
+    for every symbol, so every pair it builds is the same series twice and
+    is refused as degenerate -- the gate below was never exercised.
+    """
+
+    TICKERS = [f"W{i:02d}" for i in range(12)]
+
+    @pytest.fixture
+    def universe(self, long_ohlcv, monkeypatch):
+        from unittest.mock import MagicMock
+
+        from standard_quant_tools.data.factory import DataFactory
+
+        rng = np.random.default_rng(60)
+        n = len(long_ohlcv)
+        closes = {t: 100.0 + np.cumsum(rng.normal(0, 1.0, n)) for t in self.TICKERS}
+        # A planted pair: a mean-reverting spread (phi = 0.9, half-life about
+        # 6.6 bars) around 1.3 times W00.
+        spread = np.zeros(n)
+        for i in range(1, n):
+            spread[i] = 0.9 * spread[i - 1] + rng.normal(0, 1.0)
+        closes["PAIR"] = 1.3 * closes["W00"] + 20.0 + spread
+
+        def _frame(close):
+            frame = long_ohlcv.copy()
+            frame["Close"] = close
+            return frame
+
+        frames = {t: _frame(c) for t, c in closes.items()}
+        provider = MagicMock()
+        provider.get_ohlcv.side_effect = lambda symbol, *a, **k: frames[symbol]
+        monkeypatch.setattr(DataFactory, "get_provider", lambda *a, **kw: provider)
+        return provider
+
+    def test_the_planted_pair_is_returned_with_both_orders(self, universe):
+        inp = PairScannerInput(
+            tickers=self.TICKERS + ["PAIR"], start_date=START, end_date=END
+        )
+        result = scan_pairs(inp)
+        found = {(p.symbol_a, p.symbol_b): p for p in result.pairs}
+        assert ("W00", "PAIR") in found
+        pair = found[("W00", "PAIR")]
+        assert pair.direction_consistent is True
+        assert pair.p_value_bh <= 0.05
+        assert pair.p_value_both >= max(pair.p_value, pair.p_value_reverse) - 1e-4
+        assert result.n_pairs_with_p_value == 78
+        assert result.expected_false_positives == pytest.approx(3.9)
+
+    def test_random_walks_alone_return_nothing_and_say_why(self, universe):
+        """
+        The null case. 66 unrelated pairs clear 5% in one regression order
+        about three times by chance; none survive the adjustment, and the
+        result says how many would have been expected.
+        """
+        inp = PairScannerInput(tickers=self.TICKERS, start_date=START, end_date=END)
+        result = scan_pairs(inp)
+        assert result.n_pairs_cointegrated == 0
+        assert result.expected_false_positives == pytest.approx(66 * 0.05)
+        assert any("by chance" in w for w in result.warnings)
+
+    def test_without_adjustment_the_chance_passes_come_back(self, universe):
+        inp = PairScannerInput(
+            tickers=self.TICKERS,
+            start_date=START,
+            end_date=END,
+            multiple_testing="none",
+            min_half_life=0.01,
+            max_half_life=100_000,
+        )
+        result = scan_pairs(inp)
+        assert result.multiple_testing == "none"
+        assert result.n_pairs_significant_uncorrected >= 1
+        assert result.n_pairs_cointegrated == result.n_pairs_significant_uncorrected
+
+
 # ── Feature 3: Walk-Forward Backtest ──────────────────────────────────────────
 
 

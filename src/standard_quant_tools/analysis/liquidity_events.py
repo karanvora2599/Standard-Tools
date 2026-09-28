@@ -144,6 +144,19 @@ def _resample(frame: pd.DataFrame, freq: str) -> pd.core.resample.Resampler:
     return indexed.resample(freq)
 
 
+def _usable_mid(quotes: pd.DataFrame) -> pd.Series:
+    """
+    The quote midpoint, NaN where it is not a price.
+
+    A zero, negative or non-finite mid is a feed artefact -- an empty side
+    printed as 0.0, a placeholder -- and not a level the market traded at.
+    Masked here, a bucket's `.last()` skips it and takes the last real
+    quote instead.
+    """
+    mid = (quotes["bid_price"] + quotes["ask_price"]) / 2.0
+    return mid.where((mid > 0) & np.isfinite(mid))
+
+
 def _mid_return(quotes: pd.DataFrame, freq: str, **_) -> pd.Series:
     """
     Log return of the mid per bucket, NOT the mid itself.
@@ -157,8 +170,14 @@ def _mid_return(quotes: pd.DataFrame, freq: str, **_) -> pd.Series:
     The return series is stationary, so a trigger means the DISTRIBUTION of
     returns changed -- a volatility or drift regime shift -- which is the
     question worth asking about price in a liquidity context anyway.
+
+    A MID THAT IS NOT A PRICE IS SKIPPED, as `_spread` already did. One
+    zero-priced quote landing last in its bucket made that bucket's log
+    mid -inf and the next +inf, and the detector reported an infinite peak
+    at severity "very high" on a market where nothing happened. See the
+    CHANGELOG entry of 2026-09-27.
     """
-    mid = (quotes["bid_price"] + quotes["ask_price"]) / 2.0
+    mid = _usable_mid(quotes)
     last = _resample(quotes.assign(_v=mid), freq)["_v"].last().dropna()
     return np.log(last).diff().dropna()
 
@@ -172,8 +191,7 @@ def _spread(quotes: pd.DataFrame, freq: str, **_) -> pd.Series:
     liquidity -- and would fire hardest on whichever name happens to be
     cheapest.
     """
-    mid = (quotes["bid_price"] + quotes["ask_price"]) / 2.0
-    bps = (quotes["ask_price"] - quotes["bid_price"]) / mid.replace(0.0, np.nan) * 1e4
+    bps = (quotes["ask_price"] - quotes["bid_price"]) / _usable_mid(quotes) * 1e4
     return _resample(quotes.assign(_v=bps), freq)["_v"].mean().dropna()
 
 

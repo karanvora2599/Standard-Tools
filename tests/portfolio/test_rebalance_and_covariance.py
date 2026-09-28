@@ -23,8 +23,8 @@ import pandas as pd
 import pytest
 
 from standard_quant_tools.error import ValidationError
-from standard_quant_tools.portfolio.covariance import estimate_covariance
 from standard_quant_tools.portfolio import rebalance as rebalance_module
+from standard_quant_tools.portfolio.covariance import estimate_covariance
 from standard_quant_tools.portfolio.rebalance import (
     DEFAULT_IMPACT_COEFFICIENT,
     plan_rebalance,
@@ -234,6 +234,66 @@ class TestShrinkageAnswersTheConditioningWarning:
     def test_too_little_history_is_refused_with_the_reason(self):
         with pytest.raises(ValidationError, match="at least 2 complete"):
             estimate_covariance(_returns(3, 100).head(1))
+
+
+class TestTheHalfLifeIsTakenAsGiven:
+    """
+    `halflife or 60.0` answered an explicit 0 -- what an uninitialised config
+    field arrives as -- as though 60 had been asked for, while -5 was
+    refused. And a short enough half-life put every weight on the last row:
+    below about 0.019 the unbiasing denominator 1 - sum(w^2) was exactly 0
+    and a raw numpy LinAlgError escaped, and between 0.019 and 0.05 a matrix
+    with a condition number of 1e12 to 1e17 came back with no warning.
+    """
+
+    @pytest.mark.parametrize("method", ["ewma", "ewma_shrunk"])
+    def test_a_zero_halflife_is_refused_rather_than_read_as_sixty(self, method):
+        with pytest.raises(ValidationError, match="halflife"):
+            estimate_covariance(_returns(3, 200), method=method, halflife=0)
+
+    def test_an_absent_halflife_is_the_default_of_sixty(self):
+        """The null case: None still means 60."""
+        returns = _returns(3, 200)
+        absent = estimate_covariance(returns, method="ewma", halflife=None)
+        sixty = estimate_covariance(returns, method="ewma", halflife=60.0)
+        assert absent["matrix"] == sixty["matrix"]
+
+    @pytest.mark.parametrize("halflife", [0.01, 0.018, 0.03, 0.05, 0.5])
+    def test_a_collapsed_weighting_is_refused_before_the_division(self, halflife):
+        """A ValidationError naming the effective count, not a LinAlgError
+        and not a matrix conditioned at 1e17."""
+        with pytest.raises(ValidationError, match="effective observations"):
+            estimate_covariance(_returns(3, 200), method="ewma", halflife=halflife)
+
+    @pytest.mark.parametrize("halflife, n_obs", [(60.0, 252), (5.0, 100), (1.0, 50)])
+    def test_the_effective_count_is_the_closed_form(self, halflife, n_obs):
+        """1 / sum(w^2) for normalised weights d^k, k < n, is
+        (1 - d^n)^2 / (1 - d^(2n)) x (1 + d) / (1 - d) with d = 0.5^(1/h)."""
+        d = 0.5 ** (1.0 / halflife)
+        expected = (1 - d**n_obs) ** 2 / (1 - d ** (2 * n_obs)) * (1 + d) / (1 - d)
+        result = estimate_covariance(
+            _returns(3, n_obs), method="ewma", halflife=halflife
+        )
+        assert result["effective_observations"] == pytest.approx(expected, rel=1e-9)
+        assert result["observations_per_parameter"] == pytest.approx(
+            expected * 3 / 6, rel=1e-9
+        )
+
+    def test_the_sample_method_reports_its_row_count(self):
+        result = estimate_covariance(_returns(3, 120), method="sample")
+        assert result["effective_observations"] == 120.0
+
+    def test_fewer_effective_observations_than_assets_is_warned(self):
+        result = estimate_covariance(_returns(5, 200), method="ewma", halflife=1.0)
+        assert result["effective_observations"] == pytest.approx(3.0, rel=1e-6)
+        assert any("rank-deficient by construction" in w for w in result["warnings"])
+
+    def test_a_long_halflife_is_not_warned_about(self):
+        """The null case for the warning above."""
+        result = estimate_covariance(_returns(5, 200), method="ewma", halflife=60.0)
+        assert not any(
+            "rank-deficient by construction" in w for w in result["warnings"]
+        )
 
 
 class TestTheMicrostructureSplitHappened:

@@ -76,20 +76,108 @@ class TestTangencySignDegeneracy:
             )
 
     @pytest.mark.skipif(not HAS_SCIPY, reason="constrained path requires scipy")
-    def test_bounded_request_still_has_a_solution(self):
+    def test_bounded_request_is_refused_when_no_portfolio_beats_the_rate(self):
         """
-        Bounds make the feasible set compact, so the bounded problem has a
-        maximum even where the unconstrained one does not. The restriction is
-        specific to the closed form and must not leak into the scipy path.
+        This test used to assert the opposite -- that the bounded request
+        "still has a solution" because bounds make the feasible set compact.
+        A maximum does exist, and it was the pathology: at rf=0.90 no
+        portfolio inside max_weight=5 earns more than 0.18, every Sharpe is
+        negative, and maximizing a negative Sharpe rewards volatility. It
+        returned {A: -4, B: 5} at 5x leverage, Sharpe -1.06, converged=True.
+        The bounded path now refuses the regime the closed form refuses,
+        naming the highest return the bounds allow.
         """
+        with pytest.raises(ValidationError, match="highest attainable"):
+            mean_variance_optimize(
+                self._rets(),
+                "max_sharpe",
+                risk_free_rate=0.90,
+                allow_short=True,
+                max_weight=5.0,
+            )
+
+    @pytest.mark.skipif(not HAS_SCIPY, reason="constrained path requires scipy")
+    def test_bounded_request_below_the_attainable_return_still_solves(self):
+        """The null case: a rate the bounded book can beat is answered, with
+        a positive Sharpe."""
         r = mean_variance_optimize(
             self._rets(),
             "max_sharpe",
-            risk_free_rate=0.90,
+            risk_free_rate=0.0,
             allow_short=True,
             max_weight=5.0,
         )
         assert r["converged"]
+        assert r["sharpe_ratio"] > 0
+
+
+def _exact_moments(means, vols, n=2000, seed=5):
+    """Uncorrelated daily returns whose sample means and volatilities are
+    EXACTLY the annual figures given, so which asset dominates which is
+    known before the optimizer runs."""
+    rng = np.random.default_rng(seed)
+    data = {}
+    for name, mean, vol in zip("ABC", means, vols):
+        z = rng.normal(size=n)
+        z = (z - z.mean()) / z.std(ddof=1)
+        data[name] = mean / 252 + z * vol / np.sqrt(252)
+    return pd.DataFrame(data)
+
+
+def _dominated_book():
+    return _exact_moments([0.04, 0.03, 0.05], [0.10, 0.30, 0.20])
+
+
+@pytest.mark.skipif(not HAS_SCIPY, reason="constrained path requires scipy")
+class TestLongOnlyMaxSharpeAboveEveryReturn:
+    """
+    A 4%/10%-vol, B 3%/30% and C 5%/20%, long-only, rf=10%. B is dominated
+    by both others, and it came back as the answer -- 100% B, return 3%,
+    vol 30%, Sharpe -0.23, converged=True and no warning -- because with
+    every excess return negative the "maximum" Sharpe is the one that
+    divides the shortfall by the most volatility.
+    """
+
+    def test_a_rate_above_every_return_is_refused(self):
+        with pytest.raises(ValidationError, match="positive excess return"):
+            mean_variance_optimize(_dominated_book(), "max_sharpe", risk_free_rate=0.10)
+
+    def test_a_rate_above_every_return_is_refused_under_a_cap_too(self):
+        with pytest.raises(ValidationError, match="positive excess return"):
+            mean_variance_optimize(
+                _dominated_book(), "max_sharpe", risk_free_rate=0.10, max_weight=0.5
+            )
+
+    def test_at_a_zero_rate_the_answer_is_the_tangency_portfolio(self):
+        """
+        The null case: at rf=0 every asset beats the rate and the long-only
+        answer is the tangency portfolio -- which holds all three, about
+        (4, 1/3, 5/4) / 5.58 for uncorrelated assets (mu / sigma^2). The
+        unconstrained closed form has no negative weight here, so the two
+        paths must agree.
+        """
+        book = _dominated_book()
+        r = mean_variance_optimize(book, "max_sharpe", risk_free_rate=0.0)
+        closed = mean_variance_optimize(
+            book, "max_sharpe", risk_free_rate=0.0, allow_short=True
+        )
+        assert r["converged"]
+        assert r["sharpe_ratio"] > 0
+        for name in "ABC":
+            assert r["weights"][name] == pytest.approx(
+                closed["weights"][name], abs=1e-4
+            )
+        assert r["weights"]["B"] == pytest.approx(0.06, abs=0.02)
+
+    def test_a_rate_only_one_asset_beats_is_answered_with_a_positive_sharpe(self):
+        """Only C (5%) beats 4.5%. Equal weights start in the negative
+        region; the answer must still be the positive-excess portfolio."""
+        r = mean_variance_optimize(
+            _dominated_book(), "max_sharpe", risk_free_rate=0.045
+        )
+        assert r["converged"]
+        assert r["expected_return"] > 0.045
+        assert r["sharpe_ratio"] > 0
 
 
 class TestCovarianceEstimability:

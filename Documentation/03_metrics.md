@@ -50,7 +50,7 @@ print(f"Sortino : {srt:.2f}")  # Sortino ≥ Sharpe when returns are right-skewe
 > and apply it exactly as above — in the C++ kernel as well as in Python,
 > with parity asserted at several rates. See
 > [04_backtesting.md](04_backtesting.md#the-risk-free-rate).
-- `sortino_ratio` = `(mean(excess_returns) * periods_per_year) / downside_deviation`, where `excess_returns = returns - risk_free_rate/periods_per_year` and `downside_deviation = sqrt(mean(min(excess_returns, 0)**2)) * sqrt(periods_per_year)`. Note the denominator is the RMS of `min(excess_return, 0)` averaged over **all** N periods (zero contribution from winning bars), not just the subset of losing periods — the Sortino & Price (1994) convention. This gives a larger, more conservative denominator than dividing by the count of negative-return bars only, which some other libraries do. Returns `inf` when downside deviation is zero or `nan`.
+- `sortino_ratio` = `(mean(excess_returns) * periods_per_year) / downside_deviation`, where `excess_returns = returns - risk_free_rate/periods_per_year` and `downside_deviation = sqrt(mean(min(excess_returns, 0)**2)) * sqrt(periods_per_year)`. Note the denominator is the RMS of `min(excess_return, 0)` averaged over **all** N periods (zero contribution from winning bars), not just the subset of losing periods — the Sortino & Price (1994) convention. This gives a larger, more conservative denominator than dividing by the count of negative-return bars only, which some other libraries do. With no downside the numerator decides: `inf` when the mean excess return is positive (the strategy never fell short of the rate), `nan` when it is zero too (a book that never moved: 0/0 is undefined, as for Sharpe). `nan` also when the deviation cannot be computed. `periods_per_year` is validated before it is divided by.
 
 **Sortino vs Sharpe:** Sortino only penalizes downside deviation, making it more appropriate for strategies with asymmetric returns.
 
@@ -74,6 +74,11 @@ print(f"Calmar Ratio : {cal:.2f}")
 worst_start = equity[dd == mdd].index[0]
 print(f"Worst drawdown started: {worst_start.date()}")
 ```
+
+> **A curve with no drawdown:** `calmar_ratio` is `inf` when it only rose
+> (positive CAGR over nothing) and `nan` when it never moved (0/0). A flat
+> curve used to score `inf` too, which ranked a parameter set that never
+> traded first in any grid sorted by Calmar.
 
 ---
 
@@ -120,6 +125,8 @@ print(f"Treynor Ratio     : {tr:.4f}")
 ```
 
 > **Index alignment in `treynor_ratio`** — both the beta denominator and the excess-return numerator are computed on `returns.loc[common_idx]`, where `common_idx = returns.index.intersection(benchmark_returns.index)`. `beta` comes from `calculate_beta` on that same aligned slice, so the numerator and denominator always cover the identical date range, even when `returns` and `benchmark_returns` don't already share an identical index. `information_ratio` uses the same common-index-first approach for its active returns. `treynor_ratio` also takes `risk_free_rate` (annual, divided internally, as above).
+
+> **Both validate `periods_per_year`** (a positive whole number, not a bool) before any arithmetic, and `treynor_ratio` validates `risk_free_rate` (finite), raising `ValidationError` as `sharpe_ratio` does. Unchecked, `periods_per_year=-252` returned the true Treynor ratio with its sign flipped and made the information ratio a silent `nan`.
 
 > **Both return `nan` where the ratio is undefined, and `0.0` only where zero is the answer.** `treynor_ratio` is `nan` when beta could not be estimated and when beta is exactly 0.0 — excess return per unit of systematic risk, where the unit is zero. `information_ratio` is `0.0` when the active return is constant at zero (the portfolio held the benchmark: no bet, no skill) and `nan` when it is constant at anything else (beat the benchmark by the same amount every day: undefined, and emphatically not zero).
 
@@ -216,7 +223,7 @@ the bytes are.
 
 ## The rest of the package
 
-Three families live in `metrics/` and are documented where they are used
+Four families live in `metrics/` and are documented where they are used
 rather than a second time here:
 
 - **`evt_tail_risk`** — Peaks-Over-Threshold VaR/CVaR from a fitted
@@ -229,3 +236,9 @@ rather than a second time here:
   `trade_excursions`, `exposure_stats`** — the per-episode and per-trade
   diagnostics the backtest engine reports, signature by signature in
   [00_module_reference.md](00_module_reference.md).
+- **`annualization`** — the one place bars-per-year is decided:
+  `periods_per_year_for_interval` (the interval table, re-exported by
+  `modeling.features.base`), `infer_periods_per_year` (the median bar
+  spacing, bucketed to 252 / 52 / 12 / 4) and `resolve_periods_per_year`,
+  which the backtest engine calls:
+  [04_backtesting.md](04_backtesting.md#bars-per-year).

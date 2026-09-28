@@ -42,6 +42,7 @@ from standard_quant_tools._special import (
 )
 from standard_quant_tools.analysis._series import clean_series
 from standard_quant_tools.error import ValidationError
+from standard_quant_tools.metrics.risk_metrics import has_no_dispersion
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +132,15 @@ def detect_change_points(
         )
 
     array = values.to_numpy()
+    # A constant series has no level to shift. Refused, as ljung_box and
+    # structural_break_test refuse it, because the prefix-sum costs below
+    # are rounding residue on it: a constant 0.1 at n=300 "found" three
+    # breaks against a derived penalty of 3e-33, and 1.23 at n=1000 did too.
+    if has_no_dispersion(array):
+        raise ValidationError(
+            "detect_change_points: the series does not vary, so there is no "
+            "change in it to find."
+        )
     total_rss = float(((array - array.mean()) ** 2).sum())
     derived = penalty is None
     if derived:
@@ -205,7 +215,14 @@ def _best_split(segment: np.ndarray, min_segment: int, penalty: float):
     n = len(segment)
     if n < 2 * min_segment:
         return None
-    total = float(((segment - segment.mean()) ** 2).sum())
+    # Centred first. The prefix-sum cost is a difference of two large sums
+    # (sum of squares minus square of sum over count), and on a series far
+    # from zero -- prices, or a segment sitting at a level -- that
+    # difference is catastrophic cancellation: the costs of every split
+    # were rounding noise and a "gain" appeared from nothing. Centring
+    # changes no cost and keeps the sums at the scale of the variation.
+    segment = segment - segment.mean()
+    total = float((segment**2).sum())
 
     # Prefix sums make every candidate split O(1) rather than O(n).
     cumulative = np.concatenate([[0.0], np.cumsum(segment)])
@@ -225,7 +242,9 @@ def _best_split(segment: np.ndarray, min_segment: int, penalty: float):
     costs = np.array([rss(0, p) + rss(p, n) for p in positions])
     best = int(np.argmin(costs))
     gain = total - costs[best]
-    if gain <= penalty:
+    # A gain that is a rounding-sized fraction of the segment's own
+    # variation is not a split, whatever the penalty says.
+    if gain <= penalty or gain <= 1e-12 * total:
         return None
     return int(positions[best]), float(gain)
 

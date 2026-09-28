@@ -31,6 +31,8 @@ See the CHANGELOG entry of 2026-09-22.
 
 from __future__ import annotations
 
+import types
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -535,3 +537,101 @@ class TestThePersistedPanelIsParameterized:
             handoff.resolve(result.refs["obv"])["AAA"].to_numpy(),
             obv(universe["AAA"]["Close"], universe["AAA"]["Volume"]).to_numpy(),
         )
+
+
+@pytest.fixture(params=[True, False], ids=["native", "per-ticker"])
+def panel_backend(request, monkeypatch):
+    """Run the test once through the native kernel and once through the
+    per-ticker wrappers the panel loops when the extension is absent."""
+    if request.param:
+        if not panel_module.HAS_CPP:
+            pytest.skip("C++ extension not built")
+    else:
+        monkeypatch.setattr(panel_module, "HAS_CPP", False)
+        monkeypatch.setattr(panel_module, "_cpp_core", None)
+    return request.param
+
+
+def _with(universe, ticker, column, bar, value):
+    frame = universe[ticker].copy()
+    frame.iloc[bar, frame.columns.get_loc(column)] = value
+    return {**universe, ticker: frame}
+
+
+class TestAnInfinityIsRefusedOnBothPaths:
+    """
+    The per-ticker wrappers refuse +/-inf; the native kernel took it, and a
+    Wilder recursion carries one inf bar into every later value -- 0 of 55
+    later RSI and ATR bars finite, a stochastic %D that never recovered --
+    while the same call without the extension was refused. The panel now
+    refuses it itself, by ticker and column, before choosing a path.
+    """
+
+    @pytest.mark.parametrize("indicator", NATIVE_FIVE)
+    def test_an_inf_close_is_refused_by_name(self, universe, panel_backend, indicator):
+        bad = _with(universe, "BBB", "Close", 100, np.inf)
+        with pytest.raises(
+            ValidationError, match=r"1 infinite Close value\(s\) in \['BBB'\]"
+        ):
+            technical_indicators_panel(bad, [indicator])
+
+    def test_a_negative_inf_high_is_refused_too(self, universe, panel_backend):
+        bad = _with(universe, "CCC", "High", 50, -np.inf)
+        with pytest.raises(ValidationError, match=r"infinite High value.*'CCC'"):
+            technical_indicators_panel(bad, ["adx"])
+
+    def test_an_inf_outside_the_shared_bars_is_not_read(self, universe, panel_backend):
+        """Only the intersected bars are stacked, so only they are checked."""
+        early = _bars(4, n=N_BARS + 5, start="2021-12-27")
+        early.iloc[0, early.columns.get_loc("Close")] = np.inf
+        frames = technical_indicators_panel({**universe, "DDD": early}, ["rsi"])
+        assert np.isfinite(frames["rsi"]["DDD"].iloc[-1])
+
+    def test_nan_is_still_a_gap_for_the_kernel(self, universe):
+        """The null case: NaN marks a missing bar and is not refused here.
+        The kernel blanks the windows holding it and RSI resumes after it.
+        (The per-ticker wrappers the fallback loops refuse NaN themselves.)"""
+        if not panel_module.HAS_CPP:
+            pytest.skip("C++ extension not built")
+        gap = _with(universe, "BBB", "Close", 100, np.nan)
+        rsi_bbb = technical_indicators_panel(gap, ["rsi"])["rsi"]["BBB"]
+        assert np.isfinite(rsi_bbb.iloc[150:]).all()
+
+
+class TestAFlatWindowInThePanel:
+    """The per-ticker bollinger_bands sets all three bands to the price on a
+    flat window; the panel column is that wrapper's answer, so it must too,
+    whatever rounding the kernel leaves there."""
+
+    def test_the_bands_are_the_price_and_the_wrappers(
+        self, universe, panel_backend, monkeypatch
+    ):
+        halted = universe["AAA"].copy()
+        halted.iloc[120:160, halted.columns.get_loc("Close")] = halted["Close"].iloc[
+            119
+        ]
+        data = {**universe, "AAA": halted}
+        if panel_backend:
+            real = panel_module._cpp_core
+
+            def residue_panel(*args, **kwargs):
+                out = dict(real.technical_indicators_panel(*args, **kwargs))
+                bands = np.array(out["bollinger_bands"])
+                bands[..., 0] += 5e-7
+                bands[..., 2] -= 5e-7
+                out["bollinger_bands"] = bands
+                return out
+
+            monkeypatch.setattr(
+                panel_module,
+                "_cpp_core",
+                types.SimpleNamespace(technical_indicators_panel=residue_panel),
+            )
+        frames = technical_indicators_panel(data, ["bollinger_bands"])
+        close = halted["Close"].to_numpy()
+        flat = halted["Close"].rolling(20).max() == halted["Close"].rolling(20).min()
+        assert flat.sum() == 22
+        for field in ("BB_Upper", "BB_Middle", "BB_Lower"):
+            got = frames["bollinger_bands"][("AAA", field)].to_numpy()
+            np.testing.assert_array_equal(got[flat.to_numpy()], close[flat.to_numpy()])
+        _assert_column_matches_wrapper(frames, "bollinger_bands", "AAA", halted)
