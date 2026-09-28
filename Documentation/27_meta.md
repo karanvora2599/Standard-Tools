@@ -62,7 +62,13 @@ blank value is reported as not set, because that is how every reader treats
 it. Twenty-one settings are reported,
 among them `SQT_EXTERNAL_DIRS`, whose value is every directory external data
 may be read from — the runs directory first, then each listed one — so an
-agent can see the fence it is inside without being able to move it.
+agent can see the fence it is inside without being able to move it. Beside
+the settings, its `native_extension` block says which compiled extension
+this process loaded and whether it was built from the C++ sources beside
+the package (`match`), refused for having been built from others (`stale`,
+`unstamped`), or missing for this interpreter while another's is present
+(`abi-mismatch`), with the build facts it was stamped with; a verdict that
+needs a rebuild is also a warning carrying the command.
 
 **`describe_runtime`** and **`list_reference_kinds`** answer the two
 structural questions: what runtimes exist and what each owns, and what

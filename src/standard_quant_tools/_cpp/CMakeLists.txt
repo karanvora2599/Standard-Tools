@@ -19,6 +19,7 @@ set(SQT_SOURCES
     src/isa_dispatch.cpp
     src/rolling_beta_avx2.cpp
     src/panel_stats.cpp
+    src/build_info.cpp
     bindings/bindings.cpp
 )
 
@@ -184,6 +185,76 @@ if(OpenMP_CXX_FOUND)
 else()
     message(STATUS "OpenMP:   not found — affected loops will run serially (still correct, just single-threaded)")
 endif()
+
+# ── Build stamp: which sources and which build produced this binary ─────────
+# The extension carries a SHA-256 of the native tree it was compiled from,
+# and the package recomputes it over the sources beside it at import. An
+# extension that loads but was built from other sources -- the compiled copy
+# an editable install keeps in site-packages after the C++ has moved on -- is
+# then refused by name instead of answering with old code while reporting
+# itself available. See cmake/source_digest.cmake for the recipe and why it
+# runs at build time.
+#
+# The facts that change results or speed are known at configure time and
+# land in a small CMake file the stamp step reads. file(CONFIGURE) rewrites it
+# only when its text changes, so the stamp is regenerated when a fact moves
+# (a reconfigure with another SQT_NATIVE_ARCH, say) on every generator,
+# not just those that track command lines.
+if(SQT_PGO_GENERATE)
+    set(_sqt_pgo "generate")
+elseif(SQT_PGO_USE)
+    set(_sqt_pgo "use")
+else()
+    set(_sqt_pgo "off")
+endif()
+if(SQT_NATIVE_ARCH)
+    set(_sqt_native_arch 1)
+else()
+    set(_sqt_native_arch 0)
+endif()
+if(OpenMP_CXX_FOUND)
+    set(_sqt_openmp "${OpenMP_CXX_VERSION}")
+else()
+    set(_sqt_openmp "")
+endif()
+set(_sqt_facts_file "${CMAKE_CURRENT_BINARY_DIR}/sqt_build_facts.cmake")
+file(CONFIGURE OUTPUT "${_sqt_facts_file}" CONTENT
+"set(SQT_FACT_COMPILER \"${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}\")
+set(SQT_FACT_NATIVE_ARCH ${_sqt_native_arch})
+set(SQT_FACT_OPENMP \"${_sqt_openmp}\")
+set(SQT_FACT_PGO \"${_sqt_pgo}\")
+")
+
+# Every file the digest covers is a dependency of the stamp, so an edit
+# followed by a plain `cmake --build` restamps. CONFIGURE_DEPENDS re-runs the
+# glob on each build, so a file added or removed is picked up without a
+# manual reconfigure. The filter is the recipe's own, case-sensitive on
+# every platform.
+file(GLOB_RECURSE _sqt_stamp_inputs CONFIGURE_DEPENDS LIST_DIRECTORIES false
+     "${CMAKE_CURRENT_SOURCE_DIR}/*")
+list(FILTER _sqt_stamp_inputs INCLUDE REGEX
+     "(\\.(cpp|cc|cxx|c|hpp|hh|hxx|h|inl|ipp|cmake)|/CMakeLists\\.txt)$")
+
+set(_sqt_stamp_dir "${CMAKE_CURRENT_BINARY_DIR}/generated")
+set(_sqt_stamp "${_sqt_stamp_dir}/sqt_build_stamp.hpp")
+add_custom_command(
+    OUTPUT "${_sqt_stamp}"
+    COMMAND "${CMAKE_COMMAND}"
+            "-DSQT_NATIVE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+            "-DSQT_OUTPUT=${_sqt_stamp}"
+            "-DSQT_FACTS_FILE=${_sqt_facts_file}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/source_digest.cmake"
+    DEPENDS ${_sqt_stamp_inputs} "${_sqt_facts_file}"
+    COMMENT "Stamping _sqt_core with the digest of its sources"
+    VERBATIM
+)
+target_sources(_sqt_core PRIVATE "${_sqt_stamp}")
+target_include_directories(_sqt_core PRIVATE "${_sqt_stamp_dir}")
+# $<CONFIG> is decided at build time under a multi-config generator, which is
+# why the configuration is a definition on the one file that reports it and
+# not a line in the stamp.
+set_property(SOURCE src/build_info.cpp APPEND PROPERTY
+             COMPILE_DEFINITIONS "SQT_BUILD_CONFIG=\"$<CONFIG>\"")
 
 # ── Link-time optimization / interprocedural optimization (automatic) ────────
 # Unlike SQT_NATIVE_ARCH above, LTO/IPO carries no "illegal instruction on a

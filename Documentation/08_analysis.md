@@ -805,7 +805,14 @@ cmake --build build --config Release
 
 # Verify
 python -c "from standard_quant_tools.analysis.hurst import HAS_CPP; print('C++ active:', HAS_CPP)"
+python -c "import standard_quant_tools as s; print(s.native_build_status())"   # match:<digest>
 ```
+
+`HAS_CPP` is `False` both when there is no extension and when the one present
+was built from other C++ sources than the ones beside the package — the
+second is refused at import with a `NativeBuildWarning` naming the file and
+the rebuild command. See
+[the build guide](30_build_guide.md#was-it-built-from-these-sources).
 
 **Windows note:** Open "x64 Native Tools Command Prompt for VS 2022" before running cmake, or use the Visual Studio generator from any terminal:
 

@@ -34,6 +34,14 @@ class DecisionRecord(BaseModel):
     package_version: Optional[str] = None
     random_seed: Optional[int] = None
     strategy_source_hash: Optional[str] = None
+    # WHICH compiled build ran, not just whether one did: the import-time
+    # verdict and the short source digest the extension was stamped with,
+    # e.g. "match:df27c6e4af54", "stale:0a1b2c3d4e5f" (present, refused, the
+    # Python path ran), "absent" or "disabled". `cpp_available` alone was
+    # true for an extension weeks older than the code calling it. None for
+    # records written before this field existed; those still verify,
+    # because a record is hashed as it was stored.
+    native_build: Optional[str] = None
     # Hash-chain tamper-evidence: each record's hash covers its own content
     # plus the previous record's hash, so editing a past line changes that
     # line's hash and breaks the chain for every record after it (unless an

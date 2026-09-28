@@ -6039,6 +6039,18 @@ class ExplainDecisionResult(BaseModel):
             "without a record."
         ),
     )
+    native_build: Optional[str] = Field(
+        None,
+        description=(
+            "WHICH compiled build ran: the import-time verdict and the short "
+            "digest of the C++ sources the extension was built from, e.g. "
+            "'match:df27c6e4af54'. 'stale:…' or 'unstamped' mean an "
+            "extension was present but built from other sources, so it was "
+            "refused and the Python path ran; 'absent' and 'disabled' mean "
+            "there was none to run. None for records written before the "
+            "field existed."
+        ),
+    )
     output_hash: Optional[str] = None
     output_hash_normalized: Optional[str] = Field(
         None,

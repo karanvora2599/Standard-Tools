@@ -89,6 +89,7 @@ produces a record like:
      "source": "live_fetch", "content_hash": "1d975f555f10aeb8"}
   ],
   "cpp_available": false,
+  "native_build": "absent",
   "n_workers": null,
   "duration_ms": 6765.8,
   "output_hash": "8a2b0ca80ac84ba1",
@@ -104,6 +105,17 @@ produces a record like:
   "record_hash": "7c3a9e21f6b4d805"
 }
 ```
+
+`cpp_available` says whether the compiled extension ran; `native_build` says
+*which* build it was — the verdict the package reached at import and the
+short digest of the C++ sources the extension was built from, e.g.
+`match:df27c6e4af54`. `stale:…` and `unstamped` mean an extension was present
+but built from other sources, so it was refused and the Python path ran;
+`absent` and `disabled` mean there was none to run. An extension weeks older
+than the Python calling it used to be recorded exactly like a current one.
+Records written before the field existed have no such key and still verify:
+a record is hashed as it was stored. See
+[the build guide](30_build_guide.md#was-it-built-from-these-sources).
 
 `data_sources` has one entry per OHLCV pull, tagged `disk_cache`,
 `live_fetch`, or `session_cache`, with a content hash of the DataFrame

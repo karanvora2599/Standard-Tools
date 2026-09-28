@@ -211,6 +211,7 @@ def explain_decision(input_data: ExplainDecisionInput) -> ExplainDecisionResult:
         data_sources=sources,
         duration_ms=float(record.get("duration_ms", 0.0)),
         execution_path="C++" if record.get("cpp_available") else "Python/Numba",
+        native_build=record.get("native_build"),
         n_workers=record.get("n_workers"),
         output_hash=record.get("output_hash"),
         output_hash_normalized=record.get("output_hash_normalized"),

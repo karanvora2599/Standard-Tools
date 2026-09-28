@@ -19,6 +19,7 @@ from .paths import _audit_enabled
 from .provenance import (
     _cpp_available,
     _git_sha,
+    _native_build_label,
     _package_version,
     _strategy_source_hash,
 )
@@ -176,6 +177,7 @@ def _run_and_record(
                         input=_redact(raw_input, fields),
                         data_sources=list(_data_sources_var.get() or []),
                         cpp_available=_cpp_available(),
+                        native_build=_native_build_label(),
                         n_workers=getattr(model_instance, "n_workers", None),
                         duration_ms=round(duration_ms, 3),
                         output_hash=(

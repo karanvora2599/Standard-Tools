@@ -220,7 +220,7 @@ contrib = factor_contributions(returns_df, n_components=3)
 from standard_quant_tools.analysis import hurst_exponent, rolling_hurst
 from standard_quant_tools.analysis.hurst import HAS_CPP
 
-print("C++ backend active:", HAS_CPP)     # True once _sqt_core is built
+print("C++ backend active:", HAS_CPP)     # True once _sqt_core is built from these sources
 
 result = hurst_exponent(returns)          # pass RETURNS not prices
 # {'hurst': 0.38, 'regime': 'mean_reverting', 'regime_band': 0.07,

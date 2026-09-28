@@ -22,7 +22,8 @@ pip install . -C cmake.define.SQT_REQUIRE_NATIVE=ON # fail if it cannot
 ```
 
 Use `SQT_REQUIRE_NATIVE=ON` in CI — a silent skip there means a green build
-that quietly tested only the fallback path.
+that quietly tested only the fallback path. Every workflow in
+`.github/workflows` that builds the extension passes it.
 
 > The in-place developer build below is unchanged: `cmake -B build` still
 > writes the compiled module directly into `src/standard_quant_tools/`.
@@ -50,7 +51,10 @@ one interpreter, and a second Python version needs a second tree. See
 [Building for more than one Python version](#building-for-more-than-one-python-version).
 
 The Python modules automatically fall back to pure Python when the extension
-is not built — all existing tests continue to pass either way.
+is not built — all existing tests continue to pass either way — and also when
+the extension that loads was built from different C++ sources than the ones
+beside the package: see
+[Was it built from these sources?](#was-it-built-from-these-sources).
 
 ---
 
@@ -213,10 +217,16 @@ in `PATH` (see platform notes above).
 >   those two coexist in the package directory rather than clobbering each
 >   other. That is what makes the per-ABI trees below workable — and also why
 >   a stale one can sit there unnoticed for days.
-> - **If you suspect a stale or bad extension**, delete
->   `src/standard_quant_tools/_sqt_core*.pyd` and run `cmake --build build`
->   again. Ninja tracks its own outputs, so a file replaced by a *different*
->   build directory will not always be detected as dirty.
+> - **If you suspect a stale or bad extension**, ask the package first —
+>   `python -c "import standard_quant_tools as s; print(s.native_build_status())"`
+>   says whether the loaded one was built from the sources beside it (see
+>   [Was it built from these sources?](#was-it-built-from-these-sources)).
+>   To start over, delete `src/standard_quant_tools/_sqt_core*.pyd` and run
+>   `cmake --build build` again. Ninja tracks its own outputs, so a file
+>   replaced by a *different* build directory will not always be detected
+>   as dirty — and a source restored with an old modification time (a copy
+>   that preserves timestamps, say) is not rebuilt either; the import-time
+>   check catches both.
 >
 > To add warning flags safely, use a toolchain file or
 > `target_compile_options` on the target, both of which compose with the
@@ -311,17 +321,23 @@ caches hold absolute paths), and there is no fixed number of them.
 > with a path error that points at someone else's directory.
 
 **Rebuild every ABI you actually ship to.** The two artifacts have different
-filenames, so a stale one does not announce itself — it simply keeps being
-imported. This has bitten once already: `build/` was rebuilt against 3.12
+filenames, so rebuilding one does nothing for the other. A stale one used to
+keep being imported without a word; it is now refused at import with a
+`NativeBuildWarning` (see
+[Was it built from these sources?](#was-it-built-from-these-sources)), which
+turns a wrong answer into a slow one and says which file to rebuild — but the
+fix is still the rebuild. This has bitten once already: `build/` was rebuilt against 3.12
 while the cp311 artifact stayed five days behind, and since 3.11 is what
 downstream consumers load, the Python layer called `run_portfolio_simulation`
 with 22 arguments against a binding that knew 14. 129 tests failed looking
 like broken numerics. Nothing in the build output pointed at a stale binary.
 
-To check what you have, compare the ABI tags against their timestamps:
+To check what you have, compare the ABI tags against their timestamps, then
+ask each interpreter for its verdict:
 
 ```
 ls -la src/standard_quant_tools/_sqt_core*
+python -c "import standard_quant_tools as s; print(s.native_build_status())"
 ```
 
 ---
@@ -354,6 +370,109 @@ python -c "from standard_quant_tools import _sqt_core; print(_sqt_core.__file__)
 
 If that prints a `site-packages` path, re-run `pip install -e .` in that
 environment after building; if it prints your `src/` path, the build is live.
+You no longer have to remember to ask: the package checks this itself at
+import, as the next section describes.
+
+---
+
+### Was it built from these sources?
+
+An extension that imports is not necessarily one built from the C++ beside
+it. The split install in row 2 above is the case that matters: another
+project's environment resolves this package's Python to your checkout, but
+loads the compiled copy it made when it was installed. Every native fix since
+then is missing there while the Python calling it is current, and `HAS_CPP`
+stays `True` throughout — it is the right extension, just an old one. Measured
+through such a copy: RSI(5) over sixteen bars with one missing came back as
+sixteen NaN, where the current kernels return six — the warm-up and the
+missing bar itself — and step over the gap.
+
+**The build stamps the extension with a digest of its sources.** A CMake step
+(`src/standard_quant_tools/_cpp/cmake/source_digest.cmake`, run as a custom
+command at *build* time) hashes every C++ source and CMake file under
+`src/standard_quant_tools/_cpp/` — `.cpp`, `.hpp`, `.h` and the other C/C++
+suffixes, `.cmake`, and each `CMakeLists.txt` — as one SHA-256 over the
+sorted relative paths and each file's SHA-256 (the `sha256sum` line format).
+Because the step depends on every file it hashes, an edit followed by a plain
+`cmake --build` restamps; no reconfigure is needed. The same header records
+the build facts that change results or speed: build type, whether
+`SQT_NATIVE_ARCH` was on, compiler id and version, the OpenMP version linked,
+and the PGO mode. It holds no timestamp and no path, so two checkouts of one
+commit stamp the same digest. Read it as a read-only mapping:
+
+```
+python -c "from standard_quant_tools import _sqt_core as m; print(dict(m.__build_info__))"
+```
+
+**The package recomputes the digest at import and compares.** When the
+package directory carries the native sources — a source checkout, an
+editable install, and this project's own wheels, which ship `_cpp/` whole —
+it hashes them once per process (about thirty files, roughly 4 ms including
+loading the extension) and reaches one verdict:
+
+| Verdict | Meaning | Extension used? |
+|---|---|---|
+| `match` | Built from the sources beside the package | yes |
+| `unchecked` | No sources beside the package (a distribution built without them); nothing to compare against | yes |
+| `stale` | Built from other sources | **no** — every kernel takes its Python path |
+| `unstamped` | Built before extensions carried a stamp, with sources present to contradict it | **no** |
+| `unverified` | The sources could not be read, so the check cannot compare | yes, unverified |
+| `abi-mismatch` | No extension for this interpreter, but one for another CPython ABI is present | — |
+| `unloadable` | This interpreter's extension is present but failed to load | — |
+| `absent` | No extension anywhere: the ordinary pure-Python install | — |
+| `disabled` | `SQT_DISABLE_NATIVE` is set | — |
+
+A refused build is refused the same way `SQT_DISABLE_NATIVE` works — the
+module is made unimportable once, before any module probes it — so all
+seventeen native-aware modules fall back together. The Python paths match the
+sources, so **results are correct, only slower**. The check never raises: a
+failure inside it becomes the `unverified` verdict, not an import error.
+
+**What the warning means.** Every verdict from `stale` to `unloadable` in the
+table raises one `NativeBuildWarning` per process, at import. It names the
+extension file that was loaded (or found), what is wrong with it, and the
+command that fixes it:
+
+- *An in-place build in this checkout* — the message gives the configure and
+  build pair for this interpreter:
+  `cmake -S <repo> -B <repo>/build3XX -DCMAKE_BUILD_TYPE=Release -DPython3_EXECUTABLE=<this python>`
+  then `cmake --build <repo>/build3XX --config Release`.
+- *A copy in another environment's site-packages* (the editable consumer) —
+  a build in the checkout does not reach it, so the message gives the
+  reinstall, with that environment's own interpreter:
+
+  ```
+  "<consumer python>" -m pip install -e "<path to Standard Tools>"
+  ```
+
+  Run it from the consumer's environment after each C++ change you want it
+  to see. Nothing else refreshes the copy it holds.
+- *A binary for another ABI* (`_sqt_core.cp312-win_amd64.pyd` in front of a
+  3.11 interpreter, say) — the message names both tags and gives the same
+  per-interpreter build command. Before, that binary was invisible: the
+  import simply failed and every kernel fell back without a word.
+
+**Where the verdict is reported.** `standard_quant_tools.native_build_status()`
+returns it in code. `describe_effective_config` carries it as the
+`native_extension` block (loaded file, verdict, both digests, build facts,
+the cost of the check) and repeats the warning; `list_modeling_capabilities`
+carries it under `native_extension_detail.build`; and every decision record
+writes `native_build` — the verdict and the short digest, for example
+`match:df27c6e4af54` — beside `cpp_available`, so a record says *which* build
+computed it. Records written before that field existed have no such key and
+still verify.
+
+**The suite refuses to pass on a stale build.** A refused extension turns
+every `@requires_cpp` test into a skip, which on its own would read as green.
+`tests/cpp_bindings/test_build_provenance.py` fails instead whenever the
+extension in use does not match the checkout, with the rebuild command in the
+failure.
+
+**What the digest does not cover.** Only the package directory travels with a
+wheel or an editable install, so the root `CMakeLists.txt` and flags passed on
+the command line are not hashed. What they change that matters — build type,
+host-CPU codegen, compiler, OpenMP, PGO — is recorded in the build facts and
+reported beside the verdict rather than compared.
 
 ---
 
@@ -361,7 +480,12 @@ environment after building; if it prints your `src/` path, the build is live.
 
 ```
 python -c "from standard_quant_tools import _sqt_core; print('OK:', _sqt_core.__doc__[:50])"
+python -c "import standard_quant_tools as s; print(s.native_build_status().as_dict())"
 ```
+
+The second line should report `"verdict": "match"` and the file you just
+built. Anything else comes with a `NativeBuildWarning` that says why — see
+[Was it built from these sources?](#was-it-built-from-these-sources).
 
 ---
 
@@ -495,6 +619,10 @@ cmake --build build --config Release
 ```
 
 CMake tracks source timestamps; only changed `.cpp` files are recompiled.
+The source digest is restamped on the same build (one small translation unit
+recompiles and the module relinks), so the extension and the sources agree
+again without a reconfigure. A file added under `_cpp/` joins the digest on
+the next build too.
 
 **Rebuild each ABI tree you maintain**, not just `build/` — `cmake --build
 build311 --config Release` too, if you have one. A C++ signature change that
@@ -522,8 +650,11 @@ Standard Tools/
 │   └── standard_quant_tools/
 │       ├── _sqt_core.cp3XX-*.[pyd|so]       ← Compiled output, one per Python ABI (generated, gitignored)
 │       └── _cpp/                            ← All C++ sources
-│           ├── CMakeLists.txt               ← Extension build rules (LTO/IPO, PGO options, OpenMP, AVX2 file override)
+│           ├── CMakeLists.txt               ← Extension build rules (LTO/IPO, PGO options, OpenMP, AVX2 file override, build stamp)
+│           ├── cmake/
+│           │   └── source_digest.cmake      ← Build-time `cmake -P` step: SHA-256 of the native tree + build facts → generated stamp header
 │           ├── include/sqt/
+│           │   ├── build_info.hpp           ← BuildInfo: source digest and build facts, exposed as `_sqt_core.__build_info__`
 │           │   ├── platform.hpp             ← SQT_RESTRICT portable qualifier macro
 │           │   ├── isa_dispatch.hpp         ← Runtime CPUID feature detection (IsaFeatures{avx2,fma})
 │           │   ├── hurst.hpp                ← Hurst exponent / rolling Hurst API
@@ -537,6 +668,7 @@ Standard Tools/
 │           │   ├── panel_stats.hpp          ← Modeling-layer panel statistics API (preprocessing, per-date stats, label weights)
 │           │   └── signal_state_machines.hpp ← Donchian / VWAP-reversion signal hysteresis API
 │           ├── src/
+│           │   ├── build_info.cpp           ← The one translation unit that includes the generated stamp
 │           │   ├── isa_dispatch.cpp         ← CPUID detection + test-only override hook
 │           │   ├── hurst.cpp                ← Hurst implementation (OpenMP across rolling windows, one-pass DFA)
 │           │   ├── indicators.cpp           ← RSI / ADX / PSAR / Wilder ATR / Bollinger / Stochastic + technical_indicators implementation
@@ -565,7 +697,8 @@ Standard Tools/
     │   ├── test_cpp_array1d_validation.py   ← 1-D array validation across every binding
     │   ├── test_cpp_gil_release.py          ← GIL actually released around pure-C++ calls
     │   ├── test_cpp_nan_data_contract.py    ← the NaN/Inf contract the fuzz harness does not generate
-    │   └── test_extension_freshness.py      ← a stale ABI-tagged build fails here rather than as broken numerics
+    │   ├── test_extension_freshness.py      ← a stale ABI-tagged build fails here rather than as broken numerics
+    │   └── test_build_provenance.py         ← the extension in use was built from this checkout; the digest, the verdicts, the ABI scan
     └── cpp/
         ├── CMakeLists.txt                   ← C++ test build rules
         ├── test_hurst.cpp                   ← 26 C++ unit tests (no framework needed)

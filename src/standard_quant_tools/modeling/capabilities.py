@@ -15,7 +15,7 @@ mode a hand-maintained capability list always eventually has.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from . import calendar as _calendar
 from .adapters import available_tasks, get_adapter
@@ -356,6 +356,17 @@ def _native_available() -> bool:
         return False
 
 
+def _native_build_report() -> Optional[Dict[str, Any]]:
+    """The import-time verdict on the extension, or None if it cannot be
+    read; a capability report never fails over it."""
+    try:
+        from standard_quant_tools._native_build import native_build_status
+
+        return native_build_status().as_dict()
+    except Exception:  # noqa: BLE001 - absence is the answer, not an error
+        return None
+
+
 def _native_detail() -> Dict[str, Any]:
     """What the loaded extension actually exports.
 
@@ -371,6 +382,12 @@ def _native_detail() -> Dict[str, Any]:
     So the count and the file come back too. An agent asking why a run is
     slow can compare `exports` against `expected_exports` instead of
     inferring it from a stopwatch.
+
+    A full export list still says nothing about WHICH sources the binary
+    was built from, so the import-time verdict comes back as `build`: the
+    digest it was stamped with, whether that matches the sources beside the
+    package, and the build facts. An extension refused for not matching is
+    unavailable here, and `build` is where the reason is.
     """
     detail: Dict[str, Any] = {
         "available": _native_available(),
@@ -378,10 +395,14 @@ def _native_detail() -> Dict[str, Any]:
         "expected_exports": _EXPECTED_NATIVE_EXPORTS,
         "stale": False,
         "path": None,
+        "build": _native_build_report(),
     }
     try:
         from standard_quant_tools import _sqt_core  # type: ignore[attr-defined]
     except ImportError:
+        build = detail["build"] or {}
+        if build.get("detail"):
+            detail["note"] = build["detail"]
         return detail
 
     names = [n for n in dir(_sqt_core) if not n.startswith("_")]

@@ -1,5 +1,5 @@
-"""Best-effort reproducibility provenance: C++ extension availability, the
-current git commit, the installed package version, and a content hash of a
+"""Best-effort reproducibility provenance: C++ extension availability and
+which build of it ran, the current git commit, the installed package version, and a content hash of a
 registered strategy's source code. All of these fail silently (return
 `None`/`False`) rather than raise — provenance is a nice-to-have, never a
 reason to break a tool call."""
@@ -17,6 +17,20 @@ def _cpp_available() -> bool:
         return True
     except ImportError:
         return False
+
+
+def _native_build_label() -> Optional[str]:
+    """Which build of the extension this process runs, as one token: the
+    import-time verdict and the short digest of the sources the extension
+    was built from (`match:df27c6e4af54`), or why none ran (`absent`,
+    `disabled`, `stale:…`). `_cpp_available` says a build ran; this says
+    which one."""
+    try:
+        from standard_quant_tools._native_build import native_build_status
+
+        return native_build_status().label
+    except Exception:
+        return None
 
 
 _git_sha_cache: Optional[str] = None

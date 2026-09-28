@@ -568,6 +568,41 @@ class TestTheConfigurationIsReadable:
         assert by_name["SQT_MODEL_FORMAT"]["set"] is True
         assert any("SQT_MODEL_FORMAT" in w for w in result["warnings"])
 
+    def test_it_reports_which_native_build_loaded(self):
+        """Whether the extension is switched off was reportable; whether the
+        one that loaded was built from the sources beside it was not."""
+        from standard_quant_tools import native_build_status
+
+        status = native_build_status()
+        result = dispatch("describe_effective_config", {})
+        native = result["native_extension"]
+        assert native["verdict"] == status.verdict
+        assert native["label"] == status.label
+        assert native["used"] is status.used
+        assert "interpreter_tag" in native and "build" in native
+        if status.verdict == "match":
+            # Null case: a build that matches is not a warning.
+            assert not any("compiled extension" in w for w in result["warnings"])
+
+    def test_a_refused_build_is_a_warning_with_the_command(self, monkeypatch):
+        from standard_quant_tools import _native_build as nb
+
+        detail = (
+            "standard_quant_tools: the compiled extension X.pyd does not match "
+            "the C++ sources beside it. Re-run the editable install."
+        )
+        monkeypatch.setattr(
+            nb,
+            "_status",
+            nb.NativeBuildStatus(
+                nb.STALE, used=False, built_digest="0" * 64, detail=detail
+            ),
+        )
+        result = dispatch("describe_effective_config", {})
+        assert result["native_extension"]["verdict"] == "stale"
+        assert result["native_extension"]["used"] is False
+        assert detail in result["warnings"]
+
     def test_it_changes_nothing_it_reports(self, monkeypatch):
         import os
 

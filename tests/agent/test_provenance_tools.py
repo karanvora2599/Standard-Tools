@@ -64,6 +64,30 @@ class TestExplainDecision:
         assert result["package_version"]
         assert result["record_hash"]
 
+    def test_says_which_native_build_ran(self):
+        """`execution_path` says a compiled build ran; an extension weeks
+        older than the Python calling it said the same. The record names
+        the build by the digest of the sources it was compiled from."""
+        from standard_quant_tools import native_build_status
+
+        result = dispatch("explain_decision", {"request_id": _record_a_call()})
+        assert result["native_build"] == native_build_status().label
+
+    def test_a_record_from_before_the_field_names_no_build(self, monkeypatch):
+        """Null case: an older record has no such key, and the answer is
+        None rather than a guess."""
+        request_id = _record_a_call()
+        real = meta_tools._find_audit_record
+
+        def without_field(*args, **kwargs):
+            record = dict(real(*args, **kwargs))
+            record.pop("native_build", None)
+            return record
+
+        monkeypatch.setattr(meta_tools, "_find_audit_record", without_field)
+        result = dispatch("explain_decision", {"request_id": request_id})
+        assert result["native_build"] is None
+
     def test_an_unknown_id_is_a_caller_error(self):
         with pytest.raises(ValidationError):
             dispatch("explain_decision", {"request_id": "0" * 32})

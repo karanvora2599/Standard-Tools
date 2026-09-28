@@ -60,6 +60,7 @@ from .paths import (
 from .provenance import (
     _cpp_available,
     _git_sha,
+    _native_build_label,
     _package_version,
     _strategy_source_hash,
 )

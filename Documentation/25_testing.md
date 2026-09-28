@@ -127,12 +127,22 @@ One name made unimportable flips all seventeen, because they all import the
 same one, and each takes the `except ImportError` branch it already had. No
 module needed changing.
 
+The same mechanism refuses an extension built from other sources. The
+package compares the source digest stamped into `_sqt_core` with a digest of
+the C++ beside it at import, and a mismatch makes the module unimportable
+exactly as the switch does. That has a testing consequence: a stale build
+turns every `@requires_cpp` test into a skip, which on its own would read as
+a green run. `tests/cpp_bindings/test_build_provenance.py` therefore FAILS,
+rather than skips, whenever the extension in use does not match the
+checkout — with the rebuild command in the failure. See
+[the build guide](30_build_guide.md#was-it-built-from-these-sources).
+
 **It found nothing wrong, which is the useful result.** Zero failures. On
 the run that introduced it, 6,514 passed and 519 skipped — the extra skips
 are the parity and benchmark tests that `importorskip` the extension,
 correctly — and it took 11:22 against 6:54, which is the compiled path's
 contribution measured at suite scale rather than per kernel. The suite is
-11,800 tests now (11,641 passed, 81 skipped in 10:34 with the extension), so
+11,839 tests now (11,683 passed, 78 skipped in 10:41 with the extension and `SQT_EXPECT_NATIVE=1`), so
 that pair of clocks is a ratio to re-measure, not a figure to quote.
 
 ### Why this is a testing concern and not a packaging one

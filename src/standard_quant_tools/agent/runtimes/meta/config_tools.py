@@ -40,7 +40,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from typing import Callable, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -106,6 +106,21 @@ class EffectiveConfigResult(_Result):
     n_set: int = 0
     n_secrets_set: int = 0
     settings: List[ConfigSetting] = Field(default_factory=list)
+    native_extension: Dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Which compiled extension this process loaded and whether it was "
+            "built from the C++ sources beside the package, decided once at "
+            "import. `verdict` is 'match' (used), 'unchecked' (used; no "
+            "sources beside the package to compare against), 'stale' or "
+            "'unstamped' (present but built from other sources, so refused "
+            "and the Python path runs), 'unverified' (sources unreadable; "
+            "used unchecked), 'abi-mismatch' (only a binary for another "
+            "Python is present), 'unloadable', 'absent' or 'disabled'. "
+            "`build` holds the facts the binary was stamped with: build "
+            "type, host-CPU codegen, compiler, OpenMP."
+        ),
+    )
     notes: List[str] = Field(default_factory=list)
 
 
@@ -390,7 +405,9 @@ _OTHER_SETTINGS: Tuple[_Setting, ...] = (
         is_secret=False,
         effect=(
             "Makes the compiled extension unimportable, so every kernel "
-            "takes its fallback path. Which path ran is recorded per call."
+            "takes its fallback path. Which path ran is recorded per call. "
+            "Whether the extension that did load was built from the sources "
+            "beside the package is the separate `native_extension` block."
         ),
         resolve=_native_disabled_value,
     ),
@@ -673,15 +690,38 @@ def describe_effective_config(
             "because it can carry credentials."
         )
 
+    native, native_warning = _native_extension_report()
+    if native_warning:
+        warnings.append(native_warning)
+
     logger.debug("[describe_effective_config] %d settings, %d set", len(rows), n_set)
     return EffectiveConfigResult(
         n_settings=len(rows),
         n_set=n_set,
         n_secrets_set=n_secrets_set,
         settings=rows,
+        native_extension=native,
         notes=notes,
         warnings=warnings,
     )
+
+
+def _native_extension_report() -> Tuple[Dict[str, Any], Optional[str]]:
+    """The import-time verdict on the compiled extension, and the warning it
+    carries when the build needs refreshing. A verdict that cannot be read
+    is reported as such -- this report must not fail over it."""
+    try:
+        from standard_quant_tools._native_build import (
+            WARNED_VERDICTS,
+            native_build_status,
+        )
+
+        status = native_build_status()
+        warning = status.detail if status.verdict in WARNED_VERDICTS else None
+        return status.as_dict(), warning
+    except Exception as exc:  # noqa: BLE001 - the report outlives a broken check
+        logger.debug("[describe_effective_config] native status", exc_info=True)
+        return {"verdict": "unverified", "used": None, "detail": str(exc)}, None
 
 
 __all__ = [

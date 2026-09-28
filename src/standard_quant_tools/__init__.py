@@ -44,12 +44,30 @@ def native_disabled() -> bool:
     return env_flag(DISABLE_NATIVE_ENV, False, load=False)
 
 
-if native_disabled():
+_native_off = native_disabled()
+if _native_off:
     # `None` in sys.modules makes `import` raise ImportError, which is the
     # exact signal all seventeen call sites already handle. Set before any
     # submodule is imported, so nothing has cached a reference to the real
     # extension by the time it is asked for.
     sys.modules.setdefault(f"{__name__}._sqt_core", None)  # type: ignore[assignment]
+
+# An extension that imports is not necessarily one built from the C++ beside
+# this package: an editable install keeps its own compiled copy, which goes
+# on answering with old kernels after the sources move on. It is checked
+# here, once, against a digest of those sources and refused -- through the
+# same `None` in sys.modules as above -- when it does not match, so every
+# module falls back together and a NativeBuildWarning says which file and
+# how to refresh it. See `_native_build` and the CHANGELOG entry of
+# 2026-09-28.
+from standard_quant_tools._native_build import (  # noqa: E402,F401
+    NativeBuildWarning,
+    native_build_status,
+    screen_extension,
+)
+
+screen_extension(sys.modules[__name__], disabled=_native_off)
+del _native_off, screen_extension
 
 # Library-level NullHandler — callers configure handlers; we never emit by default.
 logging.getLogger(__name__).addHandler(logging.NullHandler())

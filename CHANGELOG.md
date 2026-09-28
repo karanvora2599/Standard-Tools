@@ -1,5 +1,33 @@
 # Changelog
 
+## The extension says which sources it was built from, and a stale one is not used
+
+An editable install keeps its own copy of the compiled extension while its
+Python follows the source tree, so the two can drift apart without anything
+noticing: a consumer on this machine ran September's kernels under
+today's Python, and RSI over a series with one missing bar came back NaN
+from end to end. `HAS_CPP` was true, the decision records said C++, and a
+binary built for another CPython version was simply invisible.
+
+- **The extension carries a digest of its C++ sources**, stamped at build
+  time by a CMake step that re-runs whenever a source changes, together with
+  the build facts that change results or speed (compiler, native-arch flag,
+  OpenMP version, PGO mode). `_sqt_core.__build_info__` exposes it.
+- **The package checks it at import** against the sources beside it (about
+  4 ms). An extension built from other sources, or from before the digest
+  existed, is not used — every kernel runs its Python path, which matches
+  the source — and a `NativeBuildWarning` names the file, both digests and
+  the command that rebuilds or reinstalls it. A wheel with no sources beside
+  it is trusted. A binary for another CPython ABI is named with both tags
+  instead of being silently ignored.
+- **The verdict is visible**: `native_build_status()`, a `native_extension`
+  block in `describe_effective_config`, the capability report, and a
+  `native_build` label on every decision record, so a record says which build
+  ran. Existing day files verify unchanged.
+- **A stale build fails the suite instead of skipping it**, and the CI jobs
+  that build the extension require it (`SQT_REQUIRE_NATIVE=ON`), so a missing
+  toolchain fails rather than shipping pure Python.
+
 ## A missing bar reads the same everywhere, the trade log adds up, and a torn record has a command
 
 The open ends left after the tool surface was closed: behaviour that still

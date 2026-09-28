@@ -22,6 +22,7 @@
 #include "sqt/signal_state_machines.hpp"
 #include "sqt/numerics.hpp"
 #include "sqt/panel_stats.hpp"
+#include "sqt/build_info.hpp"
 
 namespace py = pybind11;
 
@@ -309,6 +310,28 @@ PYBIND11_MODULE(_sqt_core, m) {
         "SQT C++ core — high-performance implementations of computationally "
         "intensive functions.  Import via the public Python modules; do not "
         "call these entry-points directly.";
+
+    // ── Build stamp ───────────────────────────────────────────────────────────
+    // Which sources and which build produced this binary. The package reads
+    // `source_digest` at import and refuses an extension built from sources
+    // other than the ones beside it, so an old copy cannot keep answering
+    // for code that has since changed. A read-only mapping, because it is a
+    // statement about the binary: nothing at runtime can make it truer.
+    {
+        const sqt::BuildInfo info = sqt::build_info();
+        py::dict stamp;
+        stamp["source_digest"] = info.source_digest;
+        stamp["source_files"]  = info.source_files;
+        stamp["build_type"]    = info.build_type;
+        stamp["native_arch"]   = info.native_arch;
+        stamp["compiler"]      = info.compiler;
+        stamp["openmp"] = (info.openmp[0] != '\0')
+                              ? py::object(py::str(info.openmp))
+                              : py::object(py::none());
+        stamp["pgo"] = info.pgo;
+        m.attr("__build_info__") =
+            py::module_::import("types").attr("MappingProxyType")(stamp);
+    }
 
     // ── Hurst exponent ────────────────────────────────────────────────────────
 
