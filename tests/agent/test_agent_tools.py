@@ -1728,6 +1728,22 @@ class TestGetLiquidityMetrics:
         result = get_liquidity_metrics(inp)
         assert result.tickers == ["AAPL"]
 
+    def test_an_empty_universe_is_refused_by_the_schema(self):
+        """It reached the least/most-liquid pick and escaped as "max()
+        iterable argument is empty". See the CHANGELOG entry of 2026-09-28."""
+        from pydantic import ValidationError as PydanticValidationError
+
+        with pytest.raises(PydanticValidationError, match="tickers"):
+            LiquidityAnalysisInput(tickers=[], start_date=START, end_date=END)
+
+    def test_a_repeated_ticker_is_refused_by_the_schema(self):
+        from pydantic import ValidationError as PydanticValidationError
+
+        with pytest.raises(PydanticValidationError, match=r"repeats \['AAPL'\]"):
+            LiquidityAnalysisInput(
+                tickers=["AAPL", "AAPL"], start_date=START, end_date=END
+            )
+
     def test_invalid_window_rejected_by_pydantic(self, patched_factory):
         from pydantic import ValidationError as PydanticValidationError
 
@@ -2040,3 +2056,160 @@ class TestFillPriceIntegration:
         assert zero_cost.best_return != pytest.approx(
             default_cost.best_return, abs=1e-9
         )
+
+
+# ── inputs the tools used to accept and then fail on ──────────────────────
+
+
+def _distinct_ohlcv(n: int = 120):
+    """A provider whose bars differ by symbol, so a decomposition has more
+    than one direction to find."""
+    import zlib
+    from unittest.mock import MagicMock
+
+    def _bars(symbol, *_a, **_k):
+        rng = np.random.default_rng(zlib.crc32(symbol.encode()))
+        close = 100.0 * np.cumprod(1.0 + rng.normal(0.0005, 0.012, n))
+        index = pd.bdate_range("2023-01-02", periods=n)
+        return pd.DataFrame(
+            {
+                "Open": close,
+                "High": close * 1.01,
+                "Low": close * 0.99,
+                "Close": close,
+                "Volume": np.full(n, 1e6),
+            },
+            index=index,
+        )
+
+    provider = MagicMock()
+    provider.get_ohlcv.side_effect = _bars
+    return provider
+
+
+class TestTheUniverseAndWindowBoundsAreRefusedByName:
+    def test_a_monte_carlo_with_no_tickers_is_refused(self):
+        """An empty universe divided by zero computing equal weights."""
+        from pydantic import ValidationError as PydanticValidationError
+
+        with pytest.raises(PydanticValidationError, match="tickers"):
+            MonteCarloSimulationInput(tickers=[], start_date=START, end_date=END)
+
+    def test_a_monte_carlo_repeating_a_ticker_is_refused(self):
+        from pydantic import ValidationError as PydanticValidationError
+
+        with pytest.raises(PydanticValidationError, match="repeats"):
+            MonteCarloSimulationInput(
+                tickers=["AAPL", "AAPL"], start_date=START, end_date=END
+            )
+
+    def test_a_negative_monte_carlo_seed_never_reaches_the_native_cast(self):
+        from pydantic import ValidationError as PydanticValidationError
+
+        with pytest.raises(PydanticValidationError, match="random_seed"):
+            MonteCarloSimulationInput(
+                tickers=["AAPL"], start_date=START, end_date=END, random_seed=-1
+            )
+
+    @pytest.mark.parametrize("top_n", [0, -1, 21])
+    def test_top_n_outside_one_to_twenty_is_refused(self, top_n):
+        """top_n=0 used to run the whole grid and then fail reading the best
+        row with an IndexError."""
+        from pydantic import ValidationError as PydanticValidationError
+
+        from standard_quant_tools.agent.models import BacktestOptInput
+
+        with pytest.raises(PydanticValidationError, match="top_n"):
+            BacktestOptInput(
+                symbol="AAPL",
+                strategy="sma_crossover",
+                start_date=START,
+                end_date=END,
+                param_grid={"fast_period": [5], "slow_period": [30]},
+                top_n=top_n,
+            )
+
+    def test_top_n_of_one_returns_the_winner(self, patched_factory):
+        from standard_quant_tools.agent.models import BacktestOptInput
+        from standard_quant_tools.agent.tools import run_backtest_optimization
+
+        result = run_backtest_optimization(
+            BacktestOptInput(
+                symbol="AAPL",
+                strategy="sma_crossover",
+                start_date=START,
+                end_date=END,
+                param_grid={"fast_period": [5, 10], "slow_period": [30]},
+                top_n=1,
+            )
+        )
+        assert len(result.top_results) == 1
+
+    @pytest.mark.parametrize(
+        "tickers,n_components,match",
+        [
+            (["AAPL"], 1, "at least 2"),
+            (["AAPL", "AAPL", "MSFT"], 2, "repeats"),
+            (["AAPL", "MSFT"], 3, "exceeds the 2 tickers"),
+        ],
+    )
+    def test_a_pca_the_universe_cannot_span_is_refused(
+        self, tickers, n_components, match
+    ):
+        """Each of these used to fail inside the contribution step with a
+        pandas length error naming neither argument."""
+        from pydantic import ValidationError as PydanticValidationError
+
+        with pytest.raises(PydanticValidationError, match=match):
+            PCAInput(
+                tickers=tickers,
+                start_date=START,
+                end_date=END,
+                n_components=n_components,
+            )
+
+    def test_a_pca_on_too_few_observations_extracts_what_they_span(self, monkeypatch):
+        """Three tickers over three bars: two returns each, and two
+        observations span at most two components. The decomposition keeps
+        what they span and says so, instead of the contribution step
+        failing on the third."""
+        from standard_quant_tools.data.factory import DataFactory
+
+        provider = _distinct_ohlcv(n=3)
+        monkeypatch.setattr(DataFactory, "get_provider", lambda *a, **k: provider)
+        result = run_pca_analysis(
+            PCAInput(
+                tickers=["AAPL", "MSFT", "XOM"],
+                start_date=START,
+                end_date=END,
+                n_components=3,
+            )
+        )
+        assert result.n_components == 2
+        assert all(len(row) == 2 for row in result.factor_contributions.values())
+        assert any("were extracted" in w for w in result.warnings)
+
+    def test_a_rolling_beta_window_longer_than_the_data_names_the_count(
+        self, patched_factory
+    ):
+        from standard_quant_tools.agent.models import RollingBetaInput
+        from standard_quant_tools.agent.tools import get_rolling_beta
+        from standard_quant_tools.error import ValidationError
+
+        with pytest.raises(ValidationError) as exc:
+            get_rolling_beta(
+                RollingBetaInput(
+                    symbol="AAPL", start_date=START, end_date=END, window=5000
+                )
+            )
+        message = str(exc.value)
+        assert "window=5000" in message and "499 returns" in message
+
+    def test_a_rolling_beta_window_that_fits_still_runs(self, patched_factory):
+        from standard_quant_tools.agent.models import RollingBetaInput
+        from standard_quant_tools.agent.tools import get_rolling_beta
+
+        result = get_rolling_beta(
+            RollingBetaInput(symbol="AAPL", start_date=START, end_date=END, window=60)
+        )
+        assert result.window == 60

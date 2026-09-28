@@ -10,9 +10,9 @@ the ones above it.
 | Parity vs contract | `tests/modeling/test_native_metrics.py` | Two backends agreeing on the WRONG answer | 6 s |
 | The extension switched off | `tests/test_fallback_configuration.py`, then the whole suite under `SQT_DISABLE_NATIVE=1` | A fallback nothing executes, and a survey that calls it dead | the suite again |
 | Whole-surface invariants | `tests/surface/test_invariants.py` | A tool registered halfway | 6 s |
-| Adversarial fuzzing | `tests/surface/test_adversarial_inputs.py` | Unhandled exceptions, NaN in output | ~4.5 min |
+| Adversarial fuzzing | `tests/surface/test_adversarial_inputs.py`, with its found cases pinned in `test_refusal_pins.py` | Unhandled exceptions, bare `ValueError`s, NaN in a result model | ~1.5 min (pins ~15 s) |
 | Metamorphic relations | `tests/surface/test_metamorphic.py` | Consistently-wrong answers | 4 s |
-| Determinism and purity | `tests/surface/test_determinism.py` | Ignored seeds, mutated arguments | ~7 min |
+| Determinism and purity | `tests/surface/test_determinism.py` | Ignored seeds, mutated arguments | ~1 min |
 | Documentation | `tests/docs/` | Stale counts, undocumented tools, dead links | 6 s |
 | Mutation testing | `scripts/mutation_testing.py` | **Tests that would not notice** | ~15 min |
 
@@ -189,12 +189,81 @@ checked over the whole surface:
 
 The contract is narrow and absolute. For **any** input, a tool either:
 
-1. raises a `QuantError` naming what was wrong and what to change, or
-2. returns a result that serializes to strict JSON — no NaN, no infinity.
+1. raises a `QuantError` (the library's `ValidationError` among them) naming
+   what was wrong and what to change, or its input model's own Pydantic
+   refusal, or
+2. returns a result whose own model holds no NaN and no infinity.
 
 Anything else is a defect. An `IndexError` from inside pandas crosses the
 boundary naming no tool, no argument and no remedy, and reads to a caller
 like a library bug rather than a request the data could not support.
+
+**A bare `ValueError` is not a refusal.** It used to count as one, and that
+hid most of what was wrong: numpy's "expected non-negative integer" for a
+seed of -1, pandas' `DateParseError` (a `ValueError` subclass) for a date
+key that is not a date, sklearn's "Input contains NaN", a rolling window of
+-1. None names an argument and `except QuantError` misses all of them. A
+Pydantic error raised by a *result* model fails too: that is a tool building
+an answer its own schema rejects, not a refusal of the input.
+
+**The non-finite check reads the raw result.** It used to read what
+`dispatch()` returned, which `sanitize_for_json` had already cleaned, so it
+could not fail — and a hundred result fields carried NaN or infinity past
+it, arriving as a null with nothing beside it. The layer now wraps
+`agent.runtimes._run_and_record` and reads the result model's own dump on
+its way into the audit record. A `Stat` field is already null there, so a
+non-finite number it finds is a field not typed to say "undefined", named by
+path; the fix is `Stat` (or a finite-or-None element type) with a warning
+saying why, or a refusal of the input that produces it. A guard fails if the
+capture stops seeing results, so the check cannot go vacuous again.
+
+**The market is fake and the fixtures are real** (`tests/surface/hermetic.py`,
+wired in `tests/surface/conftest.py` for the whole surface session).
+`FakeTicker` replaces only `yfinance.Ticker`; the provider's own interval
+checks, inclusive-end trim, session cache and audit data-access records still
+run, the Parquet tier is off for the session so fake bars are never read back
+as real ones by a later test, and a provider retry sleeps for nothing. Once
+per session (about 13 s) `publish_fixtures` builds what a baseline can name:
+price, returns, score, signal and weight panels, an equity curve, a trade
+log, a tick tape and quotes, registered order-book and order-event files, an
+indicator panel, a data bundle, a dataset, two ridge models, predictions with
+outcomes and two decision records. `published_baseline` substitutes them into
+each synthesized input by field name. A synthesized input used to refuse at
+the baseline for about two tools in five — no reference, dataset or model
+existed — so every mutation of them re-tested the argument lookup. Every
+tool must now RETURN on its published baseline except the thirteen in
+`EXPECTED_BASELINE_REFUSAL` (a tick, quote, depth or vendor feed, a Polygon
+key, a remote model store, a survival or interval model), each with its
+reason, and an entry that starts returning fails until it is removed.
+
+**Probes are generated from the input schema**, beside the ten value
+mutations: `0` and `-1` for every integer (a negative seed among them), 5000
+for a window, period, lookback or component count (longer than the data),
+`''` for every string and `'not-a-date'` / `'2019-13-45'` for a date-named
+one, ±infinity (and NaN where the baseline leaves it out) for every float,
+empty, single and duplicated name lists, NaN and infinity as a mapping's
+value, a date-keyed mapping with one key that is not a date and one keyed by
+tickers, the same scalar probes one level inside a nested model or its first
+list element, swapped and equal min/max, low/high, fast/slow, short/long,
+start/end and train/test pairs, and a length mismatch between two numeric
+lists. A guard counts each family across the surface. Sizes that make a
+tool run for minutes (a hundred thousand components or bootstrap draws) are
+left out: bounding them is a schema question, and a probe that could hang has
+no place in the default run.
+
+**The audit trail it wrote verifies.** The surface conftest runs
+`verify_audit_trail_integrity` over the session's audit directory at the
+end: every hostile call wrote a decision record, and a NaN in an input once
+made its record fail its own hash, marking the day tampered for good.
+
+**The cases it found are pinned in the fast run.**
+`tests/surface/test_refusal_pins.py` is not `slow`: one call each for the
+inputs that escaped as something other than a refusal (negative seeds,
+unparseable dates and date keys, duplicated lists, NaN and infinite inputs,
+missing lower bounds, an unknown source) plus four wrong answers — an empty
+leakage check reported safe, an inverted Hurst window, factor names zipped
+short, and a weight panel accepted as scores — each against the published
+fixtures, with the unchanged baselines as the null case.
 
 **Inputs are synthesized from the schema**, not hand-written. A hand-written
 fixture list covers the tools that existed when it was written — which makes

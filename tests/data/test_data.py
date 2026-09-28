@@ -107,6 +107,24 @@ class TestDataFactory:
         with pytest.raises(ValueError, match="Unknown data provider"):
             DataFactory.get_provider(source="unknown_provider_xyz")
 
+    @pytest.mark.parametrize("source", ["unknown_provider_xyz", "", "alpaca", None])
+    def test_factory_refusal_is_typed_and_lists_the_providers(self, source):
+        """A bare ValueError here reached eleven tools as an internal
+        failure with nothing to choose from, and 'alpaca' raised
+        NotImplementedError."""
+        from standard_quant_tools.data.factory import PROVIDER_NAMES
+        from standard_quant_tools.error import ValidationError
+
+        with pytest.raises(ValidationError) as exc:
+            DataFactory.get_provider(source=source)
+        for name in PROVIDER_NAMES:
+            assert name in str(exc.value)
+
+    def test_factory_names_are_the_four_it_builds(self):
+        from standard_quant_tools.data.factory import PROVIDER_NAMES
+
+        assert PROVIDER_NAMES == ("yfinance", "polygon", "bloomberg", "databento")
+
     def test_factory_returns_provider_for_yfinance(self):
         from standard_quant_tools.data.yfinance_provider import YFinanceProvider
 

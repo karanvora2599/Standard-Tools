@@ -34,10 +34,19 @@ strictly POSITIVE. `run_strategy` checked finiteness only, so a `Close` of
 `-5.0` passed and produced a total return of **+0.397914** — a plausible
 profit computed through a negative price — while a `Close` of `0.0` produced
 a silent total wipeout. Both are finite; neither is a price.
+
+A SCALAR PARAMETER GETS THE STRICTEST RULE: no NaN at all. The partial-NaN
+allowance above exists for gaps in a series, and a single number has no
+gaps -- a NaN capital, rate or threshold is a missing argument that
+compares False against every bound its range check is written with, so it
+passed the input schema and failed deep inside the computation (`int(nan)`,
+`round(inf)`) or came back as a NaN result. `require_finite_scalar_fields`
+applies this to every scalar float of a tool call, and to the scalars of
+the models nested in it, in one place, at dispatch.
 """
 
 import math
-from typing import Any, Optional
+from typing import Any, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -55,6 +64,7 @@ __all__ = [
     "require_finite_scalar",
     "require_periods_per_year",
     "require_finite_covariance",
+    "require_finite_scalar_fields",
 ]
 
 
@@ -373,3 +383,71 @@ def require_finite_series_frame(
             "computation cannot tolerate gaps"
         )
     return frame
+
+
+def _scalar_fields(node: Any, path: str, found: List[Tuple[str, float]]) -> None:
+    """Record every non-finite scalar float under `node`, a tool input."""
+    from pydantic import BaseModel
+
+    if isinstance(node, bool):
+        return
+    if isinstance(node, (float, np.floating)):
+        if not math.isfinite(float(node)):
+            found.append((path, float(node)))
+        return
+    if isinstance(node, BaseModel):
+        prefix = f"{path}." if path else ""
+        for name in type(node).model_fields:
+            _scalar_fields(getattr(node, name, None), prefix + name, found)
+        return
+    # Inside a list, a tuple or a dict only the MODELS are descended into.
+    # A bare number there is an element of inline data -- a series value,
+    # a weight, a date-keyed observation -- and a NaN among those is a gap
+    # that the series rules above govern, not a missing argument.
+    if isinstance(node, (list, tuple)):
+        for index, item in enumerate(node):
+            if isinstance(item, BaseModel):
+                _scalar_fields(item, f"{path}[{index}]", found)
+    elif isinstance(node, dict):
+        for key, item in node.items():
+            if isinstance(item, BaseModel):
+                _scalar_fields(item, f"{path}[{key!r}]", found)
+
+
+def non_finite_scalar_fields(model: Any) -> List[Tuple[str, float]]:
+    """
+    Every scalar float parameter of a tool input that is NaN or +/-inf, as
+    `(dotted path, value)`.
+
+    Scalar means a float-valued field of the input model itself or of a
+    model nested in it -- `initial_capital`, `legs[0].strike`. Numbers
+    inside a list or a dict are inline data and are not examined here.
+    Returns [] for anything that is not a pydantic model.
+    """
+    found: List[Tuple[str, float]] = []
+    _scalar_fields(model, "", found)
+    return found
+
+
+def require_finite_scalar_fields(model: Any, func: str) -> None:
+    """
+    Refuse a tool input carrying a NaN or infinite scalar parameter, naming
+    every such field.
+
+    No input model on the surface forbids non-finite floats, and most scalar
+    guards are comparisons (`if capital <= 0: raise`), which NaN satisfies
+    none of. Checked once at dispatch for every tool, rather than field by
+    field in hundreds of models, so the rule cannot be forgotten on the
+    next one written.
+    """
+    bad = non_finite_scalar_fields(model)
+    if not bad:
+        return
+    named = ", ".join(f"{path}={value!r}" for path, value in bad)
+    raise ValidationError(
+        f"{func}: {named} must be finite. A scalar parameter has no missing "
+        "value to skip: NaN compares False against every bound, so it passes "
+        "range checks written as comparisons and corrupts the result "
+        "silently, and an infinity is not a quantity. Pass a finite number, "
+        "or omit an optional parameter to take its default."
+    )

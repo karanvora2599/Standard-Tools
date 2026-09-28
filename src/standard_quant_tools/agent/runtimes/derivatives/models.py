@@ -24,6 +24,8 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from standard_quant_tools.agent.models import Seed
+
 
 class OptionGreeksInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -244,7 +246,7 @@ class DeltaHedgeInput(BaseModel):
     transaction_cost_bps: float = Field(
         0.0, ge=0, description="Cost per unit of notional traded, in bps."
     )
-    seed: int = Field(0, description="Seed, so the result is reproducible.")
+    seed: Seed = Field(0, description="Seed, so the result is reproducible.")
 
 
 class OptionScenariosInput(BaseModel):

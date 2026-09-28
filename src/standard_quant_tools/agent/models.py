@@ -11,8 +11,13 @@ from pydantic import (
 )
 
 from standard_quant_tools.agent.runtimes._json_safe import (
+    ExplainsNulls,
+    Reason,
+)
+from standard_quant_tools.agent.runtimes._json_safe import (
     finite_or_none as _finite_or_none,
 )
+from standard_quant_tools.data.factory import ProviderName
 
 #: A float that may legitimately be undefined. Non-finite in, null out --
 #: the same alias every runtime's own result module declares, because a NaN
@@ -20,6 +25,86 @@ from standard_quant_tools.agent.runtimes._json_safe import (
 #: JSON and which several MCP clients reject at the transport layer rather
 #: than at the tool.
 Stat = Annotated[Optional[float], BeforeValidator(_finite_or_none)]
+
+#: The same, for the values of a mapping whose values are not all numbers
+#: (a metrics dict that also carries a count or a label).
+FiniteOrNone = Annotated[Any, BeforeValidator(_finite_or_none)]
+
+#: Why a performance figure is null. Each is a quotient with a legitimate
+#: input on which it is 0/0 (undefined) or x/0 (unbounded): a strategy that
+#: never traded, a range of one bar, a book that never lost. Since the
+#: CHANGELOG entry of 2026-09-27 the engines return NaN for the 0/0 cases
+#: rather than a number that ranked a do-nothing run first, and these are
+#: the sentences a result writes beside the null that NaN becomes.
+_PERFORMANCE_REASONS: Dict[str, Reason] = {
+    "sharpe_ratio": (
+        "the returns have no dispersion -- a flat equity curve, or too few "
+        "bars to measure one -- so there is no volatility to divide by",
+        "the volatility it divides by is zero",
+    ),
+    "sortino_ratio": (
+        "no return differed from the risk-free rate, so the ratio is 0/0",
+        "no return fell below the risk-free rate, so the downside deviation "
+        "it divides by is zero",
+    ),
+    "calmar_ratio": (
+        "the equity curve neither grew nor drew down, so the ratio is 0/0",
+        "the equity curve never drew down, so the ratio divides by a zero " "drawdown",
+    ),
+    "profit_factor": (
+        "no trade closed, so there is no gross profit or loss to divide",
+        "no closed trade lost money, so the gross loss it divides by is zero",
+    ),
+    "annualized_volatility": (
+        "fewer than two returns were measured, so there is no dispersion to "
+        "annualize",
+        "the returns overflowed",
+    ),
+}
+_PERFORMANCE_REASONS["gross_sharpe_ratio"] = _PERFORMANCE_REASONS["sharpe_ratio"]
+_PERFORMANCE_REASONS["out_of_sample_sharpe"] = (
+    "the out-of-sample returns of this window have no dispersion, so there is "
+    "no volatility to divide by",
+    "the volatility it divides by is zero",
+)
+_PERFORMANCE_REASONS["best_sharpe"] = (
+    "the best row has no defined Sharpe ratio -- its returns have no "
+    "dispersion, or no row could be ranked",
+    "the volatility it divides by is zero",
+)
+_PERFORMANCE_REASONS["avg_oos_sharpe"] = (
+    "at least one window's out-of-sample Sharpe ratio is undefined, so their "
+    "mean is too",
+    "at least one window's out-of-sample Sharpe ratio is unbounded",
+)
+for _stitched, _base in (
+    ("stitched_oos_sharpe", "sharpe_ratio"),
+    ("stitched_oos_sortino", "sortino_ratio"),
+    ("stitched_oos_calmar", "calmar_ratio"),
+):
+    _PERFORMANCE_REASONS[_stitched] = _PERFORMANCE_REASONS[_base]
+
+
+def _seed_is_not_a_flag(value: Any) -> Any:
+    """Refuse True/False before int coercion turns them into seeds 1 and 0."""
+    if isinstance(value, bool):
+        raise ValueError(
+            f"a seed is a whole number in [0, 2**32 - 1], got the boolean "
+            f"{value!r}. Pass the number itself; a flag would silently run "
+            f"as seed {int(value)}."
+        )
+    return value
+
+
+#: A random seed, as every sampler on this surface can take one. The range
+#: is the one numpy's generators and the native kernels both accept:
+#: numpy refuses a negative seed with "expected non-negative integer", and
+#: the native Monte Carlo casts it to an unsigned integer and fails with a
+#: cast error that names no argument. Refused here instead, where the
+#: message can say which field was wrong. The bounds come before the
+#: validator so the JSON schema an agent reads carries them as
+#: minimum/maximum.
+Seed = Annotated[int, Field(ge=0, le=2**32 - 1), BeforeValidator(_seed_is_not_a_flag)]
 
 # ──────────────────────────────────────────────
 # Backtest
@@ -163,15 +248,19 @@ class Trade(BaseModel):
     return_pct: float
 
 
-class BacktestResult(BaseModel):
+class BacktestResult(ExplainsNulls):
+    null_reasons = _PERFORMANCE_REASONS
+
     total_return: float
     annualized_volatility: float
-    sharpe_ratio: float
-    sortino_ratio: float
+    # Null, with a warning saying why, where the ratio is 0/0 or x/0 -- a
+    # range of one bar, a strategy that never traded, a book that never lost.
+    sharpe_ratio: Stat
+    sortino_ratio: Stat
     max_drawdown: float
-    calmar_ratio: float
+    calmar_ratio: Stat
     win_rate: float
-    profit_factor: float
+    profit_factor: Stat
     num_trades: int
     avg_trade_return_pct: float
     final_equity: float
@@ -691,18 +780,16 @@ class EfficientFrontierInput(BaseModel):
         return self
 
 
-class FrontierPoint(BaseModel):
+class FrontierPoint(ExplainsNulls):
     """One portfolio on the frontier: where it sits, and what holds it."""
 
     model_config = ConfigDict(extra="forbid")
 
-    expected_return: float = Field(
+    expected_return: Stat = Field(
         ..., description="Annualized expected return of these weights."
     )
-    volatility: float = Field(
-        ..., description="Annualized volatility of these weights."
-    )
-    weights: Dict[str, float] = Field(
+    volatility: Stat = Field(..., description="Annualized volatility of these weights.")
+    weights: Dict[str, Stat] = Field(
         ...,
         description="ticker -> weight, summing to 1. UNBOUNDED: the closed "
         "form imposes sum(w)=1 and nothing else, so a weight may be "
@@ -711,7 +798,7 @@ class FrontierPoint(BaseModel):
     )
 
 
-class EfficientFrontierResult(BaseModel):
+class EfficientFrontierResult(ExplainsNulls):
     model_config = ConfigDict(extra="forbid")
 
     tickers: List[str] = Field(
@@ -788,10 +875,10 @@ class ScreenerInput(BaseModel):
         ),
     )
     ascending: bool = Field(True, description="Sort direction.")
-    source: Optional[str] = Field(
+    source: Optional[ProviderName] = Field(
         None,
         description="Data provider for the bars the technical filters read "
-        "('yfinance', 'databento', 'polygon', ...). None uses the default "
+        "('yfinance', 'polygon', 'bloomberg' or 'databento'). None uses the default "
         "provider. Fundamental filters need a provider that serves "
         "financial ratios; a bars-only provider fails those tickers by name.",
     )
@@ -850,6 +937,68 @@ class ScreenerResult(BaseModel):
 # ──────────────────────────────────────────────
 
 
+def _finite_entries(values: Any, field: str) -> Any:
+    """
+    Inline numeric data -- weights in a list or a {name: value} map -- with
+    every entry finite, or a refusal naming the entries that are not.
+
+    A NaN or infinite entry passes a sum check (NaN compares false against
+    every tolerance) and then surfaces far downstream as a NaN result, or as
+    an error that names the wrong thing.
+    """
+    import math
+
+    items = values.items() if isinstance(values, dict) else enumerate(values)
+    bad = [key for key, value in items if not math.isfinite(value)]
+    if bad:
+        where = "key(s)" if isinstance(values, dict) else "position(s)"
+        raise ValueError(
+            f"{field} is not finite at {where} {bad[:10]}; every entry must be "
+            "a finite number."
+        )
+    return values
+
+
+def _distinct(values: List[str], field: str) -> List[str]:
+    """`values`, refusing a repeat by name. A list of symbols is keyed by
+    symbol downstream, so a repeated one collapses into a single column or
+    row while its weight, name or count is still used as if it were two."""
+    repeated = sorted({v for v in values if values.count(v) > 1})
+    if repeated:
+        raise ValueError(f"{field} repeats {repeated}; list each once.")
+    return values
+
+
+def _factor_names_one_to_one(
+    factor_tickers: List[str], factor_names: Optional[List[str]]
+) -> List[str]:
+    """
+    The factor names, one per ticker and unique -- or a refusal naming why.
+
+    Names and tickers are zipped into the regression's columns, so a short
+    name list silently dropped the unnamed factors, and a repeated name
+    overwrote one factor with another before it was fitted. Every tool that
+    regresses on named factor proxies applies this one policy.
+    """
+    if not factor_tickers:
+        raise ValueError("factor_tickers must name at least one factor.")
+    if factor_names is not None and len(factor_names) != len(factor_tickers):
+        raise ValueError(
+            f"factor_names has {len(factor_names)} name(s) for "
+            f"{len(factor_tickers)} factor_tickers; give one name per "
+            "ticker, in the same order, or omit factor_names."
+        )
+    names = factor_names or factor_tickers
+    repeated = sorted({n for n in names if names.count(n) > 1})
+    if repeated:
+        raise ValueError(
+            f"factor names must be unique; repeated: {repeated}. Each "
+            "factor is one column of the regression, and a repeated name "
+            "would overwrite one factor with another."
+        )
+    return names
+
+
 class FactorRegressionInput(BaseModel):
     # An argument this tool does not take is REJECTED, not ignored.
     # Pydantic's default would drop it silently, so a typo or a
@@ -886,27 +1035,7 @@ class FactorRegressionInput(BaseModel):
 
     @model_validator(mode="after")
     def _names_label_the_tickers_one_to_one(self) -> "FactorRegressionInput":
-        # Names and tickers were zipped, so a short name list silently
-        # dropped the unnamed factors from the regression, and a repeated
-        # name overwrote one factor with another before it was fitted.
-        if not self.factor_tickers:
-            raise ValueError("factor_tickers must name at least one factor.")
-        if self.factor_names is not None and len(self.factor_names) != len(
-            self.factor_tickers
-        ):
-            raise ValueError(
-                f"factor_names has {len(self.factor_names)} name(s) for "
-                f"{len(self.factor_tickers)} factor_tickers; give one name per "
-                "ticker, in the same order, or omit factor_names."
-            )
-        names = self.factor_names or self.factor_tickers
-        repeated = sorted({n for n in names if names.count(n) > 1})
-        if repeated:
-            raise ValueError(
-                f"factor names must be unique; repeated: {repeated}. Each "
-                "factor is one column of the regression, and a repeated name "
-                "would overwrite one factor with another."
-            )
+        names = _factor_names_one_to_one(self.factor_tickers, self.factor_names)
         if "alpha" in names:
             raise ValueError(
                 "'alpha' is reserved for the intercept in t_stats and "
@@ -1113,11 +1242,18 @@ class PCAInput(BaseModel):
         ),
     )
 
-    tickers: List[str] = Field(..., description="Universe of tickers to decompose.")
+    tickers: List[str] = Field(
+        ...,
+        min_length=2,
+        description="Universe of tickers to decompose: at least two, each "
+        "named once.",
+    )
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
     n_components: int = Field(
-        3, description="Number of principal components to extract (default 3)."
+        3,
+        description="Number of principal components to extract (default 3). "
+        "At most one per ticker.",
     )
     run_id: Optional[str] = Field(
         None,
@@ -1138,6 +1274,27 @@ class PCAInput(BaseModel):
         if v < 1:
             raise ValueError(f"n_components must be >= 1, got {v}")
         return v
+
+    @field_validator("tickers")
+    @classmethod
+    def _distinct_tickers(cls, v: List[str]) -> List[str]:
+        # The returns frame is keyed by symbol, so a repeat collapses into
+        # one column and the universe is smaller than the list says.
+        return _distinct(v, "tickers")
+
+    @model_validator(mode="after")
+    def _components_fit_the_universe(self) -> "PCAInput":
+        # N assets span at most N components. Asking for more used to fail
+        # inside the per-asset contribution step with a pandas length error
+        # that named neither argument.
+        if self.n_components > len(self.tickers):
+            raise ValueError(
+                f"n_components={self.n_components} exceeds the "
+                f"{len(self.tickers)} tickers: {len(self.tickers)} return "
+                f"series span at most {len(self.tickers)} principal "
+                "components. Ask for fewer, or add tickers."
+            )
+        return self
 
 
 class PCAResult(BaseModel):
@@ -1219,13 +1376,36 @@ class CorrelationAnalysisInput(BaseModel):
         return self
 
 
-class CorrelationAnalysisResult(BaseModel):
+_CORRELATION_UNDEFINED = (
+    "a series in the pair did not move over the window, or the two share "
+    "fewer than two dates, so the correlation is 0/0"
+)
+
+
+class CorrelationAnalysisResult(ExplainsNulls):
+    null_reasons = {
+        "correlation_matrix": _CORRELATION_UNDEFINED,
+        "correlation": _CORRELATION_UNDEFINED,
+        "avg_pairwise_correlation": (
+            "at least one pairwise correlation is undefined -- a series that "
+            "did not move, or a window of fewer than two dates"
+        ),
+        "diversification_ratio": (
+            "the portfolio volatility it divides by is zero or undefined over "
+            "this window"
+        ),
+    }
+
     tickers: List[str]
-    correlation_matrix: Dict[str, Dict[str, float]]
-    avg_pairwise_correlation: float
-    highest_correlated_pair: Dict[str, Any]
-    lowest_correlated_pair: Dict[str, Any]
-    diversification_ratio: float
+    correlation_matrix: Dict[str, Dict[str, Stat]]
+    avg_pairwise_correlation: Stat
+    highest_correlated_pair: Dict[str, FiniteOrNone]
+    lowest_correlated_pair: Dict[str, FiniteOrNone]
+    diversification_ratio: Stat
+    warnings: List[str] = Field(
+        default_factory=list,
+        description="Why any correlation above is null, when one is.",
+    )
 
 
 # ──────────────────────────────────────────────
@@ -1395,22 +1575,34 @@ class RallyDetectionInput(BaseModel):
     )
 
 
-class RallyDetectionResult(BaseModel):
+_ADX_WARMUP = (
+    "adx_period needs more bars than the window holds, so the indicator "
+    "never finished its warm-up"
+)
+
+
+class RallyDetectionResult(ExplainsNulls):
+    null_reasons = {"adx": _ADX_WARMUP, "di_plus": _ADX_WARMUP, "di_minus": _ADX_WARMUP}
+
     symbol: str
     is_rally: bool
     rally_score: float
     trailing_return_pct: float
     return_zscore: float
-    adx: float
-    di_plus: float
-    di_minus: float
+    adx: Stat
+    di_plus: Stat
+    di_minus: Stat
     trend_direction: str  # "bullish" | "bearish" | "neutral"
     hurst: float
     regime: str  # "trending" | "random_walk" | "mean_reverting"
     is_new_high: bool
     n_obs: int
-    adx_threshold_used: float
+    adx_threshold_used: Stat
     auto_tuned: bool
+    warnings: List[str] = Field(
+        default_factory=list,
+        description="Why a directional-movement figure above is null, when one is.",
+    )
 
 
 # ──────────────────────────────────────────────
@@ -1449,17 +1641,38 @@ class VolatilityEstimatorsInput(BaseModel):
     )
 
 
-class VolatilityEstimatorsResult(BaseModel):
+_ESTIMATOR_WARMUP = (
+    "period needs more bars than the window holds, so the estimator has no "
+    "complete window to measure"
+)
+
+
+class VolatilityEstimatorsResult(ExplainsNulls):
+    null_reasons = {
+        "close_to_close_annualized": _ESTIMATOR_WARMUP,
+        "parkinson_annualized": _ESTIMATOR_WARMUP,
+        "garman_klass_annualized": _ESTIMATOR_WARMUP,
+        "yang_zhang_annualized": _ESTIMATOR_WARMUP,
+        "yang_zhang_vs_close_to_close_ratio": (
+            "one of the two volatilities it compares is undefined, or the "
+            "close-to-close one is zero"
+        ),
+    }
+
     symbol: str
     period: int
     periods_per_year: int = Field(
         252, description="Bars per year every number here was annualized by."
     )
-    close_to_close_annualized: float
-    parkinson_annualized: float
-    garman_klass_annualized: float
-    yang_zhang_annualized: float
-    yang_zhang_vs_close_to_close_ratio: float
+    close_to_close_annualized: Stat
+    parkinson_annualized: Stat
+    garman_klass_annualized: Stat
+    yang_zhang_annualized: Stat
+    yang_zhang_vs_close_to_close_ratio: Stat
+    warnings: List[str] = Field(
+        default_factory=list,
+        description="Why an estimate above is null, when one is.",
+    )
 
 
 # ──────────────────────────────────────────────
@@ -2044,7 +2257,9 @@ class RegimeAdaptiveWalkForwardInput(BaseModel):
     )
 
 
-class RegimeAdaptiveWalkForwardWindow(BaseModel):
+class RegimeAdaptiveWalkForwardWindow(ExplainsNulls):
+    null_reasons = _PERFORMANCE_REASONS
+
     window_index: int
     train_start: str
     train_end: str
@@ -2057,16 +2272,18 @@ class RegimeAdaptiveWalkForwardWindow(BaseModel):
     best_params: Dict[str, Any]
     in_sample_sharpe: float
     in_sample_return: float
-    out_of_sample_sharpe: float
+    out_of_sample_sharpe: Stat
     out_of_sample_return: float
     out_of_sample_max_drawdown: float
 
 
-class RegimeAdaptiveWalkForwardResult(BaseModel):
+class RegimeAdaptiveWalkForwardResult(ExplainsNulls):
+    null_reasons = _PERFORMANCE_REASONS
+
     symbol: str
     n_windows: int
     windows: List[RegimeAdaptiveWalkForwardWindow]
-    avg_oos_sharpe: float
+    avg_oos_sharpe: Stat
     avg_oos_return: float
     avg_oos_max_drawdown: float
     pct_windows_profitable: float
@@ -2117,8 +2334,22 @@ class RiskAttributionInput(BaseModel):
         description="Optional factor proxy tickers (e.g. ['SPY','IWM','IWD']). Enables factor regression on the portfolio.",
     )
     factor_names: Optional[List[str]] = Field(
-        None, description="Human-readable factor names. Defaults to factor_tickers."
+        None,
+        description="Human-readable factor names, one per factor ticker in "
+        "the same order, unique. Defaults to factor_tickers.",
     )
+
+    @field_validator("tickers")
+    @classmethod
+    def _distinct_tickers(cls, v: List[str]) -> List[str]:
+        # A repeated ticker became one returns column carrying two weights,
+        # so the portfolio product failed on a shape mismatch.
+        return _distinct(v, "tickers")
+
+    @field_validator("weights")
+    @classmethod
+    def _finite_weights(cls, v: List[float]) -> List[float]:
+        return _finite_entries(v, "weights")
 
     @model_validator(mode="after")
     def _check_weights(self) -> "RiskAttributionInput":
@@ -2129,6 +2360,25 @@ class RiskAttributionInput(BaseModel):
         total = sum(self.weights)
         if abs(total - 1.0) > 1e-6:
             raise ValueError(f"weights must sum to 1.0, got {total:.8f}")
+        return self
+
+    @model_validator(mode="after")
+    def _factor_names_label_the_tickers(self) -> "RiskAttributionInput":
+        # The policy run_factor_regression applies: the names were zipped
+        # onto the tickers here too, dropping or overwriting factors.
+        if self.factor_tickers is None:
+            if self.factor_names is not None:
+                raise ValueError(
+                    "factor_names was given without factor_tickers; the names "
+                    "label factor proxies, so pass the tickers they name."
+                )
+            return self
+        if not self.factor_tickers:
+            raise ValueError(
+                "factor_tickers=[] names no factor. Omit it for no factor "
+                "regression, or list the proxy tickers to regress on."
+            )
+        _factor_names_one_to_one(self.factor_tickers, self.factor_names)
         return self
 
     risk_free_rate: float = Field(
@@ -2260,7 +2510,11 @@ class PositionSizerInput(BaseModel):
         ..., description="Start date YYYY-MM-DD (for ATR calculation)."
     )
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
-    account_equity: float = Field(..., description="Total account equity in dollars.")
+    # Both strictly positive: a zero or negative equity or multiplier sized
+    # every position at zero shares and returned it as a recommendation.
+    account_equity: float = Field(
+        ..., gt=0, description="Total account equity in dollars."
+    )
     risk_per_trade_pct: float = Field(
         0.01,
         description="Fraction of account to risk per trade (default 0.01 = 1%). Must be in (0, 1].",
@@ -2269,7 +2523,7 @@ class PositionSizerInput(BaseModel):
         14, gt=0, le=100_000, description="ATR lookback period (default 14)."
     )
     atr_multiplier: float = Field(
-        2.0, description="Stop distance = atr_multiplier × ATR (default 2.0)."
+        2.0, gt=0, description="Stop distance = atr_multiplier × ATR (default 2.0)."
     )
     win_rate: Optional[float] = Field(
         None, description="Strategy win rate [0,1]. Required for Kelly sizing."
@@ -2312,17 +2566,19 @@ class PositionSizerInput(BaseModel):
         return v
 
 
-class PositionSizerResult(BaseModel):
+class PositionSizerResult(ExplainsNulls):
     symbol: str
     last_close: float
     atr: float
     atr_pct: float  # ATR as % of price
-    stop_distance: float  # atr_multiplier × ATR in $
+    # Null only when a sizing input was not a finite number or was too large
+    # to represent; get_position_size refuses those inputs by name.
+    stop_distance: Stat  # atr_multiplier × ATR in $
     # Fixed-risk (ATR-based) sizing
     shares_fixed_risk: int
     position_value_fixed_risk: float
     portfolio_pct_fixed_risk: float
-    max_loss_fixed_risk: float  # worst-case $ loss if stop is hit
+    max_loss_fixed_risk: Stat  # worst-case $ loss if stop is hit
     # Kelly sizing (populated when win_rate/avg_win/avg_loss are provided)
     kelly_fraction: Optional[float] = None
     shares_half_kelly: Optional[int] = None
@@ -2332,6 +2588,10 @@ class PositionSizerResult(BaseModel):
     recommended_sizing: str  # "fixed_risk" | "half_kelly"
     recommended_shares: int
     recommended_position_value: float
+    warnings: List[str] = Field(
+        default_factory=list,
+        description="Why a sizing figure above is null, when one is.",
+    )
 
 
 # ──────────────────────────────────────────────
@@ -2387,14 +2647,16 @@ class BuyAndHoldInput(BaseModel):
 # ──────────────────────────────────────────────
 
 
-class StrategyComparison(BaseModel):
+class StrategyComparison(ExplainsNulls):
+    null_reasons = _PERFORMANCE_REASONS
+
     strategy: str
     parameters: Dict[str, Any]
     total_return: float
-    sharpe_ratio: float
-    sortino_ratio: float
+    sharpe_ratio: Stat
+    sortino_ratio: Stat
     max_drawdown: float
-    calmar_ratio: float
+    calmar_ratio: Stat
     win_rate: float
     num_trades: int
     final_equity: float
@@ -2494,7 +2756,9 @@ class CompareStrategiesInput(BaseModel):
     )
 
 
-class CompareStrategiesResult(BaseModel):
+class CompareStrategiesResult(ExplainsNulls):
+    null_reasons = _PERFORMANCE_REASONS
+
     symbol: str
     sort_by: str
     best_strategy: str
@@ -2625,6 +2889,8 @@ class BacktestOptInput(BaseModel):
     )
     top_n: int = Field(
         5,
+        ge=1,
+        le=20,
         description="Number of top parameter combinations to return (default 5, max 20).",
     )
     n_workers: int = Field(
@@ -2654,13 +2920,15 @@ class BacktestOptInput(BaseModel):
         return _validate_param_grid(v)
 
 
-class OptimizationRun(BaseModel):
+class OptimizationRun(ExplainsNulls):
+    null_reasons = _PERFORMANCE_REASONS
+
     rank: int
     parameters: Dict[str, Any]
     total_return: float
-    sharpe_ratio: float
-    sortino_ratio: float
-    calmar_ratio: float
+    sharpe_ratio: Stat
+    sortino_ratio: Stat
+    calmar_ratio: Stat
     max_drawdown: float
     num_trades: int
     # Every value `sort_by` accepts is a field here. Four of them were not,
@@ -2678,7 +2946,9 @@ class OptimizationRun(BaseModel):
     )
 
 
-class BacktestOptResult(BaseModel):
+class BacktestOptResult(ExplainsNulls):
+    null_reasons = _PERFORMANCE_REASONS
+
     symbol: str
     strategy: str
     n_combinations: int = Field(
@@ -2688,7 +2958,7 @@ class BacktestOptResult(BaseModel):
     )
     sort_by: str
     best_params: Dict[str, Any]
-    best_sharpe: float
+    best_sharpe: Stat
     best_return: float
     top_results: List[OptimizationRun]
     n_unrankable: int = Field(
@@ -3155,10 +3425,12 @@ class SignalPanelBacktestInput(BaseModel):
         return self
 
 
-class SignalPanelBacktestResult(BaseModel):
+class SignalPanelBacktestResult(ExplainsNulls):
+    null_reasons = _PERFORMANCE_REASONS
+
     tickers: List[str]
     per_ticker: Dict[str, BacktestResult]
-    portfolio_metrics: Dict[str, Any]
+    portfolio_metrics: Dict[str, FiniteOrNone]
     portfolio_returns_ref: Optional[str] = Field(
         None,
         description=(
@@ -3491,25 +3763,47 @@ class RebalanceEvent(BaseModel):
     )
 
 
-class PortfolioSimulationResult(BaseModel):
+_ACCOUNT_NOT_FINITE = (
+    "the simulated account stopped being a finite number -- an input too "
+    "large to represent, such as a financing rate, reached it"
+)
+
+
+class PortfolioSimulationResult(ExplainsNulls):
+    null_reasons = {
+        **_PERFORMANCE_REASONS,
+        **{
+            name: _ACCOUNT_NOT_FINITE
+            for name in (
+                "total_return",
+                "annualized_return",
+                "final_equity",
+                "final_cash",
+                "avg_gross_leverage",
+                "max_gross_leverage_used",
+                "equity_curve",
+            )
+        },
+    }
+
     tickers: List[str]
     n_rebalances: int
     rebalance_log: List[RebalanceEvent]
-    total_return: float
-    annualized_return: float
-    annualized_volatility: float
-    sharpe_ratio: float
-    sortino_ratio: float
+    total_return: Stat
+    annualized_return: Stat
+    annualized_volatility: Stat
+    sharpe_ratio: Stat
+    sortino_ratio: Stat
     max_drawdown: float
-    calmar_ratio: float
+    calmar_ratio: Stat
     var_95: float
     cvar_95: float
     information_ratio: Optional[float] = None
-    final_equity: float
-    final_cash: float
-    avg_gross_leverage: float
-    max_gross_leverage_used: float
-    equity_curve: List[float]
+    final_equity: Stat
+    final_cash: Stat
+    avg_gross_leverage: Stat
+    max_gross_leverage_used: Stat
+    equity_curve: List[Stat]
     # ── Net exposure, inline ─────────────────────────────────────────────
     # The three numbers that answer "did the book stay where I built it".
     # A dollar-neutral construction is an INPUT (make_dollar_neutral); a
@@ -3600,6 +3894,7 @@ class PairTradeBacktestInput(BaseModel):
     exit_z: float = Field(0.5, description="Exit to flat once |z-score| <= exit_z.")
     zscore_window: Optional[int] = Field(
         30,
+        ge=2,
         description=(
             "Rolling window (bars) for the spread z-score. Defaults to 30 so signals only use "
             "data available up to each bar. Passing None switches to a full-sample static "
@@ -3654,7 +3949,9 @@ class PairTradeBacktestInput(BaseModel):
     )
 
 
-class PairTradeBacktestResult(BaseModel):
+class PairTradeBacktestResult(ExplainsNulls):
+    null_reasons = _PERFORMANCE_REASONS
+
     symbol_a: str
     symbol_b: str
     hedge_ratio: float
@@ -3666,10 +3963,10 @@ class PairTradeBacktestResult(BaseModel):
     total_return: float
     annualized_return: float
     annualized_volatility: float
-    sharpe_ratio: float
-    sortino_ratio: float
+    sharpe_ratio: Stat
+    sortino_ratio: Stat
     max_drawdown: float
-    calmar_ratio: float
+    calmar_ratio: Stat
     final_equity: float
     final_cash: float
     equity_curve: List[float]
@@ -3823,18 +4120,24 @@ class ExposureDiagnostics(BaseModel):
     avg_holding_period_bars: Optional[float] = None
 
 
-class BacktestDiagnosticsResult(BaseModel):
+class BacktestDiagnosticsResult(ExplainsNulls):
+    null_reasons = _PERFORMANCE_REASONS
+
     symbol: str
     strategy_type: str
     total_return: float
-    sharpe_ratio: float
-    sortino_ratio: float
+    sharpe_ratio: Stat
+    sortino_ratio: Stat
     max_drawdown: float
-    calmar_ratio: float
+    calmar_ratio: Stat
     num_trades: int
     top_drawdowns: List[DrawdownEpisode]
     trade_diagnostics: TradeDiagnostics
     exposure: ExposureDiagnostics
+    warnings: List[str] = Field(
+        default_factory=list,
+        description="Why a ratio above is null, when one is.",
+    )
 
 
 # ──────────────────────────────────────────────
@@ -3909,7 +4212,10 @@ class RobustnessDiagnosticsInput(BaseModel):
         ),
     )
     n_bootstrap_iterations: int = Field(
-        1000, description="Block-bootstrap resamples for the best trial's Sharpe CI."
+        1000,
+        ge=1,
+        le=20_000,
+        description="Block-bootstrap resamples for the best trial's Sharpe CI.",
     )
     bootstrap_block_size: int = Field(
         20, description="Block length (bars) for the bootstrap."
@@ -3917,7 +4223,7 @@ class RobustnessDiagnosticsInput(BaseModel):
     bootstrap_confidence: float = Field(
         0.95, description="Two-sided confidence level for the bootstrap CI."
     )
-    random_seed: Optional[int] = Field(
+    random_seed: Optional[Seed] = Field(
         None,
         description="Seed for the block-bootstrap RNG — set for reproducible results (recorded in the audit trail).",
     )
@@ -3946,13 +4252,15 @@ class RobustnessDiagnosticsInput(BaseModel):
         return _validate_param_grid(v)
 
 
-class RobustnessDiagnosticsResult(BaseModel):
+class RobustnessDiagnosticsResult(ExplainsNulls):
     symbol: str
     strategy: str
     best_params: Dict[str, Any]
     parameter_sensitivity: Dict[str, Any]
     expected_max_sharpe: float
-    deflated_sharpe_ratio: float
+    # Null only when a moment it is built from (skew, kurtosis) was not a
+    # finite number; those inputs are refused by name before it runs.
+    deflated_sharpe_ratio: Stat
     bootstrap_point_estimate: float
     bootstrap_ci_lower: float
     bootstrap_ci_upper: float
@@ -3977,7 +4285,11 @@ class MonteCarloSimulationInput(BaseModel):
     # the one choosing the names.
     model_config = ConfigDict(extra="forbid")
 
-    tickers: List[str] = Field(..., description="Portfolio tickers.")
+    tickers: List[str] = Field(
+        ...,
+        min_length=1,
+        description="Portfolio tickers, each named once.",
+    )
     weights: Optional[List[float]] = Field(
         None,
         description="Portfolio weights, same order as tickers, must sum to 1.0. None (default) uses equal weighting.",
@@ -4004,10 +4316,17 @@ class MonteCarloSimulationInput(BaseModel):
     initial_capital: float = Field(
         10_000.0, le=1e15, gt=0, description="Starting capital."
     )
-    random_seed: Optional[int] = Field(
+    random_seed: Optional[Seed] = Field(
         None,
         description="Seed for the resampling RNG — set for reproducible results (recorded in the audit trail).",
     )
+
+    @field_validator("tickers")
+    @classmethod
+    def _distinct_tickers(cls, v: List[str]) -> List[str]:
+        # The returns are fetched into one column per symbol, so a repeat
+        # collapses to one column while its weight is still counted twice.
+        return _distinct(v, "tickers")
 
     @model_validator(mode="after")
     def _check_weights(self) -> "MonteCarloSimulationInput":
@@ -4065,7 +4384,9 @@ class CapacityReportInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     tickers: List[str] = Field(
-        ..., description="Ticker universe. Must match target_weights' keys."
+        ...,
+        min_length=1,
+        description="Ticker universe. Must match target_weights' keys.",
     )
     start_date: str = Field(
         ...,
@@ -4082,12 +4403,25 @@ class CapacityReportInput(BaseModel):
     )
     adv_lookback: int = Field(
         20,
+        gt=0,
         description="Rolling window (bars, trailing from the end of the requested range) for average dollar/share volume.",
     )
     include_sector_exposure: bool = Field(
         True,
         description="If True, fetch each ticker's sector via the data provider's get_ticker_info and report exposure by sector (best-effort — 'Unknown' when unavailable).",
     )
+
+    @field_validator("tickers")
+    @classmethod
+    def _distinct_tickers(cls, v: List[str]) -> List[str]:
+        return _distinct(v, "tickers")
+
+    @field_validator("target_weights")
+    @classmethod
+    def _finite_target_weights(cls, v: Dict[str, float]) -> Dict[str, float]:
+        # A NaN weight made the capacity, every days-to-liquidate and the
+        # sector exposure NaN, reported as numbers.
+        return _finite_entries(v, "target_weights")
 
     @model_validator(mode="after")
     def _check_weights_match_tickers(self) -> "CapacityReportInput":
@@ -4097,15 +4431,28 @@ class CapacityReportInput(BaseModel):
         return self
 
 
-class CapacityReportResult(BaseModel):
+_CAPACITY_UNDEFINED = (
+    "a target weight is not a finite number, so the capacity it implies is "
+    "undefined -- NOT unbounded, which is what a null means for a zero weight"
+)
+
+
+class CapacityReportResult(ExplainsNulls):
+    null_reasons = {
+        "per_ticker_max_account_size": _CAPACITY_UNDEFINED,
+        "max_account_size": _CAPACITY_UNDEFINED,
+        "days_to_liquidate_at_capacity": _CAPACITY_UNDEFINED,
+        "sector_exposure": _CAPACITY_UNDEFINED,
+    }
+
     tickers: List[str]
     per_ticker_max_account_size: Dict[
-        str, Optional[float]
-    ]  # None = unbounded (zero target weight)
+        str, Stat
+    ]  # None = unbounded (zero target weight), unless a warning says otherwise
     binding_ticker: Optional[str] = None
-    max_account_size: Optional[float] = None  # None = unbounded (every weight is zero)
-    days_to_liquidate_at_capacity: Dict[str, float]
-    sector_exposure: Optional[Dict[str, float]] = None
+    max_account_size: Stat = None  # None = unbounded (every weight is zero)
+    days_to_liquidate_at_capacity: Dict[str, Stat]
+    sector_exposure: Optional[Dict[str, Stat]] = None
     warnings: List[str] = []
 
 
@@ -4125,12 +4472,19 @@ class LiquidityAnalysisInput(BaseModel):
     # the one choosing the names.
     model_config = ConfigDict(extra="forbid")
 
-    tickers: List[str] = Field(..., description="Tickers to analyze.")
+    # At least one: the least and most liquid ticker of nothing was a bare
+    # "max() iterable argument is empty".
+    tickers: List[str] = Field(..., min_length=1, description="Tickers to analyze.")
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
     window: int = Field(
         20, gt=0, description="Rolling window (bars) for both liquidity proxies."
     )
+
+    @field_validator("tickers")
+    @classmethod
+    def _distinct_tickers(cls, v: List[str]) -> List[str]:
+        return _distinct(v, "tickers")
 
 
 class LiquidityAnalysisResult(BaseModel):
@@ -4342,13 +4696,15 @@ class DataQualityReportResult(BaseModel):
 # ──────────────────────────────────────────────
 
 
-class PerformanceSummary(BaseModel):
+class PerformanceSummary(ExplainsNulls):
+    null_reasons = _PERFORMANCE_REASONS
+
     total_return: float
     annualized_return: float
     annualized_volatility: float
-    sharpe_ratio: float
-    sortino_ratio: float
-    calmar_ratio: float
+    sharpe_ratio: Stat
+    sortino_ratio: Stat
+    calmar_ratio: Stat
 
 
 class RiskSummary(BaseModel):
@@ -4439,7 +4795,9 @@ class BacktestCompactInput(BaseModel):
     )
 
 
-class BacktestResultV2(BaseModel):
+class BacktestResultV2(ExplainsNulls):
+    null_reasons = _PERFORMANCE_REASONS
+
     run_id: str
     strategy_name: str
     summary: PerformanceSummary
@@ -5101,7 +5459,7 @@ class EstimateTradeCostInput(BaseModel):
         return self
 
 
-class EstimateTradeCostResult(BaseModel):
+class EstimateTradeCostResult(ExplainsNulls):
     notional: float
     side: str
     legs: List[TradeCostLeg]
@@ -5109,7 +5467,7 @@ class EstimateTradeCostResult(BaseModel):
     total_bps: float = Field(
         ..., description="Total one-way cost in basis points of notional."
     )
-    breakeven_move_bps: float = Field(
+    breakeven_move_bps: Stat = Field(
         ...,
         description=(
             "How far the price must move in your favour to cover a ROUND "
@@ -5134,13 +5492,15 @@ class CostScenario(BaseModel):
     slippage_pct: float = Field(0.0, ge=0, le=1)
 
 
-class CostScenarioResult(BaseModel):
+class CostScenarioResult(ExplainsNulls):
+    null_reasons = _PERFORMANCE_REASONS
+
     label: str
     commission_pct: float
     slippage_pct: float
     total_return: float
     annualized_return: float
-    sharpe_ratio: float
+    sharpe_ratio: Stat
     max_drawdown: float
     n_trades: int
     cost_drag_vs_gross: float = Field(
@@ -5218,7 +5578,9 @@ class CompareCostModelsInput(BaseModel):
         return scenarios
 
 
-class CompareCostModelsResult(BaseModel):
+class CompareCostModelsResult(ExplainsNulls):
+    null_reasons = _PERFORMANCE_REASONS
+
     symbol: str
     strategy_type: str
     n_bars: int
@@ -5230,7 +5592,7 @@ class CompareCostModelsResult(BaseModel):
             "scenarios."
         ),
     )
-    gross_sharpe_ratio: float
+    gross_sharpe_ratio: Stat
     scenarios: List[CostScenarioResult]
     breakeven_commission_pct: Optional[float] = Field(
         None,
@@ -6745,17 +7107,21 @@ class StrategyMatrixInput(BaseModel):
         return values
 
 
-class MatrixCell(BaseModel):
+class MatrixCell(ExplainsNulls):
+    null_reasons = _PERFORMANCE_REASONS
+
     ticker: str
     strategy: str
     total_return: float
-    sharpe_ratio: float
+    sharpe_ratio: Stat
     max_drawdown: float
     num_trades: int
     win_rate: float
 
 
-class StrategyMatrixResult(BaseModel):
+class StrategyMatrixResult(ExplainsNulls):
+    null_reasons = _PERFORMANCE_REASONS
+
     tickers: List[str]
     strategies: List[str]
     n_backtests: int
@@ -7025,7 +7391,7 @@ class LiquidityEventsInput(BaseModel):
         "exclude the event: a shock inside its own baseline inflates the "
         "denominator it is measured against and hides itself.",
     )
-    source: Optional[str] = Field(
+    source: Optional[ProviderName] = Field(
         None, description="Data provider. Defaults to the configured one."
     )
 
@@ -7048,26 +7414,41 @@ class LiquidityEventsResult(BaseModel):
 # ── plan_rebalance ──────────────────────────────────────────────────────
 
 
-class RebalanceStep(BaseModel):
+_REBALANCE_UNDEFINED = (
+    "a current or target weight is not a finite number, so no schedule "
+    "toward it is defined"
+)
+
+
+class RebalanceStep(ExplainsNulls):
+    null_reasons = {
+        "turnover": _REBALANCE_UNDEFINED,
+        "traded_notional": _REBALANCE_UNDEFINED,
+        "distance_to_target": _REBALANCE_UNDEFINED,
+        "weights": _REBALANCE_UNDEFINED,
+    }
+
     day: int
-    turnover: float
-    traded_notional: float
+    turnover: Stat
+    traded_notional: Stat
     max_participation_used: Optional[float] = None
     impact_bps: Optional[float] = None
     impact_dollars: Optional[float] = None
     cumulative_cost_dollars: Optional[float] = None
-    distance_to_target: float = Field(
+    distance_to_target: Stat = Field(
         ...,
         description="Sum of absolute weight differences still to close. This "
         "is what the portfolio is NOT yet, and it is the cost of trading "
         "slowly.",
     )
-    weights: Dict[str, float]
+    weights: Dict[str, Stat]
 
 
-class UnreachableName(BaseModel):
+class UnreachableName(ExplainsNulls):
+    null_reasons = {"residual_weight": _REBALANCE_UNDEFINED}
+
     name: str
-    residual_weight: float
+    residual_weight: Stat
     days_needed: Optional[float] = Field(
         None,
         description="How long this name would ACTUALLY take at the "
@@ -7122,9 +7503,14 @@ class PlanRebalanceInput(BaseModel):
     )
 
 
-class PlanRebalanceResult(BaseModel):
+class PlanRebalanceResult(ExplainsNulls):
+    null_reasons = {
+        "total_turnover": _REBALANCE_UNDEFINED,
+        "residual_distance": _REBALANCE_UNDEFINED,
+    }
+
     n_days: int
-    total_turnover: float
+    total_turnover: Stat
     total_cost_bps: Optional[float] = Field(
         None,
         description="BLENDED rate: total impact dollars over total notional "
@@ -7135,7 +7521,7 @@ class PlanRebalanceResult(BaseModel):
     converged: bool = Field(
         ..., description="Whether the target was actually reached in the horizon."
     )
-    residual_distance: Optional[float] = None
+    residual_distance: Stat = None
     schedule: List[RebalanceStep] = Field(default_factory=list)
     unreachable: List[UnreachableName] = Field(
         default_factory=list,
@@ -7317,18 +7703,34 @@ class PartialCorrelationInput(BaseModel):
     end_date: str
 
 
-class PartialCorrelationResult(BaseModel):
+class PartialCorrelationResult(ExplainsNulls):
+    null_reasons = {
+        "raw_correlation": (
+            "x or y did not move over the window, or x and y name the same "
+            "series, so there is no pair to correlate"
+        ),
+        "partial_correlation": (
+            "nothing of x or y is left once the controls are removed -- x or "
+            "y is itself a control, x equals y, or a series did not move -- "
+            "so the correlation of what remains is 0/0"
+        ),
+        "explained_away": (
+            "it is raw_correlation minus partial_correlation, and one of the "
+            "two is undefined"
+        ),
+    }
+
     x: str
     y: str
     controlling_for: List[str]
-    raw_correlation: float
-    partial_correlation: float = Field(
+    raw_correlation: Stat
+    partial_correlation: Stat = Field(
         ...,
         description="What is left once the controls are removed from both. "
         "This is the number a pair trade lives on; the raw one systematically "
         "overstates it.",
     )
-    explained_away: float
+    explained_away: Stat
     n_observations: int
     warnings: List[str] = Field(default_factory=list)
 

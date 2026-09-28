@@ -598,31 +598,56 @@ def get_portfolio_risk_attribution(
     factor_loadings: Optional[Dict[str, float]] = None
     factor_r2: Optional[float] = None
     factor_alpha: Optional[float] = None
+    warnings: List[str] = []
 
     if input_data.factor_tickers:
+        # One name per ticker, unique -- the input model checks both, as it
+        # does for run_factor_regression, so the zip cannot drop or
+        # overwrite a factor.
         names = input_data.factor_names or input_data.factor_tickers
-        factor_df = pd.DataFrame(
-            {
-                name: provider.get_ohlcv(
-                    tick, input_data.start_date, input_data.end_date
-                )["Close"].pct_change(fill_method=None)
-                for name, tick in zip(names, input_data.factor_tickers)
-            }
-        ).dropna()
-
+        factor_series = {
+            name: provider.get_ohlcv(tick, input_data.start_date, input_data.end_date)[
+                "Close"
+            ]
+            .pct_change(fill_method=None)
+            .dropna()
+            for name, tick in zip(names, input_data.factor_tickers, strict=True)
+        }
+        # Inner join, with the dates it costs counted and reported: a date
+        # is used only when the portfolio and every factor have a return on
+        # it. A linearly dependent set of factors is refused by
+        # multi_factor_regression, naming the factors to drop.
+        factor_df = pd.concat(factor_series, axis=1, join="inner")
+        all_dates = port_ret.index
+        for series in factor_series.values():
+            all_dates = all_dates.union(series.index)
         mfr = _mfr(port_ret, factor_df)
-        factor_loadings = {k: round(float(v), 4) for k, v in mfr["loadings"].items()}
-        factor_r2 = round(float(mfr["r_squared"]), 4)
-        factor_alpha = round(float(mfr["alpha"]), 6)
+        n_dates_dropped = int(len(all_dates) - mfr["n_obs"])
+        factor_r2 = _rounded(mfr["r_squared"], 4)
+        if factor_r2 is not None:
+            factor_loadings = {
+                k: round(float(v), 4) for k, v in mfr["loadings"].items()
+            }
+            factor_alpha = _rounded(mfr["alpha"], 6)
+            warnings.append(
+                "OLS standard errors: the t-statistics and p-values assume independent, homoskedastic residuals. Daily return residuals are neither, so a loading that is 'significant' here may not survive HAC (Newey-West) errors; read the p-values as a ranking of the loadings, not a test."
+            )
+        else:
+            warnings.append(
+                f"The factor regression is undefined on {mfr['n_obs']} shared "
+                f"date(s) for {len(names)} factor(s) plus an intercept, so its "
+                "loadings, alpha and R-squared are null. Widen the date range."
+            )
+        if n_dates_dropped > 0:
+            warnings.append(
+                f"{n_dates_dropped} of {len(all_dates)} dates were dropped from "
+                "the factor regression because the portfolio or some factor "
+                f"had no return on them; it uses the {mfr['n_obs']} dates they "
+                "all share."
+            )
 
     return RiskAttributionResult(
-        warnings=(
-            [
-                "OLS standard errors: the t-statistics and p-values assume independent, homoskedastic residuals. Daily return residuals are neither, so a loading that is 'significant' here may not survive HAC (Newey-West) errors; read the p-values as a ranking of the loadings, not a test."
-            ]
-            if factor_loadings is not None
-            else []
-        ),
+        warnings=warnings,
         tickers=input_data.tickers,
         weights=list(input_data.weights),
         annualized_return=round(ann_ret, 4),
@@ -734,6 +759,25 @@ def run_stress_test(input_data: StressTestInput) -> StressTestResult:
     )
 
 
+def _whole_shares(amount: float, per_share: float, what: str) -> int:
+    """
+    Whole shares that `amount` buys at `per_share`, never negative.
+
+    `int()` of a non-finite quotient is an OverflowError or a ValueError
+    that names neither the position nor the input behind it, so a quotient
+    beyond the float range is refused here in the sizer's own terms.
+    """
+    count = amount / per_share
+    if not math.isfinite(count):
+        raise ValidationError(
+            f"{what} is not a finite number of shares ({amount:g} / "
+            f"{per_share:g}). account_equity is in dollars and "
+            "risk_per_trade_pct a fraction of it; check both are on that "
+            "scale."
+        )
+    return max(int(count), 0)
+
+
 def get_position_size(input_data: PositionSizerInput) -> PositionSizerResult:
     """
     Compute risk-adjusted position size using ATR-based stop-loss sizing
@@ -764,8 +808,20 @@ def get_position_size(input_data: PositionSizerInput) -> PositionSizerResult:
 
     stop_distance = last_atr * input_data.atr_multiplier
     dollar_risk = input_data.account_equity * input_data.risk_per_trade_pct
+    if not math.isfinite(stop_distance):
+        # An infinite stop sized every position at zero shares and reported
+        # the worst-case loss as 0 x inf = NaN.
+        raise ValidationError(
+            f"atr_multiplier={input_data.atr_multiplier:g} times the last ATR "
+            f"({last_atr:g}) is not a finite stop distance. A multiplier is "
+            "a few ATRs -- 1 to 5 is the usual range."
+        )
 
-    shares_fr = max(int(dollar_risk / stop_distance), 0) if stop_distance > 0 else 0
+    shares_fr = (
+        _whole_shares(dollar_risk, stop_distance, "the fixed-risk position")
+        if stop_distance > 0
+        else 0
+    )
     pos_val_fr = shares_fr * last_close
     port_pct_fr = (
         pos_val_fr / input_data.account_equity if input_data.account_equity > 0 else 0.0
@@ -796,7 +852,11 @@ def get_position_size(input_data: PositionSizerInput) -> PositionSizerResult:
         kelly_fraction = round(max(raw_kelly, 0.0), 4)
 
         half_kelly_equity = input_data.account_equity * kelly_fraction * 0.5
-        shares_hk = max(int(half_kelly_equity / last_close), 0) if last_close > 0 else 0
+        shares_hk = (
+            _whole_shares(half_kelly_equity, last_close, "the half-Kelly position")
+            if last_close > 0
+            else 0
+        )
         pos_val_hk = shares_hk * last_close
         port_pct_hk = (
             pos_val_hk / input_data.account_equity

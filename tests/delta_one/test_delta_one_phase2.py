@@ -343,3 +343,36 @@ class TestIndexRebalance:
         b = {r["symbol"]: r["auction_participation"] for r in auction["changes"]}
         for symbol in a:
             assert b[symbol] == pytest.approx(a[symbol] * 10.0)
+
+
+class TestTheReplicationToolRefusesAnUnestimableSeries:
+    """A series whose fourth powers overflow reached the shrinkage
+    estimator as NaN, and scikit-learn answered "Input contains NaN" --
+    naming neither the series nor the cause."""
+
+    @staticmethod
+    def _call(benchmark):
+        from standard_quant_tools.agent.tools import dispatch
+
+        rng = np.random.default_rng(5)
+        returns = {
+            "A": rng.normal(0.0, 0.01, 60).tolist(),
+            "B": rng.normal(0.0, 0.01, 60).tolist(),
+        }
+        return dispatch(
+            "optimize_replication_basket",
+            {"returns": returns, "benchmark_returns": benchmark},
+        )
+
+    def test_a_series_scaled_by_1e300_is_refused_by_name(self):
+        benchmark = (np.random.default_rng(6).normal(0.0, 0.01, 60) * 1e300).tolist()
+        with pytest.raises(ValidationError) as exc:
+            self._call(benchmark)
+        message = str(exc.value)
+        assert "benchmark_returns" in message
+        assert "not a return" in message
+
+    def test_ordinary_returns_still_build_a_basket(self):
+        benchmark = np.random.default_rng(6).normal(0.0, 0.01, 60).tolist()
+        out = self._call(benchmark)
+        assert out["net_weight"] == pytest.approx(1.0, abs=1e-6)

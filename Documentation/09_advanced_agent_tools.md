@@ -13,7 +13,11 @@ each tool against its neighbours. The description the *model* reads when
 choosing is a different string, and it lives in
 [20_tool_index.md](20_tool_index.md) with the tool's required and optional
 parameters. What this table adds is the last column: the fields you will
-actually read off the result.
+actually read off the result. A number in those fields that is undefined or
+unbounded on the input given — a Sharpe over a flat window, an ADX whose
+period is longer than the data, a capacity implied by a weight that is not a
+finite number — is `null`, and the result's `warnings` (or `notes`) says which
+and why; see [07_agent_tools.md](07_agent_tools.md#backtestinput--backtestresult--full-reference).
 
 **Advanced tools (8)**
 
@@ -722,6 +726,8 @@ MCR_i = (Σ w)_i × w_i / (w' Σ w)
 
 MCR values sum to exactly 1.0 and represent each asset's fractional contribution to total portfolio variance. A high MCR for a single asset indicates concentration risk.
 
+**The factor regression follows `run_factor_regression`'s rules.** `factor_names`, when given, has one name per factor ticker, in the same order, and no name twice; `factor_tickers=[]` and names without tickers are refused. The names used to be zipped onto the tickers, so a short list silently dropped factors from the regression and a repeated one overwrote a factor. The regression runs on the dates the portfolio and every factor share (an inner join), and a warning counts the dates that cost; a linearly dependent set of factors is refused naming the factor to drop. `tickers` names each asset once and `weights` must be finite.
+
 **Output reference:**
 
 | Field | Type | Description |
@@ -894,6 +900,8 @@ f = (b × win_rate − (1 − win_rate)) / b
 ```
 
 Half-Kelly is recommended (`f × 0.5`) — full Kelly is theoretically optimal but has severe drawdown consequences in practice.
+
+`account_equity` and `atr_multiplier` must be positive: at zero or below every position sized at zero shares and came back as a recommendation. A stop distance or a share count past the float range is refused naming the input, where it used to escape from `int()` as an `OverflowError`.
 
 ```python
 from standard_quant_tools.agent.tools import get_position_size
@@ -2254,6 +2262,9 @@ print(f"Sector exposure   : {result.sector_exposure}")
 `max_participation` defaults to `0.1`, `adv_lookback` to `20` bars (trailing
 from the end of the requested range, the window the average dollar and share
 volume are measured over), and `include_sector_exposure` to `True`.
+`adv_lookback` is at least 1, `tickers` is non-empty and names each ticker
+once, and every `target_weights` value must be finite — a NaN weight used
+to come back as a NaN capacity, reported as a number.
 
 **How it works:** for each ticker, `max account size = (max_participation *
 avg_dollar_volume) / target_weight` — a name with a large target weight and
@@ -2708,7 +2719,7 @@ print(f"Most liquid  : {result.most_liquid_ticker}")
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `tickers` | List[str] | — | Tickers to analyze |
+| `tickers` | List[str] | — | Tickers to analyze; at least one, each once |
 | `start_date` | str | — | ISO date |
 | `end_date` | str | — | ISO date |
 | `window` | int | `20` | Rolling window (bars) for both proxies |

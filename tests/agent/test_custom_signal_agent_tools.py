@@ -459,3 +459,50 @@ class TestSignalTypeValidation:
                 signal_type=SignalType.TARGET_WEIGHT,
                 max_abs_weight=1.0,
             )
+
+
+class TestSignalKeysAreDates:
+    """The signal map's keys used to be parsed one `pd.Timestamp` at a time
+    after the bars were fetched, so a key that was not a date raised pandas'
+    own parse error, naming neither `signals` nor the key."""
+
+    def test_a_key_that_is_not_a_date_is_refused_by_name(self, patched_factory):
+        from standard_quant_tools.error import ValidationError as QuantValidation
+
+        with pytest.raises(QuantValidation) as exc:
+            dispatch(
+                "run_custom_signal_backtest",
+                {
+                    "symbol": "AAPL",
+                    "start_date": START,
+                    "end_date": END,
+                    "signals": {"2023-03-01": 1.0, "not-a-date": 0.0},
+                },
+            )
+        message = str(exc.value)
+        assert "signals" in message and "'not-a-date'" in message
+        # Refused before the bars were paid for.
+        patched_factory.get_ohlcv.assert_not_called()
+
+    def test_a_map_keyed_by_tickers_is_refused(self, patched_factory):
+        from standard_quant_tools.error import ValidationError as QuantValidation
+
+        with pytest.raises(QuantValidation, match="'AAPL', 'MSFT'"):
+            run_custom_signal_backtest(
+                CustomSignalBacktestInput(
+                    symbol="AAPL",
+                    start_date=START,
+                    end_date=END,
+                    signals={"AAPL": 1.0, "MSFT": -1.0},
+                )
+            )
+
+    def test_timestamped_keys_still_run(self, patched_factory, sample_ohlcv):
+        """The null case: ISO keys with a time part are dates too."""
+        signals = {f"{d}T00:00:00": v for d, v in _toy_signal(sample_ohlcv).items()}
+        result = run_custom_signal_backtest(
+            CustomSignalBacktestInput(
+                symbol="AAPL", start_date=START, end_date=END, signals=signals
+            )
+        )
+        assert result.num_trades > 0

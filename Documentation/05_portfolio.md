@@ -520,6 +520,13 @@ is 90% explained by three factors is a factor bet; one where the factors
 explain 20% is a stock-picking portfolio, and its risk lives somewhere this
 decomposition cannot see.
 
+Weights and loadings must be finite, and every held asset needs a loading
+on every factor: a gap is refused by name (`C/size`) rather than read as
+zero, because absent is not zero — it used to make that factor's exposure
+NaN for the whole book. Give `0.0` where an asset genuinely has no
+loading, or narrow `factors` to the ones every asset has. `factors`, when
+given, names at least one factor and each once.
+
 ### `analyze_concentration`
 
 Turns "how concentrated is this" into numbers with known interpretations.
@@ -533,6 +540,11 @@ make a share-of-total meaningless, and squaring signed weights loses the
 direction; gross is the economically relevant denominator, so a
 market-neutral book has an effective N in the tens rather than an undefined
 one.
+
+Weights must be finite. An infinite weight made the gross exposure
+infinite and the effective N a division by zero, and a NaN weight was
+dropped without a word; both are refused at the schema now, and so is a
+set of finite weights whose gross exposure overflows.
 
 ### `get_marginal_risk_contribution`
 
@@ -623,7 +635,8 @@ optionally dollar-neutralised, published as an `sqt://weight_panel`.
 This matters most between modeling and backtesting:
 
 ```
-predictions ──> construct_weights_from_scores ──> LOOK AT THE WEIGHTS
+predictions ──> convert_reference(to_kind='score_panel', task=...)
+            ──> construct_weights_from_scores ──> LOOK AT THE WEIGHTS
                                                ──> only then simulate
 ```
 
@@ -639,6 +652,20 @@ tool deliberately does not.
 `dollar_neutral=true` is applied AFTER the method, so it changes net
 exposure and leaves the cross-sectional ordering alone — gross may then
 differ from the leverage you asked for.
+
+**Each reference must be the kind it names.** `scores_ref` is resolved as
+an `sqt://score_panel` and `returns_ref` as an `sqt://returns_panel`, and
+any other kind is refused naming both. Without the check, the
+`weight_panel` this tool publishes was accepted back as scores and
+transformed a second time — under `vol_scaled` the weights came out
+divided by volatility twice, a plausible vector that was not the one
+asked for — and a price panel passed as returns scaled by the volatility
+of price levels. A `predictions` reference is refused with the
+conversion that turns it into scores: it is a long (date, entity,
+prediction) frame, and a classifier's predictions are probabilities whose
+sign is a direction only after `convert_reference(to_kind='score_panel',
+task='classification')` recentres them, which needs the task this tool
+is not told.
 
 ## Covariance before optimization
 

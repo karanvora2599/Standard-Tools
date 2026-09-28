@@ -34,6 +34,8 @@ from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from standard_quant_tools.data.factory import ProviderName
+
 
 class DataSource(BaseModel):
     """Where a tool's data comes from: a symbol, a reference, or values."""
@@ -95,10 +97,10 @@ class _Fetch(BaseModel):
         ),
     )
     name: str = Field(..., description="Names this artifact within the run.")
-    source: Optional[str] = Field(
+    source: Optional[ProviderName] = Field(
         None,
         description="Data provider to fetch from ('yfinance', 'polygon', "
-        "'databento', ...). None uses the default provider. This runtime "
+        "'bloomberg' or 'databento'). None uses the default provider. This runtime "
         "could only ever reach the default before, so a tick tape or a "
         "quote panel from Databento was out of reach.",
     )
@@ -241,7 +243,7 @@ class PreflightVendorRequestInput(BaseModel):
             "why the dataset that would answer is worth asking for."
         ),
     )
-    source: Optional[str] = Field(
+    source: Optional[ProviderName] = Field(
         None,
         description=(
             "Data provider to price the request against. None uses the "
@@ -254,7 +256,7 @@ class PreflightVendorRequestInput(BaseModel):
 class FetchFinancialRatiosInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     symbol: str = Field(..., description="One ticker.")
-    source: Optional[str] = Field(
+    source: Optional[ProviderName] = Field(
         None, description="Data provider; None uses the default."
     )
 
@@ -262,7 +264,7 @@ class FetchFinancialRatiosInput(BaseModel):
 class DatasetMetadataInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     symbol: str = Field(..., description="A representative ticker.")
-    source: Optional[str] = Field(
+    source: Optional[ProviderName] = Field(
         None, description="Data provider; None uses the default."
     )
     interval: str = Field("1d", description="Bar interval the claim is about.")

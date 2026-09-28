@@ -88,6 +88,18 @@ single-pair tools over a whole set and RANKS BY |z|, NOT BY LEVEL -- a name
 that always trades 40 bps wide is not news at 40 bps -- and returns the
 pairs it could not evaluate with a reason each rather than dropping them.
 
+**Every key a result carries is declared, and every number in it is finite or
+null.** The result models used to accept keys they did not declare, and an
+undeclared key never passed the conversion that turns a NaN or an infinity
+into null: `carry_spread_rate` and `premium_vs_reference_bps` reached a
+caller as infinity, the half-life statistics as NaN, with no schema naming
+any of them. They are declared now (with `priced_against`, `basis_flat`,
+`half_life_mean_reverting`, `degenerate_baseline`, a break's `date` and a scan
+row's `shift_in_reference_sd`), an undeclared key is refused, and a number
+that arrives as NaN or infinity is null with a line in `warnings` saying so
+-- `half_life_t_statistic is null: the basis did not vary enough for the
+Dickey-Fuller regression behind the half-life to be fitted`.
+
 ## 3. Three things this surface gets wrong if you let it
 
 ### A wide basis is usually not an arbitrage

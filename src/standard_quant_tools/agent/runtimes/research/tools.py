@@ -845,8 +845,13 @@ def run_pca_analysis(input_data: PCAInput) -> PCAResult:
     # contributions below describe two different decompositions in one
     # response -- the contributions were byte-identical to the standardized
     # run while the loadings were not.
+    #
+    # The component count is the one the decomposition KEPT, not the one
+    # asked for: it clamps to the observations it had, and contributions
+    # computed for components that were never extracted failed with a
+    # pandas length error.
     contrib = factor_contributions(
-        returns, n_components=input_data.n_components, pca_result=result
+        returns, n_components=result["n_components"], pca_result=result
     )
 
     evr = {k: round(float(v), 4) for k, v in result["explained_variance_ratio"].items()}
@@ -868,6 +873,13 @@ def run_pca_analysis(input_data: PCAInput) -> PCAResult:
     }
 
     warnings: List[str] = []
+    if result["n_components"] < input_data.n_components:
+        warnings.append(
+            f"{input_data.n_components} components were asked for and "
+            f"{result['n_components']} were extracted: {result['n_obs']} "
+            "overlapping observations cannot span more. Widen the date range "
+            "to get the rest."
+        )
     full = result.get("explained_variance_ratio_full")
     if full is None:
         full_list: List[float] = []
@@ -1594,8 +1606,13 @@ def get_rolling_beta(input_data: RollingBetaInput) -> RollingBetaResult:
         "Rolling_Beta"
     ].dropna()
     if rb.empty:
-        raise ValueError(
-            f"Not enough data for rolling beta with window={input_data.window}"
+        n_shared = len(asset_ret.index.intersection(bench_ret.index))
+        raise ValidationError(
+            f"get_rolling_beta: window={input_data.window} is longer than the "
+            f"{n_shared} returns {input_data.symbol} and {input_data.benchmark} "
+            f"share between {input_data.start_date} and {input_data.end_date}, "
+            "so not one full window fits. Shorten the window or widen the "
+            "date range."
         )
 
     current = float(rb.iloc[-1])
@@ -1746,20 +1763,18 @@ def get_tail_risk_metrics(input_data: TailRiskInput) -> TailRiskResult:
 def _quality_provider(source: Optional[str]):
     """The named provider, or the default, with an unknown name refused.
 
-    `DataFactory` raises a bare ValueError for a source it does not know,
-    which reaches a caller as an internal failure rather than as "you asked
-    for a provider that does not exist, here are the ones that do".
+    `DataFactory` refuses a source it does not know with the providers it
+    serves; this adds where to find out which of them this environment
+    can actually reach.
     """
     if not source:
         return DataFactory.get_provider()
     try:
         return DataFactory.get_provider(source)
-    except (ValueError, NotImplementedError) as exc:
+    except ValidationError as exc:
         raise ValidationError(
-            f"{exc} Providers this library serves: 'yfinance', 'polygon', "
-            "'bloomberg', 'databento'. Leave `source` unset for the "
-            "configured default, or call describe_data_capabilities to see "
-            "which of them this environment can actually reach."
+            f"{exc} Call describe_data_capabilities to see which of them this "
+            "environment can actually reach."
         ) from exc
 
 

@@ -264,9 +264,7 @@ class TestBudget:
                 categories=ALL_CATEGORIES, enable_long_running=True, tool_detail="full"
             )
             _server, handlers = build_server(config)
-            warning = config_mod.check_context_budget(
-                config, handlers.context_bytes()
-            )
+            warning = config_mod.check_context_budget(config, handlers.context_bytes())
             assert warning is not None, "an explicit ceiling said nothing"
             assert "--tool-detail auto" in warning, "the warning must name the fix"
         finally:
@@ -642,3 +640,101 @@ class TestServerWiring:
         text = result.content[0].text
         assert "analysis" in text
         assert "screener" in text
+
+
+class TestEveryRouteIsAudited:
+    """
+    A tool served over MCP runs on the same path whatever runtime it is
+    from: a decision record written, a non-finite number turned into null.
+
+    The feature_lab tools were the exception. The server sent them to a
+    dispatcher that ran the tool and returned its dump, so a feature_lab call
+    over MCP left no record for `explain_decision` to read, and a NaN in its
+    result would have failed the whole response in the server's JSON
+    encoding rather than arriving as null.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _own_audit_dir(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SQT_AUDIT_DIR", str(tmp_path / "audit"))
+        monkeypatch.setenv("SQT_AUDIT_ENABLED", "1")
+        self.audit_dir = tmp_path / "audit"
+
+    def _records(self):
+        from standard_quant_tools import audit
+
+        out = []
+        for path in sorted(self.audit_dir.glob("*.jsonl")):
+            if not audit._DAY_FILE_RE.match(path.name):
+                continue
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if line.strip():
+                    out.append(json.loads(line))
+        return out
+
+    def _call(self, name, arguments):
+        import anyio
+        import mcp.types as types
+
+        _server, handlers = build_server(
+            ServerConfig(categories=("feature_lab",), runtimes=("feature_lab",))
+        )
+
+        async def call():
+            return await handlers.call_tool(
+                None, types.CallToolRequestParams(name=name, arguments=arguments)
+            )
+
+        return anyio.run(call)
+
+    def test_a_feature_lab_call_writes_its_decision_record(self):
+        result = self._call("get_feature_redundancy", {"dataset_id": "no_such_dataset"})
+        # Refused by the tool, not by its schema: a record is written for
+        # every call that reached the tool, refused or not.
+        assert result.is_error is True
+        records = [
+            r for r in self._records() if r["tool_name"] == "get_feature_redundancy"
+        ]
+        assert len(records) == 1, "the feature_lab call left no decision record"
+        assert records[0]["status"] == "error"
+        assert records[0]["input"]["dataset_id"] == "no_such_dataset"
+
+    def test_a_feature_lab_result_is_made_json_safe(self, monkeypatch):
+        """A non-finite number in a feature_lab result arrives as null, and
+        the call's request id names the record it wrote."""
+        from pydantic import BaseModel
+
+        from standard_quant_tools.modeling.agent.feature_tools import (
+            FEATURE_TOOL_DISPATCH,
+        )
+
+        class _Undefined(BaseModel):
+            value: float
+
+        _fn, model = FEATURE_TOOL_DISPATCH["get_feature_redundancy"]
+        monkeypatch.setitem(
+            FEATURE_TOOL_DISPATCH,
+            "get_feature_redundancy",
+            (lambda _input: _Undefined(value=float("nan")), model),
+        )
+        result = self._call("get_feature_redundancy", {"dataset_id": "any"})
+        assert not result.is_error
+        assert result.structured_content == {"value": None}
+        request_id = result.meta["request_id"]
+        assert [r["request_id"] for r in self._records()] == [request_id]
+
+    def test_a_schema_refusal_still_writes_nothing(self):
+        """The null case: arguments the input model refuses never reach the
+        tool, on this runtime as on every other."""
+        result = self._call("get_feature_redundancy", {})
+        assert result.is_error is True
+        assert self._records() == []
+
+    def test_every_feature_lab_tool_is_dispatched_by_its_runtime(self, catalog):
+        from standard_quant_tools.agent.runtimes import resolve
+
+        runtime = resolve("feature_lab")
+        entries = [e for e in catalog.values() if e.runtime == "feature_lab"]
+        assert len(entries) == len(runtime.dispatch_table)
+        for entry in entries:
+            assert dispatch_for(entry) == runtime.dispatch

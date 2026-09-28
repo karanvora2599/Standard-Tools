@@ -211,6 +211,7 @@ from standard_quant_tools.agent.models import (
 from standard_quant_tools.agent.runtimes._shared import (
     FETCH_INTERVAL,
     _run_backtest,
+    parse_date_keys,
 )
 from standard_quant_tools.backtest.artifacts import load_artifact, save_artifact
 from standard_quant_tools.backtest.engine import backtest_grid, run_strategy
@@ -308,6 +309,35 @@ def _apply_signal_fill_policy(
     if policy == "hold":
         return reindexed.ffill().fillna(0.0)
     return reindexed.fillna(0.0)  # "flat"
+
+
+def _require_registered_strategy(name: str) -> None:
+    """Refuse a strategy the registry does not hold, naming the ones it does."""
+    if name not in STRATEGY_REGISTRY:
+        raise ValidationError(
+            f"Unknown strategy '{name}'. Available: {list(STRATEGY_REGISTRY)}"
+        )
+
+
+def _require_one_walk_forward_window(tool: str, input_data: Any, n_bars: int) -> None:
+    """
+    Refuse a walk-forward whose first train window and test window do not
+    both fit in the bars that were fetched.
+
+    The length of the data is only known after the fetch, so this cannot
+    be a schema bound. The refusal names the bar count and the range it
+    came from, which is what the caller has to change.
+    """
+    need = input_data.train_bars + input_data.test_bars
+    if n_bars < need:
+        raise ValidationError(
+            f"{tool}: train_bars={input_data.train_bars} plus "
+            f"test_bars={input_data.test_bars} needs at least {need} bars, but "
+            f"{input_data.symbol} has {n_bars} between {input_data.start_date} "
+            f"and {input_data.end_date}. Widen the date range, or shorten "
+            "train_bars or test_bars, so one full train window and one test "
+            "window fit."
+        )
 
 
 def _dispatch_backtest(input_data: BacktestInput, default: str) -> BacktestResult:
@@ -506,7 +536,8 @@ def compare_strategies(input_data: CompareStrategiesInput) -> CompareStrategiesR
             "the list by default, not a winner."
         )
     logger.debug(
-        "[compare_strategies] winner=%s  sharpe=%.3f  return=%.2f%%  vs B&H=%.2f%%",
+        # %s, not %.3f: the ratio is null where it is undefined.
+        "[compare_strategies] winner=%s  sharpe=%s  return=%.2f%%  vs B&H=%.2f%%",
         comparisons[0].strategy,
         comparisons[0].sharpe_ratio,
         comparisons[0].total_return * 100,
@@ -678,11 +709,9 @@ def run_regime_adaptive_walkforward_backtest(
 
     train_bars = input_data.train_bars
     test_bars = input_data.test_bars
-    if n < train_bars + test_bars:
-        raise ValueError(
-            f"Not enough data for regime-adaptive walk-forward: need at least "
-            f"{train_bars + test_bars} bars, got {n}."
-        )
+    _require_one_walk_forward_window(
+        "run_regime_adaptive_walkforward_backtest", input_data, n
+    )
 
     # Only the original 4 strategies have dedicated override fields on
     # RegimeAdaptiveWalkForwardInput; the 4 newer STRATEGY_REGISTRY entries
@@ -825,7 +854,12 @@ def run_regime_adaptive_walkforward_backtest(
         )
         cursor += test_bars
 
-    oos_sharpes = [w.out_of_sample_sharpe for w in windows]
+    # A window's Sharpe is null where its returns have no dispersion; it is
+    # NaN again here so their mean is undefined too, not an error.
+    oos_sharpes = [
+        np.nan if w.out_of_sample_sharpe is None else w.out_of_sample_sharpe
+        for w in windows
+    ]
     oos_returns = [w.out_of_sample_return for w in windows]
     oos_mdd = [w.out_of_sample_max_drawdown for w in windows]
     pct_profitable = sum(1 for r in oos_returns if r > 0) / len(windows)
@@ -928,11 +962,7 @@ def run_walk_forward_backtest(input_data: WalkForwardInput) -> WalkForwardResult
         input_data.test_bars,
         input_data.sort_by,
     )
-    if input_data.strategy not in STRATEGY_REGISTRY:
-        raise ValueError(
-            f"Unknown strategy '{input_data.strategy}'. "
-            f"Available: {list(STRATEGY_REGISTRY)}"
-        )
+    _require_registered_strategy(input_data.strategy)
 
     provider = DataFactory.get_provider()
     df = provider.get_ohlcv(
@@ -942,11 +972,7 @@ def run_walk_forward_backtest(input_data: WalkForwardInput) -> WalkForwardResult
 
     train_bars = input_data.train_bars
     test_bars = input_data.test_bars
-    if n < train_bars + test_bars:
-        raise ValueError(
-            f"Not enough data for walk-forward: need at least "
-            f"{train_bars + test_bars} bars, got {n}."
-        )
+    _require_one_walk_forward_window("run_walk_forward_backtest", input_data, n)
 
     windows: List[WalkForwardWindow] = []
     oos_signal_tails: List[pd.Series] = []
@@ -1147,6 +1173,15 @@ def run_backtest_optimization(input_data: BacktestOptInput) -> BacktestOptResult
     # Distinct combinations: the grid runs a repeated axis value once, so
     # this is the number a caller may hand deflated_sharpe_ratio as n_trials.
     n_combinations = len(grid_df)
+    if n_combinations == 0:
+        # The best row is read positionally below; an empty grid has none,
+        # and indexing it raised an IndexError that named nothing.
+        raise ValidationError(
+            f"run_backtest_optimization: the grid for {input_data.strategy} "
+            f"produced no combination to rank from {input_data.param_grid}. "
+            "Check that each axis names a parameter the strategy takes and "
+            "that at least one combination is valid for it."
+        )
     top_n = min(input_data.top_n, 20, n_combinations)
     top_df = grid_df.head(top_n)
     n_unrankable = int(grid_df.attrs.get("n_unrankable", 0))
@@ -1223,14 +1258,17 @@ def run_custom_signal_backtest(input_data: CustomSignalBacktestInput) -> Backtes
         input_data.end_date,
         len(input_data.signals),
     )
+    # Keys parsed BEFORE the fetch: a map keyed by something other than
+    # dates is refused by name without paying for the bars first.
+    signals = parse_date_keys(
+        input_data.signals, "signals", "run_custom_signal_backtest"
+    )
     provider = DataFactory.get_provider()
     df = provider.get_ohlcv(
         input_data.symbol, input_data.start_date, input_data.end_date
     )
 
-    signal_series = pd.Series(
-        {pd.Timestamp(d): v for d, v in input_data.signals.items()}
-    ).sort_index()
+    signal_series = pd.Series(signals).sort_index()
     signal_series = _apply_signal_fill_policy(
         signal_series,
         df.index,
@@ -1976,11 +2014,7 @@ def get_robustness_diagnostics(
         input_data.sort_by,
         {k: len(v) for k, v in input_data.param_grid.items()},
     )
-    if input_data.strategy not in STRATEGY_REGISTRY:
-        raise ValueError(
-            f"Unknown strategy '{input_data.strategy}'. "
-            f"Available: {list(STRATEGY_REGISTRY)}"
-        )
+    _require_registered_strategy(input_data.strategy)
 
     provider = DataFactory.get_provider()
     df = provider.get_ohlcv(
@@ -2164,11 +2198,7 @@ def run_backtest_compact(input_data: BacktestCompactInput) -> BacktestResultV2:
     callers who opt into this shape. Reuses run_strategy and
     metrics/diagnostics.py's exposure_stats; no new backtest or metric math.
     """
-    if input_data.strategy_type not in STRATEGY_REGISTRY:
-        raise ValueError(
-            f"Unknown strategy '{input_data.strategy_type}'. "
-            f"Available: {list(STRATEGY_REGISTRY)}"
-        )
+    _require_registered_strategy(input_data.strategy_type)
     run_id = input_data.run_id or uuid.uuid4().hex
     logger.debug(
         "[backtest_compact] run_id=%s  %s  %s",
@@ -2314,11 +2344,7 @@ def get_backtest_diagnostics(
         input_data.start_date,
         input_data.end_date,
     )
-    if input_data.strategy_type not in STRATEGY_REGISTRY:
-        raise ValueError(
-            f"Unknown strategy '{input_data.strategy_type}'. "
-            f"Available: {list(STRATEGY_REGISTRY)}"
-        )
+    _require_registered_strategy(input_data.strategy_type)
 
     provider = DataFactory.get_provider()
     df = provider.get_ohlcv(

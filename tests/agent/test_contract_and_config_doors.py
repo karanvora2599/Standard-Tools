@@ -33,6 +33,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+from pydantic import BaseModel
 
 from standard_quant_tools import numeric_contract as nc
 from standard_quant_tools.agent.tools import dispatch
@@ -53,9 +54,25 @@ NEW_DOORS = (
     "list_artifacts",
 )
 
+
+class _Leg(BaseModel):
+    strike: float = 100.0
+
+
+class _ScalarInput(BaseModel):
+    """A tool input with open floats: no bound, so the schema admits NaN."""
+
+    rate: float = 0.0
+    legs: list[_Leg] = []
+    values: list[float] = []
+
+
 #: rule id -> a call that must raise it. One per row of the described
 #: table, so a row with no trigger here is a row nothing checks.
 TRIGGERS = {
+    "tool_scalar_parameter_is_finite": lambda: nc.require_finite_scalar_fields(
+        _ScalarInput(rate=float("nan")), "a_tool"
+    ),
     "series_rejects_infinity": lambda: nc.require_finite_series(
         pd.Series([1.0, float("inf"), 2.0]), "returns", "a_tool"
     ),
@@ -140,6 +157,10 @@ LEGAL = (
     lambda: nc.require_positive_int(20, "window", "a_tool"),
     lambda: nc.require_periods_per_year(252, "a_tool"),
     lambda: nc.require_finite_scalar(0.03, "risk_free_rate", "a_tool", minimum=0.0),
+    # A NaN inside inline data is a gap, not a missing parameter.
+    lambda: nc.require_finite_scalar_fields(
+        _ScalarInput(rate=0.03, values=[0.01, float("nan")]), "a_tool"
+    ),
     lambda: nc.require_finite_covariance(
         np.array([[1.0, 0.2], [0.2, 1.0]]), "covariance", "a_tool"
     ),
@@ -589,3 +610,92 @@ class TestTheseDoorsStayOffline:
             result = dispatch(name, {})
             assert isinstance(result.get("warnings"), list), name
             json.dumps(result, allow_nan=False)
+
+
+# ── a scalar parameter is finite, at dispatch and in validate_tool_call ──
+
+
+class TestAScalarParameterIsFinite:
+    """No input model forbade NaN or infinity in a scalar float, so an
+    open one -- a field with no bound for pydantic to compare against --
+    passed the schema and failed inside the computation, or returned a
+    NaN. One rule at dispatch refuses it for every tool, and
+    validate_tool_call reports the same refusal without running anything."""
+
+    def test_every_non_finite_scalar_is_named(self):
+        with pytest.raises(ValidationError) as exc:
+            nc.require_finite_scalar_fields(
+                _ScalarInput(rate=float("inf"), legs=[_Leg(strike=float("nan"))]),
+                "a_tool",
+            )
+        message = str(exc.value)
+        assert "rate=inf" in message
+        assert "legs[0].strike=nan" in message
+
+    def test_inline_data_keeps_its_gaps(self):
+        found = nc.non_finite_scalar_fields(
+            _ScalarInput(values=[float("nan"), float("inf")])
+        )
+        assert found == []
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    def test_dispatch_refuses_it_before_the_tool_runs(self, bad, monkeypatch):
+        """`skew` is an open float on the robustness diagnostics; a NaN
+        there used to run the whole grid and return a NaN deflated
+        Sharpe."""
+        fetched = []
+        monkeypatch.setattr(
+            "standard_quant_tools.data.yfinance_provider.YFinanceProvider.get_ohlcv",
+            lambda self, *a, **k: fetched.append(1),
+        )
+        with pytest.raises(ValidationError, match="skew=") as exc:
+            dispatch("get_robustness_diagnostics", self._robustness(skew=bad))
+        assert "must be finite" in str(exc.value)
+        assert not fetched
+
+    def test_validate_tool_call_reports_the_same_refusal(self):
+        arguments = self._robustness(skew=float("nan"))
+        with pytest.raises(ValidationError) as dispatched:
+            dispatch("get_robustness_diagnostics", arguments)
+        result = dispatch(
+            "validate_tool_call",
+            {"tool_name": "get_robustness_diagnostics", "arguments": arguments},
+        )
+        assert result["valid"] is False
+        assert [p["field"] for p in result["problems"]] == ["skew"]
+        assert result["problems"][0]["problem"] == str(dispatched.value)
+
+    def test_a_finite_call_is_still_valid(self):
+        result = dispatch(
+            "validate_tool_call",
+            {
+                "tool_name": "get_robustness_diagnostics",
+                "arguments": self._robustness(skew=-0.4),
+            },
+        )
+        assert result["valid"] is True
+        assert result["problems"] == []
+
+    def test_a_refused_call_writes_no_decision_record(self, runs_dir):
+        """Like an argument the schema refuses: the refusal is about the
+        input, not something the tool did."""
+        from standard_quant_tools.audit import last_request_id
+
+        with pytest.raises(ValidationError):
+            dispatch("get_robustness_diagnostics", self._robustness(skew=float("nan")))
+        assert last_request_id() is None
+        audit_dir = runs_dir.parent / "audit"
+        written = list(audit_dir.rglob("*.jsonl")) if audit_dir.exists() else []
+        assert written == []
+
+    @staticmethod
+    def _robustness(**overrides):
+        arguments = {
+            "symbol": "AAPL",
+            "strategy": "sma_crossover",
+            "start_date": "2022-01-01",
+            "end_date": "2023-01-01",
+            "param_grid": {"fast_period": [5, 10], "slow_period": [30, 50]},
+        }
+        arguments.update(overrides)
+        return arguments

@@ -1,17 +1,21 @@
 """
 Infrastructure every tool runtime needs.
 
-Deliberately small. Only three things are genuinely shared across runtimes --
-the C++ extension probe, the interval the backtest tools fetch bars at, and
+Deliberately small. Only four things are genuinely shared across runtimes --
+the C++ extension probe, the interval the backtest tools fetch bars at,
 `_run_backtest`, which the execution and validation tools both call and
 which is the reason those two categories live in ONE runtime rather than
-two. Everything else belongs to exactly one
-runtime and lives there, so this module cannot quietly become the place
-where cross-runtime coupling accumulates.
+two, and `parse_date_keys`, which every tool taking an inline date-keyed
+map (the backtest and data runtimes both have them) reads its keys with.
+Everything else belongs to exactly one runtime and lives there, so this
+module cannot quietly become the place where cross-runtime coupling
+accumulates.
 """
 
 import logging
-from typing import Any, Dict, List
+import math
+import warnings
+from typing import Any, Dict, List, Mapping
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +30,7 @@ from standard_quant_tools.backtest.engine import run_strategy
 from standard_quant_tools.data.bloomberg_provider import BloombergProvider
 from standard_quant_tools.data.polygon_provider import PolygonProvider
 from standard_quant_tools.data.yfinance_provider import YFinanceProvider
+from standard_quant_tools.error import ValidationError
 
 # The initializers come BEFORE the try, never after. Below it they ran
 # unconditionally and overwrote a SUCCESSFUL import -- HAS_CPP was False on
@@ -49,6 +54,131 @@ except ImportError:
 #: guess from the spacing, and a holiday-gapped daily index never warns.
 #: A tool that ever fetches another interval must pass that one instead.
 FETCH_INTERVAL = "1d"
+
+#: How many offending keys a refusal lists before it summarises the rest.
+_KEYS_NAMED = 5
+
+
+def _named(keys: List[Any]) -> str:
+    shown = ", ".join(repr(k) for k in keys[:_KEYS_NAMED])
+    more = len(keys) - _KEYS_NAMED
+    return shown + (f" and {more} more" if more > 0 else "")
+
+
+def parse_iso_date(value: Any, field: str, tool: str) -> pd.Timestamp:
+    """One ISO date argument parsed, or a refusal naming the field.
+
+    The single-value counterpart of `parse_date_keys`, for a date that sits
+    beside a date-keyed map -- a contract's expiry next to its prices -- so
+    both refuse the same inputs in the same words."""
+    try:
+        stamp = pd.to_datetime(str(value), format="ISO8601")
+    except (TypeError, ValueError):
+        stamp = pd.NaT
+    if pd.isna(stamp):
+        raise ValidationError(
+            f"{tool}: {field}={value!r} is not an ISO date. Write it as "
+            "'YYYY-MM-DD'."
+        )
+    return stamp
+
+
+def parse_date_keys(
+    mapping: Mapping[Any, Any],
+    field: str,
+    tool: str,
+    *,
+    finite: bool = False,
+) -> Dict[pd.Timestamp, Any]:
+    """
+    An inline date-keyed map with every key parsed as an ISO date, or a
+    refusal that names the keys that are not dates.
+
+    The keys used to be parsed inside the computation -- one
+    `pd.Timestamp(key)` at a time, or `pd.to_datetime` over the whole
+    index -- so one bad key surfaced as pandas' own "Unknown datetime
+    string format" or "doesn't match format" error, naming neither the
+    argument nor the remedy. A map keyed by tickers instead of dates, the
+    commonest shape of the mistake, failed the same way.
+
+    Parsed as ISO 8601 ('2024-01-02', '2024-01-02T09:30'), the format every
+    one of these fields documents. Also refused: two keys naming the same
+    instant ('2024-01-02' and '2024-01-02T00:00:00'), which would silently
+    keep only one value, and keys mixing time-zone-aware and naive stamps,
+    which cannot share one index.
+
+    `finite=True` also requires every value to be a finite number, for maps
+    whose values feed arithmetic with no notion of a gap -- a price that is
+    NaN or infinite there turns every later equity figure non-finite rather
+    than being skipped. Maps where a missing value is meaningful leave it
+    False, so their gaps stay governed by the numeric contract.
+
+    Returns a new dict keyed by `pd.Timestamp`, in the input's order.
+    """
+    keys = list(mapping)
+    if not keys:
+        return {}
+    with warnings.catch_warnings():
+        # Mixed offsets come back as an object index with a FutureWarning;
+        # that case is refused below, so the warning adds nothing.
+        warnings.simplefilter("ignore", FutureWarning)
+        try:
+            parsed = pd.to_datetime(
+                pd.Index([str(k) for k in keys], dtype=object),
+                format="ISO8601",
+                errors="coerce",
+            )
+        except (TypeError, ValueError):
+            parsed = None
+    if parsed is None or not isinstance(parsed, pd.DatetimeIndex):
+        raise ValidationError(
+            f"{tool}: the keys of {field} mix time-zone-aware and naive dates, "
+            "so they cannot share one index. Write every key the same way, "
+            "e.g. all as 'YYYY-MM-DD'."
+        )
+    bad = [key for key, stamp in zip(keys, parsed) if pd.isna(stamp)]
+    if bad:
+        raise ValidationError(
+            f"{tool}: {len(bad)} key(s) of {field} are not ISO dates: "
+            f"{_named(bad)}. {field} maps an ISO date ('YYYY-MM-DD') to its "
+            "value; a map keyed by tickers or labels is a different input."
+        )
+    seen: Dict[pd.Timestamp, Any] = {}
+    repeated: List[str] = []
+    for key, stamp in zip(keys, parsed):
+        if stamp in seen:
+            repeated.append(f"{seen[stamp]!r} and {key!r}")
+        else:
+            seen[stamp] = key
+    if repeated:
+        raise ValidationError(
+            f"{tool}: keys of {field} name the same date twice: "
+            f"{_named(repeated)}. Only one value per date can be used; keep "
+            "the one you mean."
+        )
+    out: Dict[pd.Timestamp, Any] = {}
+    non_finite: List[Any] = []
+    for key, stamp in zip(keys, parsed):
+        value = mapping[key]
+        if finite:
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                number = math.nan
+            if not math.isfinite(number):
+                non_finite.append(key)
+                continue
+            value = number
+        out[stamp] = value
+    if non_finite:
+        raise ValidationError(
+            f"{tool}: {field} has a missing or non-finite value on "
+            f"{len(non_finite)} date(s): {_named(non_finite)}. Every value "
+            "here enters the running account, where one NaN or infinity makes "
+            "every later figure non-finite. Drop those dates or supply the "
+            "value."
+        )
+    return out
 
 
 def _run_backtest(
@@ -121,7 +251,8 @@ def _run_backtest(
         warnings=list(results.get("warnings", [])),
     )
     logger.debug(
-        "[backtest] result  return=%.2f%%  sharpe=%.3f  maxdd=%.2f%%  trades=%d  win=%.0f%%",
+        # %s, not %.3f: the ratio is null where it is undefined.
+        "[backtest] result  return=%.2f%%  sharpe=%s  maxdd=%.2f%%  trades=%d  win=%.0f%%",
         bt.total_return * 100,
         bt.sharpe_ratio,
         bt.max_drawdown * 100,

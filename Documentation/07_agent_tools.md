@@ -586,6 +586,10 @@ result.max_drawdown           # Worst peak-to-trough (e.g. -0.23 = -23%)
 result.calmar_ratio           # CAGR / |max_drawdown|; higher = better
 result.win_rate               # Fraction of trades that were profitable (0–1)
 result.profit_factor          # Gross profit / gross loss; > 1.5 is healthy
+                              # The four ratios above are None where they are
+                              #   0/0 or x/0 -- a one-bar range, a strategy that
+                              #   never traded, a book that never lost -- and
+                              #   `warnings` says which and why
 result.num_trades             # Number of completed round-trip trades
 result.avg_trade_return_pct   # Average per-trade P&L in percent
 result.final_equity           # Portfolio value at end date
@@ -623,6 +627,28 @@ payload = result.model_dump()
 payload.pop("equity_curve")  # Large list — omit if sending to LLM
 print(json.dumps(payload, indent=2))
 ```
+
+**A null number says why.** JSON has no NaN or infinity, so a number that
+is undefined (0/0) or unbounded (x/0) on the input given is `None` in the
+typed result and `null` on the wire -- and the result's own `warnings` (or
+`notes`) carries one line per null saying which field and why:
+
+```
+sortino_ratio is null: no return differed from the risk-free rate, so the ratio is 0/0.
+profit_factor is null: no closed trade lost money, so the gross loss it divides by is zero.
+strategies[3].sharpe_ratio is null: the returns have no dispersion -- a flat equity curve, or too few bars to measure one -- so there is no volatility to divide by.
+```
+
+The same holds for the rows inside a result (optimization runs, strategy
+comparisons, walk-forward windows, matrix cells, cost scenarios), for
+numbers inside mappings and lists (a signal panel's `portfolio_metrics`, a
+correlation matrix, frontier and rebalance weights, an equity curve), and
+across the correlation, partial-correlation, rally, volatility-estimator,
+capacity, rebalance and trade-cost results. Three or fewer nulls of one kind
+are named; more are counted (`equity_curve[*] is null in 12 places: ...`).
+A capacity field is the one place `null` already meant something else --
+unbounded, for a zero target weight -- so a capacity that is null because a
+weight was not a finite number says "undefined -- NOT unbounded".
 
 **Working with the equity curve:**
 

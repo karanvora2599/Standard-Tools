@@ -358,6 +358,14 @@ def _value(annotation: Any, info: Any, name: str, length: int, salt: int = 0) ->
     if origin in (list, List):
         (inner,) = get_args(annotation) or (float,)
         inner, item_min, item_max = _unwrap_annotated(inner)
+        if get_origin(inner) in (
+            typing.Union,
+            getattr(__import__("types"), "UnionType", None),
+        ):
+            # `List[Stat]`: an Optional item is synthesized as its type.
+            options = [a for a in get_args(inner) if a is not type(None)]
+            if len(options) == 1:
+                inner, item_min, item_max = _unwrap_annotated(options[0])
         count = _count_for(info, length)
         if get_origin(inner) is typing.Literal:
             # `run_strategy_matrix` takes a list of strategy names. Every
@@ -415,6 +423,17 @@ def _value(annotation: Any, info: Any, name: str, length: int, salt: int = 0) ->
 
     if origin in (dict, Dict):
         key_type, value_type = get_args(annotation) or (str, float)
+        # A value type can carry its own validator -- `Dict[str, Stat]`, a
+        # finite-float alias -- and `Optional`; what is synthesized is the
+        # type underneath, as it already is for a list's items.
+        value_type, _low, _high = _unwrap_annotated(value_type)
+        if get_origin(value_type) in (
+            typing.Union,
+            getattr(__import__("types"), "UnionType", None),
+        ):
+            options = [a for a in get_args(value_type) if a is not type(None)]
+            if len(options) == 1:
+                value_type, _low, _high = _unwrap_annotated(options[0])
         # The WHOLE symbol set, not the first three. A tool taking both
         # `tickers` and a ticker-keyed mapping validates that they agree,
         # and three keys beside six tickers is a refusal rather than a test.
@@ -452,6 +471,11 @@ def _value(annotation: Any, info: Any, name: str, length: int, salt: int = 0) ->
                     for index, date in enumerate(_DATES[:length])
                 }
             return {k: 1.0 / len(keys) for k in keys}
+        if isinstance(value_type, type) and issubclass(value_type, BaseModel):
+            return {
+                k: build(value_type, length=length, salt=index + 1)
+                for index, k in enumerate(keys)
+            }
         if value_type is Any or value_type is object:
             # `object` is what `Dict[str, object]` degrades to, and it is
             # how every modeling spec carries estimator parameters. An

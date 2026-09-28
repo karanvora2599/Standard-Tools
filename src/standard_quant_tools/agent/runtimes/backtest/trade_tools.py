@@ -21,6 +21,7 @@ from typing import Annotated, List, Optional
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
+from standard_quant_tools.agent.models import Seed
 from standard_quant_tools.agent.runtimes._json_safe import (
     finite_or_none as _finite_or_none,
 )
@@ -45,7 +46,7 @@ class MonteCarloTradesInput(BaseModel):
         description="One return per TRADE, in the order they happened.",
     )
     n_paths: int = Field(2000, ge=100, le=50000)
-    seed: int = Field(0)
+    seed: Seed = Field(0)
     starting_equity: float = Field(1.0, gt=0)
 
 
@@ -66,7 +67,7 @@ class CompareRandomInput(BaseModel):
 
     trade_returns: List[float] = Field(..., min_length=20)
     n_simulations: int = Field(2000, ge=100, le=50000)
-    seed: int = Field(0)
+    seed: Seed = Field(0)
 
 
 class ExposureAttributionInput(BaseModel):

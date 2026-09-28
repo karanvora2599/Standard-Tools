@@ -72,7 +72,6 @@ from standard_quant_tools.modeling.agent import (
 )
 from standard_quant_tools.modeling.agent.feature_tools import (
     FEATURE_TOOL_DISPATCH,
-    feature_dispatch,
     get_feature_tools,
 )
 
@@ -519,9 +518,17 @@ def dispatch_for(entry: ToolEntry) -> Callable[[str, Dict[str, Any]], Dict[str, 
     what makes the server's scoping real all the way down: a tool served
     from the research runtime is executed by a table that holds only
     research tools.
+
+    The feature_lab tools go through their Runtime's `dispatch` like every
+    other runtime's. They used to be sent to `feature_dispatch`, which runs
+    the tool and returns its dump and nothing else: a feature_lab call over
+    MCP wrote no decision record, so `explain_decision` had nothing to
+    explain, and its result skipped the conversion that turns a NaN into a
+    null -- a non-finite number would have failed the response in the
+    server's JSON encoding instead of arriving as null. The Runtime's
+    `dispatch` holds the same table by reference, so nothing about which
+    tools are served changed; only the path they run on did.
     """
     if entry.registry == MODELING_REGISTRY:
         return modeling_dispatch
-    if entry.registry == FEATURE_LAB_REGISTRY:
-        return feature_dispatch
     return resolve_runtime(entry.runtime).dispatch

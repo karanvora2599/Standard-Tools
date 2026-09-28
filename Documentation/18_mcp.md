@@ -576,10 +576,21 @@ silently handing the model a workflow it has no tools to run.
 
 ## The audit trail
 
-Both dispatchers already route through `audit._run_and_record`, so **every
+Every runtime's dispatcher routes through `audit._run_and_record`, so **every
 tool call made through this server produces a hash-chained, replayable
 decision record** — inputs, the market data pulled with content hashes,
-which execution path ran, and a hash of the output.
+which execution path ran, and a hash of the output — and then through
+`sanitize_for_json`, so a non-finite number reaches the client as `null`
+rather than failing the response.
+
+The eleven `feature_lab` tools run on that path too, through the
+`feature_lab` Runtime's own `dispatch`. They used to be sent to
+`feature_dispatch`, which ran the tool and returned its dump and nothing
+else: a feature_lab call over MCP wrote no record for `explain_decision` or
+`replay_decision` to find, and a NaN in its result would have failed the
+server's strict JSON encoding. `feature_dispatch` is still importable for
+Python callers and still unaudited; call a tool through
+`agent.runtimes.resolve("feature_lab").dispatch` for a record.
 
 ```bash
 sqt report  <request_id>     # what the model actually called
@@ -622,9 +633,11 @@ rate limit whether or not anything is mutated. See
 the 189-tool analysis surface, spread across eight runtimes; the other two
 are the separate 37-tool `modeling` and 11-tool `feature_lab` runtimes. They
 stay apart inside — `dispatch_for(entry)` returns that tool's own RUNTIME's
-dispatcher, so schemas and executor are never chosen separately, and a tool
-served from `research` is executed by a table holding only research tools —
-but a user configures one server, not ten.
+dispatcher (`modeling_dispatch` for modeling, the Runtime's `dispatch` for
+every other runtime, `feature_lab` included), so schemas and executor are
+never chosen separately, and a tool served from `research` is executed by a
+table holding only research tools — but a user configures one server, not
+ten.
 
 **Schemas are dereferenced.** Twenty-seven tools carry `$ref`/`$defs`
 upstream — every one of them a tool with a nested spec. The server inlines

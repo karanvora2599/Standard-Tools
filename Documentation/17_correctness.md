@@ -149,6 +149,11 @@ are worth knowing as a user:
    be strictly *positive* rather than merely finite, and `periods_per_year`
    is validated wherever it multiplies. Cost primitives no longer accept
    negative rates, which returned negative costs — a backtest paid to trade.
+   A scalar parameter gets the strictest rule: a NaN or infinite scalar in
+   any tool call — or in a model nested in one — is refused at dispatch,
+   naming the field, because a single number has no gap to skip and NaN
+   passes every range check written as a comparison. Numbers inside a list
+   or a map keep the series rules.
 
 9. **Solvers, schemas and audit policy.** A solver reporting
    success is not a valid answer: a covariance with condition number

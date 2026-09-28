@@ -24,6 +24,7 @@ from typing import Annotated, List, Optional
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
+from standard_quant_tools.agent.models import Seed
 from standard_quant_tools.agent.runtimes._json_safe import (
     finite_or_none as _finite_or_none,
 )
@@ -59,8 +60,8 @@ class TerminalMonteCarloInput(BaseModel):
             "default rather than an option."
         ),
     )
-    initial_capital: float = Field(10_000.0, gt=0)
-    seed: Optional[int] = Field(None, description="Set it for a reproducible answer.")
+    initial_capital: float = Field(10_000.0, gt=0, le=1e15)
+    seed: Optional[Seed] = Field(None, description="Set it for a reproducible answer.")
 
 
 class TerminalMonteCarloResult(BaseModel):

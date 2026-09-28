@@ -392,3 +392,75 @@ class TestTheEnsembleToolRuns:
         assert set(["date", "entity", "prediction"]) <= set(frame.columns)
         assert len(frame) == result.n_rows > 0
         assert result.model_ids == ids
+
+
+# ── An empty request is refused, not answered ───────────────────────────
+
+
+class TestAnEmptyFeatureSetIsNotSafe:
+    """
+    `check_leakage(feature_ids=[])` checked nothing and answered
+    `safe: true` -- the most reassuring answer, from the one request that
+    asked nothing -- with or without a dataset. Refused at the schema, and
+    the tool holds the same line for any other route to an empty set. See
+    the CHANGELOG entry of 2026-09-28.
+    """
+
+    def test_an_empty_list_is_refused_by_the_schema(self):
+        import pydantic
+
+        with pytest.raises(pydantic.ValidationError, match="names nothing to check"):
+            CheckLeakageInput(feature_ids=[])
+
+    def test_an_empty_list_with_a_dataset_is_refused_too(self, built_dataset_id):
+        import pydantic
+
+        from standard_quant_tools.modeling.agent.dispatch import modeling_dispatch
+
+        with pytest.raises(pydantic.ValidationError, match="names nothing to check"):
+            modeling_dispatch(
+                "check_leakage", {"feature_ids": [], "dataset_id": built_dataset_id}
+            )
+
+    def test_the_tool_refuses_an_empty_set_however_it_arrives(self):
+        from standard_quant_tools.error import ValidationError
+
+        with pytest.raises(ValidationError, match="vacuously"):
+            check_leakage(CheckLeakageInput.model_construct(feature_ids=[]))
+
+    def test_one_feature_is_checked_and_counted(self):
+        """The null case."""
+        result = check_leakage(CheckLeakageInput(feature_ids=["technical.rsi"]))
+        assert result.n_features_checked == 1
+        assert result.safe is True
+
+
+class TestAnEmptyAsOfIsNotADate:
+    """
+    `pd.Timestamp("")` parses to NaT without raising, so `as_of=""` passed
+    the date validator and failed as "NaTType does not support strftime"
+    inside scoring. The shared date parser refuses NaT, which also closes
+    it for a dataset's start and end. See the CHANGELOG entry of 2026-09-28.
+    """
+
+    @pytest.mark.parametrize("bad", ["", "NaT"])
+    def test_score_model_refuses_it_at_the_schema(self, bad):
+        import pydantic
+
+        with pytest.raises(pydantic.ValidationError, match="as_of"):
+            ScoreModelInput(model_id="m", as_of=bad, universe=["AAA"])
+
+    def test_a_dataset_start_of_nothing_is_refused(self):
+        import pydantic
+
+        with pytest.raises(pydantic.ValidationError, match="start"):
+            DatasetSpec(
+                universe=UNIVERSE,
+                start="",
+                end="2023-12-31",
+                features=[FeatureSpec(id="technical.rsi")],
+                target=TargetSpec(horizon=5),
+            )
+
+    def test_a_real_date_is_accepted(self):
+        assert ScoreModelInput(model_id="m", as_of="2024-01-02", universe=["AAA"])

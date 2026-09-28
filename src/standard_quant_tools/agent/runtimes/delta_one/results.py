@@ -16,7 +16,17 @@ strict parser rejects -- and several quantities here are legitimately
 undefined rather than zero: a half-life on a basis that does not revert, a
 basis against an index level nobody supplied, a break-even on a position
 with no notional. `None` says "not defined"; 0.0 would say something false
-and tradeable.
+and tradeable. A null that arrived as NaN or infinity is also said to be
+null in `warnings`, with the reason where there is one.
+
+EVERY KEY IS DECLARED. These models used to accept keys they did not
+declare, because each wrapper does `Result(**lib.fn(...))` and the library
+owns that dict's shape -- and an undeclared key never passes a field
+validator, so `carry_spread_rate` and `premium_vs_reference_bps` reached a
+caller as infinity, and the half-life test statistics as NaN, with no schema
+naming them. Each is declared now, and an undeclared key is refused: a new
+key in the library is a schema change, made here, not a value slipped past
+the conversion that makes this module's promise true.
 
 WARNINGS ARE A DECLARED FIELD, not an afterthought. Most of what these
 tools know that a caller does not is in there -- that a wide basis is
@@ -31,6 +41,9 @@ from typing import Annotated, Any, Dict, List, Optional
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
+from standard_quant_tools.agent.runtimes._json_safe import (
+    ExplainsNulls,
+)
 from standard_quant_tools.agent.runtimes._json_safe import (
     finite_or_none as _finite_or_none,
 )
@@ -58,14 +71,34 @@ __all__ = [
 #: Copied rather than imported. Five other modules carry their own; a
 #: shared one would become the place cross-runtime coupling accumulates.
 Stat = Annotated[Optional[float], BeforeValidator(_finite_or_none)]
+FiniteOrNone = Annotated[Any, BeforeValidator(_finite_or_none)]
+
+_HALF_LIFE_UNDEFINED = (
+    "the basis did not vary enough for the Dickey-Fuller regression behind "
+    "the half-life to be fitted -- a flat basis, or too few observations"
+)
 
 
-class _Result(BaseModel):
+class _Row(ExplainsNulls):
+    """A nested row. Its nulls are reported by the result holding it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class _Result(ExplainsNulls):
     """Shared base: every result carries its own caveats."""
 
-    # extra="allow" because every wrapper does Result(**lib.fn(...)) and
-    # the library layer owns the shape of that dict.
-    model_config = ConfigDict(extra="allow")
+    # Every key the library returns is declared below; see the module
+    # docstring for why an undeclared one is refused rather than allowed.
+    model_config = ConfigDict(extra="forbid")
+    null_reasons = {
+        "half_life_t_statistic": _HALF_LIFE_UNDEFINED,
+        "half_life_critical_value": _HALF_LIFE_UNDEFINED,
+        "half_life_observations": (
+            "the fitted AR(1) coefficient is not negative, so the basis shows "
+            "no mean reversion to measure a half-life of"
+        ),
+    }
 
     warnings: List[str] = Field(
         default_factory=list,
@@ -109,6 +142,11 @@ class CashFuturesBasisResult(_Result):
         "fair forward, in POINTS.",
     )
     time_to_expiry: Stat = None
+    carry_spread_rate: Stat = Field(
+        None,
+        description="observed_carry_rate - fair_carry_rate: the mispricing as "
+        "a carry RATE, before annualizing into bps.",
+    )
 
 
 class SolveForwardCarryResult(_Result):
@@ -144,6 +182,27 @@ class BasisHistoryResult(_Result):
         description="In OBSERVATIONS, not days. Null when the series shows "
         "no mean reversion, which is a refusal rather than a slow one.",
     )
+    half_life_mean_reverting: Optional[bool] = Field(
+        None,
+        description="Whether the half-life's own Dickey-Fuller t-statistic "
+        "clears its 5% critical value. A finite half-life without this is "
+        "not evidence of reversion: a random walk produces one most of the "
+        "time.",
+    )
+    half_life_t_statistic: Stat = Field(
+        None, description="Dickey-Fuller t-statistic of the half-life regression."
+    )
+    half_life_critical_value: Stat = Field(
+        None,
+        description="The 5% critical value half_life_t_statistic is compared "
+        "against.",
+    )
+    basis_flat: bool = Field(
+        False,
+        description="The basis does not move: every observation is one level "
+        "to within floating-point noise, so zscore and percentile describe "
+        "nothing.",
+    )
     annualized: bool = False
     window: Optional[int] = None
     history_ref: Optional[str] = Field(
@@ -157,9 +216,7 @@ class BasisHistoryResult(_Result):
     )
 
 
-class CurvePoint(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
+class CurvePoint(_Row):
     label: str = ""
     time_to_expiry: Stat = None
     price: Stat = None
@@ -168,9 +225,7 @@ class CurvePoint(BaseModel):
     annualized_basis_bps: Stat = None
 
 
-class CalendarSpread(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
+class CalendarSpread(_Row):
     near: str = ""
     far: str = ""
     calendar_spread_points: Stat = None
@@ -295,9 +350,7 @@ class HedgeEffectivenessResult(_Result):
     window: Optional[int] = None
 
 
-class BasketConstituent(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
+class BasketConstituent(_Row):
     symbol: str = ""
     price: Stat = None
     weight: Stat = None
@@ -322,9 +375,7 @@ class IndexBasketResult(_Result):
     missing_symbols: List[str] = Field(default_factory=list)
 
 
-class PricedExpression(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
+class PricedExpression(_Row):
     label: str = ""
     kind: str = ""
     carry_bps: Stat = None
@@ -407,6 +458,17 @@ class EtfFairValueResult(_Result):
     premium_discount_pct: Stat = None
     premium_discount_bps: Stat = None
     classification: str = Field("", description="'premium', 'discount' or 'fair'.")
+    priced_against: Optional[str] = Field(
+        None,
+        description="'nav' or 'basket': the reference classification and "
+        "action were taken against, so a NAV premium can be told from a "
+        "basket premium.",
+    )
+    premium_vs_reference_bps: Stat = Field(
+        None,
+        description="The premium against `priced_against`, in bps -- the "
+        "figure the classification was made on.",
+    )
     tolerance_bps: Stat = None
     basket_value_per_share: Stat = None
     basket_vs_nav_bps: Stat = Field(
@@ -467,9 +529,7 @@ class TotalReturnFutureResult(_Result):
     )
 
 
-class DividendContribution(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
+class DividendContribution(_Row):
     symbol: str = ""
     ex_date: str = ""
     dividend_per_share: Stat = None
@@ -500,9 +560,7 @@ class DividendPointsResult(_Result):
     )
 
 
-class RebalanceChange(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
+class RebalanceChange(_Row):
     symbol: str = ""
     event: str = Field("", description="addition, deletion, increase or decrease.")
     old_weight: Stat = None
@@ -541,10 +599,11 @@ class IndexRebalanceResult(_Result):
     largest_flow: Optional[str] = None
 
 
-class BasisBreak(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
+class BasisBreak(_Row):
     index: Optional[int] = None
+    date: Optional[str] = Field(
+        None, description="The observation's label at the break, as text."
+    )
     gain: Stat = None
     mean_before: Stat = None
     mean_after: Stat = None
@@ -587,9 +646,7 @@ class BasisDislocationResult(_Result):
     breaks: List[BasisBreak] = Field(default_factory=list)
 
 
-class SpreadAlert(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
+class SpreadAlert(_Row):
     observation: Optional[int] = None
     value: Stat = None
     statistic: Stat = None
@@ -603,7 +660,7 @@ class SpreadAlert(BaseModel):
 
 
 class SpreadMonitorResult(_Result):
-    state: Dict[str, Any] = Field(
+    state: Dict[str, FiniteOrNone] = Field(
         default_factory=dict,
         description="Pass THIS back on the next call. JSON-safe, so a "
         "monitor can be paused, moved between processes and resumed without "
@@ -625,6 +682,11 @@ class SpreadMonitorResult(_Result):
     threshold: Stat = None
     baseline_mean: Stat = Field(None, description="Null until the warm-up completes.")
     baseline_std: Stat = None
+    degenerate_baseline: bool = Field(
+        False,
+        description="The warm-up saw no variation, so the statistic divides "
+        "by almost nothing and is arithmetic rather than evidence.",
+    )
 
 
 class BasisScanRow(_Result):
@@ -641,6 +703,19 @@ class BasisScanRow(_Result):
     )
     percentile: Stat = None
     half_life_observations: Stat = None
+    half_life_mean_reverting: Optional[bool] = Field(
+        None,
+        description="Whether the half-life clears its own Dickey-Fuller test; "
+        "see analyze_basis_history.",
+    )
+    basis_flat: bool = Field(
+        False,
+        description="No dispersion, or no defined z-score: flagged and ranked "
+        "last rather than first.",
+    )
+    annualized: Optional[bool] = Field(
+        None, description="Whether the basis was annualized by a time to expiry."
+    )
     shift_detected: Optional[bool] = Field(
         None,
         description="Whether the basis structurally MOVED, which is a "
@@ -649,6 +724,11 @@ class BasisScanRow(_Result):
     )
     shift_severity: Optional[str] = None
     shift_at: Optional[int] = None
+    shift_in_reference_sd: Stat = Field(
+        None,
+        description="The shift in reference standard deviations, from the "
+        "shift detector.",
+    )
 
 
 class BasisScanSkip(_Result):

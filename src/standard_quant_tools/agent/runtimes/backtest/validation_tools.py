@@ -20,11 +20,13 @@ for one trial and report a strategy as significant that is not.
 from __future__ import annotations
 
 import logging
+import math
 from typing import Annotated, Dict, List, Optional
 
 import pandas as pd
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
 
+from standard_quant_tools.agent.models import Seed
 from standard_quant_tools.agent.runtimes._json_safe import (
     finite_or_none as _finite_or_none,
 )
@@ -94,11 +96,24 @@ class PBOInput(BaseModel):
     )
 
 
+#: Paths times observations one call may build. Each path walks every
+#: observation, so the work is their product, and C(n_splits,
+#: n_test_splits) grows fast: C(16, 8) is 12,870 paths. The default six
+#: groups, two held out, at the observation ceiling is 150,000; the
+#: ceiling itself keeps the slowest legal call to seconds, not minutes.
+_MAX_CV_PATH_OBSERVATIONS = 300_000
+
+
 class PurgedCVInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     n_observations: int = Field(
-        ..., ge=50, description="Length of the series to be split."
+        ...,
+        ge=50,
+        le=10_000,
+        description="Length of the series to be split. At most 10,000: the "
+        "splits are built observation by observation, and the cost grows "
+        "faster than the length -- 100,000 ran for minutes.",
     )
     n_splits: int = Field(6, ge=2, le=20, description="Groups to cut it into.")
     n_test_splits: int = Field(
@@ -118,9 +133,28 @@ class PurgedCVInput(BaseModel):
     label_horizon: int = Field(
         1,
         ge=1,
+        le=1_000,
         description="How many observations forward the label looks. A 5-day "
         "forward return is 5. This is what purging needs to know.",
     )
+
+    @model_validator(mode="after")
+    def _bounded_work(self) -> "PurgedCVInput":
+        # Checked before the combination count is formed: C(n, k) is only
+        # defined for k <= n, and the library refuses k >= n_splits by name.
+        if self.n_test_splits >= self.n_splits:
+            return self
+        n_paths = math.comb(self.n_splits, self.n_test_splits)
+        work = n_paths * self.n_observations
+        if work > _MAX_CV_PATH_OBSERVATIONS:
+            raise ValueError(
+                f"C({self.n_splits}, {self.n_test_splits}) = {n_paths:,} paths "
+                f"over {self.n_observations:,} observations is {work:,} "
+                "path-observations, above the "
+                f"{_MAX_CV_PATH_OBSERVATIONS:,} one call builds. Hold out fewer "
+                "groups, cut fewer groups, or split a shorter series."
+            )
+        return self
 
 
 class RealityCheckInput(BaseModel):
@@ -141,7 +175,7 @@ class RealityCheckInput(BaseModel):
         "serial correlation; resampling single days makes the null too "
         "narrow and the p-value too small.",
     )
-    seed: int = Field(0)
+    seed: Seed = Field(0)
 
 
 class RegimeStratifiedInput(BaseModel):

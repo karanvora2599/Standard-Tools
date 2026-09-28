@@ -33,6 +33,7 @@ from __future__ import annotations
 import logging
 import math
 
+import numpy as np
 import pandas as pd
 
 from standard_quant_tools.delta_one import basis as _basis
@@ -248,9 +249,40 @@ def compare_delta_one_expressions(
     )
 
 
+def _require_estimable_returns(values, name: str) -> None:
+    """
+    Refuse a return series too large for a covariance estimate to hold.
+
+    The shrinkage estimator squares the squared returns, so a value near
+    1e77 already overflows floating point there, and the overflow reached
+    the estimator as NaN and came back as scikit-learn's "Input contains
+    NaN" -- naming neither the series nor the cause. Real returns sit many
+    orders of magnitude below this; a series that reaches it is a price
+    level or a unit error.
+    """
+    array = np.asarray(values, dtype=float)
+    finite = array[np.isfinite(array)]
+    if finite.size == 0:
+        return
+    with np.errstate(over="ignore", invalid="ignore"):
+        fourth = float(np.sum(np.square(np.square(finite))))
+    if not math.isfinite(fourth):
+        largest = float(np.max(np.abs(finite)))
+        raise ValidationError(
+            f"optimize_replication_basket: {name} reaches {largest:.3g}, too "
+            "large for a covariance estimate -- its fourth powers, which the "
+            "shrinkage estimator forms, overflow floating point. Returns are "
+            "decimals (0.01 is 1%); a value this size is a price level or a "
+            "unit error, not a return."
+        )
+
+
 def optimize_replication_basket(
     input_data: ReplicationBasketInput,
 ) -> ReplicationBasketResult:
+    for symbol, series in input_data.returns.items():
+        _require_estimable_returns(series, f"returns[{symbol!r}]")
+    _require_estimable_returns(input_data.benchmark_returns, "benchmark_returns")
     return ReplicationBasketResult(
         **_replication.optimize_replication_basket(
             returns=pd.DataFrame(input_data.returns),

@@ -136,3 +136,30 @@ class TestSurvival:
             )
         )
         assert result.metrics["concordance"] > 0.6
+
+
+class TestTheTrainMeanIsOnTheTargetsScale:
+    """A train_mean far off the outcomes' scale put the baseline's squared
+    error past the float range, and the baseline MAE and R2 came back as
+    +/-inf -- numbers, where the input was the mistake. Refused by name. See
+    the CHANGELOG entry of 2026-09-28."""
+
+    def test_an_overflowing_baseline_is_refused_by_name(self):
+        ref = _publish(_frame(), "train_mean_huge")
+        with pytest.raises(ValidationError, match=r"train_mean=1e\+308"):
+            score_predictions(
+                ScorePredictionsInput(
+                    predictions_ref=ref, task="regression", train_mean=1e308
+                )
+            )
+
+    def test_an_ordinary_train_mean_scores(self):
+        """The null case: every baseline number finite."""
+        ref = _publish(_frame(), "train_mean_ok")
+        result = score_predictions(
+            ScorePredictionsInput(
+                predictions_ref=ref, task="regression", train_mean=0.1
+            )
+        )
+        assert result.baseline["baseline_is_oracle"] == 0.0
+        assert all(np.isfinite(v) for v in result.baseline.values())

@@ -12,8 +12,15 @@ become weights become a P&L, and if the P&L looks wrong there is no way to
 tell whether the signal or the construction did it. Stopping in the middle
 turns one opaque number into two inspectable ones.
 
-    predictions -> construct_weights_from_scores -> LOOK AT THE WEIGHTS
+    predictions -> convert_reference(to_kind='score_panel')
+                -> construct_weights_from_scores -> LOOK AT THE WEIGHTS
                                                  -> only then simulate
+
+Every reference is resolved against the kind it has to be. Without that, a
+weight panel passed back in as scores was accepted and transformed a second
+time -- under `vol_scaled` the weights came out divided by volatility twice,
+a plausible-looking vector that was not the one asked for -- and a price
+panel passed as `returns_ref` scaled by the volatility of price LEVELS.
 """
 
 from __future__ import annotations
@@ -30,7 +37,7 @@ from standard_quant_tools.agent.runtimes._json_safe import (
 from standard_quant_tools.backtest import sizing
 from standard_quant_tools.error import ValidationError
 
-from ..handoff import publish, resolve
+from ..handoff import parse, publish, resolve
 
 logger = logging.getLogger(__name__)
 Stat = Annotated[Optional[float], BeforeValidator(_finite_or_none)]
@@ -44,9 +51,14 @@ class ConstructWeightsInput(BaseModel):
     scores_ref: str = Field(
         ...,
         description=(
-            "An `sqt://score_panel/...` or `sqt://predictions/...` "
-            "reference. Bulk values cross runtimes as references, never "
-            "through the conversation."
+            "An `sqt://score_panel/...` reference. Bulk values cross "
+            "runtimes as references, never through the conversation. Model "
+            "predictions go through convert_reference(to_kind='score_panel', "
+            "task=...) first: a `predictions` reference is refused here, "
+            "because whether a prediction's sign is a direction depends on "
+            "the task, which only that conversion is told. Any other kind -- "
+            "a weight panel above all, which would be transformed a second "
+            "time -- is refused by name."
         ),
     )
     # A bare `str` here put the valid values only in the prose. The body
@@ -70,7 +82,9 @@ class ConstructWeightsInput(BaseModel):
         None,
         description=(
             "vol_scaled only: an `sqt://returns_panel/...` to scale by. "
-            "Required for that method and ignored by the others."
+            "Required for that method and ignored by the others. Any other "
+            "kind is refused: a price panel here would scale by the "
+            "volatility of price levels."
         ),
     )
     vol_lookback: int = Field(
@@ -108,18 +122,43 @@ class WeightsResult(BaseModel):
     warnings: List[str] = Field(default_factory=list)
 
 
-def _score_frame(ref: str) -> pd.DataFrame:
+def _panel(ref: str, expect: str, field: str) -> pd.DataFrame:
+    """
+    The date-by-entity frame `ref` points at, which must be an `expect`.
+
+    Resolved WITH the expected kind: without it any panel of numbers was
+    accepted, whatever it held. A `predictions` reference is refused with
+    the conversion that turns it into scores, rather than reshaped here:
+    it is a long (date, entity, prediction) frame, and a classifier's
+    predictions are probabilities whose sign is not a direction until they
+    are recentred -- which needs the model's task, a thing this tool is not
+    told and `convert_reference` is.
+    """
     try:
-        data = resolve(ref)
+        kind: Optional[str] = parse(str(ref).strip()).kind
+    except ValidationError:
+        kind = None  # resolve() below gives the refusal for a malformed ref
+    if expect == "score_panel" and kind == "predictions":
+        raise ValidationError(
+            f"{field}={ref!r} is a 'predictions' reference: a long "
+            "(date, entity, prediction) frame, not a date-by-entity score "
+            "panel. Convert it first with convert_reference(ref=..., "
+            "to_kind='score_panel', task=...) -- task='classification' "
+            "recentres probabilities on proba_threshold so a score's sign is "
+            "the predicted direction -- and pass the score_panel it "
+            "publishes."
+        )
+    try:
+        data = resolve(ref, expect=expect)
     except Exception as exc:  # noqa: BLE001 -- one refusal, not a traceback
         raise ValidationError(
-            f"{ref!r} could not be resolved as a score panel: {exc}"
+            f"{field}={ref!r} could not be resolved as a {expect!r}: {exc}"
         ) from exc
     if isinstance(data, dict):
         data = pd.DataFrame(data)
     if not isinstance(data, pd.DataFrame) or data.empty:
         raise ValidationError(
-            f"{ref!r} did not resolve to a non-empty date-by-entity frame."
+            f"{field}={ref!r} did not resolve to a non-empty date-by-entity frame."
         )
     return data
 
@@ -133,7 +172,7 @@ def construct_weights_from_scores(
             f"unknown method {input_data.method!r}; expected one of "
             f"{list(METHODS)}."
         )
-    scores = _score_frame(input_data.scores_ref)
+    scores = _panel(input_data.scores_ref, "score_panel", "scores_ref")
 
     if input_data.method == "rank":
         weights = sizing.rank_weighted(scores, input_data.gross_leverage)
@@ -158,7 +197,7 @@ def construct_weights_from_scores(
                 "by each name's realized volatility, which cannot be "
                 "recovered from the scores."
             )
-        returns = _score_frame(input_data.returns_ref)
+        returns = _panel(input_data.returns_ref, "returns_panel", "returns_ref")
         weights = sizing.vol_scaled(
             scores, returns, input_data.vol_lookback, input_data.gross_leverage
         )

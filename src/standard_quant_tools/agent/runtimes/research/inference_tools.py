@@ -18,6 +18,10 @@ from typing import Annotated, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
+from standard_quant_tools.agent.models import Seed
+from standard_quant_tools.agent.runtimes._json_safe import (
+    ExplainsNulls,
+)
 from standard_quant_tools.agent.runtimes._json_safe import (
     finite_or_none as _finite_or_none,
 )
@@ -63,7 +67,7 @@ class BootstrapInput(BaseModel):
     )
     confidence: float = Field(0.95, gt=0, lt=1)
     periods_per_year: int = Field(252, ge=1)
-    seed: int = Field(0)
+    seed: Seed = Field(0)
 
 
 class CompareDistributionsInput(BaseModel):
@@ -121,15 +125,26 @@ class MomentSummary(BaseModel):
     p99: Stat = None
 
 
-class MomentShift(BaseModel):
+class MomentShift(ExplainsNulls):
+    # Allowed, not declared: the two sides are keyed by the caller's
+    # label_a / label_b, so their names are not known here. ExplainsNulls
+    # nulls a non-finite one -- a moment of values too large for their powers
+    # to be represented -- and CompareDistributionsResult says so.
     model_config = ConfigDict(extra="allow")
+    null_reasons = {
+        "*": (
+            "the moment is not a number for this sample",
+            "the moment overflowed: the sample's values are too large for "
+            "their powers to be represented",
+        )
+    }
 
     moment: str = ""
     change: Stat = None
     relative_change: Stat = None
 
 
-class CompareDistributionsResult(_Result):
+class CompareDistributionsResult(_Result, ExplainsNulls):
     n_a: int = 0
     n_b: int = 0
     ks_statistic: Stat = None

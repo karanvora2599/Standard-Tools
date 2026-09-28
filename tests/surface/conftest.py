@@ -12,9 +12,9 @@ That makes the suite's runtime a function of how much the developer has
 run it before. Measured here after a day of repeated runs: a 375 MB audit
 directory, 355 MB of it written that same day, and three tools costing
 15.4s, 7.8s and 7.2s for ONE call each. Against a fresh directory the same
-three are milliseconds. `25_testing.md` records this layer at ~4.5 minutes,
-which is what it costs on a clean machine and nowhere near what it had
-grown to.
+three are milliseconds. `25_testing.md` records what each layer costs on a
+clean machine, which is nowhere near what an accumulated directory had
+grown it to.
 
 The failure mode is worse than slow. A suite that reads accumulated state
 is not reproducible: `export_audit_bundle` called twice in one session
@@ -50,8 +50,52 @@ def _isolated_audit_log(tmp_path_factory: pytest.TempPathFactory):
     os.environ["SQT_AUDIT_DIR"] = str(scratch)
     try:
         yield scratch
+        # Every call this layer made -- thousands of them, hostile inputs
+        # included -- wrote a decision record here. A NaN in an input once
+        # made its record fail its own hash, so the day read as tampered
+        # forever; one verification over the whole trail pins that for
+        # every tool at the cost of one call.
+        from standard_quant_tools.audit.verify import verify_audit_trail_integrity
+
+        problems = verify_audit_trail_integrity(scratch)
+        assert not problems, (
+            "the audit trail the surface layer wrote does not verify: "
+            f"{problems[:5]}"
+        )
     finally:
         if previous is None:
             os.environ.pop("SQT_AUDIT_DIR", None)
         else:
             os.environ["SQT_AUDIT_DIR"] = previous
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _hermetic_market():
+    """
+    Every fetch in this layer is answered by `hermetic.FakeTicker`.
+
+    Session-wide, so the determinism and invariant layers see the same bars
+    the adversarial one does, and none of them depends on a connection or on
+    what the market did today. The provider's own code still runs; only the
+    call to yfinance is replaced. See `hermetic.install` for the caches.
+    """
+    from . import hermetic
+
+    patch = pytest.MonkeyPatch()
+    hermetic.install(patch)
+    try:
+        yield
+    finally:
+        patch.undo()
+        hermetic.uninstall()
+
+
+@pytest.fixture(scope="session")
+def published(tmp_path_factory: pytest.TempPathFactory):
+    """The references, dataset, models and record ids a baseline can name,
+    built once per session (about twenty seconds)."""
+    from . import hermetic
+
+    return hermetic.publish_fixtures(
+        str(tmp_path_factory.mktemp("sqt-surface-external"))
+    )

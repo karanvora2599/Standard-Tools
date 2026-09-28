@@ -1,5 +1,7 @@
 import logging
-from typing import Optional
+from typing import Literal, Optional, get_args
+
+from standard_quant_tools.error import ValidationError
 
 from .base import DataProvider
 from .bloomberg_provider import BloombergProvider
@@ -7,6 +9,12 @@ from .polygon_provider import PolygonProvider
 from .yfinance_provider import YFinanceProvider
 
 logger = logging.getLogger(__name__)
+
+#: The providers `get_provider` can build. A tool field that selects one is
+#: typed with this, so the schema an agent reads lists them, and the
+#: factory's own refusal names the same set.
+ProviderName = Literal["yfinance", "polygon", "bloomberg", "databento"]
+PROVIDER_NAMES = get_args(ProviderName)
 
 
 class DataFactory:
@@ -39,12 +47,18 @@ class DataFactory:
             DataProvider: An instance of a data provider.
 
         Raises:
-            ValueError: If the source is unknown.
+            ValidationError: If the source is unknown or not implemented. A
+                ValueError too, so an `except ValueError` still catches it.
             APIError: source='bloomberg' and blpapi isn't installed (see
                 BloombergProvider's error message for install instructions),
                 or source='polygon' and no API key was found anywhere (see
                 PolygonProvider's error message).
         """
+        if not isinstance(source, str):
+            raise ValidationError(
+                f"Unknown data provider source: {source!r}. The providers this "
+                f"library serves are {list(PROVIDER_NAMES)}."
+            )
         source = source.lower()
         logger.debug("[factory] provider=%s", source)
 
@@ -66,6 +80,15 @@ class DataFactory:
 
             return DatabentoProvider(api_key=api_key)
         elif source == "alpaca":
-            raise NotImplementedError("Alpaca provider is not yet implemented.")
+            raise ValidationError(
+                "The 'alpaca' data provider is not implemented. The providers "
+                f"this library serves are {list(PROVIDER_NAMES)}."
+            )
         else:
-            raise ValueError(f"Unknown data provider source: '{source}'")
+            # A bare ValueError here reached an agent through eleven tools
+            # as an internal failure with no list to choose from.
+            raise ValidationError(
+                f"Unknown data provider source: '{source}'. The providers this "
+                f"library serves are {list(PROVIDER_NAMES)}; leave the source "
+                "unset for the default, 'yfinance'."
+            )

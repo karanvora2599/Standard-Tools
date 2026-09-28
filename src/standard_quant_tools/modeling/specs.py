@@ -35,11 +35,22 @@ def _parse_date(value: str, field_name: str) -> pd.Timestamp:
     """Shared by DatasetSpec's start/end cross-check and
     modeling.agent.models.ScoreModelInput.as_of — raises the same
     ValueError shape pydantic validators elsewhere in this codebase use
-    (e.g. PortfolioInput._check_weights), not a raw pandas parse error."""
+    (e.g. PortfolioInput._check_weights), not a raw pandas parse error.
+
+    NaT is refused too. `pd.Timestamp("")` (and "NaT") parses WITHOUT
+    raising and returns NaT, which then compares false against every date
+    and fails wherever it is first formatted or indexed -- far from the
+    argument that caused it."""
     try:
-        return pd.Timestamp(value)
+        parsed = pd.Timestamp(value)
     except (ValueError, TypeError) as exc:
         raise ValueError(f"{field_name}={value!r} is not a valid date: {exc}") from None
+    if pd.isna(parsed):
+        raise ValueError(
+            f"{field_name}={value!r} is not a valid date: it parses to no "
+            "date at all (NaT). Give it as YYYY-MM-DD."
+        )
+    return parsed
 
 
 # ── The labels and the tasks live in registries, not here ──────────────

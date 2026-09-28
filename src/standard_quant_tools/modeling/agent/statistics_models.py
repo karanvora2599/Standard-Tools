@@ -44,6 +44,8 @@ from typing import Annotated, Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from standard_quant_tools.agent.models import Seed
+
 from ..tasks import Task
 from .models import Stat
 
@@ -505,7 +507,7 @@ class CompareSignalsInput(BaseModel):
         lt=1.0,
         description="Two-sided coverage of the interval on the mean difference.",
     )
-    seed: int = Field(
+    seed: Seed = Field(
         0,
         description="Seed for the resampler, so the interval is reproducible.",
     )

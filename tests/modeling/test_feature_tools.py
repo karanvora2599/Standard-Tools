@@ -691,3 +691,144 @@ class TestTheSplitFollowedTheRule:
         assert name in FEATURE_TOOL_DISPATCH
         assert name in {d["function"]["name"] for d in get_feature_tools()}
         assert owner_of(name) == "feature_lab"
+
+
+def _ridge_spec():
+    from standard_quant_tools.modeling.specs import (
+        EstimatorSpec,
+        ModelSpec,
+        ValidationSpec,
+    )
+
+    return ModelSpec(
+        task="regression",
+        estimator=EstimatorSpec(type="ridge", params={"alpha": 1.0}),
+        validation=ValidationSpec(train_window=150, test_window=60, embargo=5),
+    )
+
+
+def _feature_list_inputs():
+    """Every input that takes a list of feature columns, with that list."""
+    from standard_quant_tools.modeling.agent.feature_models import (
+        FeatureAblationInput,
+        ScreenFeatureSignificanceInput,
+        ScreenFeatureStabilityInput,
+    )
+    from standard_quant_tools.modeling.agent.models import AnalyzeFeaturesInput
+
+    return [
+        (FeatureRedundancyInput, "features", {}),
+        (SelectFeaturesInput, "features", {}),
+        (CompareFeatureSetsInput, "left", {"right": ["x"]}),
+        (CompareFeatureSetsInput, "right", {"left": ["x"]}),
+        (ScreenFeatureStabilityInput, "features", {}),
+        (ScreenFeatureSignificanceInput, "features", {}),
+        (FeatureAblationInput, "features", {"spec": _ridge_spec()}),
+        (AnalyzeFeaturesInput, "features", {}),
+    ]
+
+
+class TestAFeatureIsNamedOnce:
+    """A feature is one column of the panel, and naming it twice did not ask
+    for it twice: the correlation between two features came back as a frame
+    where a number was expected, an ablation dropped both copies and refit on
+    nothing, and a screen counted one feature as two tests. Refused at the
+    schema, naming the repeat. See the CHANGELOG entry of 2026-09-28."""
+
+    @pytest.mark.parametrize(
+        "model, field, extra",
+        _feature_list_inputs(),
+        ids=lambda v: getattr(v, "__name__", v) if not isinstance(v, dict) else "",
+    )
+    def test_a_repeated_feature_is_refused_by_name(self, model, field, extra):
+        import pydantic
+
+        with pytest.raises(pydantic.ValidationError, match=r"names \['f'\] more"):
+            model(dataset_id="d", **{field: ["f", "g", "f"]}, **extra)
+
+    @pytest.mark.parametrize(
+        "model, field, extra",
+        _feature_list_inputs(),
+        ids=lambda v: getattr(v, "__name__", v) if not isinstance(v, dict) else "",
+    )
+    def test_distinct_features_are_accepted(self, model, field, extra):
+        built = model(dataset_id="d", **{field: ["f", "g"]}, **extra)
+        assert getattr(built, field) == ["f", "g"]
+
+    @pytest.mark.parametrize(
+        "tool", ["get_feature_redundancy", "select_features", "compare_feature_sets"]
+    )
+    def test_through_dispatch_it_is_a_schema_refusal(self, dataset, features, tool):
+        """These raised "The truth value of a DataFrame is ambiguous"."""
+        import pydantic
+
+        twice = [features[0], features[0]]
+        args = (
+            {"left": twice, "right": features}
+            if tool == "compare_feature_sets"
+            else {"features": twice}
+        )
+        with pytest.raises(pydantic.ValidationError, match="more than once"):
+            feature_dispatch(tool, {"dataset_id": dataset, **args})
+
+    def test_distinct_features_still_run(self, dataset, features):
+        result = get_feature_redundancy(
+            FeatureRedundancyInput(dataset_id=dataset, features=features)
+        )
+        assert result.n_features == len(features)
+
+
+class TestADateIsARealDate:
+    """An empty `selection_end` parsed to NaT without raising and failed as
+    an IndexError deep in the selection window; `split_date` had no
+    validator at all, so a malformed one escaped as a pandas parse error.
+    See the CHANGELOG entry of 2026-09-28."""
+
+    @pytest.mark.parametrize("bad", ["", "not-a-date", "2019-13-45", "NaT"])
+    @pytest.mark.parametrize(
+        "model, extra",
+        [
+            (SelectFeaturesInput, {}),
+            (CompareFeatureSetsInput, {"left": ["x"], "right": ["y"]}),
+        ],
+    )
+    def test_a_bad_selection_end_is_refused(self, model, extra, bad):
+        import pydantic
+
+        with pytest.raises(pydantic.ValidationError, match="selection_end"):
+            model(dataset_id="d", selection_end=bad, **extra)
+
+    @pytest.mark.parametrize("bad", ["", "not-a-date", "2019-13-45", "NaT"])
+    def test_a_bad_split_date_is_refused(self, bad):
+        import pydantic
+
+        from standard_quant_tools.modeling.agent.feature_models import (
+            ScreenFeatureStabilityInput,
+        )
+
+        with pytest.raises(pydantic.ValidationError, match="split_date"):
+            FeatureDriftInput(dataset_id="d", feature="f", split_date=bad)
+        with pytest.raises(pydantic.ValidationError, match="split_date"):
+            ScreenFeatureStabilityInput(dataset_id="d", split_date=bad)
+
+    def test_an_empty_selection_end_through_dispatch(self, dataset, features):
+        import pydantic
+
+        with pytest.raises(pydantic.ValidationError, match="NaT"):
+            feature_dispatch(
+                "compare_feature_sets",
+                {
+                    "dataset_id": dataset,
+                    "left": features[:1],
+                    "right": features,
+                    "selection_end": "",
+                },
+            )
+
+    def test_a_split_date_inside_the_panel_still_splits(self, dataset, features):
+        result = get_feature_drift(
+            FeatureDriftInput(
+                dataset_id=dataset, feature=features[0], split_date="2023-01-03"
+            )
+        )
+        assert result.n_before > 0 and result.n_after > 0

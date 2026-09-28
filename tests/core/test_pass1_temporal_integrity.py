@@ -253,6 +253,11 @@ class TestLookAheadWarningReachesTheAgent:
         fill_price="close". _run_backtest rebuilt BacktestResult without it
         and the model had no field for it, so the engine knew the simulation
         might contain look-ahead while the agent-facing output said nothing.
+
+        The next_open run used to be asserted to carry no warning at all. On
+        this rising series no trade loses, so its profit factor is unbounded
+        and arrives as null -- and a null ratio now says why in `warnings`.
+        What next_open must not carry is the look-ahead caveat.
         """
         from standard_quant_tools.agent import tools as T
         from standard_quant_tools.agent.models import BacktestInput
@@ -286,7 +291,14 @@ class TestLookAheadWarningReachesTheAgent:
         conservative = shared_tools._run_backtest(
             inp.model_copy(update={"fill_price": "next_open"}), df, signals
         )
-        assert conservative.warnings == [], "next_open carries no such caveat"
+        assert not any(
+            "look" in w.lower() or "fill_price" in w for w in conservative.warnings
+        ), "next_open carries no such caveat"
+        assert conservative.profit_factor is None
+        assert conservative.warnings == [
+            "profit_factor is null: no closed trade lost money, so the gross "
+            "loss it divides by is zero."
+        ]
 
     def test_fill_price_and_strategy_type_are_constrained(self):
         from pydantic import ValidationError as PydanticValidationError

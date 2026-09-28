@@ -68,6 +68,7 @@ from standard_quant_tools.portfolio.portfolio import (
     fetch_returns_sync,
 )
 
+from .._shared import parse_date_keys, parse_iso_date
 from ..handoff import _vendor_provenance
 from ..handoff import describe as _handoff_describe
 from ..handoff import parse as _parse_ref
@@ -1367,6 +1368,19 @@ __all__ = [
 def build_continuous_futures_series(
     input_data: ContinuousFuturesInput,
 ) -> ContinuousFuturesResult:
+    tool = "build_continuous_futures_series"
+    # Every date in the chain checked by name before the build. The
+    # builder parsed them one `pd.Timestamp` at a time, so an expiry of
+    # 'not-a-date' surfaced as pandas' own parse error, naming neither the
+    # contract nor the field.
+    for index, contract in enumerate(input_data.contracts):
+        where = f"contracts[{index}]"
+        parse_iso_date(contract.expiry, f"{where}.expiry", tool)
+        parse_date_keys(contract.prices, f"{where}.prices", tool)
+        for name in ("volume", "open_interest"):
+            series = getattr(contract, name)
+            if series is not None:
+                parse_date_keys(series, f"{where}.{name}", tool)
     chain = [c.model_dump(exclude_none=True) for c in input_data.contracts]
     built = build_continuous_futures(
         chain,

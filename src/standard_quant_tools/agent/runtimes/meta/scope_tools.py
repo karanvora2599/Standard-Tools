@@ -29,10 +29,30 @@ from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 from standard_quant_tools.agent.runtimes._json_safe import (
     finite_or_none as _finite_or_none,
 )
+from standard_quant_tools.audit.json_native import to_json_native
 from standard_quant_tools.error import ValidationError
 
 logger = logging.getLogger(__name__)
 Stat = Annotated[Optional[float], BeforeValidator(_finite_or_none)]
+
+
+def _number_or_token(value: Any) -> Any:
+    """
+    A non-finite number as the token "NaN", "Infinity" or "-Infinity".
+
+    Not null, which is what `Stat` would make it: in a difference entry null
+    already means "absent on this side" (`only_in_a`, `only_in_b`), so a NaN
+    compared with 1.0 would have read as a field missing from one artifact.
+    The token is the audit trail's own spelling of the same value, so a
+    difference found here reads the way the recorded input does.
+    """
+    if isinstance(value, float):
+        return to_json_native(value)
+    return value
+
+
+#: A compared value: any JSON value, with a non-finite number as its token.
+Compared = Annotated[Optional[Any], BeforeValidator(_number_or_token)]
 
 
 class _Result(BaseModel):
@@ -128,8 +148,16 @@ class FieldDifference(BaseModel):
     kind: str = Field(
         "", description="'changed', 'only_in_a', 'only_in_b' or 'type_changed'."
     )
-    a: Optional[Any] = None
-    b: Optional[Any] = None
+    a: Compared = Field(
+        None,
+        description="The value in artifact a; null when absent there. A "
+        "non-finite number is written as 'NaN', 'Infinity' or '-Infinity'.",
+    )
+    b: Compared = Field(
+        None,
+        description="The value in artifact b; null when absent there. A "
+        "non-finite number is written as 'NaN', 'Infinity' or '-Infinity'.",
+    )
     relative_change: Stat = None
 
 

@@ -1560,10 +1560,12 @@ def validate_tool_call(input_data: ValidateToolCallInput) -> ValidateToolCallRes
     would pass a schema check and still be look-ahead by construction.
 
     The third is the numerical contract every boundary enforces, run
-    against numbers ALREADY PRESENT in the call: a data source carrying
-    literal values, an annualization factor. An all-NaN series passed a
-    schema check cleanly and then failed at execution with "contains no
-    observations", after the rest of the call had been paid for.
+    against numbers ALREADY PRESENT in the call: a scalar parameter that
+    is NaN or infinite (refused at dispatch with the same message), a data
+    source carrying literal values, an annualization factor. An all-NaN
+    series passed a schema check cleanly and then failed at execution with
+    "contains no observations", after the rest of the call had been paid
+    for.
     `describe_numeric_contract` states the rules this layer applies.
 
     Nothing here fetches, runs or writes — which is why a source naming a
@@ -1646,10 +1648,23 @@ def validate_tool_call(input_data: ValidateToolCallInput) -> ValidateToolCallRes
     checked_numeric = False
     if normalized:
         from standard_quant_tools.numeric_contract import (
+            non_finite_scalar_fields,
+            require_finite_scalar_fields,
             require_finite_series,
             require_periods_per_year,
             require_positive_price_series,
         )
+
+        # The scalar rule dispatch applies before any tool runs, reported
+        # here with the same message, once per offending field.
+        try:
+            require_finite_scalar_fields(instance, input_data.tool_name)
+        except ValidationError as exc:
+            checked_numeric = True
+            for path, _value in non_finite_scalar_fields(instance):
+                problems.append(
+                    ArgumentProblem(field=path, problem=str(exc), kind="invalid")
+                )
 
         for kind, field, value in _inline_numeric_payloads(normalized):
             checked_numeric = True

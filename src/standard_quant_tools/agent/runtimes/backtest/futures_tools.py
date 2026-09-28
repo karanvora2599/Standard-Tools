@@ -14,6 +14,7 @@ engine exists to break.
 from __future__ import annotations
 
 import logging
+import math
 from typing import Annotated, Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
@@ -21,6 +22,7 @@ from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 from standard_quant_tools.agent.runtimes._json_safe import (
     finite_or_none as _finite_or_none,
 )
+from standard_quant_tools.agent.runtimes._shared import parse_date_keys
 from standard_quant_tools.backtest.futures_engine import run_futures_simulation
 from standard_quant_tools.backtest.futures_hedge_backtest import (
     run_futures_hedge_backtest as _run_futures_hedge_backtest,
@@ -94,9 +96,9 @@ class FuturesBacktestInput(BaseModel):
         "targets hold the last one; before the first the account is flat.",
     )
     multiplier: float = Field(
-        ..., gt=0, description="Contract point value, e.g. 50 for ES."
+        ..., gt=0, le=1e6, description="Contract point value, e.g. 50 for ES."
     )
-    initial_capital: float = Field(1_000_000.0, gt=0, description="Currency.")
+    initial_capital: float = Field(1_000_000.0, gt=0, le=1e15, description="Currency.")
     initial_margin: float = Field(
         0.0,
         ge=0,
@@ -152,10 +154,15 @@ class FuturesBacktestInput(BaseModel):
 class FuturesBacktestResult(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    initial_capital: Optional[float] = None
-    final_equity: Optional[float] = None
-    total_return_pct: Optional[float] = None
-    max_drawdown: Optional[float] = Field(
+    # Every number is Stat-typed. The inputs are refused upstream when they
+    # are not finite, so a non-finite figure here can only be an overflow
+    # -- prices, contracts and multiplier whose product no float can hold
+    # -- and it arrives as null with a warning naming it rather than as a
+    # NaN the JSON boundary would have nulled silently.
+    initial_capital: Stat = None
+    final_equity: Stat = None
+    total_return_pct: Stat = None
+    max_drawdown: Stat = Field(
         None,
         description="Worst peak-to-trough decline as a SIGNED FRACTION at "
         "most zero (-0.20 is a 20% drawdown) -- the spelling every other "
@@ -163,7 +170,7 @@ class FuturesBacktestResult(BaseModel):
         "max_drawdown_pct, which despite its name is also a fraction. Read "
         "this one.",
     )
-    max_drawdown_pct: Optional[float] = Field(
+    max_drawdown_pct: Stat = Field(
         None,
         description="The same number as a PERCENTAGE (-20.0 for a 20% "
         "drawdown). DEPRECATED in favour of max_drawdown: the identically "
@@ -171,19 +178,19 @@ class FuturesBacktestResult(BaseModel):
         "meant two things 100x apart across one boundary. Kept so existing "
         "callers do not break.",
     )
-    max_leverage: Optional[float] = Field(
+    max_leverage: Stat = Field(
         None,
         description="ECONOMIC EXPOSURE over equity. Not the gross-market-value "
         "ratio the equity engine reports -- a futures book is at zero on that "
         "definition and many times its equity on this one.",
     )
-    peak_exposure: Optional[float] = None
-    total_variation_margin: Optional[float] = Field(
+    peak_exposure: Stat = None
+    total_variation_margin: Stat = Field(
         None, description="Where a futures position's profit actually arrives."
     )
-    total_commission: Optional[float] = None
-    total_slippage: Optional[float] = None
-    total_collateral_interest: Optional[float] = None
+    total_commission: Stat = None
+    total_slippage: Stat = None
+    total_collateral_interest: Stat = None
     n_margin_calls: int = 0
     margin_calls: List[Dict[str, Any]] = Field(default_factory=list)
     n_rolls: int = 0
@@ -193,7 +200,7 @@ class FuturesBacktestResult(BaseModel):
         description="Bars on which the target exceeded what the account could "
         "post initial margin for, with the requested and filled sizes.",
     )
-    equity_curve: Dict[str, float] = Field(
+    equity_curve: Dict[str, Stat] = Field(
         default_factory=dict, description="Cash plus posted margin, by date."
     )
     min_margin_cushion: Stat = Field(
@@ -243,10 +250,46 @@ class FuturesBacktestResult(BaseModel):
     )
 
 
+#: The headline figures of a futures run, checked for overflow by name.
+_FUTURES_HEADLINE = (
+    "final_equity",
+    "total_return_pct",
+    "max_drawdown_pct",
+    "max_leverage",
+    "peak_exposure",
+    "total_variation_margin",
+    "total_commission",
+    "total_slippage",
+    "total_collateral_interest",
+)
+
+
 def run_futures_backtest(input_data: FuturesBacktestInput) -> FuturesBacktestResult:
+    tool = "run_futures_backtest"
+    # Every date-keyed map parsed here, by name. The engine parsed the
+    # index itself outside its own guard, so a non-date key raised pandas'
+    # format error, and a NaN or infinite price or target ran straight into
+    # the account: a NaN price turned every later equity figure NaN and an
+    # infinite target raised an OverflowError from `round`.
+    prices = parse_date_keys(input_data.prices, "prices", tool, finite=True)
+    targets = parse_date_keys(
+        input_data.target_contracts, "target_contracts", tool, finite=True
+    )
+    contract_map = (
+        None
+        if input_data.contract_map is None
+        else parse_date_keys(input_data.contract_map, "contract_map", tool)
+    )
+    prior_prices = (
+        None
+        if input_data.roll_day_prior_prices is None
+        else parse_date_keys(
+            input_data.roll_day_prior_prices, "roll_day_prior_prices", tool, finite=True
+        )
+    )
     out = run_futures_simulation(
-        prices=input_data.prices,
-        target_contracts=input_data.target_contracts,
+        prices=prices,
+        target_contracts=targets,
         multiplier=input_data.multiplier,
         initial_capital=input_data.initial_capital,
         initial_margin=input_data.initial_margin,
@@ -254,10 +297,26 @@ def run_futures_backtest(input_data: FuturesBacktestInput) -> FuturesBacktestRes
         commission_per_contract=input_data.commission_per_contract,
         slippage_points=input_data.slippage_points,
         collateral_rate=input_data.collateral_rate,
-        contract_map=input_data.contract_map,
+        contract_map=contract_map,
         allow_fractional=input_data.allow_fractional,
-        roll_day_prior_prices=input_data.roll_day_prior_prices,
+        roll_day_prior_prices=prior_prices,
     )
+
+    warnings: List[str] = list(out["warnings"])
+    overflowed = [
+        name for name in _FUTURES_HEADLINE if not _is_finite_number(out[name])
+    ]
+    n_bad_bars = int((~out["equity_curve"].apply(_is_finite_number)).sum())
+    if overflowed or n_bad_bars:
+        warnings.append(
+            f"Reported as null because the arithmetic left floating point: "
+            f"{', '.join(overflowed) or 'no headline figure'}"
+            + (f", and equity on {n_bad_bars} bar(s)" if n_bad_bars else "")
+            + ". Prices, contracts and the multiplier multiply into the "
+            "account, and their product here is beyond what a float can "
+            "hold. Check that prices and multiplier are in the units the "
+            "contract trades in."
+        )
 
     # How close the account ever came to a forced reduction. The engine
     # tests `equity < |contracts| * maintenance_margin` on every bar and
@@ -301,7 +360,7 @@ def run_futures_backtest(input_data: FuturesBacktestInput) -> FuturesBacktestRes
         n_rolls=out["n_rolls"],
         rolls=out["rolls"],
         margin_limited_fills=out["margin_limited_fills"],
-        equity_curve={str(k.date()): float(v) for k, v in out["equity_curve"].items()},
+        equity_curve={str(k.date()): v for k, v in out["equity_curve"].items()},
         min_margin_cushion=min_margin_cushion,
         cash_curve_ref=_publish_state(out["cash_curve"], run_id, "cash_curve"),
         margin_curve_ref=_publish_state(out["margin_curve"], run_id, "margin_curve"),
@@ -314,8 +373,15 @@ def run_futures_backtest(input_data: FuturesBacktestInput) -> FuturesBacktestRes
         leverage_curve_ref=_publish_state(
             out["leverage_curve"], run_id, "leverage_curve"
         ),
-        warnings=out["warnings"],
+        warnings=warnings,
     )
+
+
+def _is_finite_number(value: Any) -> bool:
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError):
+        return False
 
 
 class FuturesHedgeBacktestInput(BaseModel):
@@ -373,54 +439,122 @@ class FuturesHedgeBacktestResult(BaseModel):
     n_bars: int = 0
     rehedge_rule: str = ""
     n_rehedges: int = 0
-    cash_pnl: Optional[float] = Field(
+    cash_pnl: Stat = Field(
         None,
         description="The unhedged book's P&L. Reported SEPARATELY from the "
         "hedge on purpose: a hedged book that made money because the hedge "
         "lost less than the cash leg is a different outcome from one where "
         "the hedge worked, and a net number cannot tell them apart.",
     )
-    hedge_pnl: Optional[float] = None
-    combined_pnl: Optional[float] = None
-    unhedged_volatility: Optional[float] = None
-    hedged_volatility: Optional[float] = None
-    volatility_reduction: Optional[float] = None
-    residual_beta: Optional[float] = Field(
+    hedge_pnl: Stat = None
+    combined_pnl: Stat = None
+    unhedged_volatility: Stat = None
+    hedged_volatility: Stat = None
+    volatility_reduction: Stat = None
+    residual_beta: Stat = Field(
         None,
         description="Beta left after hedging. The number that says whether it worked.",
     )
-    effective_hedge_ratio: Optional[float] = None
-    peak_hedge_notional: Optional[float] = None
-    hedge_variation_margin: Optional[float] = None
+    effective_hedge_ratio: Stat = None
+    peak_hedge_notional: Stat = None
+    held_residual_fraction_max: Stat = Field(
+        None,
+        description="Largest absolute residual of the hedge actually held, "
+        "as a fraction of the book's dollar beta, over the bars.",
+    )
+    held_residual_fraction_mean: Stat = Field(
+        None, description="Mean of the same residual over the bars."
+    )
+    hedge_variation_margin: Stat = None
     hedge_margin_calls: int = 0
-    total_commission: Optional[float] = None
-    total_slippage: Optional[float] = None
+    total_commission: Stat = None
+    total_slippage: Stat = None
     n_rolls: int = 0
     contracts_held: Dict[str, float] = Field(default_factory=dict)
-    hedge_effectiveness: Dict[str, Any] = Field(default_factory=dict)
+    hedge_effectiveness: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="The in-sample effectiveness measures. A measure that is "
+        "undefined for this book -- a drawdown reduction when the unhedged "
+        "book never drew down, a correlation with a constant leg -- is null, "
+        "and the warnings say which and why.",
+    )
     warnings: List[str] = Field(default_factory=list)
+
+
+#: Why an effectiveness measure can be undefined on a legal book, keyed by
+#: the measure. Anything not listed gets the generic reason.
+_UNDEFINED_BECAUSE = {
+    "drawdown_reduction_pct": "the unhedged book never drew down, so there "
+    "is no drawdown for the hedge to reduce",
+    "volatility_reduction_pct": "the unhedged book has no volatility to reduce",
+    "r_squared_before": "one leg is constant, so the fit explains nothing",
+    "correlation": "one leg is constant, so the two legs have no correlation",
+}
+
+
+def _null_undefined(node: Any, path: str, undefined: List[str]) -> Any:
+    """`node` with every non-finite number replaced by None, recording the
+    dotted path of each one so the warning can name it."""
+    if isinstance(node, dict):
+        return {
+            key: _null_undefined(value, f"{path}.{key}", undefined)
+            for key, value in node.items()
+        }
+    if isinstance(node, list):
+        return [
+            _null_undefined(value, f"{path}[{i}]", undefined)
+            for i, value in enumerate(node)
+        ]
+    if isinstance(node, float) and not math.isfinite(node):
+        undefined.append(path)
+        return None
+    return node
 
 
 def run_futures_hedge_backtest(
     input_data: FuturesHedgeBacktestInput,
 ) -> FuturesHedgeBacktestResult:
-    return FuturesHedgeBacktestResult(
-        **_run_futures_hedge_backtest(
-            portfolio_values=input_data.portfolio_values,
-            future_prices=input_data.future_prices,
-            multiplier=input_data.multiplier,
-            portfolio_beta=input_data.portfolio_beta,
-            future_beta=input_data.future_beta,
-            rehedge=input_data.rehedge,
-            drift_band=input_data.drift_band,
-            initial_margin=input_data.initial_margin,
-            commission_per_contract=input_data.commission_per_contract,
-            slippage_points=input_data.slippage_points,
-            collateral_rate=input_data.collateral_rate,
-            contract_map=input_data.contract_map,
-            allow_fractional=input_data.allow_fractional,
-        )
+    tool = "run_futures_hedge_backtest"
+    # Keys and values checked by name before the simulation runs. The
+    # simulation aligns the two maps on their keys as given, so a key that
+    # is not a date used to drop out of the intersection silently and the
+    # hedge ran on fewer bars than were supplied.
+    parse_date_keys(input_data.portfolio_values, "portfolio_values", tool, finite=True)
+    parse_date_keys(input_data.future_prices, "future_prices", tool, finite=True)
+    if input_data.contract_map is not None:
+        parse_date_keys(input_data.contract_map, "contract_map", tool)
+    out = _run_futures_hedge_backtest(
+        portfolio_values=input_data.portfolio_values,
+        future_prices=input_data.future_prices,
+        multiplier=input_data.multiplier,
+        portfolio_beta=input_data.portfolio_beta,
+        future_beta=input_data.future_beta,
+        rehedge=input_data.rehedge,
+        drift_band=input_data.drift_band,
+        initial_margin=input_data.initial_margin,
+        commission_per_contract=input_data.commission_per_contract,
+        slippage_points=input_data.slippage_points,
+        collateral_rate=input_data.collateral_rate,
+        contract_map=input_data.contract_map,
+        allow_fractional=input_data.allow_fractional,
     )
+
+    # A measure that is undefined for this book is null, with the reason.
+    # `drawdown_reduction_pct` is NaN whenever the unhedged book never drew
+    # down -- a legal and common input -- and the JSON boundary used to turn
+    # it into a null nobody explained.
+    undefined: List[str] = []
+    effectiveness = _null_undefined(
+        out.get("hedge_effectiveness") or {}, "hedge_effectiveness", undefined
+    )
+    warnings = list(out.get("warnings", []))
+    for path in undefined:
+        reason = _UNDEFINED_BECAUSE.get(
+            path.rsplit(".", 1)[-1], "it is undefined for this book"
+        )
+        warnings.append(f"{path} is null: {reason}.")
+    out = {**out, "hedge_effectiveness": effectiveness, "warnings": warnings}
+    return FuturesHedgeBacktestResult(**out)
 
 
 FUTURES_TOOL_DEFS = [

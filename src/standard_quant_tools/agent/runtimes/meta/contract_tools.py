@@ -247,6 +247,24 @@ _RULES = (
         ),
     },
     {
+        "rule": "tool_scalar_parameter_is_finite",
+        "applies_to": (
+            "every scalar numeric parameter of a tool call, and of the "
+            "models nested in it"
+        ),
+        "threshold": "finite; NaN and +/-inf refused at dispatch, before the tool runs",
+        "message_excerpt": "A scalar parameter has no missing value to skip",
+        "why": (
+            "The input schemas bound most parameters and leave some open, "
+            "and an open float accepted NaN and infinity: a NaN account "
+            "size reached int() and an infinite target reached round(), "
+            "both failing with errors that named no argument. The series "
+            "rules allow a gap; a single number has none, so this is the "
+            "one place NaN is refused outright. Numbers inside a list or a "
+            "map are inline data and keep the series rules."
+        ),
+    },
+    {
         "rule": "scalar_within_its_declared_range",
         "applies_to": "any scalar numeric argument with bounds",
         "threshold": "the minimum and maximum the computation declares",

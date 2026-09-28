@@ -18,7 +18,10 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from standard_quant_tools.agent.runtimes._json_safe import ExplainsNulls
+
 from ..specs import PortfolioSimSpec, PredictionTransformSpec, Task
+from .models import PORTFOLIO_METRIC_REASONS, Stat
 
 
 class EvaluatePredictionsPortfolioInput(BaseModel):
@@ -110,8 +113,9 @@ class EvaluatePredictionsPortfolioInput(BaseModel):
     )
 
 
-class EvaluatePredictionsPortfolioResult(BaseModel):
+class EvaluatePredictionsPortfolioResult(ExplainsNulls):
     model_config = ConfigDict(protected_namespaces=())
+    null_reasons = PORTFOLIO_METRIC_REASONS
 
     source_ref: str = Field(
         ...,
@@ -120,7 +124,7 @@ class EvaluatePredictionsPortfolioResult(BaseModel):
         "registered model here, and the reference is the whole of the "
         "identity.",
     )
-    metrics: Dict[str, float] = Field(
+    metrics: Dict[str, Stat] = Field(
         ...,
         description=(
             "Economic performance of the simulated account: cumulative "

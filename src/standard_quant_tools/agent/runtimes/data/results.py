@@ -25,10 +25,14 @@ from typing import Annotated, Any, Dict, List, Optional
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
 from standard_quant_tools.agent.runtimes._json_safe import (
+    ExplainsNulls,
+)
+from standard_quant_tools.agent.runtimes._json_safe import (
     finite_or_none as _finite_or_none,
 )
 
 Stat = Annotated[Optional[float], BeforeValidator(_finite_or_none)]
+FiniteOrNone = Annotated[Any, BeforeValidator(_finite_or_none)]
 
 
 class _Result(BaseModel):
@@ -231,9 +235,16 @@ class VendorPreflightResult(_Result):
     provider: Optional[str] = Field(None, description="Which provider was asked.")
 
 
-class FinancialRatiosResult(_Result):
+class FinancialRatiosResult(_Result, ExplainsNulls):
+    # A vendor payload marks a ratio it does not have as NaN. It is echoed as
+    # null, with a warning naming it, rather than as a NaN no JSON can carry.
+    null_reasons = {
+        "ratios": "the value supplied for it was not a finite number -- a "
+        "vendor's mark for a ratio it does not have"
+    }
+
     symbol: str
-    ratios: Dict[str, Any] = Field(default_factory=dict)
+    ratios: Dict[str, FiniteOrNone] = Field(default_factory=dict)
     implausible: List[str] = Field(
         default_factory=list,
         description="Values that fail a plausibility check on their face.",

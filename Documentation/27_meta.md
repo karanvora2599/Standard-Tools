@@ -35,7 +35,9 @@ handoff.
 schema, the strategy parameter contract underneath it, and the numerical
 contract run against numbers already written into the call — an all-NaN
 series passes a schema check cleanly and fails at execution with "contains
-no observations", after the rest of the call has been paid for. A grid
+no observations", after the rest of the call has been paid for. A NaN or
+infinite scalar parameter is reported with the same message dispatch
+refuses it with, one problem per field. A grid
 search with an invalid parameter range fails after the fetch without this,
 and before it with.
 
@@ -145,7 +147,10 @@ best-effort path, because a handoff that guesses is worse than one that
 refuses.
 
 **`compare_artifacts`** is a field-by-field diff of two result objects,
-ordered by the size of the change.
+ordered by the size of the change. A side that is absent is `null`; a side
+that is a non-finite number is written as `"NaN"`, `"Infinity"` or
+`"-Infinity"` — the audit trail's spelling — so a NaN compared with 1.0 is a
+changed value, not a field missing from one artifact.
 
 ## The audit trail, read-only
 

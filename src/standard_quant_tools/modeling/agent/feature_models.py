@@ -28,13 +28,21 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, List, Literal, Optional
 
-import pandas as pd
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    field_validator,
+)
 from typing_extensions import Annotated
+
+from standard_quant_tools.agent.models import Seed
 
 from ..analysis.feature_stability import PSI_MODERATE, PSI_SIGNIFICANT
 from ..limits import MAX_PERMUTATION_DRAWS
-from ..specs import ModelSpec
+from ..specs import ModelSpec, _parse_date
 
 
 def _finite_or_none(value: Any) -> Optional[float]:
@@ -70,6 +78,38 @@ _NO_PROTECTED = ConfigDict(protected_namespaces=())
 
 #: Inputs reject what they do not declare, for the reason described above.
 _FORBID_EXTRA = ConfigDict(protected_namespaces=(), extra="forbid")
+
+
+def _named_once(features: List[str]) -> List[str]:
+    """
+    A feature list with no name repeated, or a refusal naming the repeats.
+
+    A feature is one column of the panel, and selecting a column twice does
+    not ask for it twice -- it breaks what is computed from it: the
+    correlation between two features came back as a frame where a number
+    was expected, an ablation that dropped the feature dropped both copies
+    and refit on nothing, and a screen counted one feature as two tests.
+    """
+    repeated = sorted({f for f in features if features.count(f) > 1})
+    if repeated:
+        raise ValueError(
+            f"names {repeated} more than once. Each feature is one column of "
+            "the panel; list it once."
+        )
+    return features
+
+
+#: A list of feature columns, each named once. See `_named_once`.
+FeatureNames = Annotated[List[str], AfterValidator(_named_once)]
+
+
+def _optional_date(value: Optional[str], field_name: str) -> Optional[str]:
+    """None, or a string that parses to a real date -- refused otherwise at
+    the schema, naming the field, rather than deep inside the computation
+    (an empty string parses to NaT without raising)."""
+    if value is not None:
+        _parse_date(value, field_name)
+    return value
 
 
 # ── the per-feature numbers ─────────────────────────────────────────────
@@ -345,7 +385,7 @@ class FeatureRedundancyInput(BaseModel):
     dataset_id: str = Field(
         ..., description="A dataset_id returned by build_model_dataset."
     )
-    features: Optional[List[str]] = Field(
+    features: Optional[FeatureNames] = Field(
         None,
         description="Features to consider. Defaults to every feature in the "
         "dataset.",
@@ -407,7 +447,7 @@ class SelectFeaturesInput(BaseModel):
     dataset_id: str = Field(
         ..., description="A dataset_id returned by build_model_dataset."
     )
-    features: Optional[List[str]] = Field(
+    features: Optional[FeatureNames] = Field(
         None,
         description="Features to choose from. Defaults to every feature in "
         "the dataset.",
@@ -464,13 +504,7 @@ class SelectFeaturesInput(BaseModel):
     @field_validator("selection_end")
     @classmethod
     def _valid_selection_end(cls, v: Optional[str]) -> Optional[str]:
-        if v is None:
-            return v
-        try:
-            pd.Timestamp(v)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"selection_end must be a date: {exc}") from exc
-        return v
+        return _optional_date(v, "selection_end")
 
 
 class SelectFeaturesResult(BaseModel):
@@ -613,8 +647,10 @@ class CompareFeatureSetsInput(BaseModel):
     dataset_id: str = Field(
         ..., description="A dataset_id returned by build_model_dataset."
     )
-    left: List[str] = Field(..., min_length=1, description="The baseline feature set.")
-    right: List[str] = Field(
+    left: FeatureNames = Field(
+        ..., min_length=1, description="The baseline feature set."
+    )
+    right: FeatureNames = Field(
         ..., min_length=1, description="The candidate feature set."
     )
     cluster_threshold: float = Field(
@@ -640,13 +676,7 @@ class CompareFeatureSetsInput(BaseModel):
     @field_validator("selection_end")
     @classmethod
     def _valid_selection_end(cls, v: Optional[str]) -> Optional[str]:
-        if v is None:
-            return v
-        try:
-            pd.Timestamp(v)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"selection_end must be a date: {exc}") from exc
-        return v
+        return _optional_date(v, "selection_end")
 
 
 class CompareFeatureSetsResult(BaseModel):
@@ -690,6 +720,11 @@ class FeatureDriftInput(BaseModel):
         "spearman",
         description="Correlation for the IC halves: 'spearman' or " "'pearson'.",
     )
+
+    @field_validator("split_date")
+    @classmethod
+    def _valid_split_date(cls, v: Optional[str]) -> Optional[str]:
+        return _optional_date(v, "split_date")
 
 
 class FeatureDriftResult(BaseModel):
@@ -805,9 +840,7 @@ class PermutationTestInput(BaseModel):
     method: Literal["spearman", "pearson"] = Field(
         "spearman", description="'spearman' or 'pearson'."
     )
-    random_seed: int = Field(
-        0, ge=0, description="Seed, so the p-value is reproducible."
-    )
+    random_seed: Seed = Field(0, description="Seed, so the p-value is reproducible.")
     null: Literal["circular_shift", "within_date"] = Field(
         "circular_shift",
         description="How the null is drawn. 'circular_shift' (default) rolls "
@@ -901,7 +934,7 @@ class ScreenFeatureSignificanceInput(BaseModel):
     dataset_id: str = Field(
         ..., description="A dataset_id returned by build_model_dataset."
     )
-    features: Optional[List[str]] = Field(
+    features: Optional[FeatureNames] = Field(
         None,
         description="Features to test. Defaults to every feature in the "
         "dataset, which is the point of the screen -- the floor is a "
@@ -929,7 +962,7 @@ class ScreenFeatureSignificanceInput(BaseModel):
         "serial correlation too and rejected a true null 27-35% of the time "
         "on autocorrelated features.",
     )
-    random_seed: int = Field(0, ge=0, description="Seed, so the floor is reproducible.")
+    random_seed: Seed = Field(0, description="Seed, so the floor is reproducible.")
     max_draws: int = Field(
         20_000,
         ge=1,
@@ -1051,7 +1084,7 @@ class ScreenFeatureStabilityInput(BaseModel):
     dataset_id: str = Field(
         ..., description="A dataset_id returned by build_model_dataset."
     )
-    features: Optional[List[str]] = Field(
+    features: Optional[FeatureNames] = Field(
         None,
         description="Features to screen. Defaults to every feature in the " "dataset.",
     )
@@ -1084,6 +1117,11 @@ class ScreenFeatureStabilityInput(BaseModel):
         le=1000,
         description="Refuse rather than return a row per feature past this.",
     )
+
+    @field_validator("split_date")
+    @classmethod
+    def _valid_split_date(cls, v: Optional[str]) -> Optional[str]:
+        return _optional_date(v, "split_date")
 
 
 class ScreenFeatureStabilityResult(BaseModel):
@@ -1151,7 +1189,7 @@ class FeatureAblationInput(BaseModel):
         "experiment uses -- an ablation of a different model answers a "
         "different question.",
     )
-    features: Optional[List[str]] = Field(
+    features: Optional[FeatureNames] = Field(
         None,
         description="Features to ablate one at a time. Defaults to every "
         "feature in the dataset. Narrow this FIRST if the fit budget is the "

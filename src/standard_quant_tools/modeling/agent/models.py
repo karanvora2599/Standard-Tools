@@ -18,7 +18,11 @@ from pydantic import (
     model_validator,
 )
 
-from standard_quant_tools.agent.runtimes._json_safe import finite_or_none
+from standard_quant_tools.agent.runtimes._json_safe import (
+    ExplainsNulls,
+    Reason,
+    finite_or_none,
+)
 
 from ..registry.lifecycle import LifecycleStage
 from ..specs import (
@@ -30,6 +34,7 @@ from ..specs import (
     Task,
     _parse_date,
 )
+from .feature_models import FeatureNames
 
 # Every Input/Result model below with a model_id field sets this to
 # silence pydantic's "model_" protected-namespace warning (the same fix
@@ -43,6 +48,27 @@ _NO_PROTECTED_NAMESPACES = ConfigDict(protected_namespaces=())
 #: exist would fail every other number beside it. `feature_models.py:63`
 #: carries the same alias for the feature-lab results.
 Stat = Annotated[Optional[float], BeforeValidator(finite_or_none)]
+
+#: Why a simulated account's ratio is null. The simulator's metrics follow
+#: the library's 0/0 and x/0 conventions: a book that never moved has a 0/0
+#: Sortino, and one that never fell below the risk-free rate -- every flat
+#: bar is a gain under a negative rate -- an unbounded one.
+PORTFOLIO_METRIC_REASONS: Dict[str, Reason] = {
+    "sharpe_ratio": (
+        "the account's returns have no dispersion, so there is no volatility "
+        "to divide by",
+        "the volatility it divides by is zero",
+    ),
+    "sortino_ratio": (
+        "no return differed from the risk-free rate, so the ratio is 0/0",
+        "no return fell below the risk-free rate, so the downside deviation "
+        "it divides by is zero",
+    ),
+    "calmar_ratio": (
+        "the account neither grew nor drew down, so the ratio is 0/0",
+        "the account never drew down, so the ratio divides by a zero drawdown",
+    ),
+}
 
 # ── list_features ──────────────────────────────────────────────────────
 
@@ -1074,7 +1100,7 @@ class AnalyzeFeaturesInput(BaseModel):
     dataset_id: str = Field(
         ..., description="A dataset_id returned by build_model_dataset."
     )
-    features: Optional[List[str]] = Field(
+    features: Optional[FeatureNames] = Field(
         None,
         description="Feature columns to analyze. Defaults to every feature in "
         "the dataset.",
@@ -1148,11 +1174,12 @@ class EvaluateModelPortfolioInput(BaseModel):
     )
 
 
-class EvaluateModelPortfolioResult(BaseModel):
+class EvaluateModelPortfolioResult(ExplainsNulls):
     model_config = _NO_PROTECTED_NAMESPACES
+    null_reasons = PORTFOLIO_METRIC_REASONS
 
     model_id: str
-    metrics: Dict[str, float] = Field(
+    metrics: Dict[str, Stat] = Field(
         ...,
         description=(
             "Economic performance of the simulated account: cumulative "
@@ -1609,8 +1636,8 @@ class CheckLeakageInput(BaseModel):
     feature_ids: Optional[List[str]] = Field(
         None,
         description=(
-            "Feature ids to check for temporal safety. Omit to check every "
-            "feature in the registry."
+            "Feature ids to check for temporal safety, at least one. Omit to "
+            "check every feature in the registry."
         ),
     )
     dataset_id: Optional[str] = Field(
@@ -1620,6 +1647,20 @@ class CheckLeakageInput(BaseModel):
             "of the panel is genuinely as-of rather than back-filled."
         ),
     )
+
+    @field_validator("feature_ids")
+    @classmethod
+    def _names_something_to_check(cls, v: Optional[List[str]]) -> Optional[List[str]]:
+        # The empty set passes every leakage check vacuously, so it came
+        # back `safe: true` -- the most reassuring answer, from the one
+        # request that asked nothing. Refused, with or without a dataset.
+        if v is not None and not v:
+            raise ValueError(
+                "feature_ids=[] names nothing to check, and an empty set is "
+                "'safe' only vacuously. Omit feature_ids to check every "
+                "feature in the registry, or list the ids to check."
+            )
+        return v
 
 
 class LeakageFinding(BaseModel):
@@ -1841,15 +1882,15 @@ class ScorePredictionsInput(BaseModel):
     )
 
 
-class ScorePredictionsResult(BaseModel):
+class ScorePredictionsResult(ExplainsNulls):
     task: str
     n_observations: int
     n_dates: int
     n_entities: int
-    metrics: Dict[str, float] = Field(
+    metrics: Dict[str, Stat] = Field(
         ..., description="Task-appropriate accuracy metrics."
     )
-    cross_sectional_ic: Dict[str, float] = Field(
+    cross_sectional_ic: Dict[str, Stat] = Field(
         default_factory=dict,
         description=(
             "Mean IC, its standard deviation, ICIR and hit rate across "
@@ -1858,7 +1899,7 @@ class ScorePredictionsResult(BaseModel):
             "level differences."
         ),
     )
-    baseline: Dict[str, float] = Field(
+    baseline: Dict[str, Stat] = Field(
         default_factory=dict,
         description=(
             "The same metrics for predicting the training mean. A model that "

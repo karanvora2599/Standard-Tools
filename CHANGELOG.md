@@ -1,5 +1,56 @@
 # Changelog
 
+## The tool surface refuses what it cannot answer, and says why a number is missing
+
+An offline sweep of every tool with some seven thousand adversarial inputs
+found thirty tools that answered a bad input with a raw exception — no
+remedy for the model to act on — fifteen that refused with a bare
+`ValueError`, one that ran for minutes, and ninety-three result fields that
+carried NaN or infinity out of a tool. The same sweep now finds none of
+each.
+
+- **Inputs are checked where they enter.** A seed on any tool is a whole
+  number from 0 to 2**32−1; a negative seed or a boolean is refused at the
+  schema instead of failing inside numpy or the native Monte Carlo. A NaN or
+  infinite scalar parameter is refused at dispatch, naming the field, before
+  anything runs or is recorded, and `validate_tool_call` reports the same
+  refusal; numbers inside series, lists and maps keep their existing rules.
+  Date-keyed maps (custom signals, futures prices and targets, contract
+  chains) are read as ISO dates up front and a key that is not a date is
+  refused by name. An unknown data provider is a typed refusal listing the
+  four the library serves, and provider fields list them in the schema.
+  Repeated tickers, factor names and feature names, empty universes, windows
+  longer than the data, `top_n` outside 1–20, oversized purged-CV and
+  bootstrap requests, and values past the float range are refused with the
+  remedy.
+- **References are resolved as the kind they must be.**
+  `construct_weights_from_scores` no longer accepts a weight panel as scores
+  (it used to transform it a second time) or a price panel as returns, and a
+  predictions reference is pointed at `convert_reference`.
+  `get_portfolio_risk_attribution` follows the factor-regression rules: one
+  unique name per factor ticker, an inner join that reports the dates it
+  drops, dependent factors refused by name. `check_leakage` no longer answers
+  `safe: true` for an empty feature set.
+- **A missing number says why.** Ratios that are 0/0 or x/0 on a legal
+  input, correlations of a series that never moved, indicators whose window
+  outruns the data, and numbers inside metrics maps, weight maps, correlation
+  matrices and equity curves are finite-or-null across the result models,
+  and each null carries a line in `warnings` naming the field and the
+  reason. Delta-one results declare every key they return and refuse any
+  other; `compare_artifacts` writes a non-finite side as its token, because
+  null already means absent.
+- **Every door is audited.** The eleven feature-lab tools served over MCP
+  went through a dispatch that wrote no decision record and did not convert
+  NaN; they now take the same audited path as every other tool.
+- **The adversarial layer catches what it used to miss.** It no longer counts
+  a bare `ValueError` (including a date-parse error) as a refusal, reads each
+  result model before it is cleaned, generates its probes from the input
+  schemas — negative seeds, unparseable dates and date keys, duplicates,
+  NaN and infinity, empty and single-element lists, windows longer than the
+  data, swapped bounds — runs against a synthetic market and published
+  fixtures instead of the network, checks the audit trail it wrote, and pins
+  every case the sweep found in the fast run.
+
 ## Each setting is read one way, each write lands once, and each feed says what it is
 
 The plumbing under the numbers had the same failure in many places: a check

@@ -9,6 +9,7 @@ from typing import Any, Callable, Dict, Optional
 
 from standard_quant_tools._env import env_flag
 from standard_quant_tools.error import AuditIntegrityError
+from standard_quant_tools.numeric_contract import require_finite_scalar_fields
 
 from .context import _data_sources_var, _request_id_var, new_request_id
 from .hashing import hash_payload
@@ -97,8 +98,14 @@ def _run_and_record(
     refused (a word that is neither on nor off) then refuses the call
     itself, instead of surfacing after the tool has acted with no record
     of it.
+
+    A NaN or infinite scalar parameter is refused FIRST, before a request
+    id is minted, so -- like an argument the input schema refuses -- it
+    writes no record. It is part of the input contract rather than
+    something the tool did, and every dispatch path runs through here.
     """
     _forget_last_request_id()
+    require_finite_scalar_fields(model_instance, tool_name)
     recording = _audit_enabled()
     fail_closed = _audit_fail_closed() if recording else False
 

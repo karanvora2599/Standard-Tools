@@ -366,3 +366,119 @@ class TestTheProviderContractIsReportedHonestly:
         joined = " ".join(result["warnings"])
         assert "point-in-time" in joined
         assert "survivorship" in joined
+
+
+# ── a provider name, and a futures chain's dates, read by name ────────────
+
+
+class TestTheProviderIsOneOfTheFour:
+    """A source the factory does not know used to reach eleven tools as a
+    bare ValueError with no list to choose from."""
+
+    @pytest.mark.parametrize(
+        "tool,arguments",
+        [
+            ("fetch_ohlcv", {"symbol": "AAPL", "start_date": "2023-01-02"}),
+            ("fetch_financial_ratios", {"symbol": "AAPL"}),
+            ("get_dataset_metadata", {"symbol": "AAPL"}),
+        ],
+    )
+    def test_an_unknown_source_is_a_schema_refusal_listing_the_four(
+        self, tool, arguments
+    ):
+        from pydantic import ValidationError as PydanticValidationError
+
+        with pytest.raises(PydanticValidationError) as exc:
+            _data(tool, {**arguments, "source": "zz_not_valid"})
+        message = str(exc.value)
+        for provider in ("yfinance", "polygon", "bloomberg", "databento"):
+            assert provider in message
+
+    @pytest.mark.parametrize(
+        "tool",
+        [
+            "fetch_ohlcv",
+            "fetch_ohlcv_panel",
+            "fetch_returns_panel",
+            "fetch_tick_tape",
+            "fetch_quote_panel",
+            "fetch_order_book",
+            "fetch_order_events",
+            "fetch_financial_ratios",
+            "get_dataset_metadata",
+            "preflight_vendor_request",
+            "run_screener",
+            "detect_liquidity_events",
+        ],
+    )
+    def test_the_schema_an_agent_reads_lists_them(self, tool):
+        from standard_quant_tools.agent.runtimes import _build
+
+        model = next(
+            rt.dispatch_table[tool][1]
+            for rt in _build().values()
+            if tool in rt.dispatch_table
+        )
+        spec = model.model_json_schema()["properties"]["source"]
+        enum = next(b["enum"] for b in spec["anyOf"] if "enum" in b)
+        assert set(enum) == {"yfinance", "polygon", "bloomberg", "databento"}
+
+    def test_a_known_source_still_fetches(self, bars_provider, tmp_path, monkeypatch):
+        monkeypatch.setenv("SQT_RUNS_DIR", str(tmp_path))
+        result = _data(
+            "fetch_ohlcv",
+            {
+                "symbol": "AAPL",
+                "start_date": "2023-01-02",
+                "end_date": "2023-12-29",
+                "run_id": "t_source",
+                "name": "bars",
+                "source": "yfinance",
+            },
+        )
+        assert result["ref"]
+
+
+def _chain(**first):
+    base = {
+        "symbol": "ESH4",
+        "expiry": "2024-03-15",
+        "prices": {"2024-01-02": 4800.0, "2024-01-03": 4810.0},
+        "volume": {"2024-01-02": 100.0, "2024-01-03": 50.0},
+    }
+    base.update(first)
+    return {
+        "contracts": [
+            base,
+            {
+                "symbol": "ESM4",
+                "expiry": "2024-06-21",
+                "prices": {"2024-01-02": 4850.0, "2024-01-03": 4860.0},
+                "volume": {"2024-01-02": 10.0, "2024-01-03": 200.0},
+            },
+        ],
+        "run_id": "t_chain",
+        "name": "es",
+    }
+
+
+class TestAFuturesChainIsReadByName:
+    """The builder parsed each date with `pd.Timestamp` one at a time, so a
+    bad expiry surfaced as pandas' own parse error, naming no contract."""
+
+    def test_an_expiry_that_is_not_a_date_names_the_contract(self):
+        with pytest.raises(ValidationError, match=r"contracts\[0\]\.expiry"):
+            _data("build_continuous_futures_series", _chain(expiry="not-a-date"))
+
+    def test_a_price_key_that_is_not_a_date_names_the_map(self):
+        with pytest.raises(ValidationError, match=r"contracts\[0\]\.prices"):
+            _data(
+                "build_continuous_futures_series",
+                _chain(prices={"2024-01-02": 4800.0, "ESH4": 4810.0}),
+            )
+
+    def test_a_well_formed_chain_still_builds(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SQT_RUNS_DIR", str(tmp_path))
+        result = _data("build_continuous_futures_series", _chain())
+        assert result["n_contracts"] == 2
+        assert result["research_ref"] and result["tradeable_ref"]

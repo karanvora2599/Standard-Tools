@@ -596,11 +596,27 @@ class TestTheComparisonSortsInTheRightDirection:
         assert len(set(volatilities)) > 1
 
     def test_by_sharpe_the_highest_still_wins(self, one_symbol):
+        """The highest Sharpe among the strategies that traded wins.
+
+        This used to sort every row's Sharpe, the idle RSI row's included.
+        That row's returns never move, so its Sharpe is 0/0: it arrived as a
+        NaN, which sorts without complaint and means nothing, and it is null
+        now, with the reason in the result's warnings. It ranks last.
+        """
         result = _compare(one_symbol, "sharpe_ratio")
 
-        sharpes = [s.sharpe_ratio for s in result.strategies]
+        ranked = result.strategies[: len(result.strategies) - result.n_unrankable]
+        sharpes = [s.sharpe_ratio for s in ranked]
+        assert all(s is not None for s in sharpes)
         assert sharpes == sorted(sharpes, reverse=True)
         assert result.best_strategy == result.strategies[0].strategy
+        idle = result.strategies[-1]
+        assert idle.num_trades == 0 and idle.sharpe_ratio is None
+        assert any(
+            w.startswith(f"strategies[{len(result.strategies) - 1}].sharpe_ratio")
+            and "no dispersion" in w
+            for w in result.warnings
+        )
 
     def test_the_other_two_silent_ties_are_fields_now(self, one_symbol):
         """Every strategy that traded carries both metrics, ranked.
@@ -674,3 +690,123 @@ class TestTheKindTableAdvertisesWhatItCanMint:
         # check_freq=False: Parquet stores the timestamps, not the
         # DatetimeIndex's inferred frequency.
         pd.testing.assert_frame_equal(resolved, frame, check_freq=False)
+
+
+# ── a futures account reads its dates by name ───────────────────────────
+
+
+class TestTheFuturesMapsAreReadByName:
+    """Every date-keyed map on the two futures tools is parsed before the
+    account runs. The engine parsed the index outside its own guard, so a
+    key that was not a date raised pandas' format error; a NaN or infinite
+    value then ran straight into the books."""
+
+    def test_a_price_key_that_is_not_a_date_is_named(self):
+        from standard_quant_tools.error import ValidationError
+
+        with pytest.raises(ValidationError, match="'not-a-date'"):
+            _futures(
+                prices={"2024-01-02": 100.0, "not-a-date": 101.0, "2024-01-04": 100.0}
+            )
+
+    def test_a_target_map_keyed_by_contract_codes_is_refused(self):
+        from standard_quant_tools.error import ValidationError
+
+        with pytest.raises(ValidationError, match="target_contracts are not ISO"):
+            _futures(target_contracts={"ESH6": 1.0})
+
+    @pytest.mark.parametrize("bad", [float("inf"), float("-inf"), float("nan")])
+    def test_a_non_finite_target_is_refused_by_date(self, bad):
+        """+inf reached `round()` and raised OverflowError; NaN held no
+        position without saying so."""
+        from standard_quant_tools.error import ValidationError
+
+        with pytest.raises(ValidationError, match="'2024-01-02'"):
+            _futures(target_contracts={"2024-01-02": bad})
+
+    def test_a_nan_price_is_refused_rather_than_carried_into_equity(self):
+        from standard_quant_tools.error import ValidationError
+
+        with pytest.raises(ValidationError, match="prices has a missing"):
+            _futures(
+                prices={
+                    "2024-01-02": 100.0,
+                    "2024-01-03": float("nan"),
+                    "2024-01-04": 100.0,
+                }
+            )
+
+    def test_a_multiplier_past_any_contract_is_a_schema_refusal(self):
+        from pydantic import ValidationError as PydanticValidationError
+
+        with pytest.raises(PydanticValidationError, match="multiplier"):
+            _futures(multiplier=1e308)
+
+    def test_an_overflowing_account_reports_null_and_says_which(self):
+        """Finite inputs whose product no float holds: the figures that
+        overflow come back null and the warning names them, rather than a
+        NaN the JSON boundary nulls without a word."""
+        result = _futures(
+            prices={"2024-01-02": 1e308, "2024-01-03": 1e308, "2024-01-04": 1e308},
+            multiplier=10.0,
+            initial_capital=1_000_000.0,
+            initial_margin=0.0,
+        )
+        assert result.peak_exposure is None
+        assert result.final_equity == pytest.approx(1_000_000.0)
+        warning = next(w for w in result.warnings if "floating point" in w)
+        assert "peak_exposure" in warning
+
+    def test_the_minimal_account_still_runs(self):
+        result = _futures(initial_capital=100_000.0)
+        assert result.final_equity == pytest.approx(100_000.0)
+        assert list(result.equity_curve) == ["2024-01-02", "2024-01-03", "2024-01-04"]
+        assert not any("floating point" in w for w in result.warnings)
+
+
+class TestTheHedgeSaysWhyAMeasureIsNull:
+    @staticmethod
+    def _hedge(book=None, **overrides):
+        from standard_quant_tools.agent.runtimes.backtest.futures_tools import (
+            FuturesHedgeBacktestInput,
+            run_futures_hedge_backtest,
+        )
+
+        dates = [str(d.date()) for d in pd.bdate_range("2024-01-02", periods=40)]
+        rng = np.random.default_rng(0)
+        future = 5_000.0 * np.cumprod(1.0 + rng.normal(0.0, 0.01, len(dates)))
+        values = future * 200.0 if book is None else book(len(dates))
+        payload = dict(
+            portfolio_values=dict(zip(dates, np.asarray(values).tolist())),
+            future_prices=dict(zip(dates, future.tolist())),
+            multiplier=50.0,
+        )
+        payload.update(overrides)
+        return run_futures_hedge_backtest(FuturesHedgeBacktestInput(**payload))
+
+    def test_a_book_that_never_drew_down_has_no_drawdown_to_reduce(self):
+        """`drawdown_reduction_pct` was NaN here -- a legal, common input --
+        and reached the wire as a null nothing explained."""
+        result = self._hedge(book=lambda n: np.full(n, 1_000_000.0))
+        assert result.hedge_effectiveness["drawdown_reduction_pct"] is None
+        assert any(
+            "drawdown_reduction_pct is null" in w and "never drew down" in w
+            for w in result.warnings
+        )
+
+    def test_a_key_that_is_not_a_date_is_refused_instead_of_dropped(self):
+        """It used to fall out of the date intersection silently, and the
+        hedge ran on fewer bars than were supplied."""
+        from standard_quant_tools.error import ValidationError
+
+        dates = [str(d.date()) for d in pd.bdate_range("2024-01-02", periods=5)]
+        with pytest.raises(ValidationError, match="portfolio_values"):
+            self._hedge(
+                portfolio_values={**{d: 1e6 for d in dates}, "not-a-date": 1e6},
+                future_prices={d: 5_000.0 + i for i, d in enumerate(dates)},
+            )
+
+    def test_a_hedged_book_reports_every_measure(self):
+        result = self._hedge()
+        assert result.hedge_effectiveness["drawdown_reduction_pct"] is not None
+        assert not any(" is null: " in w for w in result.warnings)

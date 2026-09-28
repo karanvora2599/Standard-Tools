@@ -311,9 +311,13 @@ class TestRegimeAdaptiveWalkForwardBacktest:
         assert 0.0 <= result.strategy_stability["frequency"] <= 1.0
 
     def test_insufficient_data_raises(self, patched_long, long_ohlcv, monkeypatch):
+        """A typed refusal that names the bar count and the range, not a bare
+        ValueError saying only that there was not enough data -- see the
+        CHANGELOG entry of 2026-09-28."""
         from unittest.mock import MagicMock
 
         from standard_quant_tools.data.factory import DataFactory
+        from standard_quant_tools.error import ValidationError
 
         tiny_df = long_ohlcv.iloc[:50]
         prov = MagicMock()
@@ -327,7 +331,9 @@ class TestRegimeAdaptiveWalkForwardBacktest:
             train_bars=252,
             test_bars=63,
         )
-        with pytest.raises(ValueError, match="Not enough data"):
+        with pytest.raises(
+            ValidationError, match="needs at least 315 bars, but AAPL has 50"
+        ):
             run_regime_adaptive_walkforward_backtest(inp)
 
     def test_fill_price_threads_into_oos_leg(self, patched_long):
@@ -936,9 +942,13 @@ class TestWalkForwardBacktest:
             )
 
     def test_insufficient_data_raises(self, patched_long, long_ohlcv, monkeypatch):
+        """A typed refusal that names the bar count and the range, not a bare
+        ValueError saying only that there was not enough data -- see the
+        CHANGELOG entry of 2026-09-28."""
         from unittest.mock import MagicMock
 
         from standard_quant_tools.data.factory import DataFactory
+        from standard_quant_tools.error import ValidationError
 
         tiny_df = long_ohlcv.iloc[:50]
         prov = MagicMock()
@@ -954,8 +964,11 @@ class TestWalkForwardBacktest:
             train_bars=252,
             test_bars=63,
         )
-        with pytest.raises(ValueError, match="Not enough data"):
+        with pytest.raises(ValidationError) as exc:
             run_walk_forward_backtest(inp)
+        message = str(exc.value)
+        assert "needs at least 315 bars, but AAPL has 50" in message
+        assert START in message and END in message
 
     def test_stitched_fields_present_and_typed(self, patched_long):
         inp = WalkForwardInput(
@@ -1356,6 +1369,124 @@ class TestPortfolioRiskAttribution:
         assert result.max_drawdown <= 0.0
 
 
+def _ohlcv_from_returns(returns: np.ndarray, dates: pd.DatetimeIndex) -> pd.DataFrame:
+    close = 100.0 * np.cumprod(1 + returns)
+    return pd.DataFrame(
+        {
+            "Open": close,
+            "High": close * 1.01,
+            "Low": close * 0.99,
+            "Close": close,
+            "Volume": np.full(len(close), 1_000_000.0),
+        },
+        index=dates,
+    )
+
+
+class TestRiskAttributionFactorsAreNamedOneToOne:
+    """The factor regression inside the risk attribution follows the policy
+    run_factor_regression does: names one-to-one with the tickers and
+    unique, an inner join whose dropped dates are reported, and a linearly
+    dependent design refused by name. The names were zipped onto the
+    tickers, so a short list silently dropped factors, and a repeated
+    ticker broke the portfolio product. See the CHANGELOG entry of
+    2026-09-28."""
+
+    BASE = dict(
+        tickers=["AAPL", "MSFT"], weights=[0.6, 0.4], start_date=START, end_date=END
+    )
+
+    def test_a_repeated_ticker_is_refused_by_name(self):
+        with pytest.raises(
+            pydantic.ValidationError, match=r"tickers repeats \['AAPL'\]"
+        ):
+            RiskAttributionInput(
+                tickers=["AAPL", "AAPL"],
+                weights=[0.5, 0.5],
+                start_date=START,
+                end_date=END,
+            )
+
+    def test_a_non_finite_weight_is_refused(self):
+        """NaN passed the sum check (every comparison with NaN is false)."""
+        with pytest.raises(pydantic.ValidationError, match="finite"):
+            RiskAttributionInput(
+                tickers=["AAPL", "MSFT"],
+                weights=[float("nan"), 1.0],
+                start_date=START,
+                end_date=END,
+            )
+
+    def test_fewer_names_than_factor_tickers_is_refused(self):
+        with pytest.raises(pydantic.ValidationError, match="one name per ticker"):
+            RiskAttributionInput(
+                **self.BASE, factor_tickers=["SPY", "IWM", "IWD"], factor_names=["mkt"]
+            )
+
+    def test_a_repeated_factor_name_is_refused(self):
+        with pytest.raises(pydantic.ValidationError, match="must be unique"):
+            RiskAttributionInput(
+                **self.BASE, factor_tickers=["SPY", "IWM"], factor_names=["mkt", "mkt"]
+            )
+
+    def test_a_repeated_factor_ticker_without_names_is_refused(self):
+        with pytest.raises(pydantic.ValidationError, match="must be unique"):
+            RiskAttributionInput(**self.BASE, factor_tickers=["SPY", "SPY"])
+
+    def test_names_without_tickers_are_refused(self):
+        with pytest.raises(pydantic.ValidationError, match="without factor_tickers"):
+            RiskAttributionInput(**self.BASE, factor_names=["mkt"])
+
+    def test_an_empty_factor_list_is_refused(self):
+        with pytest.raises(pydantic.ValidationError, match="names no factor"):
+            RiskAttributionInput(**self.BASE, factor_tickers=[])
+
+    def test_linearly_dependent_factors_are_refused_by_name(self, patched_long):
+        """Every symbol here is the same series, so 'size' duplicates 'mkt'."""
+        from standard_quant_tools.error import ValidationError
+
+        inp = RiskAttributionInput(
+            **self.BASE, factor_tickers=["SPY", "IWM"], factor_names=["mkt", "size"]
+        )
+        with pytest.raises(ValidationError, match="'size'"):
+            get_portfolio_risk_attribution(inp)
+
+    def test_dates_a_factor_lacks_are_dropped_and_reported(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        from standard_quant_tools.data.factory import DataFactory
+
+        rng = np.random.default_rng(11)
+        dates = pd.bdate_range("2021-01-04", periods=300)
+        asset = _ohlcv_from_returns(rng.normal(0, 0.01, 300), dates)
+        # A factor that listed 50 bars later, on a return series of its own.
+        factor = _ohlcv_from_returns(rng.normal(0, 0.01, 300), dates).iloc[50:]
+        provider = MagicMock()
+        provider.get_ohlcv.side_effect = lambda t, *a, **k: (
+            factor if t == "IWM" else asset
+        )
+        monkeypatch.setattr(DataFactory, "get_provider", lambda *a, **kw: provider)
+
+        result = get_portfolio_risk_attribution(
+            RiskAttributionInput(
+                **self.BASE, factor_tickers=["IWM"], factor_names=["size"]
+            )
+        )
+        assert set(result.factor_loadings) == {"size"}
+        dropped = [w for w in result.warnings if "dates were dropped" in w]
+        assert dropped and dropped[0].startswith("50 of 299 dates")
+
+    def test_a_full_overlap_drops_nothing_and_says_nothing(self, patched_long):
+        """The null case: one factor on the shared calendar."""
+        result = get_portfolio_risk_attribution(
+            RiskAttributionInput(
+                **self.BASE, factor_tickers=["SPY"], factor_names=["mkt"]
+            )
+        )
+        assert set(result.factor_loadings) == {"mkt"}
+        assert not any("dropped" in w for w in result.warnings)
+
+
 # ── Feature 5: Position Sizer ──────────────────────────────────────────────────
 
 
@@ -1470,6 +1601,74 @@ class TestPositionSizer:
         result = get_position_size(inp)
         assert isinstance(result.recommended_shares, int)
         assert result.recommended_shares >= 0
+
+
+class TestPositionSizerRefusesWhatItCannotSize:
+    """A zero or negative equity or multiplier sized every position at zero
+    shares and returned that as a recommendation; a stop or share count past
+    the float range reached `int()` and escaped as an OverflowError naming
+    no input. See the CHANGELOG entry of 2026-09-28."""
+
+    @pytest.fixture
+    def wide_bars(self, monkeypatch):
+        """Bars about 20 wide, so the ATR is about 20."""
+        from unittest.mock import MagicMock
+
+        from standard_quant_tools.data.factory import DataFactory
+
+        dates = pd.bdate_range("2022-01-03", periods=120)
+        close = np.linspace(100.0, 120.0, 120)
+        frame = pd.DataFrame(
+            {
+                "Open": close,
+                "High": close + 10.0,
+                "Low": close - 10.0,
+                "Close": close,
+                "Volume": np.full(120, 1e6),
+            },
+            index=dates,
+        )
+        provider = MagicMock()
+        provider.get_ohlcv.return_value = frame
+        monkeypatch.setattr(DataFactory, "get_provider", lambda *a, **kw: provider)
+
+    def _input(self, **overrides):
+        args = dict(
+            symbol="AAPL", start_date=START, end_date=END, account_equity=100_000.0
+        )
+        args.update(overrides)
+        return PositionSizerInput(**args)
+
+    @pytest.mark.parametrize("equity", [0.0, -1.0])
+    def test_a_non_positive_equity_is_refused(self, equity):
+        with pytest.raises(pydantic.ValidationError, match="account_equity"):
+            self._input(account_equity=equity)
+
+    @pytest.mark.parametrize("multiplier", [0.0, -2.0])
+    def test_a_non_positive_multiplier_is_refused(self, multiplier):
+        with pytest.raises(pydantic.ValidationError, match="atr_multiplier"):
+            self._input(atr_multiplier=multiplier)
+
+    def test_a_stop_past_the_float_range_is_refused(self, wide_bars):
+        from standard_quant_tools.error import ValidationError
+
+        with pytest.raises(ValidationError, match="atr_multiplier"):
+            get_position_size(self._input(atr_multiplier=1e308))
+
+    def test_a_share_count_past_the_float_range_is_refused(self, wide_bars):
+        from standard_quant_tools.error import ValidationError
+
+        with pytest.raises(ValidationError, match="not a finite number of shares"):
+            get_position_size(
+                self._input(
+                    account_equity=1e308, risk_per_trade_pct=1.0, atr_multiplier=1e-10
+                )
+            )
+
+    def test_an_ordinary_request_still_sizes(self, wide_bars):
+        result = get_position_size(self._input())
+        assert result.stop_distance == pytest.approx(2.0 * result.atr, rel=1e-3)
+        assert abs(result.shares_fixed_risk - 1_000.0 / result.stop_distance) <= 1
 
 
 class TestPositionSizerKellyInputValidation:
@@ -2627,6 +2826,46 @@ class TestCapacityReport:
         assert "max_account_size" in result
 
 
+class TestCapacityReportInputsAreBounded:
+    """A zero or negative ADV window reached pandas' rolling() and escaped
+    as a bare ValueError; a NaN target weight came back as a NaN capacity,
+    reported as a number; an empty or repeated universe was accepted. See
+    the CHANGELOG entry of 2026-09-28."""
+
+    def _input(self, **overrides):
+        args = dict(
+            tickers=["AAPL", "MSFT"],
+            start_date=START,
+            end_date=END,
+            target_weights={"AAPL": 0.6, "MSFT": 0.4},
+        )
+        args.update(overrides)
+        return CapacityReportInput(**args)
+
+    @pytest.mark.parametrize("lookback", [0, -1])
+    def test_a_non_positive_adv_lookback_is_refused(self, lookback):
+        with pytest.raises(pydantic.ValidationError, match="adv_lookback"):
+            self._input(adv_lookback=lookback)
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+    def test_a_non_finite_target_weight_is_refused(self, bad):
+        with pytest.raises(pydantic.ValidationError, match="finite"):
+            self._input(target_weights={"AAPL": bad, "MSFT": 0.4})
+
+    def test_an_empty_universe_is_refused(self):
+        with pytest.raises(pydantic.ValidationError, match="tickers"):
+            self._input(tickers=[])
+
+    def test_a_repeated_ticker_is_refused(self):
+        with pytest.raises(pydantic.ValidationError, match=r"repeats \['AAPL'\]"):
+            self._input(tickers=["AAPL", "AAPL"])
+
+    def test_a_one_bar_window_still_reports(self, patched_factory):
+        """The null case: the smallest legal window."""
+        result = get_capacity_report(self._input(adv_lookback=1))
+        assert result.max_account_size is not None and result.max_account_size > 0
+
+
 # ── Data Quality Report ────────────────────────────────────────────────────────
 
 
@@ -2929,3 +3168,90 @@ class TestImpliedVolatilityTool:
             },
         )
         assert result["implied_volatility"] == pytest.approx(0.20, abs=1e-3)
+
+
+# ── bounds the advanced tools now state instead of failing inside ──────────
+
+
+class TestAdvancedToolBounds:
+    @pytest.mark.parametrize("window", [-1, 0, 1])
+    def test_a_pair_zscore_window_under_two_is_refused(self, window):
+        """-1 reached pandas' rolling window and failed there; a one-bar
+        window has no deviation to divide by."""
+        with pytest.raises(PydanticValidationError, match="zscore_window"):
+            PairTradeBacktestInput(
+                symbol_a="A",
+                symbol_b="B",
+                start_date=START,
+                end_date=END,
+                hedge_ratio=1.0,
+                zscore_window=window,
+            )
+
+    def test_a_two_bar_pair_window_still_runs(self, patched_pair):
+        """Two bars bound |z| at 1/sqrt(2), so the thresholds sit inside it."""
+        result = run_pair_trade_backtest(
+            PairTradeBacktestInput(
+                symbol_a="A",
+                symbol_b="B",
+                start_date=START,
+                end_date=END,
+                hedge_ratio=1.0,
+                entry_z=0.5,
+                exit_z=0.1,
+                zscore_window=2,
+            )
+        )
+        assert result.symbol_a == "A"
+
+    @pytest.mark.parametrize("n", [0, 20_001])
+    def test_bootstrap_iterations_outside_the_bound_are_refused(self, n):
+        """100,000 resamples ran for most of a minute before answering."""
+        with pytest.raises(PydanticValidationError, match="n_bootstrap_iterations"):
+            RobustnessDiagnosticsInput(
+                symbol="AAPL",
+                start_date=START,
+                end_date=END,
+                strategy="sma_crossover",
+                param_grid={"fast_period": [5], "slow_period": [30]},
+                n_bootstrap_iterations=n,
+            )
+
+    def test_a_negative_bootstrap_seed_is_refused(self):
+        with pytest.raises(PydanticValidationError, match="random_seed"):
+            RobustnessDiagnosticsInput(
+                symbol="AAPL",
+                start_date=START,
+                end_date=END,
+                strategy="sma_crossover",
+                param_grid={"fast_period": [5], "slow_period": [30]},
+                random_seed=-1,
+            )
+
+
+class TestPurgedSplitsAreBoundedBeforeTheyRun:
+    """The splits are built observation by observation for every path, so
+    100,000 observations ran for minutes and C(16, 8) = 12,870 paths would
+    have run for longer."""
+
+    @staticmethod
+    def _splits(**arguments):
+        return dispatch("build_purged_cv_splits", arguments)
+
+    def test_a_series_past_the_ceiling_is_refused(self):
+        with pytest.raises(PydanticValidationError, match="n_observations"):
+            self._splits(n_observations=100_000)
+
+    def test_too_many_paths_for_the_length_are_refused_with_the_count(self):
+        with pytest.raises(PydanticValidationError) as exc:
+            self._splits(n_observations=2_000, n_splits=16, n_test_splits=8)
+        assert "12,870 paths" in str(exc.value)
+
+    def test_a_label_horizon_past_the_ceiling_is_refused(self):
+        with pytest.raises(PydanticValidationError, match="label_horizon"):
+            self._splits(n_observations=500, label_horizon=5_000)
+
+    def test_the_default_split_at_the_ceiling_still_runs(self):
+        result = self._splits(n_observations=10_000)
+        assert result["n_paths"] == 15
+        assert result["n_observations"] == 10_000

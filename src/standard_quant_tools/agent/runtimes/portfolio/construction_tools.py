@@ -20,10 +20,11 @@ and burying it inside an allocator would hide it.
 from __future__ import annotations
 
 import logging
+import math
 from typing import Annotated, Dict, List, Optional
 
 import pandas as pd
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator
 
 from standard_quant_tools.agent.runtimes._json_safe import (
     finite_or_none as _finite_or_none,
@@ -58,6 +59,20 @@ def _square_frame(
                 f"{len(assets)} assets."
             )
     return pd.DataFrame(matrix, index=assets, columns=assets)
+
+
+def _finite_map(values: Dict[str, float], field: str) -> Dict[str, float]:
+    """A {name: number} input with every number finite, or a refusal naming
+    the entries that are not. A NaN or infinite weight or loading otherwise
+    comes out the other side as a NaN or infinite result -- or a division
+    by zero -- reported as if it had been measured."""
+    bad = [name for name, value in values.items() if not math.isfinite(value)]
+    if bad:
+        raise ValueError(
+            f"{field} is not finite at {bad[:10]}; every entry must be a "
+            "finite number."
+        )
+    return values
 
 
 # ── inputs ──────────────────────────────────────────────────────────────
@@ -111,7 +126,9 @@ class FactorExposureInput(BaseModel):
 
     weights: Dict[str, float] = Field(..., description="Asset -> portfolio weight.")
     factor_loadings: Dict[str, Dict[str, float]] = Field(
-        ..., description="Asset -> {factor: loading}."
+        ...,
+        description="Asset -> {factor: loading}. Every held asset that "
+        "appears here needs a loading on every factor.",
     )
     factor_covariance: Optional[List[List[float]]] = Field(
         None,
@@ -124,6 +141,45 @@ class FactorExposureInput(BaseModel):
         None, description="Explicit factor order for factor_covariance."
     )
 
+    @field_validator("weights")
+    @classmethod
+    def _finite_weights(cls, v: Dict[str, float]) -> Dict[str, float]:
+        # A NaN or infinite weight became a NaN or infinite exposure on
+        # every factor it touched.
+        return _finite_map(v, "weights")
+
+    @field_validator("factor_loadings")
+    @classmethod
+    def _finite_loadings(
+        cls, v: Dict[str, Dict[str, float]]
+    ) -> Dict[str, Dict[str, float]]:
+        for asset, loadings in v.items():
+            _finite_map(loadings, f"factor_loadings[{asset!r}]")
+        return v
+
+    @field_validator("factors")
+    @classmethod
+    def _factors_name_distinct_columns(
+        cls, v: Optional[List[str]]
+    ) -> Optional[List[str]]:
+        # An empty list was read as "every factor", the same as omitting it,
+        # and a repeated name selected the same loadings column twice, so its
+        # exposure was reported once and counted twice in the risk.
+        if v is None:
+            return v
+        if not v:
+            raise ValueError(
+                "factors=[] names no factor. Omit `factors` to use every "
+                "factor in factor_loadings, in the order they first appear."
+            )
+        repeated = sorted({f for f in v if v.count(f) > 1})
+        if repeated:
+            raise ValueError(
+                f"factors repeats {repeated}. Each factor is one row and "
+                "column of factor_covariance; name each once."
+            )
+        return v
+
 
 class ConcentrationInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -133,6 +189,14 @@ class ConcentrationInput(BaseModel):
         description="Asset -> weight. Signed: a long-short book is measured "
         "on GROSS weights, since net would make the denominator near-zero.",
     )
+
+    @field_validator("weights")
+    @classmethod
+    def _finite_weights(cls, v: Dict[str, float]) -> Dict[str, float]:
+        # An infinite weight made the gross exposure infinite, every share
+        # zero and the effective N a division by zero; a NaN weight was
+        # dropped without a word.
+        return _finite_map(v, "weights")
 
 
 class LiquidityVarInput(BaseModel):
@@ -239,10 +303,10 @@ class FactorExposureResult(_Result):
     n_unmapped: int = 0
     unmapped: List[str] = Field(default_factory=list)
     n_factors: int = 0
-    exposures: Dict[str, float] = Field(default_factory=dict)
+    exposures: Dict[str, Stat] = Field(default_factory=dict)
     largest_exposures: List[NamedExposure] = Field(default_factory=list)
     factor_variance: Stat = None
-    factor_variance_shares: Optional[Dict[str, float]] = Field(
+    factor_variance_shares: Optional[Dict[str, Stat]] = Field(
         None,
         description="Each factor's share of portfolio variance. This is the "
         "number that answers 'what am I taking risk on'. Null when no factor "
@@ -353,6 +417,25 @@ def get_factor_exposure_budget(
                 f"in the loadings. Available: {list(loadings.columns)}."
             )
         loadings = loadings[input_data.factors]
+    # A held asset with no loading on some factor becomes a NaN cell when the
+    # per-asset dicts are stacked, and that NaN made the factor's exposure --
+    # and its variance share -- NaN for the whole portfolio. Absent is not
+    # zero, so it is refused by name rather than filled.
+    held = [a for a in input_data.weights if a in loadings.index]
+    gaps = loadings.loc[held].isna()
+    if gaps.to_numpy().any():
+        pairs = [
+            f"{asset}/{factor}"
+            for asset in gaps.index
+            for factor in gaps.columns
+            if gaps.at[asset, factor]
+        ]
+        raise ValidationError(
+            f"get_factor_exposure_budget: {len(pairs)} held asset/factor "
+            f"loading(s) are missing: {pairs[:10]}. Give every held asset a "
+            "loading on every factor (0.0 where it genuinely has none), or "
+            "narrow `factors` to the ones every asset has."
+        )
     covariance = None
     if input_data.factor_covariance is not None:
         covariance = _square_frame(
@@ -360,14 +443,31 @@ def get_factor_exposure_budget(
             [str(c) for c in loadings.columns],
             "get_factor_exposure_budget",
         )
-    return FactorExposureResult(
-        **lib.factor_exposure_budget(
-            input_data.weights, loadings, factor_covariance=covariance
-        )
+    result = lib.factor_exposure_budget(
+        input_data.weights, loadings, factor_covariance=covariance
     )
+    overflowed = [f for f, e in result["exposures"].items() if not math.isfinite(e)]
+    if overflowed:
+        raise ValidationError(
+            f"get_factor_exposure_budget: the exposure to {overflowed} is "
+            "beyond the float range -- weight times loading overflowed. Give "
+            "weights as fractions of the portfolio and loadings on their "
+            "usual scale."
+        )
+    return FactorExposureResult(**result)
 
 
 def analyze_concentration(input_data: ConcentrationInput) -> ConcentrationResult:
+    # Every weight is finite by type, but a sum of large ones can still
+    # overflow, and an infinite gross exposure makes every share zero and
+    # the effective N a division by zero.
+    gross = sum(abs(w) for w in input_data.weights.values())
+    if not math.isfinite(gross):
+        raise ValidationError(
+            "analyze_concentration: the gross exposure of these weights is "
+            "beyond the float range. Give weights as fractions of the "
+            "portfolio or as position values in currency."
+        )
     return ConcentrationResult(**lib.concentration_analysis(input_data.weights))
 
 

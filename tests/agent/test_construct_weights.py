@@ -48,9 +48,17 @@ def scores_ref():
 
 @pytest.fixture
 def returns_ref():
+    """Published as the `returns_panel` it is. This fixture used to publish
+    its returns as a `score_panel`, which the tool accepted only because it
+    resolved `returns_ref` without asking for a kind; it now asks for
+    `returns_panel`, dated the way a fetched returns panel is."""
     rng = np.random.default_rng(1)
-    panel = {t: {d: float(rng.normal(0, 0.01)) for d in DATES} for t in NAMES}
-    return handoff.publish(panel, "score_panel", "r", "rets", producer="test")
+    frame = pd.DataFrame(
+        rng.normal(0, 0.01, (len(DATES), len(NAMES))),
+        index=pd.to_datetime(DATES),
+        columns=NAMES,
+    )
+    return handoff.publish(frame, "returns_panel", "r", "rets", producer="test")
 
 
 @pytest.fixture
@@ -196,6 +204,117 @@ class TestItStillRefusesWhatItCannotDo:
     def test_an_unresolvable_scores_ref(self, portfolio):
         with pytest.raises(ValidationError):
             _call(portfolio, "sqt://score_panel/nope/nothing", name="x")
+
+
+class TestEachReferenceIsTheKindItMustBe:
+    """Both references are resolved against the kind they must be. Without
+    that, the weight panel this tool publishes was accepted back as scores
+    and transformed a second time, and a price panel was accepted as
+    returns. See the CHANGELOG entry of 2026-09-28."""
+
+    def test_a_weight_panel_is_not_scores(self, portfolio, scores_ref, returns_ref):
+        """Planted: under vol_scaled the second pass divided by volatility
+        again -- a plausible vector, and not the one asked for."""
+        once = _call(
+            portfolio,
+            scores_ref,
+            method="vol_scaled",
+            returns_ref=returns_ref,
+            name="once",
+        )
+        with pytest.raises(ValidationError, match="'weight_panel'"):
+            _call(
+                portfolio,
+                once["ref"],
+                method="vol_scaled",
+                returns_ref=returns_ref,
+                name="twice",
+            )
+
+    @pytest.mark.parametrize("method", ["rank", "zscore"])
+    def test_a_weight_panel_is_refused_whatever_the_method(
+        self, portfolio, scores_ref, method
+    ):
+        weights = _call(portfolio, scores_ref, method=method, name=f"w1_{method}")
+        with pytest.raises(ValidationError, match="expected a 'score_panel'"):
+            _call(portfolio, weights["ref"], method=method, name=f"w2_{method}")
+
+    def test_a_price_panel_is_not_returns(self, portfolio, scores_ref):
+        rng = np.random.default_rng(3)
+        prices = pd.DataFrame(
+            100 * np.cumprod(1 + rng.normal(0, 0.01, (len(DATES), len(NAMES))), 0),
+            index=pd.to_datetime(DATES),
+            columns=NAMES,
+        )
+        price_ref = handoff.publish(prices, "price_panel", "r", "px", producer="t")
+        with pytest.raises(ValidationError, match="'price_panel'"):
+            _call(
+                portfolio,
+                scores_ref,
+                method="vol_scaled",
+                returns_ref=price_ref,
+                name="px",
+            )
+
+    @pytest.fixture
+    def predictions_ref(self):
+        rng = np.random.default_rng(5)
+        frame = pd.DataFrame(
+            [
+                {"date": pd.Timestamp(d), "entity": t, "prediction": rng.normal()}
+                for d in DATES
+                for t in NAMES
+            ]
+        )
+        return handoff.publish(frame, "predictions", "r", "preds", producer="t")
+
+    def test_a_predictions_reference_is_refused_with_the_conversion(
+        self, portfolio, predictions_ref
+    ):
+        """It raised a bare "could not convert string to float" from inside
+        the sizer, though the field's own description invited it."""
+        with pytest.raises(ValidationError) as exc:
+            _call(portfolio, predictions_ref, name="p")
+        message = str(exc.value)
+        assert "'predictions'" in message
+        assert "convert_reference" in message and "score_panel" in message
+
+    def test_the_named_conversion_gives_scores_it_accepts(
+        self, portfolio, predictions_ref
+    ):
+        """The remedy the refusal names, followed, works."""
+        converted = resolve("meta").dispatch(
+            "convert_reference",
+            {
+                "ref": predictions_ref,
+                "to_kind": "score_panel",
+                "task": "regression",
+                "run_id": "r",
+                "name": "converted",
+            },
+        )
+        result = _call(portfolio, converted["ref"], method="zscore", name="conv")
+        assert result["n_entities"] == len(NAMES)
+        assert result["gross_leverage"] == pytest.approx(1.0, rel=1e-6)
+
+    def test_a_returns_panel_scales_exactly_as_the_sizer_does(
+        self, portfolio, scores_ref, returns_ref
+    ):
+        """The null case: the right kinds give the library's own answer."""
+        from standard_quant_tools.backtest import sizing
+
+        result = _call(
+            portfolio,
+            scores_ref,
+            method="vol_scaled",
+            returns_ref=returns_ref,
+            name="exact",
+        )
+        scores = pd.DataFrame(handoff.resolve(scores_ref, expect="score_panel"))
+        returns = handoff.resolve(returns_ref, expect="returns_panel")
+        expected = sizing.vol_scaled(scores, returns, 20, 1.0).iloc[-1]
+        for name, weight in result["latest"].items():
+            assert weight == pytest.approx(float(expected[name]), rel=1e-9)
 
 
 class TestPublishTakesEitherContainer:

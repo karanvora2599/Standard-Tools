@@ -1780,6 +1780,13 @@ def check_leakage(input_data: CheckLeakageInput) -> CheckLeakageResult:
         from standard_quant_tools.modeling.features.registry import FEATURE_REGISTRY
 
         ids = sorted(FEATURE_REGISTRY)
+    # The input model refuses feature_ids=[]; this holds the same line for
+    # any other route to an empty set. Nothing checked is not "safe".
+    if not ids:
+        raise ValidationError(
+            "check_leakage: there is no feature to check, and an empty set "
+            "is 'safe' only vacuously. List the feature ids to check."
+        )
 
     definitions, findings, notes = [], [], []
     for feature_id in ids:
@@ -2353,6 +2360,22 @@ def score_predictions(input_data: ScorePredictionsInput) -> ScorePredictionsResu
         else np.full(1, float(input_data.train_mean))
     )
     if input_data.task == "regression":
+        if train_y is not None:
+            # A train_mean far off the outcomes' scale (1e308) put the
+            # baseline's squared error past the float range, and the
+            # baseline MAE and R2 came back as +/-inf -- numbers, where the
+            # input was the mistake.
+            with np.errstate(over="ignore", invalid="ignore"):
+                spread = float(np.sum((y_true - train_y[0]) ** 2))
+            if not np.isfinite(spread):
+                raise ValidationError(
+                    f"train_mean={input_data.train_mean!r} is not a mean of "
+                    "outcomes on this target's scale: the baseline's squared "
+                    "error against it is beyond the float range. Pass the "
+                    "training outcomes' mean (the realized outcomes here run "
+                    f"from {float(np.min(y_true)):g} to "
+                    f"{float(np.max(y_true)):g})."
+                )
         metrics = regression_metrics(y_true, y_pred, dates=dates, train_y=train_y)
         baseline = baseline_regression_metrics(y_true, train_y)
     elif input_data.task == "classification":
