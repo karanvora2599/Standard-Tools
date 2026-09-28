@@ -156,17 +156,58 @@ void rolling_beta_into(
     // cancellation for a large-baseline series -- e.g. a ~1e9-level x with
     // a genuine beta near 1.5 previously came out as -0.003, and the
     // denominator collapsed to exactly zero at a ~1e12 offset (verified by
-    // hand). Shifting both x and y by per-window reference points (their
-    // own first values, so x/y - c stays close to the window's actual
+    // hand). Shifting both x and y by per-window reference points (values
+    // from the window itself, so x/y - c stays close to the window's actual
     // *variation*, not its absolute level) before accumulating fixes this
     // the same way as bollinger_bands' fix in indicators.cpp -- periodic
     // full recompute every `window` bars both re-centers the shift and
     // bounds floating-point drift, matching rolling_factor_loadings'
     // existing periodic-refresh idiom elsewhere in this file.
+    //
+    // The reference is the NEWEST bar of the window being recomputed, not
+    // the oldest. That bar is the last to leave, and it leaves on exactly
+    // the slide where the periodic refresh fires, so the reference is always
+    // a value inside the current window. The oldest bar gave no such
+    // guarantee: when a large print happened to sit at a refresh boundary it
+    // became the reference, left one slide later, and every later window was
+    // shifted by the print's magnitude until the next refresh -- the same
+    // cancellation the shift exists to prevent.
     const double W = static_cast<double>(window);
+    const std::size_t window_sz = static_cast<std::size_t>(window);
     double cx = 0.0, cy = 0.0;
-    double Sx = 0.0, Sy = 0.0, Sxy = 0.0, Sxx = 0.0;
+    double Sx = 0.0, Sy = 0.0, Sxy = 0.0, Sxx = 0.0, Syy = 0.0;
     std::size_t since_refresh = 0;
+
+    // ── Non-finite bars ───────────────────────────────────────────────────
+    // A NaN or Inf in x or y makes the window it sits in unevaluable, and an
+    // O(1) sliding sum cannot subtract it back out: NaN - NaN is NaN, and
+    // inf - inf is NaN. The sums used to stay poisoned until the refresh
+    // cadence caught up, so the output was NaN for up to `window` - 1 clean
+    // windows after the bad bar had left. `bad_in_window` counts the bad
+    // bars actually in the window (the output is NaN exactly while it is
+    // nonzero), and `sums_polluted` records that one was ever ADDED, so the
+    // sums are rebuilt the moment the window is clean again -- the same pair
+    // of variables bollinger_bands_into uses.
+    std::size_t bad_in_window = 0;
+    bool        sums_polluted = false;
+
+    // ── Finite outliers ───────────────────────────────────────────────────
+    // A large but finite value does not poison the sums; it destroys their
+    // low-order bits. While it is in the window Sxx is of order value^2;
+    // when it leaves, `Sxx -= xdo*xdo` subtracts it back out and what
+    // remains carries an absolute error of order eps * value^2 -- measured,
+    // one 1e8 print among 0.01-scale returns left 19 consecutive betas
+    // wrong by up to 9.6x (sign flips included) until the refresh. The
+    // lost digits are log10(peak / current) of the second moment, so the
+    // sums are rebuilt whenever a second moment has fallen more than
+    // kShrink below its peak since the last rebuild (a negative Sxx from
+    // cancellation trips the same test). Syy is kept for the same test on
+    // y: by Cauchy-Schwarz, |Sxy| is bounded by sqrt(Sxx * Syy), so
+    // watching both second moments bounds the loss in the cross moment
+    // too. On clean data neither moment moves by four decades inside one
+    // window, so this adds no recomputes there.
+    constexpr double kShrink = 1e4;
+    double peak_xx = 0.0, peak_yy = 0.0;
 
     // Runtime ISA dispatch (item L): use the AVX2+FMA reduction when the
     // actual CPU supports it, otherwise the portable scalar path -- a
@@ -177,13 +218,26 @@ void rolling_beta_into(
     // via a tolerance gate, not assumed; see tests/test_cpp_regression.py.
     const bool use_avx2 = detect_isa_features().avx2;
 
+    auto bar_is_bad = [&](std::size_t j) {
+        return !std::isfinite(x[j]) || !std::isfinite(y[j]);
+    };
+
     auto recompute_window = [&](std::size_t start) {
-        cx = x[start];
-        cy = y[start];
+        const std::size_t end = start + window_sz;
+        bad_in_window = 0;
+        for (std::size_t j = start; j < end; ++j)
+            if (bar_is_bad(j)) ++bad_in_window;
+        // A non-finite reference would poison every shifted value. Falling
+        // back to 0.0 costs nothing: a window whose newest bar is bad
+        // reports NaN until that bar leaves, which is the slide the next
+        // refresh fires on.
+        cx = std::isfinite(x[end - 1]) ? x[end - 1] : 0.0;
+        cy = std::isfinite(y[end - 1]) ? y[end - 1] : 0.0;
         if (use_avx2) {
-            rolling_beta_reduce_avx2(x, y, start, window, cx, cy, Sx, Sy, Sxy, Sxx);
+            rolling_beta_reduce_avx2(x, y, start, window, cx, cy,
+                                     Sx, Sy, Sxy, Sxx, Syy);
         } else {
-            Sx = Sy = Sxy = Sxx = 0.0;
+            Sx = Sy = Sxy = Sxx = Syy = 0.0;
             // Vectorization hint only, not a functional requirement -- a
             // 4-accumulator reduction the compiler may already auto-vectorize
             // at -O3/-march=native without it. MSVC's default /openmp only
@@ -194,21 +248,27 @@ void rolling_beta_into(
             // rather than pulling in a project-wide experimental-flag change
             // for one vectorization hint.
 #if defined(_OPENMP) && !defined(_MSC_VER)
-            #pragma omp simd reduction(+:Sx,Sy,Sxy,Sxx)
+            #pragma omp simd reduction(+:Sx,Sy,Sxy,Sxx,Syy)
 #endif
-            for (std::size_t j = start; j < start + static_cast<std::size_t>(window); ++j) {
+            for (std::size_t j = start; j < end; ++j) {
                 const double xd = x[j] - cx;
                 const double yd = y[j] - cy;
                 Sx  += xd;
                 Sy  += yd;
                 Sxy += xd * yd;
                 Sxx += xd * xd;
+                Syy += yd * yd;
             }
         }
         since_refresh = 0;
+        sums_polluted = (bad_in_window > 0);
+        peak_xx = Sxx;
+        peak_yy = Syy;
     };
 
     auto write_beta = [&](std::size_t i) {
+        // A window holding a bad bar has no beta; out[i] is already NaN.
+        if (bad_in_window > 0) return;
         const double denom = W * Sxx - Sx * Sx;
         // Relative-epsilon threshold scaled to the denominator's own natural
         // magnitude (W*Sxx), not a fixed absolute 1e-14 -- the same
@@ -225,23 +285,32 @@ void rolling_beta_into(
 
     // Seed first window
     recompute_window(0);
-    write_beta(static_cast<std::size_t>(window) - 1);
+    write_beta(window_sz - 1);
 
     // Slide. size_t throughout (not int): this loop is inherently serial
-    // (Sx/Sy/Sxy/Sxx carry state across iterations, never OpenMP-
-    // parallelized) and i/old can exceed INT_MAX for a large series.
-    const std::size_t window_sz = static_cast<std::size_t>(window);
+    // (the sums carry state across iterations, never OpenMP-parallelized)
+    // and i/old can exceed INT_MAX for a large series.
     for (std::size_t i = window_sz; i < n; ++i) {
         const std::size_t old = i - window_sz;
+        if (bar_is_bad(old)) --bad_in_window;
+        if (bar_is_bad(i)) { ++bad_in_window; sums_polluted = true; }
         const double xdi = x[i] - cx, ydi = y[i] - cy;
         const double xdo = x[old] - cx, ydo = y[old] - cy;
         Sx  += xdi - xdo;
         Sy  += ydi - ydo;
         Sxy += xdi * ydi - xdo * ydo;
         Sxx += xdi * xdi - xdo * xdo;
+        Syy += ydi * ydi - ydo * ydo;
         ++since_refresh;
 
-        if (since_refresh >= window_sz) {
+        // A comparison with NaN is false, so a polluted sum never becomes
+        // the peak and never trips the shrink test; sums_polluted covers it.
+        if (Sxx > peak_xx) peak_xx = Sxx;
+        if (Syy > peak_yy) peak_yy = Syy;
+        const bool shrunk = peak_xx > kShrink * Sxx || peak_yy > kShrink * Syy;
+
+        if (since_refresh >= window_sz ||
+            (bad_in_window == 0 && (sums_polluted || shrunk))) {
             recompute_window(old + 1);
         }
 

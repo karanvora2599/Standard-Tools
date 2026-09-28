@@ -1163,16 +1163,12 @@ def run_portfolio_simulation(
     # extrapolating to ~450 us/bar at 2,000. A walk-forward or a parameter
     # sweep multiplies that by fifty or a hundred.
     #
-    # The kernel covers exactly the configuration _apply_rebalance's own
-    # vectorized branch covers, and nothing else: percentage commission, no
-    # impact model, no ADV constraint. The per-share model has a per-ORDER
-    # minimum, the impact model needs a per-ticker volatility lookup, and the
-    # ADV constraint has to raise naming one ticker -- each is a per-element
-    # decision that would have to be restated in C++ to be supported, and
-    # restating it is how two implementations drift.
-    #
-    # Anything else falls through to the loop, which is unchanged: the diff
-    # that introduced this is an indent plus this guard.
+    # The kernel covers every commission model, the impact model and the ADV
+    # cap (see _native_portfolio_sim for why they are no longer refused), and
+    # follows this loop's scalar branch whenever one of them is active, so
+    # the two agree bit for bit. It returns None -- and the loop below runs
+    # -- only when the extension is absent or a panel it needs (open prices,
+    # dollar volume, volatility) was not built.
     try:
         _native = _native_portfolio_sim(
             close_mat=close_mat,

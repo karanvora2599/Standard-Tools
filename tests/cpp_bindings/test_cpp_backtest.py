@@ -497,3 +497,134 @@ class TestBacktestGridCppPath:
                 atol=1e-6,
                 err_msg=f"C++ vs Python mismatch in column '{col}'",
             )
+
+
+def _crossover_inputs(n=120, n_rows=3, seed=0):
+    rng = np.random.default_rng(seed)
+    prices = 100.0 * np.exp(np.cumsum(rng.normal(0, 0.01, n)))
+    indicators = np.vstack(
+        [pd.Series(prices).rolling(w, min_periods=1).mean() for w in (3, 8, 20)]
+    )[:n_rows]
+    return prices, np.ascontiguousarray(indicators)
+
+
+@requires_cpp
+class TestCrossoverPairIndices:
+    """
+    pair_idx used to be cast to int32 with numpy's unsafe cast before its
+    bounds check ran, so [[2**32, 2**32+1]] was answered exactly as [[0, 1]]
+    and [[0.9, 1.9]] was floored to it. Both are refused now.
+    """
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            np.array([[2**32, 2**32 + 1]], dtype=np.int64),
+            np.array([[0, 2**64 - 1]], dtype=np.uint64),
+            np.array([[0, 3]], dtype=np.int32),
+            np.array([[-1, 0]], dtype=np.int32),
+        ],
+        ids=["int64-wraps", "uint64", "past-the-end", "negative"],
+    )
+    def test_an_index_outside_the_indicators_raises(self, bad):
+        prices, indicators = _crossover_inputs()
+        with pytest.raises(ValueError, match="outside"):
+            _cpp.batch_backtest_crossover(prices, indicators, bad)
+
+    def test_a_float_index_is_refused_not_floored(self):
+        prices, indicators = _crossover_inputs()
+        with pytest.raises(ValueError, match="integer"):
+            _cpp.batch_backtest_crossover(prices, indicators, np.array([[0.9, 1.9]]))
+
+    @pytest.mark.parametrize(
+        "pairs",
+        [np.array([[0, 1], [1, 2]], dtype=np.int64), [[0, 1], [1, 2]]],
+        ids=["int64", "list"],
+    )
+    def test_any_integer_index_matches_int32(self, pairs):
+        """The null case."""
+        prices, indicators = _crossover_inputs()
+        want = _cpp.batch_backtest_crossover(
+            prices, indicators, np.array([[0, 1], [1, 2]], dtype=np.int32)
+        )
+        got = _cpp.batch_backtest_crossover(prices, indicators, pairs)
+        np.testing.assert_array_equal(got, want)
+
+
+@requires_cpp
+class TestRiskFreeRateIsANumber:
+    """
+    A NaN risk_free_rate made Sharpe NaN and Sortino +inf from the same call
+    -- +inf being the Sortino that reads as "no downside at all" -- where
+    the Python path refuses it. Every backtest binding now refuses it too;
+    any finite rate, negative included, is still accepted.
+    """
+
+    @staticmethod
+    def _calls(rf):
+        prices, indicators = _crossover_inputs()
+        signals = np.sign(indicators[0] - indicators[1])
+        pairs = np.array([[0, 1]], dtype=np.int32)
+        return {
+            "run_strategy": lambda: _cpp.run_strategy(
+                prices, signals, 10_000.0, 0.001, 0.0005, 252.0, None, rf
+            ),
+            "batch_run_strategy": lambda: _cpp.batch_run_strategy(
+                prices, signals[None, :], 10_000.0, 0.001, 0.0005, 252.0, None, rf
+            ),
+            "batch_backtest_crossover": lambda: _cpp.batch_backtest_crossover(
+                prices, indicators, pairs, 10_000.0, 0.001, 0.0005, 252.0, None, rf
+            ),
+        }
+
+    @pytest.mark.parametrize(
+        "binding", ["run_strategy", "batch_run_strategy", "batch_backtest_crossover"]
+    )
+    @pytest.mark.parametrize("rf", [np.nan, np.inf, -np.inf])
+    def test_a_non_finite_rate_is_refused(self, binding, rf):
+        with pytest.raises(ValueError, match="risk_free_rate"):
+            self._calls(rf)[binding]()
+
+    @pytest.mark.parametrize(
+        "binding", ["run_strategy", "batch_run_strategy", "batch_backtest_crossover"]
+    )
+    @pytest.mark.parametrize("rf", [-0.05, 0.0, 0.05])
+    def test_a_finite_rate_of_either_sign_runs(self, binding, rf):
+        self._calls(rf)[binding]()
+
+
+@requires_cpp
+class TestBatchSortinoUnderANegativeRate:
+    """
+    The batch kernel seeds bar 0's downside term by hand, and seeded rf^2
+    whatever the sign. Bar 0's excess return is -rf, which is downside only
+    for a positive rate, so under a negative policy rate the grid, the fused
+    crossover and walk-forward ranking all disagreed with the single run
+    (measured 3e-6 at rf = -5%). The single run is the reference.
+    """
+
+    @pytest.mark.parametrize("rf", [-0.5, -0.05, -0.001, 0.0, 0.05])
+    def test_batch_and_crossover_match_the_single_run(self, rf):
+        prices, indicators = _crossover_inputs(n=250, seed=4)
+        # The fused kernel's own signal: long while fast is above slow.
+        signals = np.where(indicators[0] > indicators[1], 1.0, 0.0)
+        single = _cpp.run_strategy(
+            prices, signals, 10_000.0, 0.001, 0.0005, 252.0, None, rf
+        )
+        batch = _cpp.batch_run_strategy(
+            prices, signals[None, :], 10_000.0, 0.001, 0.0005, 252.0, None, rf
+        )
+        fused = _cpp.batch_backtest_crossover(
+            prices,
+            indicators,
+            np.array([[0, 1]], dtype=np.int32),
+            10_000.0,
+            0.001,
+            0.0005,
+            252.0,
+            None,
+            rf,
+        )
+        assert batch[0, 4] == single["sortino_ratio"]
+        assert fused[0, 4] == single["sortino_ratio"]
+        assert batch[0, 3] == single["sharpe_ratio"]

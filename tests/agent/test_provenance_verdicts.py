@@ -223,9 +223,9 @@ class TestTheVerdictSeparatesAnEmptyTrailFromAnIntactOne:
 
 @pytest.mark.skipif(not audit.HAS_CRYPTOGRAPHY, reason="cryptography is not installed")
 class TestTheSignatureStateNamesWhichFailureItIs:
-    """A checkpoint check has six ways of not saying "valid", and they call
-    for completely different responses. Collapsed into one boolean, "nobody
-    ever signed this day" arrived looking exactly like "this day was
+    """A checkpoint check has seven ways of not saying "valid", and they
+    call for completely different responses. Collapsed into one boolean,
+    "nobody ever signed this day" arrived looking exactly like "this day was
     forged"."""
 
     def _public_key(self, tmp_path) -> str:
@@ -251,9 +251,14 @@ class TestTheSignatureStateNamesWhichFailureItIs:
         self, tmp_path
     ):
         """Every verification is itself a recorded call, so a signed day
-        that is still being written to drifts past its checkpoint by
-        design. The result names the cause and the remedy instead of
-        presenting the drift as evidence."""
+        that is still being written to grows past its checkpoint by design.
+        The result names the cause and the remedy instead of presenting the
+        growth as evidence -- and no longer as a failed check: this second
+        call used to report `checkpoint_signature_valid=False` and a
+        "tampered" verdict for a day nobody touched, because a record
+        appended after signing and a day cut short shared one state. What
+        was signed still recomputes, so the signature is reported valid for
+        what it covers, and the one record after it is counted."""
         _record_a_call()
         date = _iter_day_files(_audit_dir())[-1].stem
         public_key = self._public_key(tmp_path)
@@ -273,8 +278,10 @@ class TestTheSignatureStateNamesWhichFailureItIs:
             "verify_audit_integrity",
             {"date": date, "public_key_path": public_key},
         )
-        assert second["signature_state"] == "content_drift"
-        assert second["checkpoint_signature_valid"] is False
+        assert second["signature_state"] == "extended"
+        assert second["checkpoint_signature_valid"] is True
+        assert second["records_after_checkpoint"] == 1
+        assert second["verdict"] == "intact"
         assert any("appends a record" in note for note in second["notes"])
         assert any("yesterday" in note for note in second["notes"])
 

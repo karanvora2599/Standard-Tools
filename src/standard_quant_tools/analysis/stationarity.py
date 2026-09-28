@@ -180,6 +180,11 @@ def variance_ratio(values: np.ndarray, period: int = 2) -> Dict[str, float]:
     means they trend. It fails differently from ADF, which is why both are
     here: a series can be a unit root in level while its increments are
     strongly mean-reverting, and only this sees that.
+
+    `z_statistic` is Lo and MacKinlay's heteroskedasticity-robust z*,
+    asymptotically N(0, 1) under a random walk with uncorrelated but
+    possibly heteroskedastic increments, and `p_value` is its two-sided
+    normal p-value.
     """
     if period < 2:
         raise ValidationError("variance_ratio: period must be at least 2")
@@ -208,17 +213,35 @@ def variance_ratio(values: np.ndarray, period: int = 2) -> Dict[str, float]:
         raise ValidationError(
             f"variance_ratio: {n} returns is too few for a period of {period}"
         )
+    # Lo and MacKinlay (1988), with T = n returns and q = period:
+    #
+    #   var_1 = sum (x_k - mu)^2 / (T - 1)
+    #   var_q = sum over the T - q + 1 overlapping q-sums of
+    #           (x_k + ... + x_{k+q-1} - q mu)^2 / m,
+    #           m = q (T - q + 1) (1 - q / T)
+    #   z*    = sqrt(T) (VR - 1) / sqrt(theta)
+    #
+    # Both lines were short of the paper. Without the (1 - q/T) factor in m
+    # the ratio is biased low by exactly that factor. Without sqrt(T) the
+    # statistic was O(1/sqrt(T)) rather than N(0, 1): on 400 random walks
+    # of 1000 returns its standard deviation was 0.03 and it never
+    # rejected, and on an MA(1) with theta = -0.8, VR(8) = 0.15 came back
+    # with p = 0.79 against a corrected z* of -8.5. See the CHANGELOG entry
+    # of 2026-09-27.
     mean = returns.mean()
     var_1 = float(((returns - mean) ** 2).sum() / (n - 1))
-    aggregated = np.array(
-        [returns[i : i + period].sum() for i in range(n - period + 1)]
-    )
-    var_q = float(
-        ((aggregated - period * mean) ** 2).sum() / ((n - period + 1) * period)
-    )
+    cumulative = np.concatenate(([0.0], np.cumsum(returns)))
+    aggregated = cumulative[period:] - cumulative[:-period]
+    m = period * (n - period + 1) * (1.0 - period / n)
+    var_q = float(((aggregated - period * mean) ** 2).sum() / m)
     ratio = var_q / var_1 if var_1 > 0 else float("nan")
 
-    # Lo-MacKinlay heteroskedasticity-robust standard error.
+    # Heteroskedasticity-robust asymptotic variance of VR - 1, times T:
+    # theta = sum_{j<q} [2 (q - j) / q]^2 delta(j), where
+    # delta(j) = T sum (x_k - mu)^2 (x_{k-j} - mu)^2 / [sum (x_k - mu)^2]^2.
+    # The robust form, not the homoskedastic 2(2q - 1)(q - 1) / (3q):
+    # under GARCH returns that one rejected a true random walk 11% of the
+    # time at the 5% level.
     theta = 0.0
     for j in range(1, period):
         delta_num = float(
@@ -227,7 +250,7 @@ def variance_ratio(values: np.ndarray, period: int = 2) -> Dict[str, float]:
         delta_den = float(((returns - mean) ** 2).sum() ** 2)
         if delta_den > 0:
             theta += (2.0 * (period - j) / period) ** 2 * (delta_num / delta_den) * n
-    z = (ratio - 1.0) / math.sqrt(theta) if theta > 0 else float("nan")
+    z = math.sqrt(n) * (ratio - 1.0) / math.sqrt(theta) if theta > 0 else float("nan")
     return {
         "variance_ratio": ratio,
         "z_statistic": float(z),

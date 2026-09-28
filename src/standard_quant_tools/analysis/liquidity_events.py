@@ -190,12 +190,10 @@ def _signed_volume(
     """
     from standard_quant_tools.analysis.microstructure import signs_positional
 
-    # sign_trades matches each trade to the quote that preceded it, so it
-    # needs a real time INDEX rather than a timestamp column -- and it
-    # returns a Series of signs, aligned to the trades it could classify.
-    # Trades it could NOT classify are absent from that Series rather than
-    # signed zero, so the reindex below drops them instead of counting them
-    # as balanced flow.
+    # Signing matches each trade to the quote that preceded it, so it needs
+    # a real time INDEX rather than a timestamp column. Trades no rule could
+    # classify come back NaN (or 0 where the rules cancelled) and are
+    # dropped below rather than counted as balanced flow.
     indexed = trades.set_index("timestamp") if "timestamp" in trades.columns else trades
     quoted = (
         quotes.set_index("timestamp")
@@ -204,7 +202,11 @@ def _signed_volume(
     )
     # By POSITION. `.loc[signs.index]` on a tape with repeated timestamps
     # fanned rows out by label and reported a net imbalance 3.5x larger
-    # than everything that traded (findings D7).
+    # than everything that traded (findings D7). The array is in
+    # `indexed`'s own row order whatever order the prints arrived in, so it
+    # lines up with `indexed`'s sizes and stamps row for row, and `resample`
+    # buckets them in time order itself. See the CHANGELOG entry of
+    # 2026-09-27.
     signs = signs_positional(indexed, quoted)
     keep = np.isfinite(signs) & (signs != 0)
     sized = pd.Series(

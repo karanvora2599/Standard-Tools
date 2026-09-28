@@ -18,40 +18,59 @@ namespace sqt {
 namespace {
 
 /**
- * pandas' linear-interpolated quantile over an already-sorted, finite range.
+ * pandas' linear-interpolated quantile over the first `n` values of an
+ * UNORDERED buffer. The buffer is partially reordered in place.
  *
  * `Series.quantile(q)` places the result at h = (n-1)*q and interpolates
  * between the two neighbouring order statistics. Rounding h to an index --
  * which is what a bare nth_element gives -- disagrees with pandas on almost
  * every column that is not exactly (n-1)*q integral, so the interpolation
  * is the point of this helper rather than a refinement of it.
+ *
+ * Nothing about the buffer's order may be assumed on entry. The same buffer
+ * serves the q_low call and then the q_high call, so what the second call
+ * sees is the first call's partition, which orders only the neighbourhood
+ * of ITS pivot. q == 1 used to read slot n-1 directly on the strength of a
+ * parameter name that said the buffer was sorted: the answer was whatever
+ * element the partition had left there, not the maximum -- wrong on most
+ * columns of more than 32 values, the size below which the standard
+ * library's nth_element insertion-sorts and so hid it.
  */
-double interpolated_quantile(std::vector<double>& sorted_scratch,
+double interpolated_quantile(std::vector<double>& scratch,
                              std::size_t n,
                              double q) {
     if (n == 0) return std::nan("");
-    if (n == 1) return sorted_scratch[0];
+    if (n == 1) return scratch[0];
 
     const double h = static_cast<double>(n - 1) * q;
     double lower_pos = std::floor(h);
     const double frac = h - lower_pos;
     auto lower_index = static_cast<std::size_t>(lower_pos);
-    if (lower_index >= n - 1) return sorted_scratch[n - 1];
+    if (lower_index >= n - 1) {
+        // Only q == 1 reaches here (floor((n-1)*q) < n-1 for every q < 1),
+        // and its answer is the maximum, found by a scan rather than read
+        // from a slot nothing has ordered. On finite data that is exactly
+        // pandas' quantile(1.0). With a +inf present this answers +inf,
+        // where pandas 2.x answers NaN (its interpolation forms inf - inf);
+        // the library's own callers never pass q = 1.
+        return *std::max_element(scratch.begin(),
+                                 scratch.begin() + static_cast<std::ptrdiff_t>(n));
+    }
 
     // Only the two order statistics that bracket h are needed, so a full
     // sort is wasted work: two nth_element passes are O(n) each. The second
     // searches only the tail the first left above the pivot, which is where
     // the upper neighbour must be.
-    std::nth_element(sorted_scratch.begin(),
-                     sorted_scratch.begin() + static_cast<std::ptrdiff_t>(lower_index),
-                     sorted_scratch.begin() + static_cast<std::ptrdiff_t>(n));
-    const double low_value = sorted_scratch[lower_index];
+    std::nth_element(scratch.begin(),
+                     scratch.begin() + static_cast<std::ptrdiff_t>(lower_index),
+                     scratch.begin() + static_cast<std::ptrdiff_t>(n));
+    const double low_value = scratch[lower_index];
     if (frac == 0.0) return low_value;
 
     const double high_value =
-        *std::min_element(sorted_scratch.begin() +
+        *std::min_element(scratch.begin() +
                               static_cast<std::ptrdiff_t>(lower_index + 1),
-                          sorted_scratch.begin() + static_cast<std::ptrdiff_t>(n));
+                          scratch.begin() + static_cast<std::ptrdiff_t>(n));
     return low_value + frac * (high_value - low_value);
 }
 
@@ -288,9 +307,12 @@ bool bucket_by_date(const long long* date_codes,
     for (std::size_t i = 0; i < n_rows; ++i) {
         const long long code = date_codes[i];
         // A code outside range would corrupt neighbouring buckets, so it is
-        // dropped rather than trusted. The caller builds these from
-        // pd.factorize and cannot produce one, but a silent out-of-bounds
-        // write is not a failure mode worth leaving open.
+        // dropped rather than trusted. Callers CAN produce one: pd.factorize
+        // codes a NaT date or a NaN key as -1. The bindings refuse such a
+        // code before any kernel runs, and a kernel that writes per-row
+        // output must still define the rows dropped here (see
+        // fill_rows_outside_dates below) -- a dropped row that is never
+        // written hands the caller whatever the allocator left behind.
         if (code < 0 || static_cast<std::size_t>(code) >= n_dates) continue;
         if (!keep(i)) continue;
         ++counts[static_cast<std::size_t>(code)];
@@ -311,6 +333,32 @@ bool bucket_by_date(const long long* date_codes,
         order[cursor[static_cast<std::size_t>(code)]++] = i;
     }
     return true;
+}
+
+/**
+ * NaN into every row of a row-major (n_rows, n_cols) output whose date code
+ * bucket_by_date dropped.
+ *
+ * The per-row kernels write only the rows they bucketed, so without this a
+ * dropped row came back as uninitialised memory -- different garbage on
+ * every call. NaN is the missing-value marker these kernels already use for
+ * a value they cannot place. Called only when `bucketed < n_rows`, so the
+ * valid path pays one comparison.
+ */
+void fill_rows_outside_dates(const long long* date_codes,
+                             std::size_t n_rows,
+                             std::size_t n_cols,
+                             std::size_t n_dates,
+                             std::size_t bucketed,
+                             double* out) {
+    if (bucketed >= n_rows) return;
+    for (std::size_t i = 0; i < n_rows; ++i) {
+        const long long code = date_codes[i];
+        if (code < 0 || static_cast<std::size_t>(code) >= n_dates) {
+            std::fill_n(out + i * n_cols, n_cols,
+                        std::numeric_limits<double>::quiet_NaN());
+        }
+    }
 }
 
 /**
@@ -534,6 +582,8 @@ bool standardize_by_date(const double* values,
     if (!bucket_by_date(date_codes, n_rows, n_dates, keep_all, offsets, counts,
                         order))
         return false;
+    fill_rows_outside_dates(date_codes, n_rows, n_cols, n_dates,
+                            offsets[n_dates], out);
 
     bool alloc_error = false;
 
@@ -642,6 +692,8 @@ bool rank_by_date(const double* values,
     if (!bucket_by_date(date_codes, n_rows, n_dates, keep_all, offsets, counts,
                         order))
         return false;
+    fill_rows_outside_dates(date_codes, n_rows, n_cols, n_dates,
+                            offsets[n_dates], out);
 
     bool alloc_error = false;
 

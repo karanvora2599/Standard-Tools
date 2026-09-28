@@ -422,6 +422,31 @@ class TestOrderFlowImbalance:
         result = order_flow_imbalance(self._frame())
         assert any("TICK RULE" in w for w in result["warnings"])
 
+    def test_a_repeated_timestamp_is_just_another_bar(self):
+        """The imbalance is lined up with the NEXT bar's return by position.
+        Aligning by label raised pandas' 'cannot reindex on an axis with
+        duplicate labels' on any dated frame with one stamp repeated, where
+        every sibling estimator ran. The answer is the positional one: the
+        same bars on a plain index."""
+        frame = self._frame(n=300)
+        stamps = pd.date_range("2026-01-02", periods=len(frame), freq="D")
+        repeated = pd.DatetimeIndex(np.r_[stamps[:150], stamps[149:299]])
+        assert repeated.has_duplicates
+        dated = frame.set_axis(repeated)
+        assert order_flow_imbalance(dated, window=5) == order_flow_imbalance(
+            frame, window=5
+        )
+
+    def test_dated_bars_give_the_same_answer_as_plain_ones(self):
+        """Null case: nothing repeated, and the date labels change nothing."""
+        frame = self._frame(n=300)
+        dated = frame.set_axis(
+            pd.date_range("2026-01-02", periods=len(frame), freq="D")
+        )
+        assert order_flow_imbalance(dated, window=5) == order_flow_imbalance(
+            frame, window=5
+        )
+
 
 class TestVpin:
     @staticmethod

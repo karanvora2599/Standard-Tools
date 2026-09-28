@@ -73,6 +73,38 @@ _INTERVAL_RE = re.compile(r"^[A-Za-z0-9]{1,10}$")
 # migrated; they age out with the directory.
 _CACHE_FORMAT_VERSION = "v3"
 
+# Per-provider generation bumps, ON TOP of the shared version above.
+#
+# A change to what ONE provider's cached frame means should retire that
+# provider's files and nobody else's: throwing away the Polygon cache
+# because Databento's keys changed would spend a rate-limited budget
+# refetching bars that were right. The value is an offset rather than an
+# absolute name so a later shared bump still moves every provider -- with
+# an absolute "v4" here, a shared bump to v4 would leave these files
+# current by coincidence. A provider without an entry is at the shared
+# version, so every existing yfinance and Polygon file keeps its name.
+#
+# databento +1: a single-letter exchange suffix used to be folded into the
+# ticker, so a file named for `GOOG.L` holds Alphabet class A's bars, and
+# files are now named by the symbol as sent to the vendor rather than as
+# the caller spelled it. See the CHANGELOG entry of 2026-09-27.
+_PROVIDER_GENERATION_BUMPS = {"databento": 1}
+
+
+def _provider_family(provider: str) -> str:
+    """The provider a cache token belongs to: `databento-EQUS.SUMMARY` is
+    Databento's, whatever dataset answered."""
+    return str(provider).split("-", 1)[0].lower()
+
+
+def cache_generation(provider: str) -> str:
+    """The generation prefix this provider's cache files are written and
+    looked up under: the shared version plus the provider's own bumps."""
+    base = int(_CACHE_FORMAT_VERSION.lstrip("v"))
+    bump = _PROVIDER_GENERATION_BUMPS.get(_provider_family(provider), 0)
+    return f"v{base + bump}"
+
+
 # ── In-process session cache (avoids repeated network calls in the same run) ──
 _session_cache = TTLCache(maxsize=100, ttl=3600)
 # cachetools' cache classes do no internal locking of their own (that's why
@@ -378,9 +410,9 @@ def _parquet_path(
     # served the other's bars. Use a token that _SYMBOL_RE itself rejects, so
     # no real symbol can ever produce it by other means.
     safe = symbol.replace("/", "__SLASH__").upper()
+    generation = cache_generation(provider)
     path = (
-        _CACHE_ROOT
-        / f"{_CACHE_FORMAT_VERSION}_{provider}_{safe}_{start}_{end}_{interval}.parquet"
+        _CACHE_ROOT / f"{generation}_{provider}_{safe}_{start}_{end}_{interval}.parquet"
     )
     root = _CACHE_ROOT.resolve()
     resolved = path.resolve()
@@ -437,6 +469,23 @@ def _is_historical(end_date: Union[str, datetime, _date]) -> bool:
 
 
 _GENERATION_RE = re.compile(r"^v\d+_")
+#: A generation prefix and the provider token after it. Provider tokens
+#: cannot contain '_' (`_SYMBOL_RE` refuses it), so the first underscore
+#: after the generation ends the token.
+_GENERATION_PROVIDER_RE = re.compile(r"^(v\d+)_([^_]+)_")
+
+
+def _is_dead_generation(name: str) -> bool:
+    """Whether a cache filename carries a generation its provider no longer
+    reads. A name with a generation but no provider token is compared with
+    the shared version, as every file was before generations were per
+    provider."""
+    if not _GENERATION_RE.match(name):
+        return False
+    match = _GENERATION_PROVIDER_RE.match(name)
+    if match is None:
+        return not name.startswith(f"{_CACHE_FORMAT_VERSION}_")
+    return match.group(1) != cache_generation(match.group(2))
 
 
 def dead_generations(*, dry_run: bool = True) -> "list[Path]":
@@ -447,16 +496,15 @@ def dead_generations(*, dry_run: bool = True) -> "list[Path]":
     directory is touched -- a file that does not carry a generation prefix
     is not this cache's to remove. The live cache held 1,574 files, 501 of
     them a dead generation (findings, the plumbing).
+
+    CURRENT IS PER PROVIDER. A provider whose own generation was bumped
+    (see `_PROVIDER_GENERATION_BUMPS`) has its previous files listed here,
+    while another provider's files at the shared version stay current.
     """
     root = _CACHE_ROOT
     if not root.exists():
         return []
-    current = f"{_CACHE_FORMAT_VERSION}_"
-    dead = sorted(
-        p
-        for p in root.glob("*.parquet")
-        if _GENERATION_RE.match(p.name) and not p.name.startswith(current)
-    )
+    dead = sorted(p for p in root.glob("*.parquet") if _is_dead_generation(p.name))
     if not dry_run:
         for p in dead:
             p.unlink(missing_ok=True)

@@ -48,8 +48,21 @@ against.
 ## Decision records
 
 **Enabled by default.** Every `dispatch()` call writes one JSON line to a
-daily file under `SQT_AUDIT_DIR` (default `~/.cache/standard_quant_tools/audit/`),
-e.g. `2026-07-19.jsonl`.
+daily file under `SQT_AUDIT_DIR`, e.g. `2026-07-19.jsonl`. Unset, that is
+`%LOCALAPPDATA%\standard_quant_tools\audit` on Windows and
+`$XDG_STATE_HOME/standard_quant_tools/audit` (`~/.local/state/...`)
+elsewhere — not a cache directory, which cleanup tools are entitled to
+empty.
+
+**The legacy location.** Earlier releases defaulted to
+`~/.cache/standard_quant_tools/audit/`. A trail already there keeps its
+home, because moving the default would orphan it and make the upgrade look
+like a deletion. The first resolution in a process says so with an
+`AuditLocationWarning` through `warnings.warn` — visible on stderr and in
+pytest's warnings summary, once per process rather than once per call — and
+`describe_audit_log` reports `audit_dir_is_legacy_cache: true` with a
+warning every time it is asked. Move the trail somewhere durable and set
+`SQT_AUDIT_DIR`.
 
 ```python
 from standard_quant_tools.agent import dispatch
@@ -211,7 +224,7 @@ for what they cover and how to verify them.
 |---|---|---|
 | `SQT_AUDIT_ENABLED` | `1` | Set to `0` to disable decision-record writes entirely |
 | `SQT_AUDIT_FAIL_CLOSED` | `0` | Set to `1` to make a failed audit *write* fail the tool call. The default is fail-open: for an analytics library, a full disk should not destroy a result the caller already paid to compute. Under a governance regime that trade is wrong — an action taken without a record of it is exactly what the trail exists to prevent — so the policy is selectable. This governs write failures only; a corrupted existing chain (`AuditIntegrityError`) always propagates, because it is a statement about the whole log rather than about one record. |
-| `SQT_AUDIT_DIR` | `~/.cache/standard_quant_tools/audit/` | Where JSONL files are written |
+| `SQT_AUDIT_DIR` | the platform state directory (see [Decision records](#decision-records)); an existing trail under `~/.cache/standard_quant_tools/audit/` keeps its home | Where JSONL files are written |
 | `SQT_AUDIT_RETENTION_DAYS` | unset (never delete) | Default retention window for `gc()`/`sqt gc` — see [Retention / garbage collection](#retention--garbage-collection) |
 | `SQT_AUDIT_REDACT_FIELDS` | unset (redact nothing) | Comma-separated dotted field paths in `input` (and, best-effort, `error_message`) to redact — see [Field redaction](#field-redaction) |
 | `SQT_AUDIT_REDACT_SALT` | unset (unsalted) | Salt mixed into the redaction placeholder hash — see [Field redaction](#field-redaction) |
@@ -266,6 +279,43 @@ names the offending `request_id` and line number, and distinguishes:
   recomputed content hash.
 - **chain broken** — `prev_record_hash` doesn't match the preceding line's
   `record_hash` (a record was edited, removed, reordered, or inserted).
+
+**The hash is taken over the line as it is read back.** The writer hashes
+`json.loads` of the line it is about to write, which is exactly what the
+verifier re-hashes, so the two agree by construction. Before
+2026-09-27 it hashed the record's live values instead, and any value the
+JSON writer spells differently — a NaN or infinity written as `null`, a
+timestamp, bytes, a set, an integer-keyed mapping — left a line whose
+stored hash could never be reproduced: the day read as tampered for ever,
+usually over a call the tool had correctly refused. A numpy value in a
+free-form input made the write fail and left no record at all. For a
+record made of JSON-native values the two rules give the same hash bit for
+bit, so every day already on disk verifies exactly as before.
+
+**What `input` stores.** A call's input is made JSON-native before it is
+redacted, hashed and written (`audit.json_native.to_json_native`): a
+non-finite float becomes the string `"NaN"`, `"Infinity"` or
+`"-Infinity"` — not `null`, so `verify_replay` can rebuild the call that
+was made, since pydantic reads those strings back as the values they name;
+mapping keys become strings; sets become sorted lists and tuples lists;
+bytes become their hex string; dates and timestamps their ISO 8601 text;
+numpy scalars and arrays their plain values. This is separate from the
+output-side `sanitize_for_json`, which turns an undefined metric into
+`null`.
+
+**Lines written before that change.** A line the old writer wrote for a
+non-finite input is recognised rather than reported: the verifier puts
+NaN, `+inf` or `-inf` back where the line holds `null` inside `input`,
+and if one such restoration reproduces the stored hash the line is exactly
+what that writer produced. It is then a **note**, not a problem — pass
+`notes=[]` to either verifier to receive it; `sqt verify` and the
+standalone verifier print it and still exit `0`. This never accepts an
+edit: a changed line passes only if some restoration hashes to the stored
+value, which for an edit means finding a second preimage of the hash. The
+search is bounded per line (restorations of one `null` first, then two, up
+to 4,096 trial hashes and 16 MiB hashed), so a line outside the bound stays
+reported. Only non-finite floats are tried; the other divergences needed a
+Python caller and stay reported.
 
 `expected_prev_hash` defaults to the genesis hash (`"0" * 16`), correct for
 verifying a file in isolation. When checking a file as part of the larger
@@ -520,7 +570,7 @@ sqt seal <date>                      # chmod a day file read-only (not WORM)
 sqt export --start D --end D --out F # package a date range into an auditor-ready zip
 sqt keygen [--out DIR]                # generate an Ed25519 keypair (local dev only)
 sqt anchor <date> [--key PATH]        # sign a checkpoint for a calendar day
-sqt verify --checkpoint <date> --pubkey PATH   # verify a checkpoint's signature
+sqt verify --checkpoint <date> --pubkey PATH   # the chain, then that day's checkpoint state
 sqt cache gc [--confirm]             # list (or delete) OHLCV cache files of a dead format generation
 ```
 
@@ -578,7 +628,10 @@ With no arguments, checks the full cross-day trail rooted at `SQT_AUDIT_DIR`
 (`verify_audit_trail_integrity()`). With `--file PATH`, checks just that one
 day file in isolation (`verify_audit_log_integrity()`), the same as before
 `sqt verify` existed. Exit code `0` = clean, `1` = one or more problems
-(printed to stdout, one per line, prefixed with a count).
+(printed to stdout, one per line, prefixed with a count). Notes — lines
+recognised as written for a non-finite input by the earlier writer (see
+[Tamper evidence](#tamper-evidence-hash-chain)) — follow under their own
+count and do not change the exit code.
 
 ### Standalone verification (no package install required)
 
@@ -808,22 +861,46 @@ the checkpoint only needs to anchor the chain's current endpoint. Signing
 writes two sidecars next to the day file: `<date>.checkpoint.json` (the
 payload) and `<date>.checkpoint.sig` (the raw Ed25519 signature, hex).
 
-**Verification does two things, not one:** it checks the signature over the
-*stored* checkpoint using only the public key, **and** it re-derives
-`final_record_hash`/`index_hash` from the *current* on-disk state and
-confirms they still match. A checkpoint signed against a day, then followed
-by any change to that day's file (a legitimate new record, or a wholesale
-forged rewrite) fails verification either way — re-anchor with
-`checkpoint_and_sign` again once you know a change is legitimate.
-`verify_checkpoint_signature` never raises for a bad input; it returns
-`False` for a missing checkpoint/signature file, a non-matching public key,
-a corrupted signature, or stale/mismatched content.
+**The endpoint is recomputed, not read.** `checkpoint_and_sign` walks the
+day from the head the chain index recorded for it, through the same
+per-record checks `verify_audit_log_integrity()` makes, and signs where
+the records *recompute* to. Until 2026-09-27 both signing and verification
+took the `record_hash` the day's last line *claims*, which an edit that
+leaves the stored hashes alone does not change — so an edited day verified
+"valid", and a day edited before it was signed was anchored as it stood.
+Signing now refuses (`ValidationError`) a day whose chain does not hold and
+a day with no records; a signature over a damaged day would certify the
+damage. The checkpoint format is unchanged, and a checkpoint signed by an
+earlier release is judged by the same recomputation, so an untouched day
+still reads `valid`.
 
-**Checkpoint signing does not replace hash-chain verification, the two
-catch different things:** an edited record whose `record_hash` field wasn't
-recomputed to match is a *chain break*, caught by
-`verify_audit_log_integrity()` — a signed checkpoint alone does not
-re-validate the chain's internals, only its endpoint. Run both.
+**Verification** checks the signature over the *stored* checkpoint using
+only the public key, then compares what it signed with the day recomputed
+now. `verify_checkpoint(date, public_key_path)` returns a
+`CheckpointVerification` — the state, how many records the signature
+covers (`records_signed`), how many came after (`records_after`), and a
+one-sentence `detail`; `verify_checkpoint_state` returns the state alone:
+
+| State | Meaning |
+|---|---|
+| `valid` | the signature verifies and the day ends exactly where it was signed |
+| `extended` | the signature verifies, every record it covers still recomputes, and more records were appended after signing — ordinary for a day still being written to; re-anchor it once it closes |
+| `altered` | the signature verifies but the day no longer recomputes to what it signed: an edit (stale hashes or not), a truncation, a rewrite from the published head, a changed index entry, or a record after the signed point that does not hold |
+| `no_checkpoint` | the day was never anchored |
+| `no_signature` | a checkpoint exists with no `.sig` beside it |
+| `key_mismatch` | a well-formed signature that does not verify under this key |
+| `corrupt_signature` | the `.sig` file is not a 64-byte Ed25519 signature |
+| `unavailable` | the check could not be made (no or unreadable key, checkpoint or day file) |
+
+`extended` used to share one state, `content_drift`, with a day cut short;
+truncation is now `altered`. `verify_checkpoint_signature` is the one-bit
+gate: `True` only for `valid`, `False` for every other state including
+`extended` (the appended records are not covered by the signature). None
+of these raises for a bad input.
+
+**Run both anyway.** The chain check says *which* line broke and covers
+days that were never signed; the checkpoint is what catches a wholesale,
+internally consistent rewrite. `sqt verify --checkpoint` runs both.
 
 ### Key custody — read this before using signing beyond local development
 
@@ -865,16 +942,21 @@ the two key file paths it writes. `sqt anchor` reads the key from `--key`
 or `SQT_AUDIT_SIGNING_KEY_PATH` (there's no `--signer` CLI flag — a custom
 signer callback is a Python-API-only feature, since a callback can't be
 expressed on a command line). `sqt verify --checkpoint DATE --pubkey PATH`
-exits `0` if the signature is valid, `1` otherwise (including "no
-checkpoint found for that date").
+verifies the full trail's hash chain first — it used to run *instead of*
+the chain and printed "Signature valid." with exit `0` for a day whose
+records had been edited — then prints the checkpoint's state by name with
+its explanation (`Signature valid.` is still printed for `valid`). Exit
+code: `0` chain clean and checkpoint `valid`; `1` a chain problem, or a
+failed checkpoint (`altered`, `key_mismatch`, `corrupt_signature`); `2`
+nothing to check or no way to check it (`no_checkpoint`, `no_signature`,
+`unavailable`); `3` `extended`, a day that only grew after signing.
 
 ---
 
 ## Pluggable storage backend
 
-`AuditWriter` (used internally by `dispatch()` and directly by
-`checkpoint_and_sign`) delegates all of its actual reads/writes/locking to
-an `AuditStorageBackend`:
+`AuditWriter` (used internally by `dispatch()`) delegates all of its actual
+reads/writes/locking to an `AuditStorageBackend`:
 
 ```python
 from standard_quant_tools.audit import AuditWriter, LocalFilesystemBackend
@@ -893,11 +975,12 @@ orchestration logic. **That backend does not exist** — this interface only
 makes one possible later without a rewrite.
 
 **Scope of what's backend-routed today:** `AuditWriter`'s own read, append,
-lock, and day-listing operations (used for writing records and for
-`checkpoint_and_sign`'s content derivation) go through whatever backend was
-passed in. `verify_audit_log_integrity()`, `verify_audit_trail_integrity()`,
-the retention functions (`hold_day`/`gc`/`seal_day`), and `export_bundle()`
-still read the local filesystem directly — extending those to the backend
+lock, and day-listing operations (used for writing records) go through
+whatever backend was passed in. `verify_audit_log_integrity()`,
+`verify_audit_trail_integrity()`, checkpoint signing and verification
+(which recompute a day through the verifier's walk), the retention
+functions (`hold_day`/`gc`/`seal_day`), and `export_bundle()` still read
+the local filesystem directly — extending those to the backend
 interface is work for whenever a non-local backend is actually built.
 
 A custom backend implements six methods (`acquire_lock`, `release_lock`,

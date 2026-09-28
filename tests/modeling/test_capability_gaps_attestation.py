@@ -418,8 +418,14 @@ class TestLineageTakesAKey:
         assert unpinned["package"]["signature"]["key_pinned"] is False
 
     def test_a_key_with_nothing_to_check_is_refused_not_ignored(
-        self, patched_multi_factory, other_public_key_path
+        self, patched_multi_factory, tmp_path
     ):
+        """The refusal is decided from the view alone and never reads the
+        key, so any file will do. It used to be given a freshly generated
+        keypair, which needs the optional `cryptography` package and made
+        this test error at setup on a machine without it."""
+        key_path = tmp_path / "k.pub"
+        key_path.write_bytes(b"not read: the view has no signature to check")
         model_id = _train_a_model_with_spec(
             _dataset_spec(), dataset_id="ds_lineage_key_misplaced"
         )
@@ -427,5 +433,5 @@ class TestLineageTakesAKey:
             InspectModelInput(
                 model_id=model_id,
                 view="summary",
-                public_key_path=str(other_public_key_path),
+                public_key_path=str(key_path),
             )

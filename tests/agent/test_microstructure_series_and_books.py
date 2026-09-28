@@ -176,6 +176,58 @@ class TestARepeatedTimestampIsJustAnotherRow:
         assert result["n_unclassified"] == len(trades) - len(labelled)
 
 
+class TestATapeOutOfTimeOrderKeepsEachPrintsOwnSide:
+    """A published tape is not always in time order: vendor feeds carry
+    inversions, and two pulls concatenated the wrong way round is an
+    ordinary caller pattern. The signed tape keeps the rows as published,
+    and each row carries its own side -- the sign was once computed in
+    sorted order and assigned to the unsorted rows, which on the tape below
+    gave about half the prints another print's side."""
+
+    @staticmethod
+    def _sides_and_tape(n: int = 60, seed: int = 4):
+        """Every print at the ask (a buy) or the bid (a sell) of the steady
+        99.98 / 100.02 book, the side drawn at random: the truth is in the
+        price."""
+        side = np.random.default_rng(seed).choice([-1.0, 1.0], n)
+        trades = pd.DataFrame(
+            {"price": 100.0 + 0.02 * side, "size": 100.0},
+            index=pd.DatetimeIndex(
+                [BASE + pd.Timedelta(seconds=s) for s in range(1, n + 1)]
+            ),
+        )
+        return side, trades
+
+    def _classified(self, trades: pd.DataFrame) -> tuple:
+        tape_ref, quote_ref = _publish_tape_and_quotes(trades)
+        result = dispatch(
+            "classify_trade_direction",
+            {
+                "tick_tape_ref": tape_ref,
+                "quote_panel_ref": quote_ref,
+                "run_id": "run",
+                "name": "signed",
+            },
+        )
+        return result, handoff.resolve(result["ref"], expect="tick_tape")
+
+    def test_two_pulls_concatenated_the_wrong_way_round(self, runs_dir):
+        side, trades = self._sides_and_tape()
+        order = np.r_[np.arange(25, len(trades)), np.arange(25)]
+        swapped = trades.iloc[order]
+        result, signed = self._classified(swapped)
+
+        assert list(signed.index) == list(swapped.index), "the rows as published"
+        np.testing.assert_array_equal(signed["sign"].to_numpy(), side[order])
+        assert result["n_buys"] == int((side > 0).sum())
+
+    def test_a_tape_in_time_order_is_signed_exactly(self, runs_dir):
+        """Null case: nothing to reorder."""
+        side, trades = self._sides_and_tape()
+        _, signed = self._classified(trades)
+        np.testing.assert_array_equal(signed["sign"].to_numpy(), side)
+
+
 class TestTheInlineBookCanCarryAClock:
     """`timestamp` is the first column of the book contract, and the inline
     path could not express it -- so three of the result's fields were

@@ -3,6 +3,7 @@
 import numpy as np
 import pandas as pd
 import pytest
+from scipy.signal import lfilter
 
 from standard_quant_tools.analysis.garch import (
     HAS_SCIPY,
@@ -55,12 +56,18 @@ class TestVarianceRecursion:
 
 class TestParameterRecovery:
     def test_recovers_true_parameters_on_simulated_process(self):
+        """
+        50,000 observations pin alpha to about +/-0.005. The tolerance used
+        to be 0.03, wide enough that a fit which stopped near its 0.05
+        starting point passed with alpha = 0.0517 against a true 0.08; the
+        fit that reaches the maximum returns 0.0772.
+        """
         true_omega, true_alpha, true_beta = 1e-6, 0.08, 0.90
         returns = _simulate_garch11(50_000, true_omega, true_alpha, true_beta)
         result = garch_volatility_forecast(returns, forecast_horizon=5)
         assert result["converged"] is True
-        assert result["alpha"] == pytest.approx(true_alpha, abs=0.03)
-        assert result["beta"] == pytest.approx(true_beta, abs=0.05)
+        assert result["alpha"] == pytest.approx(true_alpha, abs=0.01)
+        assert result["beta"] == pytest.approx(true_beta, abs=0.01)
         assert result["persistence"] < 1.0
 
     def test_forecast_decays_toward_long_run_variance(self):
@@ -73,6 +80,130 @@ class TestParameterRecovery:
         # the very first step should be closer to current vol than long-run
         # is (unless they happen to already coincide).
         assert abs(forecast[-1] - long_run) < abs(forecast[0] - long_run) + 1e-9
+
+
+# ── garch_volatility_forecast — the fit is at the maximum ────────────────────
+
+
+def _independent_log_likelihood(returns, omega, alpha, beta):
+    """
+    The GARCH(1,1) Gaussian log-likelihood written without the library's
+    kernels: the variance recursion as a first-order IIR filter, started at
+    the mean squared residual as the library's is.
+    """
+    resid = np.asarray(returns, dtype=float)
+    resid = resid - resid.mean()
+    resid_sq = resid**2
+    start = resid_sq.mean()
+    rest, _ = lfilter(
+        [1.0], [1.0, -beta], omega + alpha * resid_sq[:-1], zi=[beta * start]
+    )
+    sigma2 = np.concatenate([[start], rest])
+    return float(
+        -0.5 * np.sum(np.log(2.0 * np.pi) + np.log(sigma2) + resid_sq / sigma2)
+    )
+
+
+class TestTheFitReachesTheMaximum:
+    """
+    The optimizer used to run on the raw return scale, where the omega
+    direction of the gradient outweighed alpha and beta by five orders of
+    magnitude; L-BFGS-B's default tolerance was met a few iterations from
+    the start and `converged` came back True. These are measured against
+    answers known without the library's optimizer.
+    """
+
+    @pytest.mark.parametrize("seed", range(5))
+    def test_it_is_at_least_as_likely_as_the_parameters_that_made_the_data(self, seed):
+        """The maximum likelihood cannot be below the likelihood of the
+        true parameters, which are inside the bounds. The old fit sat 4.9
+        to 157 nats below them on these samples."""
+        true = (5e-6, 0.25, 0.65)
+        returns = _simulate_garch11(4000, *true, seed=seed)
+        result = garch_volatility_forecast(returns)
+        fitted = _independent_log_likelihood(
+            returns, result["omega"], result["alpha"], result["beta"]
+        )
+        assert fitted >= _independent_log_likelihood(returns, *true) - 1e-6
+        assert result["log_likelihood"] == pytest.approx(fitted, abs=1e-6)
+        assert result["converged"] is True
+        assert result["gradient_norm"] < 1e-4
+
+    def test_no_independent_search_around_it_finds_a_higher_likelihood(self):
+        """Nelder-Mead on the independent likelihood, started from a simplex
+        spanning several percent around the answer, gains nothing."""
+        from scipy.optimize import minimize
+
+        returns = _simulate_garch11(3000, 2e-6, 0.15, 0.80, seed=11)
+        result = garch_volatility_forecast(returns)
+        scale = float(((returns - returns.mean()) ** 2).mean())
+        answer = np.array([result["omega"] / scale, result["alpha"], result["beta"]])
+
+        def negative(p):
+            if p[0] <= 0 or p[1] < 0 or p[2] < 0 or p[1] + p[2] >= 1:
+                return np.inf
+            return -_independent_log_likelihood(returns, p[0] * scale, p[1], p[2])
+
+        simplex = np.vstack([answer] + [answer * (1 + 0.05 * e) for e in np.eye(3)])
+        search = minimize(
+            negative,
+            answer,
+            method="Nelder-Mead",
+            options={
+                "initial_simplex": simplex,
+                "xatol": 1e-10,
+                "fatol": 1e-12,
+                "maxiter": 20_000,
+                "maxfev": 40_000,
+            },
+        )
+        assert -search.fun <= result["log_likelihood"] + 1e-6
+
+    def test_the_answer_does_not_depend_on_the_returns_units(self):
+        """Returns in percent are the same model with omega times 1e4. The
+        old fit gave alpha 0.05 on decimal returns and 0.16 on the same
+        returns in percent."""
+        returns = _simulate_garch11(2000, 2e-6, 0.15, 0.80, seed=11)
+        decimal = garch_volatility_forecast(returns)
+        percent = garch_volatility_forecast(returns * 100.0)
+        assert percent["alpha"] == pytest.approx(decimal["alpha"], abs=1e-6)
+        assert percent["beta"] == pytest.approx(decimal["beta"], abs=1e-6)
+        assert percent["omega"] == pytest.approx(decimal["omega"] * 1e4, rel=1e-5)
+        assert percent["log_likelihood"] == pytest.approx(
+            decimal["log_likelihood"] - len(returns) * np.log(100.0), abs=1e-6
+        )
+        assert percent["current_annualized_vol"] == pytest.approx(
+            decimal["current_annualized_vol"] * 100.0, rel=1e-5
+        )
+
+    def test_a_fit_stopped_by_its_iteration_limit_is_not_converged(self, monkeypatch):
+        """`success` alone is not the verdict, and neither is its absence
+        ignored: one iteration leaves the gradient large and the result
+        says both."""
+        import standard_quant_tools.analysis.garch as garch_module
+
+        monkeypatch.setattr(
+            garch_module, "_OPTIONS", {**garch_module._OPTIONS, "maxiter": 1}
+        )
+        result = garch_volatility_forecast(
+            _simulate_garch11(2000, 2e-6, 0.15, 0.80, seed=11)
+        )
+        assert result["converged"] is False
+        assert result["gradient_norm"] >= 1e-4
+        assert any(w.startswith("NOT CONVERGED") for w in result["warnings"])
+
+    def test_converged_always_means_a_negligible_gradient(self):
+        for seed in range(6):
+            result = garch_volatility_forecast(
+                _simulate_garch11(1000, 1e-6, 0.08, 0.90, seed=seed)
+            )
+            if result["converged"]:
+                assert result["gradient_norm"] < 1e-4
+                assert result["persistence"] < 1.0
+
+    def test_constant_returns_are_refused_with_the_reason(self):
+        with pytest.raises(ValidationError, match="no variance"):
+            garch_volatility_forecast(pd.Series(np.full(300, 0.001)))
 
 
 # ── garch_volatility_forecast — forecast seed uses the last observed return ──

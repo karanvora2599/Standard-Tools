@@ -163,13 +163,13 @@ class TestCheckpointTamperDetection:
         self, tmp_path: Path
     ):
         """Editing a record's content but leaving its stored record_hash
-        field untouched is exactly the "content altered" case
-        verify_audit_log_integrity() already catches -- checkpoint
-        verification alone does NOT re-validate the chain itself, it only
-        anchors the chain's endpoint, so the two are meant to be run
-        together, not as substitutes for each other. This test documents
-        that boundary rather than asserting checkpoint verification catches
-        it too."""
+        field untouched is the "content altered" case
+        verify_audit_log_integrity() catches. This test used to document
+        that the checkpoint did NOT catch it -- it compared the signed
+        endpoint with the hash the last line claimed, which such an edit
+        leaves alone, and reported the edited day valid. The checkpoint now
+        recomputes the day's records, so it catches the edit as well; the
+        chain check is still the one that says which line."""
         _write_day_with_one_record(tmp_path)
         private_bytes, public_bytes = audit.generate_keypair()
         priv_path = tmp_path.parent / "priv.key"
@@ -183,12 +183,24 @@ class TestCheckpointTamperDetection:
         line["status"] = "tampered"  # record_hash left stale on purpose
         day_path.write_text(json.dumps(line) + "\n", encoding="utf-8")
 
-        # The chain-integrity check (a different function) is the one that
-        # must catch this -- and does.
         problems = audit.verify_audit_log_integrity(day_path)
         assert problems and any("record_hash" in p for p in problems)
+        assert (
+            audit.verify_checkpoint_state("2024-01-01", pub_path, audit_dir=tmp_path)
+            == "altered"
+        )
+        assert (
+            audit.verify_checkpoint_signature(
+                "2024-01-01", pub_path, audit_dir=tmp_path
+            )
+            is False
+        )
 
     def test_appending_a_record_after_signing_fails_verification(self, tmp_path: Path):
+        """The boolean gate stays False for a day that grew after signing:
+        the appended record is not covered by the signature. Which of the
+        two it is -- grown or altered -- is `verify_checkpoint_state`'s
+        answer."""
         record = _write_day_with_one_record(tmp_path)
         private_bytes, public_bytes = audit.generate_keypair()
         priv_path = tmp_path.parent / "priv.key"

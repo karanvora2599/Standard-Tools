@@ -14,6 +14,7 @@
 
 #include "sqt/isa_dispatch.hpp"
 
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstdio>
@@ -366,6 +367,111 @@ static void test_rolling_beta_forced_scalar_path_correct() {
     for (int i = window - 1; i < n; ++i) CHECK_NEAR(out[i], 1.5, 1e-6);
 }
 
+// ── rolling_beta: what the sliding sums must survive ────────────────────────
+
+// Two-pass per-window beta, recomputed from scratch for every window: shares
+// no state with the kernel, so agreement means the sliding sums are right.
+static double two_pass_beta(const std::vector<double>& y,
+                            const std::vector<double>& x, int end, int window) {
+    double mx = 0.0, my = 0.0;
+    for (int j = end - window + 1; j <= end; ++j) { mx += x[j]; my += y[j]; }
+    mx /= window;
+    my /= window;
+    double sxy = 0.0, sxx = 0.0;
+    for (int j = end - window + 1; j <= end; ++j) {
+        sxy += (x[j] - mx) * (y[j] - my);
+        sxx += (x[j] - mx) * (x[j] - mx);
+    }
+    return sxy / sxx;
+}
+
+static void check_outlier_case(bool force_scalar) {
+    // One large FINITE value among 0.01-scale returns. It is subtracted back
+    // out when it leaves the window, and takes the sums' low-order digits
+    // with it: measured, a 1e8 print left 19 consecutive betas wrong by up to
+    // 9.6x (signs flipped) until the next scheduled rebuild. Positions 60
+    // and 120 are rebuild starts at window 60, where the print used to
+    // become the reference point itself; 100 is not.
+    const int n = 200, window = 60;
+    if (force_scalar) sqt::force_isa_features_for_testing({false, false});
+    for (double magnitude : {1e5, 1e8}) {
+        for (int pos : {60, 100, 120}) {
+            for (int side = 0; side < 2; ++side) {
+                std::vector<double> x(n), y(n);
+                std::uint64_t state = 1000 + static_cast<std::uint64_t>(pos);
+                for (int i = 0; i < n; ++i) {
+                    x[i] = 0.01 * pseudo_random(state);
+                    y[i] = 0.001 + 1.3 * x[i] + 0.001 * pseudo_random(state);
+                }
+                (side == 0 ? x : y)[pos] = magnitude;
+                auto out = sqt::rolling_beta(y.data(), x.data(), n, window);
+                for (int i = window - 1; i < n; ++i) {
+                    if (i - window + 1 <= pos && pos <= i) continue;  // inside
+                    const double want = two_pass_beta(y, x, i, window);
+                    CHECK(std::abs(out[i] - want) <= 1e-9 * std::abs(want));
+                }
+            }
+        }
+    }
+    if (force_scalar) sqt::reset_isa_features_override_for_testing();
+}
+
+static void test_rolling_beta_finite_outlier_leaving_the_window() {
+    check_outlier_case(false);  // the dispatched path (AVX2 on this machine)
+    check_outlier_case(true);   // the portable scalar path
+}
+
+static void test_rolling_beta_bad_bar_is_nan_for_exactly_its_windows() {
+    // A NaN or inf cannot be subtracted back out of a running sum, so the
+    // output used to stay NaN until the refresh cadence caught up -- up to
+    // window-1 clean windows after the bad bar had left. It must be NaN for
+    // exactly the windows that contain it, and right again after.
+    const int n = 60, window = 5, bad = 10;
+    for (bool force_scalar : {false, true}) {
+        for (double poison : {std::numeric_limits<double>::quiet_NaN(),
+                              std::numeric_limits<double>::infinity()}) {
+            for (int side = 0; side < 2; ++side) {
+                if (force_scalar) sqt::force_isa_features_for_testing({false, false});
+                std::vector<double> x(n), y(n);
+                std::uint64_t state = 77;
+                for (int i = 0; i < n; ++i) {
+                    x[i] = pseudo_random(state);
+                    y[i] = 0.5 * x[i] + 0.1 * pseudo_random(state);
+                }
+                (side == 0 ? x : y)[bad] = poison;
+                auto out = sqt::rolling_beta(y.data(), x.data(), n, window);
+                if (force_scalar) sqt::reset_isa_features_override_for_testing();
+                for (int i = window - 1; i < n; ++i) {
+                    const bool contains = (i - window + 1 <= bad && bad <= i);
+                    if (contains) {
+                        CHECK_NAN(out[i]);
+                    } else {
+                        const double want = two_pass_beta(y, x, i, window);
+                        CHECK_NEAR(out[i], want, 1e-12 * std::max(1.0, std::abs(want)));
+                    }
+                }
+            }
+        }
+    }
+}
+
+static void test_rolling_beta_clean_series_matches_two_pass() {
+    // The null case: on ordinary data the shrink test never fires, so the
+    // output is the two-pass beta to rounding on every window.
+    const int n = 2000, window = 60;
+    std::vector<double> x(n), y(n);
+    std::uint64_t state = 7;
+    for (int i = 0; i < n; ++i) {
+        x[i] = 0.01 * pseudo_random(state);
+        y[i] = 0.8 * x[i] + 0.002 * pseudo_random(state);
+    }
+    auto out = sqt::rolling_beta(y.data(), x.data(), n, window);
+    for (int i = window - 1; i < n; ++i) {
+        const double want = two_pass_beta(y, x, i, window);
+        CHECK(std::abs(out[i] - want) <= 1e-12 * std::abs(want));
+    }
+}
+
 int main() {
     test_nan_prefix_and_shape();
     test_single_factor_recovers_known_coefficients();
@@ -379,6 +485,9 @@ int main() {
     test_rolling_beta_nan_prefix();
     test_rolling_beta_avx2_matches_scalar_tolerance();
     test_rolling_beta_forced_scalar_path_correct();
+    test_rolling_beta_finite_outlier_leaving_the_window();
+    test_rolling_beta_bad_bar_is_nan_for_exactly_its_windows();
+    test_rolling_beta_clean_series_matches_two_pass();
 
     std::printf("\n%d / %d tests passed.\n",
                 g_tests_run - g_tests_failed, g_tests_run);

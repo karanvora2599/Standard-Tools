@@ -144,7 +144,15 @@ static void fuzz_ols2() {
             // absolute epsilon -- these adversarial shapes span many
             // orders of magnitude by design.
             CHECK(std::abs(sum) < 1e-6 * max_abs_y * n);
-            CHECK(r.r_squared >= -1e-9 && r.r_squared <= 1.0 + 1e-9);
+            // A constant y (one of the adversarial shapes is all zeros) has
+            // no variance to explain, so its R^2 is NaN rather than a number
+            // in [0, 1]; any other fit must land in the unit interval.
+            CHECK(std::isnan(r.r_squared) ||
+                  (r.r_squared >= -1e-9 && r.r_squared <= 1.0 + 1e-9));
+            bool y_constant = true;
+            for (int i = 1; i < n; ++i)
+                if (y[static_cast<std::size_t>(i)] != y[0]) { y_constant = false; break; }
+            CHECK(std::isnan(r.r_squared) == y_constant);
         }
     }
 }

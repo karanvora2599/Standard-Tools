@@ -167,11 +167,13 @@ class TestD5AFuturesRootIsNotAnEquity:
             ("AAPL  240119C00190000", "AAPL  240119C00190000", "raw_symbol", "option"),
             ("AAPL240119C00190000", "AAPL  240119C00190000", "raw_symbol", "option"),
             ("ES~equity", "ES", "raw_symbol", "equity"),
-            ("BRK.B", "BRKB", "raw_symbol", "equity"),
+            ("BRK.B", "BRK.B", "raw_symbol", "equity"),
             ("NVDA", "NVDA", "raw_symbol", "equity"),
         ],
     )
     def test_the_grammar_routes_each_spelling(self, symbol, raw, stype, family):
+        """A share class keeps its dot: Databento's Historical symbology
+        resolves `BRK.B` and not `BRKB`, which this row used to expect."""
         route = DatabentoProvider.resolve_symbol(symbol)
         assert (route.raw, route.stype_in, route.family) == (raw, stype, family)
 
@@ -250,10 +252,216 @@ class TestTheSeams:
         assert again.attrs["dataset"] == SUMMARY
         assert again.index.dtype == "datetime64[ns]"
 
+    def test_a_file_written_before_the_databento_generation_is_not_read(self):
+        """Databento's previous generation may hold a file named for
+        `GOOG.L` with Alphabet class A's bars, so none of its files is read
+        again: a planted one here is passed over for a fetch, and the
+        collector lists it, while another provider's file at the shared
+        version stays current."""
+        root = cache_module._CACHE_ROOT
+        root.mkdir(parents=True, exist_ok=True)
+        poisoned = f"v3_databento-{SUMMARY}_AAPL_2025-03-03_2025-03-07_1d.parquet"
+        _daily_file(root / poisoned, volume=1)
+        (root / "v3_yfinance_AAPL_2025-03-03_2025-03-07_1d.parquet").write_bytes(b"x")
+        client = StubClient(ALL)
+        frame = _provider(client).get_ohlcv("AAPL", "2025-03-03", "2025-03-07")
+        assert client.datasets_called() == [SUMMARY]
+        assert int(frame["Volume"].iloc[0]) != 1
+        dead = [p.name for p in cache_module.dead_generations(dry_run=True)]
+        assert dead == [poisoned]
+        written = [p.name for p in root.glob(f"*databento-{SUMMARY}*")]
+        assert sorted(written) == sorted(
+            [poisoned, f"v4_databento-{SUMMARY}_AAPL_2025-03-03_2025-03-07_1d.parquet"]
+        )
+
     def test_the_temporal_contract_agrees_with_the_metadata(self):
         provider = _provider(StubClient(ALL))
         assert provider.get_temporal_contract("bars").revisions == "unknown"
         assert provider.get_metadata("AAPL").point_in_time is False
+
+
+def _daily_file(path, volume):
+    """A cache file as this provider writes one: five sessions, naive
+    dates, the five columns."""
+    index = pd.bdate_range("2025-03-03", "2025-03-07")
+    close = 200.0 + np.arange(len(index))
+    pd.DataFrame(
+        {
+            "Open": close,
+            "High": close + 1,
+            "Low": close - 1,
+            "Close": close,
+            "Volume": np.full(len(index), volume, dtype="int64"),
+        },
+        index=index,
+    ).to_parquet(path)
+
+
+def _volumes(frame):
+    return int(frame["Volume"].iloc[0])
+
+
+class TestTheDiskCacheAnswersWithTheFeedThatWouldAnswer:
+    """
+    Each feed's answer is its own disk entry, and the lookup used to serve
+    the first entry it found among every candidate. One failure on the
+    summary feed, or one run with `DATABENTO_OHLCV_DATASET` set, left a
+    sample-feed file that every later call served -- 5% of the true volume
+    -- for a window the summary feed covered all along.
+    """
+
+    WINDOW = ("2025-03-03", "2025-03-07")
+    VOLUME = {SUMMARY: 36_000_000, CONSOLIDATED: 1_700_000}
+
+    def _client(self, rules=None, ranges=None):
+        """Bars whose volume says which feed answered."""
+        client = StubClient(ranges or ALL, rules=rules)
+        volume = self.VOLUME
+
+        def by_feed(kw):
+            if kw["dataset"] not in volume:
+                return None
+            index = pd.bdate_range(
+                pd.Timestamp(kw["start"], tz="UTC"),
+                pd.Timestamp(kw["end"], tz="UTC") - pd.Timedelta(days=1),
+                tz="UTC",
+            )
+            close = 200.0 + np.arange(len(index))
+            return pd.DataFrame(
+                {
+                    "open": close,
+                    "high": close + 1,
+                    "low": close - 1,
+                    "close": close,
+                    "volume": np.full(len(index), volume[kw["dataset"]], "uint64"),
+                },
+                index=index,
+            )
+
+        client.rules.append(by_feed)
+        return client
+
+    def _fresh_healthy_read(self):
+        client = self._client()
+        frame = _provider(client).get_ohlcv("AAPL", *self.WINDOW)
+        return frame, client
+
+    def _assert_the_summary_feed_answers(self):
+        frame, client = self._fresh_healthy_read()
+        assert client.datasets_called() == [SUMMARY]
+        assert frame.attrs["dataset"] == SUMMARY
+        assert _volumes(frame) == self.VOLUME[SUMMARY]
+
+    def test_a_failed_data_request_does_not_pin_the_window(self):
+        failing = self._client(
+            rules=[
+                lambda kw: (
+                    RuntimeError("500 gateway error")
+                    if kw["dataset"] == SUMMARY
+                    else None
+                )
+            ]
+        )
+        first = _provider(failing).get_ohlcv("AAPL", *self.WINDOW)
+        assert first.attrs["dataset"] == CONSOLIDATED
+        self._assert_the_summary_feed_answers()
+
+    def test_a_failed_range_lookup_does_not_pin_the_window(self):
+        client = self._client()
+        original = client.metadata.get_dataset_range
+
+        def flaky(dataset):
+            if dataset == SUMMARY:
+                raise RuntimeError("503 service unavailable")
+            return original(dataset)
+
+        client.metadata.get_dataset_range = flaky
+        first = _provider(client).get_ohlcv("AAPL", *self.WINDOW)
+        assert first.attrs["dataset"] == CONSOLIDATED
+        assert SUMMARY not in client.datasets_called()
+        self._assert_the_summary_feed_answers()
+
+    def test_a_dataset_override_used_once_does_not_pin_the_window(self, monkeypatch):
+        monkeypatch.setenv("DATABENTO_OHLCV_DATASET", CONSOLIDATED)
+        first = _provider(self._client()).get_ohlcv("AAPL", *self.WINDOW)
+        assert first.attrs["dataset"] == CONSOLIDATED
+        monkeypatch.delenv("DATABENTO_OHLCV_DATASET")
+        self._assert_the_summary_feed_answers()
+
+    def test_the_same_instance_asks_the_preferred_feed_again(self):
+        """The degraded answer is not kept for the session either: the next
+        call on the instance that saw the failure asks the summary feed."""
+        state = {"failures": 1}
+
+        def once(kw):
+            if kw["dataset"] == SUMMARY and state["failures"]:
+                state["failures"] -= 1
+                return RuntimeError("500 gateway error")
+            return None
+
+        client = self._client(rules=[once])
+        provider = _provider(client)
+        assert provider.get_ohlcv("AAPL", *self.WINDOW).attrs["dataset"] == (
+            CONSOLIDATED
+        )
+        again = provider.get_ohlcv("AAPL", *self.WINDOW)
+        assert again.attrs["dataset"] == SUMMARY
+        assert _volumes(again) == self.VOLUME[SUMMARY]
+
+    def test_a_denied_preferred_feed_still_reads_the_fallback_entry(self):
+        """
+        A subscription without the summary feed gets the sample feed's
+        answer from disk on the next fresh provider, not a metered refetch:
+        once the denial is learned, the sample feed is the one that would
+        answer.
+        """
+        without_summary = {k: v for k, v in ALL.items() if k != SUMMARY}
+        first = _provider(self._client(ranges=without_summary)).get_ohlcv(
+            "AAPL", *self.WINDOW
+        )
+        assert first.attrs["dataset"] == CONSOLIDATED
+        client = self._client(ranges=without_summary)
+        again = _provider(client).get_ohlcv("AAPL", *self.WINDOW)
+        assert client.calls == []
+        assert again.attrs["dataset"] == CONSOLIDATED
+        assert _volumes(again) == self.VOLUME[CONSOLIDATED]
+
+    def test_a_request_level_denial_still_reads_the_fallback_entry(self):
+        """The same when the denial arrives on the data request rather than
+        the range lookup: the one refused request, and no data refetched."""
+        denied = [
+            lambda kw: (
+                RuntimeError("403 Forbidden: not_entitled")
+                if kw["dataset"] == SUMMARY
+                else None
+            )
+        ]
+        _provider(self._client(rules=denied)).get_ohlcv("AAPL", *self.WINDOW)
+        client = self._client(rules=denied)
+        again = _provider(client).get_ohlcv("AAPL", *self.WINDOW)
+        assert client.datasets_called() == [SUMMARY]
+        assert again.attrs["dataset"] == CONSOLIDATED
+
+    def test_null_a_clean_summary_answer_is_served_warm(self):
+        self._assert_the_summary_feed_answers()
+        frame, client = self._fresh_healthy_read()
+        assert client.calls == []
+        assert frame.attrs["dataset"] == SUMMARY
+        assert _volumes(frame) == self.VOLUME[SUMMARY]
+
+    def test_null_a_window_before_the_summary_feed_reads_the_sample_entry(self):
+        """Policy, not a pin: the summary feed does not reach 2024-06, so
+        the sample feed is the preferred answer there, warm as well as
+        cold."""
+        window = ("2024-06-03", "2024-06-07")
+        cold = self._client()
+        first = _provider(cold).get_ohlcv("AAPL", *window)
+        assert cold.datasets_called() == [CONSOLIDATED]
+        warm = self._client()
+        again = _provider(warm).get_ohlcv("AAPL", *window)
+        assert warm.calls == []
+        assert again.attrs["dataset"] == CONSOLIDATED
+        assert again.equals(first)
 
 
 class TestQualityReadsTheCalendarAndTheVolume:

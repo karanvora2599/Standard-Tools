@@ -853,8 +853,13 @@ static void test_summary_matches_run_strategy_under_a_rate() {
     // EXCESS is -rf/ppy. That seed contributes nothing at rf = 0, so a
     // missing one is invisible until a rate is set -- and every batch entry
     // point reads its numbers from this function.
+    //
+    // The negative rates are the other half. Bar 0's downside term is
+    // min(excess, 0)^2, which is rf^2 for a positive rate and 0 for a
+    // negative one; seeding rf^2 regardless put the batch Sortino 3e-6 off
+    // the single run at rf = -5%, enough to reorder a grid.
     std::uint64_t state = 4242;
-    const double rates[] = {0.0, 0.01, 0.045, 0.10, 0.25};
+    const double rates[] = {-0.5, -0.05, -0.001, 0.0, 0.01, 0.045, 0.10, 0.25};
     for (double rf : rates) {
         for (int trial = 0; trial < 15; ++trial) {
             const int n = 5 + static_cast<int>(std::abs(pseudo_random(state)) * 200);
@@ -875,6 +880,180 @@ static void test_summary_matches_run_strategy_under_a_rate() {
             check_all_fields_match(full, summ);
         }
     }
+}
+
+
+// ── run_portfolio_simulation ─────────────────────────────────────────────────
+//
+// Every output element must be defined on every return path. The outputs are
+// pre-filled with a sentinel standing in for whatever the caller's buffer held
+// -- from Python that was numpy's recycled memory, so a failing run returned
+// the previous run's equity curve in its tail.
+
+namespace {
+
+constexpr double kSentinel = 12345.0;
+
+struct PortfolioRun {
+    std::vector<double> equity, cash, gross, net, rebal;
+    double peak = 0.0;
+    sqt::PortfolioSimError err;
+    std::size_t n_executed = 0;
+};
+
+PortfolioRun run_portfolio(const std::vector<double>& close,
+                           const std::vector<double>& exec,
+                           const std::vector<double>& weights,
+                           const std::vector<long long>& rebal_bars,
+                           std::size_t n_bars, std::size_t n_tickers,
+                           const sqt::PortfolioCosts& costs) {
+    PortfolioRun r;
+    const std::size_t n_rebal = rebal_bars.size();
+    r.equity.assign(n_bars, kSentinel);
+    r.cash.assign(n_bars, kSentinel);
+    r.gross.assign(n_bars, kSentinel);
+    r.net.assign(n_bars, kSentinel);
+    r.rebal.assign(n_rebal * 3, kSentinel);
+    const std::vector<double> gaps(n_bars, 1.0);
+    r.n_executed = sqt::run_portfolio_simulation(
+        close.data(), exec.data(), weights.data(), rebal_bars.data(), gaps.data(),
+        n_bars, n_tickers, n_rebal, costs,
+        r.equity.data(), r.cash.data(), r.gross.data(), r.net.data(),
+        r.rebal.data(), &r.peak, &r.err);
+    return r;
+}
+
+bool no_sentinel_left(const PortfolioRun& r) {
+    for (const auto* v : {&r.equity, &r.cash, &r.gross, &r.net, &r.rebal})
+        for (double x : *v)
+            if (x == kSentinel) return false;
+    return true;
+}
+
+// Bars [first, last) of every per-bar output are NaN.
+bool bars_nan(const PortfolioRun& r, std::size_t first, std::size_t last) {
+    for (std::size_t b = first; b < last; ++b)
+        if (!std::isnan(r.equity[b]) || !std::isnan(r.cash[b]) ||
+            !std::isnan(r.gross[b]) || !std::isnan(r.net[b]))
+            return false;
+    return true;
+}
+
+bool bars_finite(const PortfolioRun& r, std::size_t first, std::size_t last) {
+    for (std::size_t b = first; b < last; ++b)
+        if (!std::isfinite(r.equity[b]) || !std::isfinite(r.cash[b]) ||
+            !std::isfinite(r.gross[b]) || !std::isfinite(r.net[b]))
+            return false;
+    return true;
+}
+
+bool rebal_rows_nan(const PortfolioRun& r, std::size_t first) {
+    for (std::size_t i = first * 3; i < r.rebal.size(); ++i)
+        if (!std::isnan(r.rebal[i])) return false;
+    return true;
+}
+
+sqt::PortfolioCosts free_costs() {
+    sqt::PortfolioCosts c;
+    c.commission_pct = 0.0;
+    c.sell_commission_pct = 0.0;
+    c.slippage_pct = 0.0;
+    return c;
+}
+
+}  // namespace
+
+static void test_portfolio_healthy_run_writes_every_element() {
+    // The null case: a run that reaches the end has no NaN anywhere.
+    const std::size_t n_bars = 6, n_tickers = 2;
+    const std::vector<double> close = {100, 50, 110, 55, 121, 60,
+                                       100, 70, 105, 65, 130, 50};
+    const std::vector<double> weights = {1.0, 0.0, 0.5, 0.5};
+    const std::vector<long long> rebal = {0, 3};
+    auto r = run_portfolio(close, close, weights, rebal, n_bars, n_tickers,
+                           free_costs());
+    CHECK(r.err.status == sqt::kPortfolioOk);
+    CHECK(r.n_executed == 2);
+    CHECK(no_sentinel_left(r));
+    CHECK(bars_finite(r, 0, n_bars));
+    CHECK(std::isfinite(r.rebal[3]) && std::isfinite(r.rebal[5]));
+    // All-in ticker 0 at 100 with no costs: bar 1 is marked at 110.
+    CHECK_NEAR(r.equity[1], 10'000.0 * 110.0 / 100.0, 1e-9);
+}
+
+static void test_portfolio_failed_rebalance_leaves_a_nan_tail() {
+    // A NaN execution price for a ticker that is being bought stops the run
+    // at the rebalance bar, which is never marked.
+    const std::size_t n_bars = 6, n_tickers = 2;
+    std::vector<double> close = {100, 50, 101, 51, 102, 52,
+                                 103, 53, 104, 54, 105, 55};
+    std::vector<double> exec = close;
+    exec[4 * n_tickers + 0] = std::numeric_limits<double>::quiet_NaN();
+    const std::vector<double> weights = {0.5, 0.5, 0.6, 0.4};
+    const std::vector<long long> rebal = {0, 4};
+    auto r = run_portfolio(close, exec, weights, rebal, n_bars, n_tickers,
+                           free_costs());
+    CHECK(r.err.status == sqt::kPortfolioBadExecPrice);
+    CHECK(r.err.bar == 4);
+    CHECK(r.n_executed == 1);
+    CHECK(no_sentinel_left(r));
+    CHECK(bars_finite(r, 0, 4));
+    CHECK(bars_nan(r, 4, n_bars));
+    CHECK(rebal_rows_nan(r, 1));
+}
+
+static void test_portfolio_zero_capital_leaves_every_bar_nan() {
+    // Insolvent at the very first rebalance: nothing was ever marked.
+    const std::size_t n_bars = 5, n_tickers = 1;
+    const std::vector<double> close = {100, 101, 102, 103, 104};
+    const std::vector<double> weights = {1.0};
+    const std::vector<long long> rebal = {0};
+    auto costs = free_costs();
+    costs.initial_capital = 0.0;
+    auto r = run_portfolio(close, close, weights, rebal, n_bars, n_tickers, costs);
+    CHECK(r.err.status == sqt::kPortfolioInsolventAtRebalance);
+    CHECK(r.err.bar == 0);
+    CHECK(r.n_executed == 0);
+    CHECK(no_sentinel_left(r));
+    CHECK(bars_nan(r, 0, n_bars));
+    CHECK(rebal_rows_nan(r, 0));
+}
+
+static void test_portfolio_insolvent_at_bar_marks_that_bar_only() {
+    // Fully invested at 100 with no costs: 100 shares, cash exactly 0. A
+    // close of 0 at bar 3 marks equity 0 there and stops; bar 3 itself is
+    // written (it WAS marked), everything after it is NaN.
+    const std::size_t n_bars = 6, n_tickers = 1;
+    const std::vector<double> close = {100, 90, 80, 0.0, 70, 60};
+    const std::vector<double> weights = {1.0};
+    const std::vector<long long> rebal = {0};
+    auto r = run_portfolio(close, close, weights, rebal, n_bars, n_tickers,
+                           free_costs());
+    CHECK(r.err.status == sqt::kPortfolioInsolventAtBar);
+    CHECK(r.err.bar == 3);
+    CHECK(no_sentinel_left(r));
+    CHECK(bars_finite(r, 0, 4));
+    CHECK_NEAR(r.equity[3], 0.0, 0.0);
+    CHECK(bars_nan(r, 4, n_bars));
+}
+
+static void test_portfolio_next_open_trigger_on_the_last_bar() {
+    // status 0, but the second row never executes -- there is no following
+    // Open to fill at -- so its rebalance row is NaN, not left unwritten.
+    const std::size_t n_bars = 5, n_tickers = 1;
+    const std::vector<double> close = {100, 101, 102, 103, 104};
+    const std::vector<double> open  = {99.5, 100.5, 101.5, 102.5, 103.5};
+    const std::vector<double> weights = {1.0, 0.5};
+    const std::vector<long long> rebal = {0, 4};
+    auto costs = free_costs();
+    costs.fill = sqt::kFillNextOpen;
+    auto r = run_portfolio(close, open, weights, rebal, n_bars, n_tickers, costs);
+    CHECK(r.err.status == sqt::kPortfolioOk);
+    CHECK(r.n_executed == 1);
+    CHECK(no_sentinel_left(r));
+    CHECK(bars_finite(r, 0, n_bars));
+    CHECK(std::isfinite(r.rebal[0]));
+    CHECK(rebal_rows_nan(r, 1));
 }
 
 
@@ -920,6 +1099,13 @@ int main() {
     test_crossover_honours_ref_prices();
     test_crossover_rejects_out_of_range_pair_index();
     test_crossover_empty_inputs();
+
+    // run_portfolio_simulation
+    test_portfolio_healthy_run_writes_every_element();
+    test_portfolio_failed_rebalance_leaves_a_nan_tail();
+    test_portfolio_zero_capital_leaves_every_bar_nan();
+    test_portfolio_insolvent_at_bar_marks_that_bar_only();
+    test_portfolio_next_open_trigger_on_the_last_bar();
 
     std::printf("\n%d / %d tests passed.\n",
                 g_tests_run - g_tests_failed, g_tests_run);

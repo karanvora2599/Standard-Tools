@@ -38,7 +38,7 @@ scoped to four categories rather than all of them, so it advertises 58 of the
 | `modeling` | 37 | 171 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
 | `backtest` | 35 | 86 KB | `backtest_execution`, `backtest_validation`, `custom_signal` | [04_backtesting.md](04_backtesting.md), [24_overfitting.md](24_overfitting.md) |
 | `meta` | 25 | 24 KB | `discovery`, `provenance` | [27_meta.md](27_meta.md), [10_auditability.md](10_auditability.md) |
-| `data` | 21 | 33 KB | *(one surface)* | [26_data.md](26_data.md) |
+| `data` | 21 | 34 KB | *(one surface)* | [26_data.md](26_data.md) |
 | `portfolio` | 19 | 35 KB | `portfolio_risk` | [05_portfolio.md](05_portfolio.md) |
 | `delta_one` | 18 | 43 KB | *(one surface)* | [28_delta_one.md](28_delta_one.md) |
 | `microstructure` | 17 | 30 KB | *(one surface)* | [22_microstructure.md](22_microstructure.md) |
@@ -566,7 +566,7 @@ Register a model package from an artifact store into THIS runs directory, verifi
 
 #### `register_external_panel`
 
-Register a feature matrix computed OUTSIDE this library -- by a C++ pipeline over an L2 feed, a warehouse query, another system -- as a modeling dataset, without copying it. Use this when the features already exist and build_model_dataset has nothing to fetch or compute. `horizon` is required and is the one thing not inferable from the file: the engine purges training rows whose label window overlaps the test fold, and a missing horizon disables that purge silently rather than failing. The panel's content hash is recorded and verified on every load, so an edited file fails loudly; a moved one stops loading. score_model cannot run on a model trained this way, because rebuilding features needs definitions this library does not have.
+Register a feature matrix computed OUTSIDE this library -- by a C++ pipeline over an L2 feed, a warehouse query, another system -- as a modeling dataset, without copying it. Use this when the features already exist and build_model_dataset has nothing to fetch or compute. `horizon` is required and is the one thing not inferable from the file: the engine purges training rows whose label window overlaps the test fold, and a missing horizon disables that purge silently rather than failing. The panel's content hash is recorded and verified on every load, so an edited file fails loudly; a moved one stops loading. score_model cannot run on a model trained this way, because rebuilding features needs definitions this library does not have. The path must lie in the runs directory or a directory listed in SQT_EXTERNAL_DIRS.
 
 **Required:** `path`  
 **Optional:** `horizon`, `targets`, `target_type`, `event_column`, `interval`, `date_column`, `entity_column`, `target_column`, `label_end_column`, `feature_columns`, `source`, `file_format`
@@ -908,7 +908,7 @@ What a data provider can serve — tick trades, top-of-book quotes, L2 depth, or
 
 #### `describe_effective_config`
 
-Every SQT_* setting this process reads, resolved through the functions that read it rather than echoed from the environment -- so an unset variable still reports the value in force. Covers recording, redaction, retention and signing of the decision log, the artifact and cache roots, the native-extension switch, provider credentials and the model registry. A secret reports only whether it is set: disclosing the redaction salt would undo the redaction it configures. Reads configuration and cannot change it.
+Every SQT_* setting this process reads, resolved through the functions that read it rather than echoed from the environment -- so an unset variable still reports the value in force. Covers recording, redaction, retention and signing of the decision log, the artifact and cache roots, the directories external data may be read from, the native-extension switch, provider credentials and the model registry. A secret reports only whether it is set: disclosing the redaction salt would undo the redaction it configures. Reads configuration and cannot change it.
 
 *No required arguments.*  
 **Optional:** `include_paths`
@@ -1042,7 +1042,7 @@ Re-run a recorded call and classify the result: reproduced, data_changed (the in
 
 #### `verify_audit_integrity`
 
-Check the audit log's tamper-evident hash chain, for one day or the whole trail, optionally including that day's Ed25519 checkpoint signature. The verdict separates intact, tampered, no_trail and recording_disabled, because an empty directory is not an intact one, and signature_state names which of six things a failed checkpoint check means. Read-only.
+Check the audit log's tamper-evident hash chain, for one day or the whole trail, optionally including that day's Ed25519 checkpoint signature. The verdict separates intact, tampered, no_trail and recording_disabled, because an empty directory is not an intact one, and signature_state names which of eight states the day's checkpoint is in, telling a day that only grew after signing from one whose records no longer recompute to what was signed. Read-only.
 
 *No required arguments.*  
 **Optional:** `date`, `public_key_path`
@@ -1165,14 +1165,14 @@ What a vendor request would cost and whether the data is even there -- asked for
 
 #### `prepare_vendor_extract`
 
-Convert a RAW vendor extract into this library's contract, the step BEFORE register_external_dataset. A Databento export spells the same quantity `bid_px_00` where this library spells it `bid_price_0`, stamps rows `ts_recv` rather than `timestamp`, sends prices as int64 nanodollars and fills absent levels with int64-max rather than null -- so registering it unconverted fails on the column names if you are lucky and puts $9.2 billion quotes in your book if you are not. Writes a new Parquet and REPORTS the two judgements that change the numbers and cannot be recovered from the output: which timestamp became `timestamp`, and whether prices were divided by a billion. Use dry_run to see both before committing a large file.
+Convert a RAW vendor extract into this library's contract, the step BEFORE register_external_dataset. A Databento export spells the same quantity `bid_px_00` where this library spells it `bid_price_0`, stamps rows `ts_recv` rather than `timestamp`, sends prices as int64 nanodollars and fills absent levels with int64-max rather than null -- so registering it unconverted fails on the column names if you are lucky and puts $9.2 billion quotes in your book if you are not. Writes a new Parquet and REPORTS the two judgements that change the numbers and cannot be recovered from the output: which timestamp became `timestamp`, and whether prices were divided by a billion. Use dry_run to see both before committing a large file. Reads only from the runs directory or a directory listed in SQT_EXTERNAL_DIRS; a relative out_path lands in the runs directory's `extracts` folder, an absolute one must lie in a listed directory.
 
 **Required:** `path`, `kind`, `out_path`  
 **Optional:** `price_scale`, `timestamp`, `levels`, `keep_empty_levels`, `file_format`, `dry_run`, `batch_rows`
 
 #### `register_external_dataset`
 
-Make a Parquet or CSV dataset already on your disk resolvable as an `sqt://` reference WITHOUT copying it, for data too large to fetch and republish -- L2 depth, a full tick tape, an event history. Every other tool here fetches a frame and then writes a second complete copy under the runs directory; a book cannot survive that twice. Registration reads the schema, checks the columns the declared kind requires, and stores a pointer. It does NOT read the rows, so a book with its bid and ask columns transposed registers cleanly -- run validate_external_dataset next.
+Make a Parquet or CSV dataset already on your disk resolvable as an `sqt://` reference WITHOUT copying it, for data too large to fetch and republish -- L2 depth, a full tick tape, an event history. Every other tool here fetches a frame and then writes a second complete copy under the runs directory; a book cannot survive that twice. Registration reads the schema, checks the columns the declared kind requires, and stores a pointer. It does NOT read the rows, so a book with its bid and ask columns transposed registers cleanly -- run validate_external_dataset next. The path must lie in the runs directory or a directory the operator listed in SQT_EXTERNAL_DIRS; anything else is refused, and no tool call can widen that list.
 
 **Required:** `path`, `kind`, `run_id`, `name`  
 **Optional:** `file_format`, `source`

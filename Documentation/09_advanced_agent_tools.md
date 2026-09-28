@@ -2733,7 +2733,9 @@ print(f"10-day forecast          : {[f'{v:.1%}' for v in result.forecast_annuali
 |---|---|---|
 | `omega`, `alpha`, `beta` | `float` | Fitted GARCH(1,1) parameters |
 | `persistence` | `float` | `alpha + beta` — how slowly a volatility shock decays; close to 1.0 means shocks persist for a long time |
-| `converged` | `bool` | The **optimizer** reached a stationary point inside the bounds with `persistence < 1`. It is not a verdict on the specification — for that read `misspecified`, which is computed from the fit's own residuals and is independent of this flag |
+| `converged` | `bool` | The **optimizer** reached a maximum of the likelihood: L-BFGS-B reported success, `persistence < 1`, and `gradient_norm < 1e-4`. It is not a verdict on the specification — for that read `misspecified`, which is computed from the fit's own residuals and is independent of this flag |
+| `gradient_norm` | `float?` | Largest component of the projected gradient of the negative log-likelihood at the answer, per observation, on returns rescaled to unit mean square (so it does not depend on the returns' units). A fit at the maximum reads about 1e-6 or less; one that stopped short reads 1e-2 or more |
+| `at_bound` | `List[str]` | The parameters (`omega`, `alpha`, `beta`) sitting on a bound. `alpha` there means the sample shows no ARCH effect and `beta` is not identified; a warning says so |
 | `ljung_box_p` | `float?` | Joint Ljung-Box p-value on the standardized residuals, testing the *mean* equation. This model assumes a constant mean, so a low value points at an omitted AR term rather than at the variance model |
 | `ljung_box_squared_p` | `float?` | Joint Ljung-Box on the **squared** standardized residuals — the check on the variance model. If the fit captured the clustering, dividing it out leaves no autocorrelation; below 0.05 it did not |
 | `standardized_skew`, `standardized_kurtosis` | `float?` | Skew (~0 under normality) and **excess** kurtosis (0 under normality, not 3) of the standardized residuals. Large positive excess kurtosis is the standard sign that Student-t innovations are wanted |
@@ -2749,7 +2751,9 @@ print(f"10-day forecast          : {[f'{v:.1%}' for v in result.forecast_annuali
 
 A `persistence` near 1.0 (e.g. > 0.97) means today's volatility shock will take a long time to fade — current elevated (or depressed) volatility is a reliable near-term forecast. Compare `current_annualized_vol` against `get_volatility_estimators`' realized measures on the same symbol: GARCH's conditional vol reacts faster to recent shocks than a trailing realized-vol window does, since it's model-based rather than a rolling average.
 
-Read `misspecified` before any of that. `converged=True` says the optimizer finished; it says nothing about whether the fit did its job. A converged, misspecified fit is a forecast built on residuals that still cluster, and its persistence and horizon are both suspect.
+Read `misspecified` before any of that. `converged=True` says the optimizer reached the maximum; it says nothing about whether the fit did its job. A converged, misspecified fit is a forecast built on residuals that still cluster, and its persistence and horizon are both suspect.
+
+The fit runs on returns rescaled to unit mean square, from three starting points, so decimal and percent returns give the same `alpha` and `beta`, and a build with or without the C++ extension gives the same answer. `converged=False` comes with a warning naming the failed condition: `persistence >= 1` (the long-run volatility is then an artifact of a clamp, not an estimate), a projected gradient too large to be a maximum, or the optimizer reporting failure. On a sample with no volatility clustering, `alpha` often lands on its lower bound; `beta` and `persistence` then carry no information, and the warning says so.
 
 ---
 

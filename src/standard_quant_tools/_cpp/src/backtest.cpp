@@ -403,7 +403,8 @@ BacktestResult run_strategy(
 // equity value lives -- a scalar here instead of equity_curve[i]). Pass 2's
 // sum_sq/down_sq_sum accumulation is seeded with index 0's implicit
 // strat_ret[0]=0.0 contribution ((0-mean_r)^2 = mean_r*mean_r exactly, and
-// min(0,0)^2=0) before looping i=1..n-1 -- 0.0 + x == x exactly in IEEE 754,
+// min(0-rf,0)^2 for the downside) before looping i=1..n-1 -- 0.0 + x == x
+// exactly in IEEE 754,
 // so this reproduces run_strategy()'s i=0..N-1 accumulation order bit for
 // bit, just starting the running sum from the i=0 term's value directly
 // instead of adding it as a loop iteration.
@@ -542,12 +543,18 @@ BacktestResult run_strategy_summary(
     const double mean_excess   = mean_r - rf_per_period;
 
     double sum_sq = mean_r * mean_r;
-    // Bar 0's strat_ret is identically 0.0, so its EXCESS is -rf_per_period
-    // and it contributes rf_per_period^2 to the downside sum. The loop below
-    // starts at i=1, so that term has to be seeded here -- it is the one
-    // piece of this function that is invisible at rf = 0 and makes the two
-    // execution paths disagree the moment a rate is set.
-    double down_sq_sum = rf_per_period * rf_per_period;
+    // Bar 0's strat_ret is identically 0.0, so its EXCESS is -rf_per_period.
+    // The loop below starts at i=1, so that bar's downside term has to be
+    // seeded here -- the one piece of this function that is invisible at
+    // rf = 0 and makes the two execution paths disagree the moment a rate is
+    // set. The term is min(excess, 0)^2, the same expression run_strategy()
+    // and risk_metrics.sortino_ratio use: rf^2 for a positive rate, and 0
+    // for a NEGATIVE one, whose bar-0 excess is a gain and not downside.
+    // Seeding rf^2 unconditionally made the grid, the fused crossover and
+    // walk-forward ranking disagree with the single run under a negative
+    // policy rate.
+    const double bar0_down = std::min(0.0 - rf_per_period, 0.0);
+    double down_sq_sum = bar0_down * bar0_down;
 
     for (std::size_t i = 1; i < n; ++i) {
         const double exec_i      = signals[i - 1];
@@ -633,6 +640,19 @@ std::size_t run_portfolio_simulation(
 {
     if (err) *err = PortfolioSimError{};
     if (out_peak_position) *out_peak_position = 0.0;
+    // Every output element is defined on every return path. The loop below
+    // writes a bar only once it is marked and a rebalance row only once it
+    // executes, so an early stop left every later bar -- and a next_open
+    // trigger on the last bar left its rebalance row -- as whatever the
+    // caller's buffer held. From Python that was numpy's recycled memory:
+    // measured, a failing run returned the PREVIOUS run's equity curve in
+    // its tail. NaN is what "this bar was never reached" reads as. O(n_bars)
+    // against a loop that is O(n_bars * n_tickers).
+    if (out_rebal) std::fill_n(out_rebal, n_rebal * 3, kNaN);
+    if (out_equity) std::fill_n(out_equity, n_bars, kNaN);
+    if (out_cash) std::fill_n(out_cash, n_bars, kNaN);
+    if (out_gross) std::fill_n(out_gross, n_bars, kNaN);
+    if (out_net) std::fill_n(out_net, n_bars, kNaN);
     if (n_bars == 0) return 0;
 
     // Two rates, selected per order by the sign of delta. The spread is

@@ -31,6 +31,27 @@ _WINSOR_LOW = 0.01
 _WINSOR_HIGH = 0.99
 
 
+def _date_codes(dates: np.ndarray) -> "tuple[np.ndarray, int]":
+    """
+    Integer date codes for a cross-sectional transform, and how many there are.
+
+    `pd.factorize` codes a NaT date as -1, and the pandas paths below have
+    always treated those rows as one more cross-section of their own -- a
+    `groupby` or a sort sees -1 as just another key. The native kernels
+    refuse a code outside [0, n_dates) instead (such a row used to come back
+    as uninitialised memory), so the NaT rows are given that cross-section
+    explicitly here: code `len(uniques)`, one past the real dates. Both
+    backends then see the same groups and return the same values for them.
+    """
+    codes, uniques = pd.factorize(np.asarray(dates), sort=False)
+    n_dates = int(len(uniques))
+    missing = codes < 0
+    if missing.any():
+        codes = np.where(missing, n_dates, codes)
+        n_dates += 1
+    return codes.astype(np.int64), n_dates
+
+
 def _native_matrix(frame: pd.DataFrame) -> Optional[np.ndarray]:
     """
     The frame as a C-contiguous float64 matrix, or None if it is not the
@@ -99,6 +120,33 @@ def fit_preprocessing(train: pd.DataFrame) -> Dict[str, Dict[str, float]]:
     return stats
 
 
+def _check_preprocessing_stats(stats: Dict[str, Dict[str, float]]) -> None:
+    """
+    Refuse statistics no fit could have produced, on both backends alike.
+
+    They arrive from a persisted preprocessing_stats.json, so they are not
+    necessarily this module's own output. A std of 0 divided into +/-inf
+    and NaN, a negative one flipped every sign, and lo > hi was answered
+    differently by the two paths -- pandas' clip swaps the bounds, the
+    kernel pinned every value to hi. NaN lo/hi/mean stay legal: they are
+    what a fit reports for an all-NaN column, beside std = 1.0.
+    """
+    for col, s in stats.items():
+        std, lo, hi = float(s["std"]), float(s["lo"]), float(s["hi"])
+        if not (np.isfinite(std) and std > 0.0):
+            raise ValidationError(
+                f"apply_preprocessing: std for column {col!r} must be finite "
+                f"and > 0, got {std}. Refit the statistics with "
+                "fit_preprocessing, which never produces one."
+            )
+        if lo > hi:
+            raise ValidationError(
+                f"apply_preprocessing: column {col!r} has lo={lo} above "
+                f"hi={hi}; the clip bounds must satisfy lo <= hi. Refit the "
+                "statistics with fit_preprocessing."
+            )
+
+
 def apply_preprocessing(
     df: pd.DataFrame, stats: Dict[str, Dict[str, float]]
 ) -> pd.DataFrame:
@@ -112,6 +160,7 @@ def apply_preprocessing(
             "apply_preprocessing: this preprocessing_stats.json is a marker, "
             "not a transform: " + str(stats.get("note", ""))
         )
+    _check_preprocessing_stats(stats)
     # The native path transforms the WHOLE matrix in one fused pass, so it
     # only applies when the frame is exactly the fitted columns in the
     # fitted order. A frame carrying extra columns, or a partial stats dict,
@@ -161,14 +210,14 @@ def rank_within_date(frame: pd.DataFrame, dates: np.ndarray) -> pd.DataFrame:
     if frame.empty or frame.shape[1] == 0:
         return frame.copy()
 
-    codes, uniques = pd.factorize(np.asarray(dates), sort=False)
+    codes, n_dates = _date_codes(dates)
     if HAS_CPP and hasattr(_cpp_core, "rank_by_date"):
         matrix = _native_matrix(frame)
         if matrix is not None:
             ranked = _cpp_core.rank_by_date(
                 matrix,
-                np.ascontiguousarray(codes.astype(np.int64)),
-                int(len(uniques)),
+                np.ascontiguousarray(codes),
+                n_dates,
             )
             return pd.DataFrame(ranked, index=frame.index, columns=frame.columns)
 
@@ -183,8 +232,9 @@ def cross_sectional_counts(frame: pd.DataFrame, dates: np.ndarray) -> pd.DataFra
     The companion to `rank_within_date`: a rank means nothing without the
     size of the cross-section it was taken in, and every caller needs both.
     """
-    codes, uniques = pd.factorize(np.asarray(dates), sort=False)
-    n_dates = int(len(uniques))
+    # The same codes rank_within_date uses, NaT rows included as their own
+    # cross-section -- np.bincount would refuse factorize's raw -1.
+    codes, n_dates = _date_codes(dates)
     values = frame.to_numpy(dtype=np.float64)
     present = ~np.isnan(values)
     counts = np.empty_like(values)
@@ -318,14 +368,14 @@ def standardize_cross_sectional(
     if frame.empty:
         return frame.copy()
 
-    codes = pd.factorize(np.asarray(dates), sort=False)[0]
+    codes, n_dates = _date_codes(dates)
     if HAS_CPP and hasattr(_cpp_core, "standardize_by_date"):
         matrix = _native_matrix(frame)
         if matrix is not None:
             standardized = _cpp_core.standardize_by_date(
                 matrix,
-                np.ascontiguousarray(codes.astype(np.int64)),
-                int(codes.max()) + 1 if codes.size else 0,
+                np.ascontiguousarray(codes),
+                n_dates,
                 float(clip_sigma),
             )
             return pd.DataFrame(standardized, index=frame.index, columns=frame.columns)

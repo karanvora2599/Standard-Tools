@@ -254,7 +254,9 @@ class RegisterExternalPanelInput(BaseModel):
             "A Parquet or CSV file, or a directory read as one partitioned "
             "dataset, holding a long panel: one row per (bar, entity) with "
             "the feature columns and the label already computed. Nothing is "
-            "copied -- the dataset record points at this path."
+            "copied -- the dataset record points at this path, which has to "
+            "lie in the runs directory or a directory listed in "
+            "SQT_EXTERNAL_DIRS."
         ),
     )
     horizon: Optional[int] = Field(

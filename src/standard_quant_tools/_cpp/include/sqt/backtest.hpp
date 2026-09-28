@@ -232,18 +232,15 @@ std::vector<BacktestResult> batch_backtest_crossover(
 // to ~450 us/bar at 2,000 -- about 0.9 s for one 2,000-bar backtest, which a
 // walk-forward or a parameter sweep multiplies by fifty or a hundred.
 //
-// SCOPE. This deliberately implements ONLY the configuration the Python
-// engine itself already carves out as its vectorized fast path:
-//
-//     commission_model == "pct" and not use_impact_model
-//                              and max_adv_participation is None
-//
-// The per-share commission model has a per-ORDER minimum, the impact model
-// needs a per-ticker volatility lookup, and the ADV constraint has to raise
-// naming one ticker -- each is a genuinely per-element decision that would
-// have to be restated here to be supported, and restating it is how the two
-// implementations drift. Everything outside the fast path stays on the
-// Python loop, which is unchanged.
+// SCOPE. Every configuration the Python engine accepts: both commission
+// models, the square-root impact model and the ADV participation cap. It
+// began as the percentage-commission fast path only, on the reasoning that
+// the per-share minimum, the impact model's volatility lookup and the ADV
+// cap were per-element decisions; the rebalance loop below was already
+// per-ticker with a per-ticker error path, so what they needed was the
+// arguments on PortfolioCosts, not a different shape. When one of those
+// three is active the loop follows the Python's SCALAR branch, operation for
+// operation, so the two engines still agree bit for bit.
 
 // Why a simulation stopped, so the caller can raise the same message it
 // always raised rather than a generic one from the kernel.
@@ -322,16 +319,26 @@ struct PortfolioCosts {
  *                    Open matrix for kFillNextOpen, (High+Low)/2 for kFillHl2,
  *                    and `close` itself for kFillClose.
  * @param weights     (n_rebal x n_tickers) row-major target weights.
- * @param rebal_bars  (n_rebal) bar index each weight row triggers at, ascending.
+ * @param rebal_bars  (n_rebal) bar index each weight row triggers at,
+ *                    strictly increasing and each in [0, n_bars). A row out
+ *                    of order is skipped and one past the last bar never
+ *                    triggers, both silently, so the binding refuses either.
  * @param day_gaps    (n_bars) calendar days since the previous bar, for
  *                    financing accrual. day_gaps[0] is unused (1.0 by
  *                    convention). A Friday->Monday gap is 3, not 1.
  * @param out_equity, out_cash, out_gross, out_net  (n_bars) each.
  * @param out_rebal   (n_rebal x 3): turnover_pct, gross_leverage_after,
- *                    n_positions. Only rows for rebalances that actually
- *                    executed are written; see the return value.
- * @param err         Set when the simulation stops early. On any non-ok
- *                    status the output buffers are valid only up to `bar`.
+ *                    n_positions. Rows [0, n_executed) hold the rebalances
+ *                    that executed, in order; every later row is NaN (a
+ *                    next_open trigger on the last bar, or rows after an
+ *                    early stop).
+ * @param err         Set when the simulation stops early. Every output
+ *                    element is defined on return: bars the simulation never
+ *                    marked are NaN. A rebalance failure (bad price, ADV,
+ *                    volatility, insolvency, leverage or position breach)
+ *                    leaves bars from `bar` on NaN, because the failing bar
+ *                    is never marked; kPortfolioInsolventAtBar marks `bar`
+ *                    itself and leaves bars from `bar`+1 on NaN.
  *
  * @returns the number of rebalances that executed.
  */

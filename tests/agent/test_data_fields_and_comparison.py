@@ -37,7 +37,6 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-import exchange_calendars as xcals
 import numpy as np
 import pandas as pd
 import pytest
@@ -54,17 +53,38 @@ from standard_quant_tools.data.base import (
 )
 from standard_quant_tools.data.factory import DataFactory
 from standard_quant_tools.error import ValidationError
+from standard_quant_tools.modeling.calendar import calendar_available
 
 #: The dataset the stub provider says answered. A real one of these carries
 #: a few percent of consolidated volume, which is the reason the name has
 #: to reach the caller rather than stay on the frame.
 SAMPLE_DATASET = "EQUS.MINI"
 
-_SESSIONS = pd.DatetimeIndex(
-    xcals.get_calendar("XNYS").sessions_in_range(
-        pd.Timestamp("2024-01-02"), pd.Timestamp("2024-12-31")
-    )
-).tz_localize(None)
+#: The NYSE's full-day closures in 2024. Written out rather than read from
+#: `exchange_calendars`, which is optional: a module-level import of it
+#: failed collection of this whole file on a machine without it, when only
+#: the two calendar tests below need the library.
+_NYSE_HOLIDAYS_2024 = [
+    "2024-01-01",
+    "2024-01-15",
+    "2024-02-19",
+    "2024-03-29",
+    "2024-05-27",
+    "2024-06-19",
+    "2024-07-04",
+    "2024-09-02",
+    "2024-11-28",
+    "2024-12-25",
+]
+
+_SESSIONS = pd.bdate_range(
+    "2024-01-02", "2024-12-31", freq="C", holidays=_NYSE_HOLIDAYS_2024
+)
+
+_needs_calendars = pytest.mark.skipif(
+    not calendar_available(),
+    reason="the optional exchange_calendars package is not installed here",
+)
 
 
 def _bars(index: pd.DatetimeIndex | None = None) -> pd.DataFrame:
@@ -467,7 +487,18 @@ def _quality(**overrides):
     return dispatch("get_data_quality_report", arguments)
 
 
+@_needs_calendars
 class TestWhichCalendarDecidesWhatIsMissing:
+    def test_the_written_out_sessions_are_the_exchange_calendar(self):
+        """The fixture's session index is the library's XNYS calendar,
+        checked wherever the library is there to check it against."""
+        import exchange_calendars as xcals
+
+        sessions = xcals.get_calendar("XNYS").sessions_in_range(
+            pd.Timestamp("2024-01-02"), pd.Timestamp("2024-12-31")
+        )
+        assert _SESSIONS.equals(pd.DatetimeIndex(sessions).tz_localize(None))
+
     def test_two_exchanges_disagree_about_the_same_frame(self):
         """
         A frame of US equity sessions has no gaps against the US calendar

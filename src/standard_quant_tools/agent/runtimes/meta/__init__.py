@@ -125,7 +125,7 @@ TOOL_DEFS = [
     ),
     (
         "verify_audit_integrity",
-        "Check the audit log's tamper-evident hash chain, for one day or the whole trail, optionally including that day's Ed25519 checkpoint signature. The verdict separates intact, tampered, no_trail and recording_disabled, because an empty directory is not an intact one, and signature_state names which of six things a failed checkpoint check means. Read-only.",
+        "Check the audit log's tamper-evident hash chain, for one day or the whole trail, optionally including that day's Ed25519 checkpoint signature. The verdict separates intact, tampered, no_trail and recording_disabled, because an empty directory is not an intact one, and signature_state names which of eight states the day's checkpoint is in, telling a day that only grew after signing from one whose records no longer recompute to what was signed. Read-only.",
         VerifyAuditIntegrityInput,
     ),
     (
@@ -160,7 +160,7 @@ TOOL_DEFS = [
     ),
     (
         "describe_effective_config",
-        "Every SQT_* setting this process reads, resolved through the functions that read it rather than echoed from the environment -- so an unset variable still reports the value in force. Covers recording, redaction, retention and signing of the decision log, the artifact and cache roots, the native-extension switch, provider credentials and the model registry. A secret reports only whether it is set: disclosing the redaction salt would undo the redaction it configures. Reads configuration and cannot change it.",
+        "Every SQT_* setting this process reads, resolved through the functions that read it rather than echoed from the environment -- so an unset variable still reports the value in force. Covers recording, redaction, retention and signing of the decision log, the artifact and cache roots, the directories external data may be read from, the native-extension switch, provider credentials and the model registry. A secret reports only whether it is set: disclosing the redaction salt would undo the redaction it configures. Reads configuration and cannot change it.",
         EffectiveConfigInput,
     ),
     (

@@ -3159,7 +3159,8 @@ _MODELING_TOOL_DEFS: List[tuple] = [
         "and verified on every load, so an edited file fails loudly; a moved "
         "one stops loading. score_model cannot run on a model trained this "
         "way, because rebuilding features needs definitions this library "
-        "does not have.",
+        "does not have. The path must lie in the runs directory or a "
+        "directory listed in SQT_EXTERNAL_DIRS.",
         RegisterExternalPanelInput,
     ),
     (

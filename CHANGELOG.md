@@ -1,5 +1,103 @@
 # Changelog
 
+## A test that never rejected, a fit that never moved, and a trail that could not be evidence
+
+Each of these returned a plausible answer that was wrong, or a verdict that
+could not be trusted, in ordinary use: a test statistic with no power, a
+volatility fit that stopped where it started and called itself converged,
+trade signs attached to the wrong prints, native results holding memory
+nothing wrote, a cache answering with another feed's volume, a ticker
+resolving to another company, an ordinary NaN making a day read as tampered,
+a signature vouching for an edited day, an agent door that read files
+anywhere, and a test suite writing into the audit trail it exists to protect.
+
+- **The variance-ratio test rejects.** Its z statistic is now Lo and
+  MacKinlay's heteroskedasticity-robust z\*, scaled by the square root of the
+  number of returns, and the overlapping variance carries its (1 − q/T)
+  factor. Before, z had a standard deviation near 0.03 and the test never
+  rejected: an MA(1) with VR(8) = 0.15 read p = 0.79.
+- **GARCH(1,1) fits.** It now fits returns rescaled to unit mean square from
+  three starting points. It used to stop near its starting values while
+  reporting `converged`, understating alpha by about half and leaving up to
+  180 nats of likelihood unused, and the C++-gradient and finite-difference
+  builds stopped at different wrong points. The fit is now the same for
+  decimal and percent returns and on both builds; `converged` also requires a
+  projected gradient below 1e-4 per observation; the result reports
+  `gradient_norm` and `at_bound`, warns when alpha sits on its lower bound,
+  and refuses constant returns.
+- **Trade signs line up with the caller's rows.** `signs_positional` signs a
+  tape in time order and returns each sign in the caller's own row order; it
+  used to return them sorted, so a tape out of time order gave prints another
+  print's side in the Kyle-lambda tape path, the liquidity detector's signed
+  volume and `classify_trade_direction` — about a third of the prints on two
+  concatenated pulls. The time sort is stable, so prints and quote updates
+  sharing a timestamp keep their arrival order and one tape gives one
+  tick-rule answer. `order_flow_imbalance` aligns the next bar's return by
+  position, so a repeated timestamp is measured instead of raising.
+- **Native results hold only what the kernel wrote.** Rows with a NaT date or
+  an out-of-range code, and portfolio bars or rebalance rows after an early
+  stop, come back NaN or are refused instead of carrying the previous call's
+  memory; a NaT date gets its own cross-section on both backends. The
+  portfolio binding enforces the Python engine's bounds on all fifteen
+  scalars, `rebal_bars` and `day_gaps`, and every backtest binding refuses a
+  non-finite risk-free rate. Index arrays must be integers and are
+  range-checked before narrowing, so a wrapped index is refused instead of
+  answered. `rolling_beta` and `bollinger_bands` stay exact after a large
+  print leaves the window (a sign-flipped beta 286 times too large, before)
+  and a NaN blanks only its own windows. The q = 1 winsorize bound is the
+  column maximum, stats with a non-positive std or lo > hi are refused, the
+  batch Sortino matches the single run under a negative rate, `ols2` reports
+  NaN R² for a constant response, and two panel bindings refuse 2-D input
+  instead of flattening it.
+- **Databento's disk cache answers with the feed that would answer now.** One
+  failed request, one failed range lookup, or one run with
+  `DATABENTO_OHLCV_DATASET` set no longer pins a window to the sample feed at
+  5% of the true volume; a subscription without the summary feed still reads
+  the sample feed's entry without refetching. Share classes go to the vendor
+  dotted (`BRK.B`, from `BRK-B`, `BRK/B` or `brk.b`), the spelling the
+  Historical symbology resolves; tickers with an exchange suffix (`GOOG.L`,
+  `BP.L`, `SONY.T`, `0700.HK`, `IBM.N`) are refused by name instead of
+  folding into another US company. Cache generations are per provider:
+  Databento moves to `v4` and `sqt cache gc` collects its old files; yfinance
+  and Polygon caches are untouched.
+- **A decision record verifies whatever its input held.** The record hash is
+  taken over the line exactly as written and read back, and the input is made
+  JSON-native first: a non-finite value is recorded as `"NaN"`, `"Infinity"`
+  or `"-Infinity"` so a replay rebuilds the same call, and a numpy value no
+  longer drops the record. Records of JSON-native values hash exactly as
+  before. A line an earlier writer recorded for a NaN input is recognised and
+  reported as a note, not as tampering, by both verifiers; a real edit of the
+  same line is still reported.
+- **A signed checkpoint commits to what the day recomputes to.** An edited,
+  truncated or rewritten day reads `altered`; a day that only grew reads
+  `extended` (formerly `content_drift`); signing refuses a day whose chain does
+  not hold. `sqt verify --checkpoint` checks the chain too, names the state,
+  and exits 0 valid, 1 chain problem or altered or key mismatch or corrupt
+  signature, 2 nothing to check, 3 extended. A trail still in the old cache
+  location is warned about once per process, and `describe_audit_log`
+  reports `audit_dir_is_legacy_cache`.
+- **External data has a fence.** `register_external_dataset`,
+  `register_external_panel` and `prepare_vendor_extract` read only from the
+  runs directory or the directories listed in the new setting
+  `SQT_EXTERNAL_DIRS` (environment only; the twenty-first setting
+  `describe_effective_config` reports). The path is checked as text first, so
+  network paths are refused before anything is opened, again after links are
+  followed, and file by file for a directory dataset. `$NAME` and `%NAME%` are
+  no longer expanded; they used to put an environment variable's value into
+  the refusal and the decision log. A relative `out_path` lands in
+  `runs/extracts/`, and nothing is written into the cache, the audit directory
+  or the artifact store. Narrowing the setting stops registrations outside it
+  from resolving. `_env.py` holds one reading of environment settings — blank
+  means unset, relative paths and unknown flag words are refused — for the
+  other settings to move onto.
+- **The test suite runs against its own trail.** The root `conftest.py` points
+  the audit directory, the artifact store and the cache at a per-run
+  temporary directory before any import, and clears the audit behaviour
+  settings. Twenty-five test files used to write several hundred synthetic
+  decision records into the machine's audit trail per run, indistinguishable
+  from real ones. Three tests no longer assume optional libraries are
+  installed.
+
 ## Nine doors for capability that had none
 
 Nine tools, each over functions that existed, worked, and could not be

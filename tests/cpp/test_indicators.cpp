@@ -814,11 +814,65 @@ static void test_bollinger_inf_bar_does_not_throw_and_stays_local() {
 }
 
 static void test_bollinger_leading_nan_does_not_poison_the_series() {
-    // The seed window starts at bar 0, so a NaN at bar 0 is also the
-    // reference point the shifted sums are centred on.
+    // The seed window starts at bar 0, so a NaN at bar 0 is in the very
+    // first sums the kernel builds.
     auto prices = pseudo_random(60);
     prices[0] = std::numeric_limits<double>::quiet_NaN();
     check_matches_brute_force_bollinger(prices, 10, 2.0, 1e-9);
+}
+
+static void test_bollinger_nan_reference_point_does_not_poison_the_series() {
+    // The shifted sums are centred on the NEWEST price of each rebuilt
+    // window: bar 9 for the seed window at period 10, bar 19 for the first
+    // periodic rebuild. A NaN there must fall back to a finite reference.
+    for (int bad : {9, 19}) {
+        auto prices = pseudo_random(60);
+        prices[static_cast<std::size_t>(bad)] =
+            std::numeric_limits<double>::quiet_NaN();
+        check_matches_brute_force_bollinger(prices, 10, 2.0, 1e-9);
+    }
+}
+
+static void test_bollinger_finite_outlier_leaving_the_window() {
+    // A large but FINITE print is subtracted back out of the sliding sums,
+    // and takes their low-order digits with it: measured, a 1e8 print among
+    // ~100 +/- 0.01 prices left the band width wrong by up to 327x until the
+    // next rebuild, and a 1e12 print made the variance so negative that the
+    // kernel threw. Positions 40 and 60 are rebuild starts at period 20 (a
+    // print there used to become the reference point itself); 37 is not.
+    const int period = 20;
+    const int n = 120;
+    for (double magnitude : {1e5, 1e8, 1e12}) {
+        for (int pos : {37, 40, 60}) {
+            std::vector<double> prices(static_cast<std::size_t>(n));
+            unsigned state = 7u + static_cast<unsigned>(pos);
+            for (int i = 0; i < n; ++i) {
+                state = state * 1664525u + 1013904223u;
+                prices[static_cast<std::size_t>(i)] =
+                    100.0 + 0.02 * (static_cast<double>(state & 0x7FFFFFFFu) /
+                                    2147483648.0 - 0.5);
+            }
+            prices[static_cast<std::size_t>(pos)] = magnitude;
+
+            std::vector<double> result;
+            bool threw = false;
+            try {
+                result = sqt::bollinger_bands(prices.data(), prices.size(), period, 2.0);
+            } catch (...) {
+                threw = true;
+            }
+            CHECK(!threw);
+            if (threw) continue;
+            const auto expected = brute_force_bollinger(prices, period, 2.0);
+            for (int i = period - 1; i < n; ++i) {
+                if (i - period + 1 <= pos && pos <= i) continue;  // print inside
+                for (int k = 0; k < 3; ++k) {
+                    const std::size_t o = static_cast<std::size_t>(i) * 3 + k;
+                    CHECK_NEAR(result[o], expected[o], 1e-9);
+                }
+            }
+        }
+    }
 }
 
 
@@ -1028,6 +1082,8 @@ int main() {
     test_bollinger_nan_bar_does_not_throw_and_stays_local();
     test_bollinger_inf_bar_does_not_throw_and_stays_local();
     test_bollinger_leading_nan_does_not_poison_the_series();
+    test_bollinger_nan_reference_point_does_not_poison_the_series();
+    test_bollinger_finite_outlier_leaving_the_window();
 
     // Stochastic Oscillator
     test_stochastic_matches_brute_force_random();

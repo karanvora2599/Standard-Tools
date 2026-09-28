@@ -229,10 +229,12 @@ Every `get_ohlcv` call for a **historical date range** (end date before today, o
 
 ```
 ~/.cache/standard_quant_tools/ohlcv/v3_yfinance_AAPL_2020-01-01_2024-01-01_1d.parquet
-~/.cache/standard_quant_tools/ohlcv/v3_databento-EQUS.SUMMARY_AAPL_2024-07-01_2025-06-30_1d.parquet
+~/.cache/standard_quant_tools/ohlcv/v4_databento-EQUS.SUMMARY_AAPL_2024-07-01_2025-06-30_1d.parquet
 ```
 
-The filename carries the format generation, the provider and — for a provider that chooses a dataset per window — the dataset that answered, so two feeds 30x apart in volume never share one file.
+The filename carries the format generation, the provider and — for a provider that chooses a dataset per window — the dataset that answered, so two feeds 30x apart in volume never share one file. Such a provider reads only the entry of the dataset that would answer the request now (see the Databento section), never whichever entry it finds first.
+
+**The generation is per provider.** The shared generation (`v3`) moves every provider's files at once; a provider can also be bumped on its own, so a change to what one provider's files mean retires that provider's files and nobody else's — the Polygon cache, on a rate-limited budget, is not refetched because Databento's naming changed. Databento is one bump ahead (`v4`): its files are now named by the symbol as sent to the vendor, and a file of the previous generation named for an exchange-suffixed ticker such as `GOOG.L` holds another company's bars.
 
 **Why only historical ranges?** "Historical" here means the bar is no longer forming — it does *not* mean the cached values can never change. Data is fetched with `auto_adjust=True`, so a later corporate action (split, special dividend) can retroactively revise the adjusted Close/Open/High/Low for dates already on disk. The cache trades that small staleness risk for avoiding repeated network calls; a symbol with a recent corporate action needs the cache cleared or bypassed (`SQT_CACHE_DIR`) rather than assuming it self-heals. Today's still-forming bar always goes through the in-process session cache instead (for 60 seconds, not the hour a settled window gets), never the disk cache.
 
@@ -257,7 +259,7 @@ print(f"Cached call: {time.perf_counter() - t0:.3f}s")
 
 **Cache path safety**: `symbol`, `start_date`/`end_date`, and `interval` are all validated (allow-listed characters, `..` rejected) before being used to build the Parquet filename, and the resolved path is checked to still resolve inside the cache root — a malformed or adversarial symbol string (these are LLM-reachable via `get_ohlcv`'s own parameters) can't write outside `SQT_CACHE_DIR`. A symbol that fails this check doesn't cause `get_ohlcv` itself to fail, though: caching is an optimization, not a correctness requirement, so every provider degrades gracefully by skipping the disk cache for that one call (still served live/from the session cache) rather than raising `ValidationError` for a symbol its own live-fetch path can otherwise handle fine.
 
-**Dead generations are collected, not read.** A format bump (see the `v3` note above) leaves the previous generation's files on disk, never looked up again; a live cache held 1,574 files, 501 of them dead. `sqt cache gc` lists them and `sqt cache gc --confirm` deletes them — only files carrying an old generation prefix, never the current generation and never a file without one.
+**Dead generations are collected, not read.** A format bump (see the `v3` note above) leaves the previous generation's files on disk, never looked up again; a live cache held 1,574 files, 501 of them dead. `sqt cache gc` lists them and `sqt cache gc --confirm` deletes them — only files carrying a generation their provider no longer reads, never a provider's current generation and never a file without one. After the Databento bump, its `v3_databento-*` files are listed while `v3_yfinance_*` and `v3_polygon_*` files stay current.
 
 **Override the cache directory** via the `SQT_CACHE_DIR` environment variable:
 
@@ -546,6 +548,22 @@ in `get_metadata(...).notes`, and the disk cache is keyed by it. Override
 the daily choice with `DATABENTO_OHLCV_DATASET` (or `DATABENTO_DATASET` /
 `DATABENTO_DEPTH_DATASET` for the venue and depth feeds).
 
+**The disk cache answers with the feed that would answer.** Each feed's
+answer is its own entry, and the lookup used to serve the first entry it
+found among every candidate: one failed request on `EQUS.SUMMARY`, one
+failed range lookup, or one run with `DATABENTO_OHLCV_DATASET` set left an
+`EQUS.MINI` file that every later call served — 5% of the true volume, with
+no request and no warning — for a window the summary feed covered all
+along. Now the preferred feed's entry is read before anything is asked, and
+a lesser feed's entry only once every better feed has been passed over:
+denied by the subscription (a remembered 403), not covering the window, or
+failing on this call. So a healthy summary feed is asked again after a
+transient failure, while a subscription without it still reads the sample
+feed's entry from disk rather than refetching it. A window before
+2024-07-01 is the sample feed's by policy, warm as well as cold. An answer
+served in place of a failing better feed is logged and is not kept in the
+session cache, so the same provider asks the better feed on its next call.
+
 **A daily request no longer returns tomorrow.** The daily request ended one
 day past the inclusive end and nothing trimmed, so every as-of query on this
 provider read the next session's close. `end_date` is inclusive here as
@@ -566,6 +584,23 @@ continuous), `ESZ6` (a contract), `ES.FUT` (the parent) and OSI option
 strings route to the futures and options datasets (`GLBX.MDP3`,
 `OPRA.PILLAR`; override with `DATABENTO_FUTURES_DATASET` /
 `DATABENTO_OPTIONS_DATASET`), while `ES~equity` names the ticker.
+
+**A share class keeps its dot; an exchange suffix is refused by name.**
+Databento's Historical symbology spells a class share with a dot — `BRK.B`
+resolves, `BRKB` is `not_found` — and the provider used to send the
+undotted form, so every share class failed after a dozen requests. `BRK.B`,
+`BRK-B`, `BRK/B` and `brk.b` now all go to the vendor as `BRK.B`, and share
+one disk-cache entry, which is named by the symbol as sent. The same rule
+used to read any single letter after a dot as a class and fold it into the
+ticker, so `GOOG.L` returned Alphabet class A (`GOOGL`) and `BP.L` another
+company (`BPL`), silently. A ticker with an exchange suffix — `.L`, `.T`,
+`.F`, `.S`, `.HK`, `.TO`, `.AX`, `.PA` and the rest of the Yahoo and
+Reuters conventions — is now refused before any request: the message names
+the listing, says this provider serves US listings, and offers the US
+ticker as a separate security. The Reuters codes for US venues (`IBM.N`,
+`AAPL.O`) are refused with the plain ticker to ask for. Letters that are
+also US class letters (`A`, `B`, `V`, units' `U`) are not treated as
+suffixes: `BRK.A`, `BF.B` and `MKC.V` are served.
 
 **`DataSetMetadata` gained a `notes` list** — the served dataset, the index
 normalisation and any ambiguity travel in it — and its `timezone` is now

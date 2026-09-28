@@ -55,7 +55,10 @@ drawn there. Per-tool bounds sit on top of it and belong to
 reads and what it resolves to, taken through the same readers the library
 uses, so an unset variable still has an answer. A secret reports only
 whether it is set; the redaction salt is never a value, because disclosing
-it would undo the redaction it configures.
+it would undo the redaction it configures. Twenty-one settings are reported,
+among them `SQT_EXTERNAL_DIRS`, whose value is every directory external data
+may be read from — the runs directory first, then each listed one — so an
+agent can see the fence it is inside without being able to move it.
 
 **`describe_runtime`** and **`list_reference_kinds`** answer the two
 structural questions: what runtimes exist and what each owns, and what
@@ -157,9 +160,9 @@ agent-facing half.
 | `explain_decision` | What one recorded call did: inputs, the data it read with content hashes, which execution path ran, and every field of the record, including the hash of the strategy source that ran |
 | `replay_decision` | Re-run it and classify: reproduced, `data_changed`, or a genuine code change, with the old and new hash of the output and of every data source so a change comes with what changed; a failure that no longer reproduces is an answer, not a machinery error |
 | `compare_decisions` | Diff two recorded calls and say which of the differences explains the outcome |
-| `verify_audit_integrity` | Check the tamper-evident hash chain, for one day or the whole trail. The `verdict` separates `intact`, `tampered`, `no_trail` and `recording_disabled` (an empty directory used to read as intact), and `signature_state` names which of six things a failed checkpoint check means, including the record this very call appends |
+| `verify_audit_integrity` | Check the tamper-evident hash chain, for one day or the whole trail. The `verdict` separates `intact`, `tampered`, `no_trail` and `recording_disabled` (an empty directory used to read as intact), and `signature_state` names which of eight states the day's checkpoint is in: `valid`, `extended` (every signed record still recomputes and more were appended after signing -- including the record this very call appends, counted in `records_after_checkpoint`), `altered` (the records no longer recompute to what was signed: an edit, a truncation, a rewrite), `no_checkpoint`, `no_signature`, `key_mismatch`, `corrupt_signature` or `unavailable`. Only `altered`, `key_mismatch` and `corrupt_signature` set `checkpoint_signature_valid` false. A line the earlier writer recorded for a NaN input is named in `notes` rather than reported as a problem |
 | `export_audit_bundle` | Package a date range plus its chain index, checkpoint sidecars and manifest into one zip for an external auditor; a range covering no day is refused |
-| `describe_audit_log` | What the log holds -- dates, records, bytes -- and what it is CONFIGURED to do, since a count of zero means something different under recording-off. Per day, on request, whether it is held, sealed or carries a signed checkpoint. The retention window is a PREVIEW of what a policy would make eligible; the redaction salt is reported as set or unset and never as a value |
+| `describe_audit_log` | What the log holds -- dates, records, bytes -- and what it is CONFIGURED to do, since a count of zero means something different under recording-off. Per day, on request, whether it is held, sealed or carries a signed checkpoint. The retention window is a PREVIEW of what a policy would make eligible; the redaction salt is reported as set or unset and never as a value. `audit_dir_is_legacy_cache` says the trail still lives in the old default under the cache directory, which cleanup tools empty |
 | `find_decisions` | Search by tool, status and date, and get back the request ids the three tools above take. `dispatch()` returns the payload alone, so nothing else hands one back in process -- and this is the only way to read a call that FAILED |
 
 **`replay_decision`'s classification is the point.** "The output changed"

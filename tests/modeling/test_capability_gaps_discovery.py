@@ -267,22 +267,30 @@ class TestEstimatorParameterBounds:
 
     def test_tree_and_leaf_ceilings_are_reported_with_their_reason(self):
         """The two resource budgets an unbounded request would blow
-        through. lightgbm is installed in this environment, which is what
-        makes num_leaves reachable as a registered entry."""
+        through. The bounds are a static declaration and hold on every
+        machine; whether the entry is available, and the two facts that
+        need the class imported, depend on whether lightgbm is installed.
+        This used to assert `available is True` outright, which is a fact
+        about the machine the test ran on and failed wherever the optional
+        library was absent."""
         result = describe_estimator(
             DescribeEstimatorInput(task="regression", name="lightgbm")
         )
         entry = result.estimators[0]
 
-        assert entry.available is True
+        assert entry.available is (find_spec("lightgbm") is not None)
         assert entry.requires_library == "lightgbm"
         assert entry.params["n_estimators"].maximum == 2000
         assert entry.params["n_estimators"].note != ""
         assert entry.params["num_leaves"].maximum == 4096
-        # The one estimator argument the engine sets itself, one fit per
-        # requested quantile, so it is not a params key.
-        assert entry.quantile_param == "alpha"
-        assert "num_leaves" not in (entry.class_path or "")
+        if entry.available:
+            # The one estimator argument the engine sets itself, one fit
+            # per requested quantile, so it is not a params key.
+            assert entry.quantile_param == "alpha"
+            assert "num_leaves" not in (entry.class_path or "")
+        else:
+            assert entry.quantile_param is None
+            assert entry.class_path is None
 
 
 class TestEstimatorAvailability:

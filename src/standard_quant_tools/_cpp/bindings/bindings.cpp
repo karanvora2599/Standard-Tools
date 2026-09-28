@@ -6,8 +6,11 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <initializer_list>
+#include <limits>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include "sqt/hurst.hpp"
 #include "sqt/indicators.hpp"
@@ -32,12 +35,106 @@ namespace py = pybind11;
 // parameter) is what actually enforces the "1-D" half of this type's name.
 using Array1D = py::array_t<double, py::array::c_style | py::array::forcecast>;
 
-static void require_1d(const Array1D& arr, const char* name) {
+// Templated over the element type and flags so an integer array is checked
+// as itself. A single Array1D overload accepted an int64 code array only by
+// implicitly CONVERTING it -- a full float64 copy made just to read ndim --
+// and could not be called at all on the bindings whose arrays are not
+// float64, which is how two of them flattened a (4, 2) input and answered.
+template <typename T, int Flags>
+static void require_1d(const py::array_t<T, Flags>& arr, const char* name) {
     if (arr.ndim() != 1)
         throw std::invalid_argument(
             std::string(name) + " must be a 1-D array, got ndim=" +
             std::to_string(arr.ndim()));
 }
+
+// ── Index arrays ─────────────────────────────────────────────────────────────
+//
+// Every integer index a binding receives -- date and entity codes, pair rows,
+// rebalance bars, timestamps -- comes through exact_int64. They used to be
+// declared py::array_t<Int, forcecast>, and forcecast is numpy's UNSAFE cast:
+// it wraps an int64 2**33+2 to 2 when the target is int32, floors a float 1.9
+// to 1, and wraps a uint64 2**64-1 to -1, all before any bounds check below
+// can see the value. Measured: batch_engle_granger([[2**33+2, 2]]) answered
+// for a series against itself (hedge ratio 1.0, cointegrated), and a wrapped
+// date code handed back uninitialised memory.
+//
+// So: integer dtypes only (an empty array of any dtype is still accepted, as
+// is a Python list of ints), every value converted to int64 exactly, and a
+// range checked in int64 BEFORE anything is narrowed. The argument arrives as
+// a py::object rather than a py::array because pybind11's py::array caster
+// refuses a list outright, where the old forcecast parameters converted one.
+using IndexArray = py::array_t<long long, py::array::c_style | py::array::forcecast>;
+
+static IndexArray exact_int64(const py::object& obj, const char* name, const char* fn) {
+    const py::array a = py::array::ensure(obj);
+    if (!a)
+        throw std::invalid_argument(
+            std::string(fn) + ": " + name + " must be an integer array");
+    const char kind = a.dtype().kind();
+    if (a.size() > 0 && kind != 'i' && kind != 'u')
+        throw std::invalid_argument(
+            std::string(fn) + ": " + name + " must be an integer array, got dtype " +
+            std::string(py::str(a.dtype())) +
+            " -- a non-integer index would be truncated before it could be "
+            "range-checked; convert it with .astype(np.int64) once its values "
+            "are known to be whole");
+    if (a.size() > 0 && kind == 'u' && a.itemsize() == 8) {
+        // The one integer dtype int64 cannot hold exactly.
+        const auto u = py::array_t<std::uint64_t,
+                                   py::array::c_style | py::array::forcecast>::ensure(a);
+        const std::uint64_t* p = u.data();
+        const auto limit =
+            static_cast<std::uint64_t>(std::numeric_limits<long long>::max());
+        for (py::ssize_t i = 0; i < u.size(); ++i) {
+            if (p[i] > limit)
+                throw std::invalid_argument(
+                    std::string(fn) + ": " + name + "[" + std::to_string(i) +
+                    "] = " + std::to_string(p[i]) + " is outside the int64 range");
+        }
+    }
+    // Exact now: every remaining source dtype fits in int64.
+    IndexArray out = IndexArray::ensure(a);
+    if (!out)
+        throw std::invalid_argument(
+            std::string(fn) + ": " + name + " could not be read as int64");
+    return out;
+}
+
+// Every value in [0, upper), checked in int64 before any narrowing. `hint`
+// names the usual cause, so the refusal says what to do about it.
+static void require_indices_below(const IndexArray& a, long long upper,
+                                  const char* name, const char* fn,
+                                  const char* hint = "") {
+    const long long* p = a.data();
+    for (py::ssize_t i = 0; i < a.size(); ++i) {
+        if (p[i] < 0 || p[i] >= upper)
+            throw std::invalid_argument(
+                std::string(fn) + ": " + name + "[" + std::to_string(i) + "] = " +
+                std::to_string(p[i]) + " is outside [0, " + std::to_string(upper) +
+                ")" + hint);
+    }
+}
+
+// Row indices for a kernel that takes `int`, after the range check. `upper`
+// is checked against INT_MAX first, so every value below it narrows exactly.
+static std::vector<int> narrow_indices_to_int(const IndexArray& a, long long upper,
+                                              const char* fn) {
+    if (upper > static_cast<long long>(std::numeric_limits<int>::max()))
+        throw std::invalid_argument(
+            std::string(fn) + ": " + std::to_string(upper) +
+            " rows is outside what the kernel's int indices can address");
+    std::vector<int> out(static_cast<std::size_t>(a.size()));
+    const long long* p = a.data();
+    for (std::size_t i = 0; i < out.size(); ++i) out[i] = static_cast<int>(p[i]);
+    return out;
+}
+
+// Date and entity codes come from pd.factorize, which codes a NaT or NaN key
+// as -1; that is the usual way a code falls outside its range.
+static constexpr const char* kFactorizeHint =
+    "; every row needs a code in that range, and pd.factorize gives -1 for a "
+    "NaT or NaN key, so drop or fill those rows first";
 
 // ── Shared argument validators ──────────────────────────────────────────────
 //
@@ -93,6 +190,30 @@ static void require_positive_int(int v, const char* name, const char* fn) {
             std::string(fn) + ": " + name + " must be >= 1, got " + std::to_string(v));
 }
 
+// Any sign, but a number. A risk-free rate may be negative -- policy rates
+// have been -- but a NaN one made Sharpe NaN and Sortino +inf from the same
+// call, and +inf is the Sortino that reads as "no downside at all".
+static void require_finite(double v, const char* name, const char* fn) {
+    if (!std::isfinite(v))
+        throw std::invalid_argument(
+            std::string(fn) + ": " + name + " must be finite, got " +
+            std::to_string(v));
+}
+
+// An enum code from Python. An unknown one used to fall into whichever
+// branch the kernel tests last -- fill=7 ran as Close, commission_model=9 as
+// percentage -- so a typo answered as a different configuration.
+static void require_one_of(int v, std::initializer_list<int> allowed,
+                           const char* name, const char* fn) {
+    if (std::find(allowed.begin(), allowed.end(), v) == allowed.end()) {
+        std::string codes;
+        for (int a : allowed) codes += (codes.empty() ? "" : ", ") + std::to_string(a);
+        throw std::invalid_argument(
+            std::string(fn) + ": " + name + " must be one of {" + codes +
+            "}, got " + std::to_string(v));
+    }
+}
+
 // Grouped, because listing the individual require_* calls at each binding
 // is what let two of them ship with none at all.
 //
@@ -110,12 +231,43 @@ static void require_positive_int(int v, const char* name, const char* fn) {
 // four lines present and spelled with the right function name?".
 static void require_backtest_scalars(
     double initial_capital, double commission_pct, double slippage_pct,
-    double periods_per_year, const char* fn)
+    double periods_per_year, double risk_free_rate, const char* fn)
 {
     require_positive(initial_capital, "initial_capital", fn);
     require_non_negative(commission_pct, "commission_pct", fn);
     require_non_negative(slippage_pct, "slippage_pct", fn);
     require_positive(periods_per_year, "periods_per_year", fn);
+    require_finite(risk_free_rate, "risk_free_rate", fn);
+}
+
+// The same lesson for the portfolio account, which shipped with fifteen
+// scalars and no call at all. Measured on that build: slippage_pct=-0.5 tripled
+// the final equity, a NaN max_gross_leverage silently switched the limit off
+// (`x > NaN` is false), and fill=7 ran as Close. The bounds are the ones
+// backtest/portfolio_engine.py and costs._cost_rate apply before they call
+// here, so a direct caller is held to the same rules as the Python engine.
+static void require_portfolio_scalars(const sqt::PortfolioCosts& c, const char* fn) {
+    require_positive(c.initial_capital, "initial_capital", fn);
+    require_non_negative(c.commission_pct, "commission_pct", fn);
+    require_non_negative(c.sell_commission_pct, "sell_commission_pct", fn);
+    require_non_negative(c.slippage_pct, "slippage_pct", fn);
+    require_positive(c.max_gross_leverage, "max_gross_leverage", fn);
+    require_positive(c.max_position_pct, "max_position_pct", fn);
+    require_non_negative(c.borrow_fee_bps, "borrow_fee_bps", fn);
+    require_non_negative(c.margin_interest_rate, "margin_interest_rate", fn);
+    require_one_of(c.fill, {sqt::kFillClose, sqt::kFillNextOpen, sqt::kFillHl2},
+                   "fill", fn);
+    require_one_of(c.commission_model,
+                   {sqt::kCommissionPct, sqt::kCommissionPerShare},
+                   "commission_model", fn);
+    require_non_negative(c.per_share_rate, "per_share_rate", fn);
+    require_non_negative(c.min_commission, "min_commission", fn);
+    // use_impact_model needs nothing: pybind11's bool caster refuses a
+    // non-bool before this runs.
+    require_non_negative(c.impact_coefficient, "impact_coefficient", fn);
+    // 0 is the kernel's "no cap" (Python sends 0.0 for None); a negative,
+    // NaN or infinite cap used to switch the cap off just as silently.
+    require_non_negative(c.max_adv_participation, "max_adv_participation", fn);
 }
 
 static void require_simulation_scalars(
@@ -355,7 +507,7 @@ PYBIND11_MODULE(_sqt_core, m) {
             if (prices.size() != signals.size())
                 throw std::invalid_argument("prices and signals must have equal length");
             require_backtest_scalars(initial_capital, commission_pct, slippage_pct,
-                                     periods_per_year, "run_strategy");
+                                     periods_per_year, risk_free_rate, "run_strategy");
             const double* prices_ptr  = prices.data();
             const double* signals_ptr = signals.data();
             const auto    n           = prices.size();
@@ -430,7 +582,7 @@ PYBIND11_MODULE(_sqt_core, m) {
         "batch_backtest_crossover",
         [](Array1D prices,
            py::array_t<double, py::array::c_style | py::array::forcecast> indicators,
-           py::array_t<int, py::array::c_style | py::array::forcecast> pair_idx,
+           py::object pair_idx_obj,
            double initial_capital, double commission_pct, double slippage_pct,
            double periods_per_year,
            std::optional<py::array_t<double, py::array::c_style | py::array::forcecast>>
@@ -438,33 +590,32 @@ PYBIND11_MODULE(_sqt_core, m) {
            double risk_free_rate)
         -> py::array_t<double>
         {
+            constexpr const char* fn = "batch_backtest_crossover";
             require_1d(prices, "prices");
             require_backtest_scalars(initial_capital, commission_pct, slippage_pct,
-                                     periods_per_year, "batch_backtest_crossover");
+                                     periods_per_year, risk_free_rate, fn);
             auto ind_buf  = indicators.request();
-            auto pair_buf = pair_idx.request();
+            const IndexArray pair_idx = exact_int64(pair_idx_obj, "pair_idx", fn);
             if (ind_buf.ndim != 2)
                 throw std::invalid_argument("indicators must be 2-D (n_unique, n_bars)");
-            if (pair_buf.ndim != 2 || pair_buf.shape[1] != 2)
+            if (pair_idx.ndim() != 2 || pair_idx.shape(1) != 2)
                 throw std::invalid_argument("pair_idx must be 2-D (num_combos, 2)");
 
             const auto n          = static_cast<std::size_t>(prices.size());
             const auto n_unique   = static_cast<std::size_t>(ind_buf.shape[0]);
-            const auto num_combos = static_cast<std::size_t>(pair_buf.shape[0]);
+            const auto num_combos = static_cast<std::size_t>(pair_idx.shape(0));
             if (static_cast<std::size_t>(ind_buf.shape[1]) != n)
                 throw std::invalid_argument("indicators.shape[1] must equal len(prices)");
 
-            // Bounds-checked HERE, where an out-of-range row is a caller
-            // error worth naming, rather than left to the kernel where it
-            // would be an out-of-bounds read.
-            const int* pair_ptr = static_cast<const int*>(pair_buf.ptr);
-            for (std::size_t i = 0; i < num_combos * 2; ++i) {
-                if (pair_ptr[i] < 0 ||
-                    static_cast<std::size_t>(pair_ptr[i]) >= n_unique) {
-                    throw std::invalid_argument(
-                        "pair_idx contains a row index outside indicators");
-                }
-            }
+            // Bounds-checked HERE, in int64 and before narrowing, where an
+            // out-of-range row is a caller error worth naming, rather than
+            // left to the kernel where it would be an out-of-bounds read.
+            require_indices_below(pair_idx, static_cast<long long>(n_unique),
+                                  "pair_idx", fn,
+                                  " (a row of indicators)");
+            const std::vector<int> pairs_int = narrow_indices_to_int(
+                pair_idx, static_cast<long long>(n_unique), fn);
+            const int* pair_ptr = pairs_int.data();
 
             const double* ref_ptr = nullptr;
             if (ref_prices.has_value()) {
@@ -520,7 +671,10 @@ PYBIND11_MODULE(_sqt_core, m) {
         py::arg("risk_free_rate") = 0.0,
         "Fused crossover grid: builds each combination's signal from two rows "
         "of `indicators` and backtests it immediately, so no (num_combos x "
-        "n_bars) signal matrix is ever materialized. "
+        "n_bars) signal matrix is ever materialized. pair_idx is a "
+        "(num_combos, 2) integer array of rows of `indicators`; a float or "
+        "out-of-range index raises ValueError rather than being truncated or "
+        "wrapped. "
         "Returns a flat (num_combos, 11) array in the same column order as "
         "batch_run_strategy."
     );
@@ -538,7 +692,8 @@ PYBIND11_MODULE(_sqt_core, m) {
         {
             require_1d(prices, "prices");
             require_backtest_scalars(initial_capital, commission_pct, slippage_pct,
-                                     periods_per_year, "batch_run_strategy");
+                                     periods_per_year, risk_free_rate,
+                                     "batch_run_strategy");
             auto prices_buf  = prices.request();
             auto signals_buf = signals_2d.request();
 
@@ -632,7 +787,7 @@ PYBIND11_MODULE(_sqt_core, m) {
         [](py::array_t<double, py::array::c_style | py::array::forcecast> close,
            py::array_t<double, py::array::c_style | py::array::forcecast> exec_prices,
            py::array_t<double, py::array::c_style | py::array::forcecast> weights,
-           py::array_t<long long, py::array::c_style | py::array::forcecast> rebal_bars,
+           py::object rebal_bars_obj,
            py::array_t<double, py::array::c_style | py::array::forcecast> day_gaps,
            double initial_capital, double commission_pct,
            double sell_commission_pct, double slippage_pct,
@@ -644,6 +799,8 @@ PYBIND11_MODULE(_sqt_core, m) {
            bool use_impact_model, double impact_coefficient,
            double max_adv_participation) -> py::dict
         {
+            constexpr const char* fn = "run_portfolio_simulation";
+            const IndexArray rebal_bars = exact_int64(rebal_bars_obj, "rebal_bars", fn);
             auto c_buf = close.request();
             auto x_buf = exec_prices.request();
             auto w_buf = weights.request();
@@ -689,6 +846,34 @@ PYBIND11_MODULE(_sqt_core, m) {
             costs.use_impact_model      = use_impact_model;
             costs.impact_coefficient    = impact_coefficient;
             costs.max_adv_participation = max_adv_participation;
+            require_portfolio_scalars(costs, fn);
+
+            // The two arrays that are configuration rather than data, held
+            // to what the Python engine guarantees by construction. The
+            // kernel skips a rebalance row that is out of order and never
+            // reaches one at or past the last bar -- both silently, as fewer
+            // executed rebalances than rows -- and a NaN day gap turned the
+            // financing charge, and every equity value after it, into NaN.
+            require_indices_below(rebal_bars, static_cast<long long>(n_bars),
+                                  "rebal_bars", fn, " (a bar of close)");
+            const long long* rb = rebal_bars.data();
+            for (std::size_t i = 1; i < n_rebal; ++i) {
+                if (rb[i] <= rb[i - 1])
+                    throw std::invalid_argument(
+                        std::string(fn) + ": rebal_bars must be strictly "
+                        "increasing, got " + std::to_string(rb[i - 1]) +
+                        " then " + std::to_string(rb[i]) + " at position " +
+                        std::to_string(i) + "; sort the weights rows by date "
+                        "and merge duplicates");
+            }
+            const double* gaps = static_cast<const double*>(g_buf.ptr);
+            for (std::size_t i = 0; i < n_bars; ++i) {
+                if (!(gaps[i] >= 0.0) || !std::isfinite(gaps[i]))
+                    throw std::invalid_argument(
+                        std::string(fn) + ": day_gaps[" + std::to_string(i) +
+                        "] must be finite and >= 0, got " +
+                        std::to_string(gaps[i]));
+            }
 
             // Held at this scope, not inside the branch: the pointers below
             // are borrowed from these arrays and must not outlive them.
@@ -794,20 +979,31 @@ PYBIND11_MODULE(_sqt_core, m) {
         py::arg("use_impact_model")     = false,
         py::arg("impact_coefficient")   = 1.0,
         py::arg("max_adv_participation") = 0.0,
-        "Shared-cash multi-asset portfolio simulation.\\n\\n"
-        "Implements only the configuration portfolio_engine.py already treats\\n"
-        "as its vectorized fast path: percentage commission, no impact model,\\n"
-        "no ADV constraint. Anything else stays on the Python loop.\\n\\n"
-        "close/exec_prices are (n_bars, n_tickers); weights is\\n"
-        "(n_rebal, n_tickers); rebal_bars is the bar index each weights row\\n"
-        "triggers at; day_gaps is calendar days since the previous bar, for\\n"
-        "financing accrual.\\n\\n"
-        "fill: 0 = Close, 1 = next Open, 2 = (High+Low)/2.\\n\\n"
-        "Returns a dict with equity/cash/gross/net (n_bars each), rebalances\\n"
-        "(n_rebal, 3) of turnover_pct/gross_leverage_after/n_positions,\\n"
-        "n_executed, and a status/bar/ticker/value quartet describing why the\\n"
-        "simulation stopped -- status 0 means it ran to the end. The caller\\n"
-        "raises; this never does, so the exact message stays in Python.");
+        "Shared-cash multi-asset portfolio simulation.\n\n"
+        "Runs every configuration backtest/portfolio_engine.py accepts: the\n"
+        "pct and per_share commission models (commission_model 0 / 1), the\n"
+        "square-root impact model (use_impact_model, with dollar_volume and\n"
+        "volatility panels) and the ADV participation cap\n"
+        "(max_adv_participation > 0, with a dollar_volume panel; 0 = no cap).\n\n"
+        "close/exec_prices are (n_bars, n_tickers); weights is\n"
+        "(n_rebal, n_tickers); rebal_bars is the bar index each weights row\n"
+        "triggers at, an integer array strictly increasing within\n"
+        "[0, n_bars); day_gaps is calendar days since the previous bar, for\n"
+        "financing accrual, each finite and >= 0.\n\n"
+        "fill: 0 = Close, 1 = next Open, 2 = (High+Low)/2.\n\n"
+        "Every scalar is held to the Python engine's bounds (capital,\n"
+        "leverage and position limits finite and > 0; rates, fees and the\n"
+        "impact coefficient finite and >= 0; fill and commission_model one of\n"
+        "their codes) and a violation raises ValueError.\n\n"
+        "Returns a dict with equity/cash/gross/net (n_bars each), rebalances\n"
+        "(n_rebal, 3) of turnover_pct/gross_leverage_after/n_positions,\n"
+        "n_executed, and a status/bar/ticker/value quartet describing why the\n"
+        "simulation stopped -- status 0 means it ran to the end. Rebalance\n"
+        "rows from n_executed on are NaN (a next_open trigger on the last bar\n"
+        "never executes). After an early stop, bars the simulation never\n"
+        "marked are NaN: from `bar` on for a failed rebalance, from `bar`+1\n"
+        "when equity reached zero at `bar`. The caller raises on a non-zero\n"
+        "status; this never does, so the exact message stays in Python.");
 
     // ── 2-variable OLS ────────────────────────────────────────────────────────
 
@@ -977,9 +1173,9 @@ PYBIND11_MODULE(_sqt_core, m) {
         py::arg("d_period") = 3,
         "Stochastic Oscillator — fused sliding min+max in one pass.\n\n"
         "Returns a 2-D float64 array of shape (n, 2):\n"
-        "  col 0 = %%K, col 1 = %%D.\n"
-        "First (k_period-1) rows have NaN in %%K;\n"
-        "first (k_period + d_period - 2) rows have NaN in %%D.");
+        "  col 0 = %K, col 1 = %D.\n"
+        "First (k_period-1) rows have NaN in %K;\n"
+        "first (k_period + d_period - 2) rows have NaN in %D.");
 
     // ── Fused technical indicators ────────────────────────────────────────────
 
@@ -1175,15 +1371,15 @@ PYBIND11_MODULE(_sqt_core, m) {
         py::arg("compute_stochastic") = false,
         py::arg("stoch_k_period")     = 14,
         py::arg("stoch_d_period")     = 3,
-        "technical_indicators() over a whole universe in one call.\\n\\n"
-        "high/low/close are 2-D float64 (n_tickers, n_bars); row t is\\n"
-        "ticker t. Tickers are computed in parallel.\\n\\n"
-        "Returns a dict containing only the requested keys, each with the\\n"
-        "ticker axis prepended to the single-series shape: 'rsi'\\n"
-        "(n_tickers, n_bars), 'adx' (n_tickers, n_bars, 3), 'atr'\\n"
-        "(n_tickers, n_bars), 'bollinger_bands' (n_tickers, n_bars, 3),\\n"
-        "'stochastic_oscillator' (n_tickers, n_bars, 2).\\n\\n"
-        "Bit-identical to calling technical_indicators() once per ticker --\\n"
+        "technical_indicators() over a whole universe in one call.\n\n"
+        "high/low/close are 2-D float64 (n_tickers, n_bars); row t is\n"
+        "ticker t. Tickers are computed in parallel.\n\n"
+        "Returns a dict containing only the requested keys, each with the\n"
+        "ticker axis prepended to the single-series shape: 'rsi'\n"
+        "(n_tickers, n_bars), 'adx' (n_tickers, n_bars, 3), 'atr'\n"
+        "(n_tickers, n_bars), 'bollinger_bands' (n_tickers, n_bars, 3),\n"
+        "'stochastic_oscillator' (n_tickers, n_bars, 2).\n\n"
+        "Bit-identical to calling technical_indicators() once per ticker --\n"
         "each row goes through the same kernels.");
 
     // ── Engle-Granger cointegration ───────────────────────────────────────────
@@ -1232,27 +1428,35 @@ PYBIND11_MODULE(_sqt_core, m) {
     m.def(
         "batch_engle_granger",
         [](py::array_t<double, py::array::c_style | py::array::forcecast> prices,
-           py::array_t<int, py::array::c_style | py::array::forcecast> pairs,
+           py::object pairs_obj,
            int max_lag, bool use_aic) -> py::array_t<double>
         {
+            constexpr const char* fn = "batch_engle_granger";
             auto p_buf = prices.request();
-            auto q_buf = pairs.request();
+            const IndexArray pairs = exact_int64(pairs_obj, "pairs", fn);
             if (p_buf.ndim != 2)
                 throw std::invalid_argument(
                     "prices must be a 2-D array (n_tickers, n_bars)");
-            if (q_buf.ndim != 2 || q_buf.shape[1] != 2)
+            if (pairs.ndim() != 2 || pairs.shape(1) != 2)
                 throw std::invalid_argument("pairs must be a 2-D array (n_pairs, 2)");
 
             const auto n_tickers = static_cast<std::size_t>(p_buf.shape[0]);
             const auto n_bars    = static_cast<std::size_t>(p_buf.shape[1]);
-            const auto n_pairs   = static_cast<std::size_t>(q_buf.shape[0]);
+            const auto n_pairs   = static_cast<std::size_t>(pairs.shape(0));
+
+            // In int64, before narrowing to the kernel's int: a value that
+            // only wrapped into range used to pass the kernel's own check.
+            require_indices_below(pairs, static_cast<long long>(n_tickers),
+                                  "pairs", fn, " (a ticker row of prices)");
+            const std::vector<int> pairs_int = narrow_indices_to_int(
+                pairs, static_cast<long long>(n_tickers), fn);
 
             constexpr py::ssize_t kCols = sqt::kBatchCointCols;
             py::array_t<double> out(
                 {static_cast<py::ssize_t>(n_pairs), kCols});
             double* out_ptr = out.mutable_data();
             const double* p_ptr = static_cast<const double*>(p_buf.ptr);
-            const int*    q_ptr = static_cast<const int*>(q_buf.ptr);
+            const int*    q_ptr = pairs_int.data();
             {
                 py::gil_scoped_release release;
                 sqt::batch_engle_granger(p_ptr, n_tickers, n_bars, q_ptr, n_pairs,
@@ -1264,17 +1468,19 @@ PYBIND11_MODULE(_sqt_core, m) {
         py::arg("pairs"),
         py::arg("max_lag") = -1,
         py::arg("use_aic") = true,
-        "Engle-Granger over many pairs in one native call.\\n\\n"
-        "prices : 2-D float64 (n_tickers, n_bars), already aligned onto a\\n"
-        "         common index by the caller -- this kernel never sees an\\n"
-        "         index and does no date alignment.\\n"
-        "pairs  : 2-D int32 (n_pairs, 2), row indices into `prices`.\\n\\n"
-        "Returns a 2-D float64 array of shape (n_pairs, 11), one row per pair\\n"
-        "in input order. Columns (fixed order): intercept, hedge_ratio,\\n"
-        "adf_statistic, optimal_lag, p_value, cv_1pct, cv_5pct, cv_10pct,\\n"
-        "half_life, n_obs, cointegrated (0.0/1.0).\\n\\n"
-        "Bit-identical to calling engle_granger() once per pair, and\\n"
-        "independent of thread count. Raises ValueError if a pairs row\\n"
+        "Engle-Granger over many pairs in one native call.\n\n"
+        "prices : 2-D float64 (n_tickers, n_bars), already aligned onto a\n"
+        "         common index by the caller -- this kernel never sees an\n"
+        "         index and does no date alignment.\n"
+        "pairs  : 2-D integer (n_pairs, 2), row indices into `prices`. Any\n"
+        "         integer dtype; a float array is refused rather than\n"
+        "         truncated.\n\n"
+        "Returns a 2-D float64 array of shape (n_pairs, 11), one row per pair\n"
+        "in input order. Columns (fixed order): intercept, hedge_ratio,\n"
+        "adf_statistic, optimal_lag, p_value, cv_1pct, cv_5pct, cv_10pct,\n"
+        "half_life, n_obs, cointegrated (0.0/1.0).\n\n"
+        "Bit-identical to calling engle_granger() once per pair, and\n"
+        "independent of thread count. Raises ValueError if a pairs row\n"
         "references a ticker outside the panel.");
 
     // ── Monte Carlo (moving-block bootstrap) ──────────────────────────────────
@@ -1686,6 +1892,32 @@ PYBIND11_MODULE(_sqt_core, m) {
                 throw std::invalid_argument(
                     "lo, hi, mean and std must each have one entry per column");
 
+            // The stats are caller-supplied -- apply_preprocessing reads them
+            // back from a persisted preprocessing_stats.json -- and the kernel
+            // divides by std and clips to [lo, hi] without asking. std = 0
+            // answered +/-inf and NaN, a negative std flipped every sign, and
+            // lo > hi pinned every value to hi (where pandas' clip swaps the
+            // bounds, so the two backends disagreed). NaN lo/hi/mean stay
+            // legal: fit_preprocess_stats emits them for an all-NaN column,
+            // with std = 1.0.
+            const double* lo_p = lo.data();
+            const double* hi_p = hi.data();
+            const double* sd_p = stdev.data();
+            for (py::ssize_t c = 0; c < expected; ++c) {
+                if (!(sd_p[c] > 0.0) || !std::isfinite(sd_p[c]))
+                    throw std::invalid_argument(
+                        "apply_preprocess_stats: std[" + std::to_string(c) +
+                        "] must be finite and > 0, got " + std::to_string(sd_p[c]) +
+                        "; refit the statistics with fit_preprocess_stats, which "
+                        "never produces one");
+                if (lo_p[c] > hi_p[c])
+                    throw std::invalid_argument(
+                        "apply_preprocess_stats: lo[" + std::to_string(c) + "] = " +
+                        std::to_string(lo_p[c]) + " is above hi[" +
+                        std::to_string(c) + "] = " + std::to_string(hi_p[c]) +
+                        "; the clip bounds must satisfy lo <= hi");
+            }
+
             py::array_t<double> out({buf.shape[0], buf.shape[1]});
             sqt::PreprocessStats stats{
                 const_cast<double*>(lo.data()), const_cast<double*>(hi.data()),
@@ -1707,22 +1939,33 @@ PYBIND11_MODULE(_sqt_core, m) {
         "The Python form allocates two full-panel temporaries per column\n"
         "(the clip result and the standardized result); this allocates one\n"
         "output array and nothing else. NaN passes through untouched, which\n"
-        "is what Series.clip does with a missing value.");
+        "is what Series.clip does with a missing value.\n\n"
+        "Raises ValueError for a std that is not finite and > 0, or a column\n"
+        "whose lo is above its hi. NaN lo/hi/mean are accepted: they are what\n"
+        "fit_preprocess_stats reports for an all-NaN column.");
 
 
     m.def(
         "cross_sectional_correlation",
-        [](py::array_t<double, py::array::c_style | py::array::forcecast> y_true,
-           py::array_t<double, py::array::c_style | py::array::forcecast> y_pred,
-           py::array_t<long long, py::array::c_style | py::array::forcecast> date_codes,
+        [](Array1D y_true,
+           Array1D y_pred,
+           py::object date_codes_obj,
            py::ssize_t n_dates,
            bool spearman) -> py::array_t<double>
         {
+            constexpr const char* fn = "cross_sectional_correlation";
+            // 1-D first: a (4, 2) input used to be flattened and answered.
+            require_1d(y_true, "y_true");
+            require_1d(y_pred, "y_pred");
+            const IndexArray date_codes = exact_int64(date_codes_obj, "date_codes", fn);
+            require_1d(date_codes, "date_codes");
             if (y_true.size() != y_pred.size() || y_true.size() != date_codes.size())
                 throw std::invalid_argument(
                     "y_true, y_pred and date_codes must have the same length");
             if (n_dates < 0)
                 throw std::invalid_argument("n_dates must be >= 0");
+            require_indices_below(date_codes, static_cast<long long>(n_dates),
+                                  "date_codes", fn, kFactorizeHint);
 
             const auto n_rows = static_cast<std::size_t>(y_true.size());
             py::array_t<double> out(n_dates);
@@ -1756,18 +1999,23 @@ PYBIND11_MODULE(_sqt_core, m) {
         "(fewer than two usable pairs, or a constant cross-section) -- the\n"
         "same 0.0-not-NaN contract the Python _safe_corr established.\n\n"
         "The POOLED correlation is this with n_dates=1 and all codes 0, so\n"
-        "both share one implementation rather than drifting apart.");
+        "both share one implementation rather than drifting apart.\n\n"
+        "All three arrays are 1-D; date_codes is an integer array with every\n"
+        "code in [0, n_dates). Anything else raises ValueError.");
 
     m.def(
         "standardize_by_date",
         [](py::array_t<double, py::array::c_style | py::array::forcecast> values,
-           py::array_t<long long, py::array::c_style | py::array::forcecast> date_codes,
+           py::object date_codes_obj,
            py::ssize_t n_dates,
            double clip_sigma) -> py::array_t<double>
         {
+            constexpr const char* fn = "standardize_by_date";
             auto buf = values.request();
             if (buf.ndim != 2)
                 throw std::invalid_argument("values must be 2-D (n_rows, n_cols)");
+            const IndexArray date_codes = exact_int64(date_codes_obj, "date_codes", fn);
+            require_1d(date_codes, "date_codes");
             if (date_codes.size() != buf.shape[0])
                 throw std::invalid_argument(
                     "date_codes must have one entry per row of values");
@@ -1775,6 +2023,11 @@ PYBIND11_MODULE(_sqt_core, m) {
                 throw std::invalid_argument("n_dates must be >= 0");
             if (!(clip_sigma >= 0.0))
                 throw std::invalid_argument("clip_sigma must be >= 0");
+            // A row whose code is outside [0, n_dates) belongs to no
+            // cross-section; the kernel used to leave it unwritten, and the
+            // caller got uninitialised memory back for that row.
+            require_indices_below(date_codes, static_cast<long long>(n_dates),
+                                  "date_codes", fn, kFactorizeHint);
 
             const auto n_rows = static_cast<std::size_t>(buf.shape[0]);
             const auto n_cols = static_cast<std::size_t>(buf.shape[1]);
@@ -1804,21 +2057,31 @@ PYBIND11_MODULE(_sqt_core, m) {
         "dispersion has every entity exactly at the mean, so those rows come\n"
         "back 0.0 rather than NaN -- NaN would drop the whole date\n"
         "downstream. NaN inputs are skipped by the moments and preserved in\n"
-        "the output.");
+        "the output.\n\n"
+        "date_codes is an integer array with every code in [0, n_dates);\n"
+        "anything else raises ValueError. pd.factorize codes a NaT date as -1,\n"
+        "so those rows need a code of their own or must be dropped first.");
     m.def(
         "rank_by_date",
         [](py::array_t<double, py::array::c_style | py::array::forcecast> values,
-           py::array_t<long long, py::array::c_style | py::array::forcecast> date_codes,
+           py::object date_codes_obj,
            py::ssize_t n_dates) -> py::array_t<double>
         {
+            constexpr const char* fn = "rank_by_date";
             auto buf = values.request();
             if (buf.ndim != 2)
                 throw std::invalid_argument("values must be 2-D (n_rows, n_cols)");
+            const IndexArray date_codes = exact_int64(date_codes_obj, "date_codes", fn);
+            require_1d(date_codes, "date_codes");
             if (date_codes.size() != buf.shape[0])
                 throw std::invalid_argument(
                     "date_codes must have one entry per row of values");
             if (n_dates < 0)
                 throw std::invalid_argument("n_dates must be >= 0");
+            // Same reason as standardize_by_date: an out-of-range row was
+            // never written.
+            require_indices_below(date_codes, static_cast<long long>(n_dates),
+                                  "date_codes", fn, kFactorizeHint);
 
             const auto n_rows = static_cast<std::size_t>(buf.shape[0]);
             const auto n_cols = static_cast<std::size_t>(buf.shape[1]);
@@ -1845,19 +2108,23 @@ PYBIND11_MODULE(_sqt_core, m) {
         "matching Series.rank(method='average'). Ranking is per COLUMN within\n"
         "each date, so several models' predictions rank in one call. NaN is\n"
         "skipped by the ranking and preserved in the output, and does not\n"
-        "shift the ranks of the values that are present.");
+        "shift the ranks of the values that are present.\n\n"
+        "date_codes is an integer array with every code in [0, n_dates);\n"
+        "anything else raises ValueError, as in standardize_by_date.");
     m.def(
         "permutation_null_ic",
-        [](py::array_t<double, py::array::c_style | py::array::forcecast> target,
-           py::array_t<double, py::array::c_style | py::array::forcecast> values,
-           py::array_t<long long, py::array::c_style | py::array::forcecast> date_codes,
+        [](Array1D target,
+           Array1D values,
+           py::object date_codes_obj,
            py::ssize_t n_dates,
            py::ssize_t n_permutations,
            std::uint64_t seed,
            bool spearman) -> py::array_t<double>
         {
+            constexpr const char* fn = "permutation_null_ic";
             require_1d(target, "target");
             require_1d(values, "values");
+            const IndexArray date_codes = exact_int64(date_codes_obj, "date_codes", fn);
             require_1d(date_codes, "date_codes");
             if (target.size() != values.size() ||
                 target.size() != date_codes.size())
@@ -1867,6 +2134,8 @@ PYBIND11_MODULE(_sqt_core, m) {
                 throw std::invalid_argument("n_dates must be >= 0");
             if (n_permutations < 0)
                 throw std::invalid_argument("n_permutations must be >= 0");
+            require_indices_below(date_codes, static_cast<long long>(n_dates),
+                                  "date_codes", fn, kFactorizeHint);
 
             py::array_t<double> out(n_permutations);
             const double* t_ptr = target.data();
@@ -1902,20 +2171,38 @@ PYBIND11_MODULE(_sqt_core, m) {
         "and shuffled directly, since permuting values permutes their\n"
         "ranks. `seed` reproduces a run within THIS backend only -- it is\n"
         "not numpy's PCG64 stream, the same contract\n"
-        "simulate_forward_paths states.");
+        "simulate_forward_paths states. date_codes is an integer array with\n"
+        "every code in [0, n_dates); anything else raises ValueError.");
     m.def(
         "label_uniqueness",
-        [](py::array_t<long long, py::array::c_style | py::array::forcecast> dates,
-           py::array_t<long long, py::array::c_style | py::array::forcecast> label_end,
-           py::array_t<long long, py::array::c_style | py::array::forcecast> entity_codes,
+        [](py::object dates_obj,
+           py::object label_end_obj,
+           py::object entity_codes_obj,
            py::ssize_t n_entities) -> py::array_t<double>
         {
+            constexpr const char* fn = "label_uniqueness";
+            // Timestamps have no range to check -- NaT is INT64_MIN and
+            // legal -- but they are still converted exactly: a float
+            // timestamp was truncated on the way in.
+            const IndexArray dates = exact_int64(dates_obj, "dates", fn);
+            const IndexArray label_end = exact_int64(label_end_obj, "label_end", fn);
+            const IndexArray entity_codes =
+                exact_int64(entity_codes_obj, "entity_codes", fn);
+            // 1-D: a (4, 2) input used to be flattened into eight labels.
+            require_1d(dates, "dates");
+            require_1d(label_end, "label_end");
+            require_1d(entity_codes, "entity_codes");
             if (dates.size() != label_end.size() ||
                 dates.size() != entity_codes.size())
                 throw std::invalid_argument(
                     "dates, label_end and entity_codes must have the same length");
             if (n_entities < 0)
                 throw std::invalid_argument("n_entities must be >= 0");
+            // A row outside [0, n_entities) was dropped from the concurrency
+            // count and left at weight 1.0, while the Python path grouped it
+            // with the other unmatched rows -- the backends disagreed.
+            require_indices_below(entity_codes, static_cast<long long>(n_entities),
+                                  "entity_codes", fn, kFactorizeHint);
 
             const auto n_rows = static_cast<std::size_t>(dates.size());
             py::array_t<double> out(dates.size());
@@ -1946,5 +2233,7 @@ PYBIND11_MODULE(_sqt_core, m) {
         "array, which is O(n) where sweeping every label's span would be\n"
         "O(n * horizon).\n\n"
         "Returns weights normalized to mean 1, so enabling weighting does\n"
-        "not also rescale the effective regularization strength.");
+        "not also rescale the effective regularization strength.\n\n"
+        "All three arrays are 1-D integer arrays; entity_codes must lie in\n"
+        "[0, n_entities). Anything else raises ValueError.");
 }

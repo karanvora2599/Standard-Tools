@@ -304,7 +304,8 @@ class RegisterExternalDatasetInput(BaseModel):
         description=(
             "A Parquet or CSV file, or a directory read as one partitioned "
             "dataset. Nothing is copied, so this has to be readable from "
-            "wherever this library runs."
+            "wherever this library runs, and it has to lie in the runs "
+            "directory or a directory listed in SQT_EXTERNAL_DIRS."
         ),
     )
     kind: Literal[
@@ -347,7 +348,9 @@ class PrepareVendorExtractInput(BaseModel):
             "The RAW vendor file, as downloaded: a Parquet or CSV file, or "
             "a directory read as one partitioned dataset. This is the "
             "unconverted export -- `bid_px_00`, `ts_recv`, fixed-point "
-            "prices -- not something that would register successfully."
+            "prices -- not something that would register successfully. It "
+            "has to lie in the runs directory or a directory listed in "
+            "SQT_EXTERNAL_DIRS."
         ),
     )
     kind: Literal[
@@ -372,7 +375,11 @@ class PrepareVendorExtractInput(BaseModel):
             "the input was: the conversion's whole value is correct dtypes "
             "-- datetime64 timestamps, floats that have been de-scaled -- "
             "and CSV would discard them and reintroduce the ambiguity that "
-            "was just resolved. Refused if something is already there."
+            "was just resolved. Refused if something is already there. A "
+            "bare or relative name lands in the runs directory's `extracts` "
+            "folder, not the working directory; an absolute path must lie in "
+            "a directory listed in SQT_EXTERNAL_DIRS, and never in the cache, "
+            "the audit directory or the rest of the runs directory."
         ),
     )
     price_scale: Literal["auto", "fixed", "float"] = Field(

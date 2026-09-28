@@ -110,6 +110,19 @@ def label_uniqueness_weights(
     dates = np.asarray(dates)
     label_end_dates = np.asarray(label_end_dates)
     entities = np.asarray(entities)
+    # One label per row. A 2-D input used to be flattened by the native
+    # kernel into that many more labels and weighted as if it were real.
+    for name, array in (
+        ("dates", dates),
+        ("label_end_dates", label_end_dates),
+        ("entities", entities),
+    ):
+        if array.ndim != 1:
+            raise ValidationError(
+                f"label_uniqueness_weights: {name} must be 1-D (one value per "
+                f"row), got shape {array.shape}. Pass a single column of the "
+                "panel."
+            )
     n = dates.size
     if n == 0:
         return np.empty(0, dtype=np.float64)
@@ -120,6 +133,12 @@ def label_uniqueness_weights(
         )
 
     entity_codes = pd.factorize(entities, sort=False)[0]
+    # A missing entity is coded -1, which the loop below groups like any
+    # other code and the kernel refuses as outside [0, n_entities). Giving
+    # those rows a code of their own keeps both backends on the same groups.
+    missing = entity_codes < 0
+    if missing.any():
+        entity_codes = np.where(missing, int(entity_codes.max()) + 1, entity_codes)
 
     if HAS_CPP:
         # Timestamps rather than integer offsets because `horizon` counts

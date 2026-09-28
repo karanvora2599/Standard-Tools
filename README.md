@@ -163,7 +163,7 @@ sqt seal <date>                      # chmod a day file read-only (operational s
 sqt export --start D --end D --out F # zip a date range + manifest + standalone verifier for an auditor
 sqt keygen [--out DIR]                # generate an Ed25519 keypair (local development only)
 sqt anchor <date> [--key PATH]        # sign a checkpoint anchoring a day's chain endpoint
-sqt verify --checkpoint <date> --pubkey PATH   # verify a checkpoint's signature (public key only)
+sqt verify --checkpoint <date> --pubkey PATH   # the hash chain, then that day's checkpoint state (public key only)
 sqt cache gc [--confirm]             # list (or delete) OHLCV disk-cache files of a dead format generation; nothing else is evicted
 ```
 

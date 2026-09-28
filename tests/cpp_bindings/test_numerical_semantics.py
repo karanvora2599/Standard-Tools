@@ -473,8 +473,119 @@ class TestScalarConfigValidation:
         assert out["total_return"] == pytest.approx(0.02, abs=1e-12)
 
     def test_degenerate_data_still_yields_nan_rather_than_raising(self):
-        """The contract these validators must not break."""
+        """
+        The contract these validators must not break.
+
+        The NaN case used to assert an all-NaN result, which pinned a defect:
+        the last window, [3, 4, 5] against [102, 103, 104], holds no NaN and
+        has a true beta of exactly 1.0 (pandas returns it), but the sliding
+        sums could not subtract the NaN back out and stayed NaN until the
+        periodic rebuild. The contract is NaN for the windows that CONTAIN
+        the bad bar, and the right answer after it.
+        """
         assert np.all(np.isnan(_cpp.rsi(self.PRICES, -5)))
         assert np.all(np.isnan(_cpp.rolling_beta(self.PRICES, self.PRICES, 0)))
         nan_in = np.array([1.0, np.nan, 3.0, 4.0, 5.0])
-        assert np.all(np.isnan(_cpp.rolling_beta(nan_in, self.PRICES, 3)))
+        out = _cpp.rolling_beta(nan_in, self.PRICES, 3)
+        assert np.isnan(out[:4]).all()
+        assert out[4] == pytest.approx(1.0, abs=1e-12)
+
+    # ── run_portfolio_simulation ──────────────────────────────────────────
+    #
+    # Fifteen scalars and no validation at all: slippage_pct=-0.5 tripled
+    # the final equity, a NaN max_gross_leverage switched the limit off
+    # (`x > NaN` is false), fill=7 ran as Close, a negative
+    # max_adv_participation switched the cap off. The bounds are the Python
+    # engine's own, so a direct caller is held to the same rules.
+
+    CLOSE = np.array([[100.0, 50.0], [101.0, 51.0], [102.0, 50.5], [103.0, 52.0]])
+    WEIGHTS = np.array([[0.5, 0.5], [0.3, 0.7]])
+    REBAL = np.array([0, 2], dtype=np.int64)
+
+    def _portfolio(self, rebal=None, gaps=None, **kwargs):
+        return _cpp.run_portfolio_simulation(
+            self.CLOSE,
+            self.CLOSE,
+            self.WEIGHTS,
+            self.REBAL if rebal is None else rebal,
+            np.ones(len(self.CLOSE)) if gaps is None else gaps,
+            **kwargs,
+        )
+
+    @pytest.mark.parametrize(
+        "name, bad",
+        [
+            (name, bad)
+            for name in (
+                "initial_capital",
+                "max_gross_leverage",
+                "max_position_pct",
+            )
+            for bad in (0.0, -1.0, np.nan, np.inf)
+        ]
+        + [
+            (name, bad)
+            for name in (
+                "commission_pct",
+                "sell_commission_pct",
+                "slippage_pct",
+                "borrow_fee_bps",
+                "margin_interest_rate",
+                "per_share_rate",
+                "min_commission",
+                "impact_coefficient",
+                "max_adv_participation",
+            )
+            for bad in (-0.5, np.nan, np.inf)
+        ]
+        + [
+            ("fill", 3),
+            ("fill", -1),
+            ("commission_model", 2),
+            ("commission_model", -1),
+        ],
+    )
+    def test_nonsense_portfolio_config_is_rejected(self, name, bad):
+        with pytest.raises(ValueError, match=name):
+            self._portfolio(**{name: bad})
+
+    @pytest.mark.parametrize(
+        "rebal, match",
+        [
+            (np.array([2, 0], dtype=np.int64), "increasing"),
+            (np.array([2, 2], dtype=np.int64), "increasing"),
+            (np.array([0, 4], dtype=np.int64), "outside"),
+            (np.array([-1, 2], dtype=np.int64), "outside"),
+            (np.array([0.0, 2.7]), "integer"),
+        ],
+        ids=["unsorted", "duplicate", "past-the-end", "negative", "float"],
+    )
+    def test_nonsense_rebalance_bars_are_rejected(self, rebal, match):
+        """An out-of-order row used to be skipped and one past the end never
+        triggered -- both silently, as fewer executed rebalances -- and a
+        float bar was floored (2.7 executed at bar 2)."""
+        with pytest.raises(ValueError, match=match):
+            self._portfolio(rebal=rebal)
+
+    @pytest.mark.parametrize("bad", [np.nan, np.inf, -1.0])
+    def test_nonsense_day_gaps_are_rejected(self, bad):
+        """A NaN gap made every equity value after it NaN once a financing
+        rate was set."""
+        gaps = np.ones(len(self.CLOSE))
+        gaps[2] = bad
+        with pytest.raises(ValueError, match="day_gaps"):
+            self._portfolio(gaps=gaps, borrow_fee_bps=10.0)
+
+    def test_valid_portfolio_config_still_runs(self):
+        """The null case: the defaults, a zero ADV cap (the kernel's "no cap"),
+        both commission models and every fill code still run to the end."""
+        for kwargs in (
+            {},
+            dict(max_adv_participation=0.0),
+            dict(commission_model=1, per_share_rate=0.005, min_commission=1.0),
+            dict(fill=1),
+            dict(fill=2),
+        ):
+            res = self._portfolio(**kwargs)
+            assert res["status"] == 0, kwargs
+            assert np.isfinite(res["equity"]).all(), kwargs

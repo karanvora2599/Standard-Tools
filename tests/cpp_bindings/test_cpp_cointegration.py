@@ -550,6 +550,36 @@ class TestCppOls2Direct:
         assert 0.0 <= r["r_squared"] <= 1.0
 
     @requires_cpp
+    @pytest.mark.parametrize("level", [0.0, 0.01, -3.5, 1e9])
+    def test_a_constant_response_has_no_r_squared(self, level):
+        """A constant y has no variance to explain, so R^2 is 0/0 and the
+        kernel reports NaN. It used to report 0.0 ("x explains nothing"),
+        while the NumPy fallback in calculate_beta reported NaN."""
+        x = np.linspace(-1.0, 1.0, 30)
+        r = _cpp.ols2(np.full(30, level), x)
+        assert np.isnan(r["r_squared"])
+        assert r["slope"] == pytest.approx(0.0, abs=1e-12)
+
+    @requires_cpp
+    def test_a_nearly_constant_response_still_has_one(self):
+        """The null case: any variation gives a number in [0, 1]."""
+        y = np.full(30, 0.01)
+        y[4] = 0.02
+        r = _cpp.ols2(y, np.linspace(-1.0, 1.0, 30))
+        assert 0.0 <= r["r_squared"] <= 1.0
+
+    @requires_cpp
+    @pytest.mark.parametrize("native", [True, False])
+    def test_calculate_beta_agrees_on_a_constant_asset(self, native, monkeypatch):
+        from standard_quant_tools.analysis import regression
+
+        monkeypatch.setattr(regression, "HAS_CPP", native)
+        idx = pd.date_range("2021-01-01", periods=30)
+        bm = pd.Series(np.random.default_rng(2).normal(0, 0.01, 30), index=idx)
+        out = regression.calculate_beta(pd.Series(0.01, index=idx), bm)
+        assert np.isnan(out["r_squared"])
+
+    @requires_cpp
     def test_mismatched_length_raises(self):
         y = np.ones(50)
         x = np.ones(49)
@@ -832,6 +862,46 @@ class TestBatchEngleGranger:
         with pytest.raises(ValueError, match="outside"):
             _cpp.batch_engle_granger(panel, np.array(bad, dtype=np.int32))
 
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            np.array([[2**33 + 2, 2]], dtype=np.int64),  # wrapped to [2, 2]
+            np.array([[2**32, 1]], dtype=np.int64),  # wrapped to [0, 1]
+            np.array([[2**64 - 1, 0]], dtype=np.uint64),  # wrapped to [-1, 0]
+        ],
+        ids=["int64-wraps-to-self-pair", "int64-wraps-in-range", "uint64"],
+    )
+    def test_a_value_that_only_wraps_into_range_raises(self, bad):
+        """The pairs used to be cast to int32 before the bounds check saw
+        them. [[2**33+2, 2]] became [[2, 2]] and was answered as a series
+        cointegrated with itself: hedge ratio 1.0, adf -inf."""
+        panel = self._panel(3, 120, seed=2)
+        with pytest.raises(ValueError, match="outside"):
+            _cpp.batch_engle_granger(panel, bad)
+
+    def test_a_float_pair_is_refused_not_truncated(self):
+        panel = self._panel(3, 120, seed=2)
+        with pytest.raises(ValueError, match="integer"):
+            _cpp.batch_engle_granger(panel, np.array([[1.9, 0.2]]))
+
+    @pytest.mark.parametrize(
+        "pairs",
+        [
+            np.array([[0, 1], [2, 1]], dtype=np.int64),
+            np.array([[0, 1], [2, 1]], dtype=np.uint16),
+            [[0, 1], [2, 1]],
+        ],
+        ids=["int64", "uint16", "list"],
+    )
+    def test_any_integer_pairs_match_int32(self, pairs):
+        """The null case: every integer kind, and a list, answer exactly as
+        the int32 array the Python caller builds."""
+        panel = self._panel(3, 120, seed=2)
+        want = _cpp.batch_engle_granger(
+            panel, np.array([[0, 1], [2, 1]], dtype=np.int32)
+        )
+        np.testing.assert_array_equal(_cpp.batch_engle_granger(panel, pairs), want)
+
     def test_shape_validation(self):
         panel = self._panel(3, 120, seed=2)
         with pytest.raises(ValueError, match="2-D"):
@@ -839,9 +909,11 @@ class TestBatchEngleGranger:
         with pytest.raises(ValueError, match="2-D"):
             _cpp.batch_engle_granger(panel, np.array([0, 1], dtype=np.int32))
 
-    def test_empty_pairs(self):
+    @pytest.mark.parametrize("dtype", [np.int32, np.int64, np.float64])
+    def test_empty_pairs(self, dtype):
+        """An empty array has no value to truncate, so any dtype is fine."""
         panel = self._panel(3, 120, seed=2)
-        out = _cpp.batch_engle_granger(panel, np.zeros((0, 2), dtype=np.int32))
+        out = _cpp.batch_engle_granger(panel, np.zeros((0, 2), dtype=dtype))
         assert out.shape == (0, 11)
 
 

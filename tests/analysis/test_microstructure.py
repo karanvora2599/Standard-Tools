@@ -23,14 +23,17 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from standard_quant_tools.analysis.liquidity_events import _signed_volume
 from standard_quant_tools.analysis.microstructure import (
     effective_spread,
     intraday_volume_profile,
     microstructure_summary,
     quoted_spread,
     sign_trades,
+    signs_positional,
     trade_size_profile,
 )
+from standard_quant_tools.analysis.microstructure_estimators import kyle_lambda
 from standard_quant_tools.error import ValidationError
 
 BASE = pd.Timestamp("2024-03-01 14:30:00")
@@ -57,6 +60,66 @@ def _trades(rows):
         {"price": [r[1] for r in rows], "size": [r[2] for r in rows]},
         index=pd.DatetimeIndex(index),
     )
+
+
+def _planted_tape(n=1200, seed=3, tie_share=0.4):
+    """
+    A tape in time order whose every side is known, with repeated stamps.
+
+    The mid moves only between distinct timestamps, every print is one cent
+    either side of it, and a quote carrying that mid is stamped a
+    millisecond before each distinct timestamp. Lee-Ready therefore signs
+    each print by its own price against the mid, whatever order a group of
+    prints sharing a timestamp arrives in, and `side` is the answer row for
+    row. `tie_share` of the prints repeat their predecessor's timestamp;
+    live tapes run from a fifth to over half.
+    """
+    rng = np.random.default_rng(seed)
+    step = np.where(rng.random(n) < tie_share, 0, rng.integers(5, 400, n))
+    step[0] = 0
+    stamps = BASE + pd.to_timedelta(np.cumsum(step), unit="ms")
+    new = np.r_[True, step[1:] > 0]
+    mid = 100.0 + np.cumsum(np.where(new, rng.normal(0, 0.01, n), 0.0))
+    side = rng.choice([-1.0, 1.0], n)
+    trades = pd.DataFrame(
+        {"price": mid + 0.01 * side, "size": rng.integers(1, 300, n).astype(float)},
+        index=pd.DatetimeIndex(stamps),
+    )
+    quotes = pd.DataFrame(
+        {"bid_price": mid[new] - 0.01, "ask_price": mid[new] + 0.01},
+        index=pd.DatetimeIndex(stamps[new] - pd.Timedelta(milliseconds=1)),
+    )
+    return trades, quotes, side
+
+
+def _halves_swapped(frame):
+    """Row order for the frame's second half followed by its first -- two
+    pulls concatenated the wrong way round -- cut between two distinct
+    timestamps so that no group of rows sharing one is split."""
+    stamps = frame.index
+    cut = next(
+        i for i in range(len(frame) // 2, len(frame)) if stamps[i] != stamps[i - 1]
+    )
+    return np.r_[np.arange(cut, len(frame)), np.arange(cut)]
+
+
+def _shuffled_keeping_ties(frame, seed):
+    """
+    A random row order for a frame in time order, in which every group of
+    rows sharing a timestamp still arrives in its original relative order.
+
+    Putting it back in time order with ties kept in arrival order gives the
+    original frame exactly, so every such shuffle has one right answer.
+    """
+    rng = np.random.default_rng(seed)
+    n = len(frame)
+    group = pd.factorize(frame.index)[0]
+    shuffled = rng.permutation(n)
+    slots = np.lexsort((np.arange(n), group[shuffled]))
+    members = shuffled[np.lexsort((shuffled, group[shuffled]))]
+    order = np.empty(n, dtype=int)
+    order[slots] = members
+    return order
 
 
 @pytest.fixture
@@ -137,6 +200,110 @@ class TestSignTrades:
         signs = sign_trades(trades, quotes)
         assert len(signs) == 1
         assert signs.index[0] == BASE + pd.Timedelta(seconds=15)
+
+
+class TestPositionalSignsFollowTheCallersRows:
+    """
+    `signs_positional` is lined up against the caller's own rows by every
+    consumer, so its array has to be in those rows' order -- whatever order
+    they arrived in. Vendor tapes are not always in time order, and two
+    pulls concatenated the wrong way round is an ordinary caller pattern.
+    The signs are still COMPUTED in time order: the tick rule means the
+    previous print in time, not the previous row.
+    """
+
+    def test_two_pulls_concatenated_out_of_order_are_signed_row_for_row(self):
+        trades, quotes, side = _planted_tape()
+        order = _halves_swapped(trades)
+        signs = signs_positional(trades.iloc[order], quotes)
+        np.testing.assert_array_equal(signs, side[order])
+
+    def test_the_tick_rule_still_reads_the_previous_print_in_time(self):
+        trades, _, _ = _planted_tape()
+        order = _halves_swapped(trades)
+        np.testing.assert_array_equal(
+            signs_positional(trades.iloc[order]), signs_positional(trades)[order]
+        )
+
+    def test_a_tape_in_time_order_gets_its_planted_sides(self):
+        """Null case: nothing to reorder, and the answer is the truth."""
+        trades, quotes, side = _planted_tape()
+        np.testing.assert_array_equal(signs_positional(trades, quotes), side)
+        labelled = sign_trades(trades)
+        tick = signs_positional(trades)
+        decided = np.isfinite(tick) & (tick != 0)
+        np.testing.assert_array_equal(tick[decided], labelled.to_numpy())
+
+    def test_signed_volume_does_not_depend_on_the_row_order(self):
+        trades, quotes, _ = _planted_tape()
+        swapped = trades.iloc[_halves_swapped(trades)]
+        pd.testing.assert_series_equal(
+            _signed_volume(swapped, quotes, freq="10s"),
+            _signed_volume(trades, quotes, freq="10s"),
+        )
+
+    def test_kyle_lambda_from_a_tape_does_not_depend_on_the_row_order(self):
+        trades, quotes, _ = _planted_tape(n=3000)
+        swapped = trades.iloc[_halves_swapped(trades)]
+        in_order = kyle_lambda(trades=trades, quotes=quotes, freq="5s")
+        out_of_order = kyle_lambda(trades=swapped, quotes=quotes, freq="5s")
+        assert out_of_order["kyle_lambda"] == in_order["kyle_lambda"]
+        assert out_of_order["r_squared"] == in_order["r_squared"]
+
+
+class TestTiesKeepTheirArrivalOrder:
+    """
+    Rows sharing a timestamp are put in time order WITHOUT being reordered
+    among themselves. Live tapes repeat timestamps on a fifth to over half
+    of their prints, the tick rule reads the previous print, and on the
+    quote side the last update at a timestamp is the book that stood. An
+    unstable sort permuted every tie group as soon as one row was out of
+    place, so the same tape gave a different answer per arrival order.
+    """
+
+    def test_every_order_that_keeps_ties_in_arrival_order_gives_one_answer(self):
+        trades, _, _ = _planted_tape(n=3000)
+        expected_signs = signs_positional(trades)
+        expected_fraction = microstructure_summary(trades)["buy_volume_fraction"]
+
+        unique = np.flatnonzero(~trades.index.duplicated(keep=False))
+        one_late_print = np.arange(len(trades))
+        one_late_print[[unique[100], unique[101]]] = [unique[101], unique[100]]
+        orders = [one_late_print] + [
+            _shuffled_keeping_ties(trades, seed) for seed in range(6)
+        ]
+        for order in orders:
+            shuffled = trades.iloc[order]
+            summary = microstructure_summary(shuffled)
+            assert summary["buy_volume_fraction"] == expected_fraction
+            np.testing.assert_array_equal(
+                signs_positional(shuffled), expected_signs[order]
+            )
+
+    def test_the_last_quote_update_at_a_timestamp_is_the_one_that_prevails(self):
+        """Each timestamp carries a stale quote and then the live one, and a
+        trade a millisecond later is measured against the live mid. Against
+        the stale mid, five cents low, every sell reads as a buy."""
+        rng = np.random.default_rng(2)
+        n = 400
+        stamps = np.repeat(BASE + pd.to_timedelta(np.arange(n) * 100, unit="ms"), 2)
+        live = 100.0 + np.cumsum(rng.normal(0, 0.02, n))
+        mids = np.empty(2 * n)
+        mids[0::2] = live - 0.05
+        mids[1::2] = live
+        quotes = pd.DataFrame(
+            {"bid_price": mids - 0.01, "ask_price": mids + 0.01},
+            index=pd.DatetimeIndex(stamps),
+        )
+        side = rng.choice([-1.0, 1.0], n)
+        trades = pd.DataFrame(
+            {"price": live + 0.01 * side, "size": 100.0},
+            index=pd.DatetimeIndex(stamps[1::2] + pd.Timedelta(milliseconds=1)),
+        )
+        np.testing.assert_array_equal(signs_positional(trades, quotes), side)
+        for seed in range(4):
+            shuffled = quotes.iloc[_shuffled_keeping_ties(quotes, seed)]
+            np.testing.assert_array_equal(signs_positional(trades, shuffled), side)
 
 
 class TestEffectiveSpread:

@@ -60,6 +60,26 @@ _BINDINGS_WITH_FIRST_ARG_BAD = [
     ("kalman_filter_2state", (_BAD_2D, _GOOD_1D, 1e-4, 1e-3)),
     ("donchian_state_machine", (_BAD_2D, _GOOD_1D, _GOOD_1D)),
     ("vwap_reversion_state_machine", (_BAD_2D, _GOOD_1D, 0.02)),
+    # The panel-statistics bindings that take one value per row. The first
+    # two flattened a (4, 2) input and answered for eight rows; the third
+    # reached require_1d only through an implicit float64 copy of its codes.
+    (
+        "cross_sectional_correlation",
+        (_BAD_2D, _GOOD_1D, np.zeros(20, dtype=np.int64), 1, True),
+    ),
+    (
+        "label_uniqueness",
+        (
+            np.ones((10, 10), dtype=np.int64),
+            np.ones(20, dtype=np.int64),
+            np.zeros(20, dtype=np.int64),
+            1,
+        ),
+    ),
+    (
+        "permutation_null_ic",
+        (_BAD_2D, _GOOD_1D, np.zeros(20, dtype=np.int64), 1, 5, 0, True),
+    ),
 ]
 
 

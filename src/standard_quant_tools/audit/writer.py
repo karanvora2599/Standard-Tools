@@ -15,6 +15,7 @@ from typing import Any, Dict, Optional, Union
 from standard_quant_tools.error import AuditIntegrityError
 
 from .hashing import hash_payload
+from .json_native import to_json_native
 from .models import DecisionRecord
 from .paths import _GENESIS_HASH, _INDEX_FILENAME, _audit_dir
 from .storage import AuditStorageBackend, LocalFilesystemBackend
@@ -184,6 +185,15 @@ class AuditWriter:
         return chain_head
 
     def write(self, record: DecisionRecord) -> Path:
+        # The recorded values are made JSON-native before anything is
+        # hashed or written, whoever built the record: a numpy value in a
+        # free-form input made the JSON writer raise, and the record was
+        # dropped. `dispatch` normalises the input already; doing it again
+        # here costs nothing (the conversion is idempotent) and covers a
+        # record written directly through this class.
+        record.input = to_json_native(record.input)
+        record.data_sources = to_json_native(record.data_sources)
+
         when = datetime.now(timezone.utc)
         path = self._path_for(when)
 
@@ -202,9 +212,20 @@ class AuditWriter:
             # Hash over the record with record_hash itself left unset, so
             # the chain link (prev_record_hash) and the record's own content
             # are both covered without the field hashing itself.
-            record.record_hash = hash_payload(
-                {**record.model_dump(exclude={"record_hash"}), "record_hash": None}
-            )
+            #
+            # The hash is taken over the line AS IT WILL BE READ BACK, not
+            # over the live objects the line was made from. The verifier
+            # hashes `json.loads(line)`, so the two agree by construction:
+            # hashing the objects let any value the JSON writer spells
+            # differently (a NaN written as null, a timestamp, a set, an
+            # integer key) leave a record whose stored hash could never be
+            # reproduced -- a day reported as tampered for ever. For a record
+            # already made of JSON-native values the parsed form equals the
+            # objects, so its hash is bit-identical to the old rule and every
+            # day file on disk verifies exactly as before. See the CHANGELOG
+            # entry of 2026-09-27.
+            payload = json.loads(record.model_dump_json(exclude={"record_hash"}))
+            record.record_hash = hash_payload({**payload, "record_hash": None})
             self._backend.append_line(path, record.model_dump_json())
         finally:
             self._backend.release_lock(lf)

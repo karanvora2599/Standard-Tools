@@ -109,9 +109,13 @@ def classify_trade_direction(input_data: ClassifyTradesInput) -> SignedTapeResul
     # of prints in a live AAPL session, and every real tape has some -- that
     # raises "cannot reindex on an axis with duplicate labels" from inside
     # pandas, and where it does not raise it fans rows out by label. The
-    # positional array is one sign per trade row in order, NaN where no rule
-    # decided, which is the honest representation of a trade that could not
-    # be classified. See the CHANGELOG entry of 2026-09-22.
+    # positional array is one sign per trade row, NaN where no rule decided,
+    # which is the honest representation of a trade that could not be
+    # classified. It is in THIS tape's row order -- computed in time order,
+    # returned in the order the rows were published -- so the published
+    # tape keeps its rows and each row carries its own side even when the
+    # tape is not in time order. See the CHANGELOG entries of 2026-09-22
+    # and 2026-09-27.
     try:
         signs = lib.signs_positional(trades, quotes)
     except ValidationError:

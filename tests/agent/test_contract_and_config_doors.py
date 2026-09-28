@@ -12,8 +12,8 @@ only by being wrong. Three of them shared that shape:
   and then failed at execution.
 
   THE CONFIGURATION decided whether a decision was recorded, where an
-  artifact landed and which provider could be reached, across twenty
-  environment variables that no tool mentioned.
+  artifact landed and which provider could be reached, across what are now
+  twenty-one environment variables that no tool mentioned.
 
   THE ARTIFACT STORE had a complete listing API that the tool surface
   touched zero times, and `describe_artifact` refused the store's own key
@@ -499,10 +499,11 @@ class TestTheConfigurationIsReadable:
         }
         assert by_name["SQT_AUDIT_DIR"]["value"] == str(tmp_path / "elsewhere")
 
-    def test_the_twenty_names_are_exactly_the_set_the_library_reads(self):
+    def test_the_twenty_one_names_are_exactly_the_set_the_library_reads(self):
         """Grep-backed: a variable added to the library and not to this
         table is a setting nothing reports, which is the state this tool
-        exists to end."""
+        exists to end. Twenty-one since SQT_EXTERNAL_DIRS, the directories
+        external data may be read from, became a setting."""
         pattern = re.compile(r"SQT_[A-Z][A-Z0-9_]*")
         in_source = set()
         for path in SRC.rglob("*.py"):
@@ -517,7 +518,7 @@ class TestTheConfigurationIsReadable:
             f"read by the library and not reported: {sorted(in_source - reported)}; "
             f"reported and not read: {sorted(reported - in_source)}"
         )
-        assert len(reported) == 20
+        assert len(reported) == 21
 
     def test_the_platform_directories_are_behind_the_flag(self):
         with_paths = {
@@ -528,7 +529,7 @@ class TestTheConfigurationIsReadable:
         without = dispatch("describe_effective_config", {"include_paths": False})
         names = {row["name"] for row in without["settings"]}
         assert not {"LOCALAPPDATA", "XDG_STATE_HOME"} & names
-        assert len(names) == 20
+        assert len(names) == 21
 
     def test_every_setting_names_its_reader_and_its_effect(self):
         for row in dispatch("describe_effective_config", {})["settings"]:

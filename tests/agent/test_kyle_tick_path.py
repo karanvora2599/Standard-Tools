@@ -230,6 +230,32 @@ class TestFlowThatMovesThePrice:
         assert with_impact["r_squared"] - signed_flat["r_squared"] > 0.3
 
 
+class TestATapeOutOfTimeOrder:
+    """The tape's rows are signed in time order and each keeps its own
+    side, so the order a tape was published in cannot move the estimate.
+    The sign was once computed in sorted order and lined up against the
+    unsorted rows, so two pulls concatenated the wrong way round gave half
+    the prints another print's side and a different lambda."""
+
+    def test_two_pulls_concatenated_the_wrong_way_round_give_one_lambda(self, runs_dir):
+        trades, quotes = _tape(PLANTED_LAMBDA, seed=7)
+        half = len(trades) // 2
+        swapped = pd.concat([trades.iloc[half:], trades.iloc[:half]])
+        in_order_ref, quote_ref = _published(trades, quotes, "in_order")
+        swapped_ref, _ = _published(swapped, quotes, "swapped")
+
+        in_order = dispatch(
+            "estimate_kyle_lambda",
+            {"trades_ref": in_order_ref, "quotes_ref": quote_ref},
+        )
+        out_of_order = dispatch(
+            "estimate_kyle_lambda", {"trades_ref": swapped_ref, "quotes_ref": quote_ref}
+        )
+        assert out_of_order["kyle_lambda"] == in_order["kyle_lambda"]
+        assert out_of_order["r_squared"] == in_order["r_squared"]
+        assert out_of_order["kyle_lambda"] == pytest.approx(PLANTED_LAMBDA, rel=0.35)
+
+
 class TestTheBucketIsTheCallersChoice:
     def test_five_minute_buckets_leave_fewer_observations_than_one_minute(
         self, runs_dir

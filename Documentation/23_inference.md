@@ -235,7 +235,7 @@ that is robust.
 | `get_lead_lag_matrix` | Which series move first — and does anything survive the search size |
 | `test_structural_break` | Did something break at this known point — `break_index` is a position in the series, and the result names the date it lands on |
 | `detect_change_points` | When did the process change, at an unknown date |
-| `run_stationarity_tests` | ADF, KPSS and variance ratio, with the four-way verdict; `kpss_lags` (Andrews' bandwidth by default, and reported) and `vr_periods` are inputs |
+| `run_stationarity_tests` | ADF, KPSS and variance ratio, with the four-way verdict; `kpss_lags` (Andrews' bandwidth by default, and reported) and `vr_periods` are inputs. The variance ratio's `z_statistic` is Lo and MacKinlay's heteroskedasticity-robust z*, sqrt(T)(VR − 1)/sqrt(θ) over T returns, with the (1 − q/T) small-sample factor in the overlapping variance, so its p-value holds its nominal size under clustered volatility |
 | `detect_regimes` | Label each observation with a volatility regime; with `run_id` and `name` the per-bar labels are published as an `analytic_series` |
 | `test_granger_causality` | Does A precede B — Bonferroni corrected for the lags tested |
 | `get_partial_correlation` | What is left once the common drivers are removed from both |

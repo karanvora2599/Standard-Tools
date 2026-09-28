@@ -24,6 +24,18 @@ pytest tests/surface -q         # the surface layers alone
 python scripts/mutation_testing.py
 ```
 
+**The suite never touches the machine's own state.** The root
+`tests/conftest.py` points `SQT_AUDIT_DIR`, `SQT_RUNS_DIR` and
+`SQT_CACHE_DIR` at a per-run temporary directory at module level, before
+any package import (the OHLCV cache root is read at import), forcing them
+even when the shell exports production values, and clears the audit
+behaviour settings. Until it did, every test file outside the two subtrees
+that contained themselves appended its dispatches to the real audit trail —
+hundreds of synthetic decision records per run, with no field distinguishing
+them from real ones, in a chain that is append-only. `SQT_EXTERNAL_DIRS` is
+set to the system temporary directory so tests can register files under
+`tmp_path`; the fence's own tests set their own value.
+
 ## Layer 1 — correctness, against planted answers
 
 The rule for every test in `tests/<package>/`: **test against an answer

@@ -53,7 +53,18 @@ import re
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Set, Tuple, Union
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    NamedTuple,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+    Union,
+)
 
 import pandas as pd
 
@@ -101,9 +112,60 @@ BAR_SCHEMAS: Dict[str, str] = {
     "1d": "ohlcv-1d",
 }
 
-#: A plain US equity ticker, and the share-class form that needs mapping.
+#: A plain US equity ticker, and a share class. The class is sent to the
+#: vendor in its dotted spelling (`BRK.B`) whichever separator the caller
+#: used: '-' is Yahoo's class separator and '/' Bloomberg's.
 _EQUITY_RE = re.compile(r"^[A-Z]{1,5}$")
-_CLASS_RE = re.compile(r"^([A-Z]{1,5})[.\-]([A-Z])$")
+_CLASS_RE = re.compile(r"^([A-Z]{1,5})[.\-/]([A-Z])$")
+#: A ticker with a DOTTED exchange suffix, the Yahoo and Reuters convention
+#: (`GOOG.L`, `0700.HK`, `IBM.N`). The root may be digits (`7203.T`).
+_EXCHANGE_SUFFIX_RE = re.compile(r"^([A-Z0-9]{1,8})\.([A-Z]{1,3})$")
+#: Dotted suffixes that name a non-US listing, and the venue each names.
+#: A single letter that is also a US share-class letter is deliberately
+#: absent -- BRK.A, BF.B, MKC.V and units such as `.U` are US securities this
+#: provider serves -- which is why Toronto's venture board (`.V`) and the
+#: Reuters code for NYSE American (`.A`) are not refused here.
+_FOREIGN_SUFFIXES: Dict[str, str] = {
+    "L": "London Stock Exchange",
+    "IL": "London Stock Exchange's international order book",
+    "T": "Tokyo Stock Exchange",
+    "F": "Frankfurt Stock Exchange",
+    "DE": "Xetra",
+    "S": "SIX Swiss Exchange",
+    "SW": "SIX Swiss Exchange",
+    "PA": "Euronext Paris",
+    "AS": "Euronext Amsterdam",
+    "BR": "Euronext Brussels",
+    "LS": "Euronext Lisbon",
+    "IR": "Euronext Dublin",
+    "MI": "Borsa Italiana",
+    "MC": "Bolsa de Madrid",
+    "ST": "Nasdaq Stockholm",
+    "CO": "Nasdaq Copenhagen",
+    "HE": "Nasdaq Helsinki",
+    "OL": "Oslo Bors",
+    "VI": "Vienna Stock Exchange",
+    "WA": "Warsaw Stock Exchange",
+    "HK": "Hong Kong Stock Exchange",
+    "SS": "Shanghai Stock Exchange",
+    "SZ": "Shenzhen Stock Exchange",
+    "TW": "Taiwan Stock Exchange",
+    "KS": "Korea Exchange",
+    "KQ": "KOSDAQ",
+    "NS": "National Stock Exchange of India",
+    "BO": "Bombay Stock Exchange",
+    "SI": "Singapore Exchange",
+    "AX": "Australian Securities Exchange",
+    "NZ": "New Zealand Exchange",
+    "TO": "Toronto Stock Exchange",
+    "SA": "B3 (Sao Paulo)",
+    "MX": "Mexican Stock Exchange",
+    "JO": "Johannesburg Stock Exchange",
+    "TA": "Tel Aviv Stock Exchange",
+}
+#: Reuters instrument-code suffixes for US venues: the listing IS one this
+#: provider serves, under its plain ticker.
+_US_RIC_SUFFIXES: Dict[str, str] = {"N": "NYSE", "O": "Nasdaq", "OQ": "Nasdaq"}
 #: The derivatives grammar. `ES.c.0` / `ES.n.1` / `ES.v.0` are Databento's
 #: continuous symbols (calendar, open-interest and volume rolls), `ES.FUT`
 #: and `ES.OPT` the parent symbols, `ESZ6` / `ESZ26` a contract, and an
@@ -242,6 +304,48 @@ def _record(
         what,
         source=f"databento:{dataset}",
         content_hash=audit.hash_dataframe(frame),
+    )
+
+
+def _refuse_exchange_suffix(symbol: str, text: str) -> None:
+    """
+    Refuse a ticker carrying a dotted exchange suffix, naming the listing.
+
+    Before this refusal, a single-letter suffix read as a share class and
+    was folded into the ticker: `GOOG.L` came back as Alphabet class A
+    (`GOOGL`) and `BP.L` as `BPL`, another company, with no warning. The
+    suffix names a venue, not a class, and this provider's equity datasets
+    are US venues, so the honest answer is a refusal that says which
+    listing was asked for and how to ask for the one this provider has.
+    """
+    match = _EXCHANGE_SUFFIX_RE.match(text)
+    if match is None:
+        return
+    root, suffix = match.groups()
+    if suffix in _US_RIC_SUFFIXES:
+        raise ValidationError(
+            f"{symbol!r} is a Reuters code for the {_US_RIC_SUFFIXES[suffix]} "
+            f"listing of {root!r}, and this provider serves US listings under "
+            f"their plain ticker: ask for {root!r}. The '.{suffix}' exchange "
+            "suffix is refused rather than guessed at, because reading it as "
+            "a share class named a different symbol."
+        )
+    venue = _FOREIGN_SUFFIXES.get(suffix)
+    if venue is None:
+        return
+    remedies = [
+        f"for the {venue} listing use a provider that carries it (provider "
+        "'yfinance' takes Yahoo exchange suffixes)",
+        "for a US share class use its class letter, as in 'BRK.B'",
+    ]
+    if _EQUITY_RE.match(root):
+        remedies.insert(0, f"for the US listing ask for {root!r}, a separate security")
+    remedy = "; ".join(remedies)
+    raise ValidationError(
+        f"{symbol!r} names a listing on the {venue} (the '.{suffix}' exchange "
+        "suffix), and this provider serves US listings only. It will not read "
+        "the suffix as a share class, which folded 'GOOG.L' into 'GOOGL', "
+        f"another security. {remedy[0].upper()}{remedy[1:]}."
     )
 
 
@@ -485,22 +589,59 @@ class DatabentoProvider(DataProvider):
             _to_utc(start_date, end_of_day=False) if start_date is not None else None
         )
         candidates = self._datasets_for(route.family, schema, start)
-        return [
-            name
-            for name in candidates
-            if not (
-                name == DATASET_CONSOLIDATED
-                and start is not None
-                and start < CONSOLIDATED_START
-            )
-            and not (
-                name == DATASET_SUMMARY
-                and (
-                    schema not in SUMMARY_SCHEMAS
-                    or (start is not None and start < SUMMARY_START)
-                )
-            )
-        ]
+        return [name for name in candidates if self._window_admits(name, schema, start)]
+
+    @staticmethod
+    def _window_admits(dataset: str, schema: str, start: Optional[datetime]) -> bool:
+        """
+        The two window rules applied before anyone is asked.
+
+        The sample feed does not exist before `CONSOLIDATED_START`, so
+        asking is a guaranteed miss and a wasted round trip; the summary
+        feed answers daily bars only, from `SUMMARY_START`. One definition
+        for the fetch, the routing preview and the disk-cache lookup, so the
+        three cannot disagree about which feed answers a window. A missing
+        start (a preview with no window) is admitted.
+        """
+        if (
+            dataset == DATASET_CONSOLIDATED
+            and start is not None
+            and start < CONSOLIDATED_START
+        ):
+            return False
+        if dataset == DATASET_SUMMARY and (
+            schema not in SUMMARY_SCHEMAS
+            or (start is not None and start < SUMMARY_START)
+        ):
+            return False
+        return True
+
+    def _first_to_ask(
+        self, family: str, schema: str, start: datetime, end: datetime
+    ) -> Optional[str]:
+        """
+        The dataset the routing asks first for this window, from what this
+        instance knows WITHOUT a network call: the window rules, remembered
+        entitlement denials and, for a dataset whose range lookup has
+        succeeded, its published coverage.
+
+        This is the feed that would answer the request now, and the only
+        one whose disk-cache entry may answer it before anyone is asked.
+        A coverage this instance has not yet looked up counts as covering:
+        on a cache miss `_fetch` looks it up, and a dataset it turns out
+        not to cover is passed over there.
+        """
+        for dataset in self._datasets_for(family, schema, start):
+            if dataset in self._denied or not self._window_admits(
+                dataset, schema, start
+            ):
+                continue
+            with self._lock:
+                span = self._ranges.get(dataset)
+            if span is not None and self._clamp(span, start, end) is None:
+                continue
+            return dataset
+        return None
 
     def _known_datasets(self) -> List[str]:
         """Every dataset this provider is configured to reach, deduplicated."""
@@ -523,11 +664,20 @@ class DatabentoProvider(DataProvider):
         """
         What a symbol names: its vendor spelling, symbology and family.
 
-        Share classes are the equity job: `BRK.B` and `BRK-B` are `BRKB` on
-        the Nasdaq feeds (the LIVE gateway uses the dotted form, so a live
-        path needs the inverse map). Futures and options are named by their
-        own grammar -- continuous, parent, contract, OSI -- and routed to
-        their own datasets.
+        SHARE CLASSES KEEP THE DOT. `BRK.B`, `BRK-B`, `BRK/B` and `brk.b`
+        all resolve to raw `BRK.B`, which is how Databento's Historical
+        symbology spells a class share (`BRKB` is `not_found` there). This
+        provider used to send the undotted concatenation, so every share
+        class failed after a dozen requests. Futures and options are named
+        by their own grammar -- continuous, parent, contract, OSI -- and
+        routed to their own datasets.
+
+        AN EXCHANGE SUFFIX IS REFUSED BY NAME. `GOOG.L`, `BP.L`, `SONY.T`,
+        `0700.HK` and `RY.TO` name non-US listings, and `IBM.N` / `AAPL.O`
+        are Reuters codes for US ones. A single-letter suffix used to read
+        as a share class and fold into the ticker, so `GOOG.L` returned
+        Alphabet class A. The refusal names the listing and the spelling
+        this provider does serve; see `_refuse_exchange_suffix`.
 
         A BARE FUTURES ROOT IS REFUSED. `ES` and `CL` are equity tickers as
         well as roots, and this provider used to resolve them to the
@@ -540,10 +690,13 @@ class DatabentoProvider(DataProvider):
         text = str(symbol).strip().upper()
         if text.endswith("~EQUITY"):
             text = text[: -len("~EQUITY")]
+            # The escape hatch names the equity reading of a futures root;
+            # it does not make an exchange suffix a share class.
+            _refuse_exchange_suffix(symbol, text)
             match = _CLASS_RE.match(text)
             if match:
                 return SymbolRoute(
-                    f"{match.group(1)}{match.group(2)}", "raw_symbol", "equity"
+                    f"{match.group(1)}.{match.group(2)}", "raw_symbol", "equity"
                 )
             if _EQUITY_RE.match(text):
                 return SymbolRoute(text, "raw_symbol", "equity")
@@ -578,10 +731,13 @@ class DatabentoProvider(DataProvider):
             )
         if _EQUITY_RE.match(text):
             return SymbolRoute(text, "raw_symbol", "equity")
+        # Before the share-class rule: `GOOG.L` matches it, and reading the
+        # suffix as a class is the mistake this refusal exists to prevent.
+        _refuse_exchange_suffix(symbol, text)
         match = _CLASS_RE.match(text)
         if match:
             return SymbolRoute(
-                f"{match.group(1)}{match.group(2)}", "raw_symbol", "equity"
+                f"{match.group(1)}.{match.group(2)}", "raw_symbol", "equity"
             )
         raise ValidationError(
             f"{symbol!r} is not a symbol this provider can map to a Databento "
@@ -606,6 +762,14 @@ class DatabentoProvider(DataProvider):
         span = self._available_range(dataset)
         if span is None:
             return None
+        return self._clamp(span, start, end)
+
+    @staticmethod
+    def _clamp(
+        span: Tuple[datetime, datetime], start: datetime, end: datetime
+    ) -> Optional[Tuple[datetime, datetime]]:
+        """A window clamped to a published span, or None when it starts
+        before the span or ends where the span has nothing."""
         first, last = span
         if start < first:
             # Not an error: a deeper dataset may cover it, and the caller
@@ -677,8 +841,18 @@ class DatabentoProvider(DataProvider):
         *,
         datasets: Optional[List[str]] = None,
         what: str = "data",
+        stored: Optional[Callable[[str], Optional[pd.DataFrame]]] = None,
     ) -> Tuple[pd.DataFrame, str]:
-        """Try each dataset in order; return the first that answers."""
+        """
+        Try each dataset in order; return the first that answers.
+
+        `stored`, when given, is asked for a dataset's stored answer at the
+        moment that dataset is the one this request would be sent to --
+        past the window rules, the remembered denials and its published
+        coverage -- and a frame it returns is served instead of a request.
+        That is the only point at which a lesser feed's stored answer can
+        be the right one: every better feed has just been passed over.
+        """
         route = self.resolve_symbol(symbol)
         raw = route.raw
         start = _to_utc(start_date, end_of_day=False)
@@ -699,17 +873,15 @@ class DatabentoProvider(DataProvider):
         for dataset in candidates:
             if dataset in self._denied:
                 continue
-            if dataset == DATASET_CONSOLIDATED and start < CONSOLIDATED_START:
-                # The sample feed does not exist before this date, so
-                # asking is a guaranteed miss and a wasted round trip.
-                continue
-            if dataset == DATASET_SUMMARY and (
-                schema not in SUMMARY_SCHEMAS or start < SUMMARY_START
-            ):
+            if not self._window_admits(dataset, schema, start):
                 continue
             window = self._range(dataset, start, end)
             if window is None:
                 continue
+            if stored is not None:
+                answer = stored(dataset)
+                if answer is not None:
+                    return answer, dataset
             tried.append(dataset)
             try:
                 frame = self._get_range(
@@ -790,10 +962,15 @@ class DatabentoProvider(DataProvider):
                 cached,
             )
             return _with_attrs(cached.copy(), cached.attrs)
-        result = self._fetch_ohlcv_uncached(
+        result, preferred = self._fetch_ohlcv_uncached(
             symbol, start_date, end_date, interval, schema, start_str, end_str
         )
-        _session_cache_set(key, result, end=end_str)
+        if preferred:
+            # An answer from a lesser feed because a better one failed (or
+            # returned nothing) is not kept for the session: the next call
+            # on this instance asks the better feed again rather than
+            # repeating the degraded answer for an hour.
+            _session_cache_set(key, result, end=end_str)
         return _with_attrs(result.copy(), result.attrs)
 
     @retry(times=3, delay=1)
@@ -806,22 +983,38 @@ class DatabentoProvider(DataProvider):
         schema: str,
         start_str: str,
         end_str: str,
-    ) -> pd.DataFrame:
+    ) -> Tuple[pd.DataFrame, bool]:
+        """
+        The bars, and whether they came from the feed the routing prefers
+        for this window now (False when a better feed failed and a lesser
+        one answered in its place).
+
+        THE DISK CACHE IS READ FOR THE FEED THAT WOULD ANSWER, AND NO OTHER.
+        Entries are keyed by the dataset that answered, so the same window
+        served by two feeds 30x apart in volume is two files. The lookup
+        used to walk every candidate and serve the first file it found, so
+        one transient failure on the summary feed -- or one run with
+        `DATABENTO_OHLCV_DATASET` set -- left a sample-feed file that every
+        later call served for a window the summary feed covered all along.
+        Now the preferred feed's entry is read before anything is asked; a
+        lesser feed's entry is read only inside `_fetch`, at the moment
+        every better feed has been passed over (denied, not covering the
+        window, or failing right now), which is when a live request would
+        be answered by that lesser feed too.
+
+        A window before `SUMMARY_START` is served by the sample feed by
+        policy, every time: its file is the preferred feed's entry for that
+        window, and reading it is not a fallback.
+        """
         route = self.resolve_symbol(symbol)
         start = _to_utc(start_date, end_of_day=False)
-        candidates = self._datasets_for(route.family, schema, start)
-        # The disk cache is keyed by the dataset that answered: the same
-        # window served by two feeds 30x apart in volume is two entries,
-        # never one file. Read in preference order, so a window a better
-        # feed has since come to cover still serves the feed it was
-        # first fetched from -- reproducibility over recency, and the
-        # served dataset says which.
-        for dataset in candidates:
-            path = _safe_parquet_path(
-                symbol, start_str, end_str, interval, provider=f"databento-{dataset}"
-            )
+        end = _to_utc(end_date, end_of_day=True)
+        served: Dict[str, pd.DataFrame] = {}
+
+        def _stored(dataset: str) -> Optional[pd.DataFrame]:
+            path = self._bar_cache_path(route, dataset, start_str, end_str, interval)
             if path is None or not path.exists():
-                continue
+                return None
             try:
                 frame = _normalize_ohlcv_index(pd.read_parquet(path), interval)
             except Exception as exc:  # noqa: BLE001 - a bad file is evicted
@@ -832,24 +1025,48 @@ class DatabentoProvider(DataProvider):
                     path.unlink()
                 except OSError:
                     pass
-                continue
+                return None
             frame.attrs["dataset"] = dataset
             frame.attrs["provider"] = "databento"
             _record(
                 symbol, start_date, end_date, interval, f"{dataset}:disk_cache", frame
             )
+            served[dataset] = frame
             return frame
+
+        first = self._first_to_ask(route.family, schema, start, end)
+        if first is not None and _stored(first) is not None:
+            return served[first], True
         raw_frame, dataset = self._fetch(
-            schema, symbol, start_date, end_date, what="bars"
+            schema, symbol, start_date, end_date, what="bars", stored=_stored
         )
+        # Asked again after the fetch, which has learned denials and
+        # coverage: a feed passed over for either is not a failure, and the
+        # dataset that answered is then the preferred one.
+        preferred = self._first_to_ask(route.family, schema, start, end)
+        if dataset != preferred:
+            logger.warning(
+                "databento %s %s was answered by %s because the preferred %s "
+                "failed or returned nothing; not kept for the session, so the "
+                "next request asks %s again",
+                symbol,
+                schema,
+                dataset,
+                preferred,
+                preferred,
+            )
+        if dataset in served:
+            return served[dataset], dataset == preferred
         out = self._shape_bars(raw_frame, symbol, interval, end_date)
         out.attrs["dataset"] = dataset
         out.attrs["provider"] = "databento"
         # Into the open decision record, like every other provider's bars.
         _record(symbol, start_date, end_date, interval, dataset, out)
-        path = _safe_parquet_path(
-            symbol, start_str, end_str, interval, provider=f"databento-{dataset}"
-        )
+        # Written under the dataset that answered, even when it answered in
+        # a failing feed's place: the entry is that dataset's true answer,
+        # and the lookup above reads it only when that dataset is the one
+        # that would answer.
+        path = self._bar_cache_path(route, dataset, start_str, end_str, interval)
         if path is not None and _is_historical(end_date):
             try:
                 _write_parquet_atomic(path, out)
@@ -857,7 +1074,30 @@ class DatabentoProvider(DataProvider):
                 logger.warning(
                     "[cache] databento disk write failed for %s: %s", path, exc
                 )
-        return out
+        return out, dataset == preferred
+
+    @staticmethod
+    def _bar_cache_path(
+        route: SymbolRoute, dataset: str, start_str: str, end_str: str, interval: str
+    ):
+        """
+        The disk-cache entry for one dataset's answer to one window.
+
+        Named by the symbol AS SENT TO THE VENDOR, not as the caller spelled
+        it: `BRK.B`, `BRK-B` and `BRK/B` are one request and share one
+        entry, and a mapping change moves the name with it instead of
+        leaving a file named for one spelling holding another instrument's
+        bars. The spaces in an OSI option symbol are dropped, because the
+        cache refuses a space in a filename and the root and the date
+        cannot run together ambiguously.
+        """
+        return _safe_parquet_path(
+            route.raw.replace(" ", ""),
+            start_str,
+            end_str,
+            interval,
+            provider=f"databento-{dataset}",
+        )
 
     def _shape_bars(
         self,

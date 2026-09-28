@@ -174,11 +174,13 @@ class TestTheKindIsCheckedBeforeAnyRowIsRead:
 
 class TestOnlyTabularFilesAreReadable:
     """
-    The containment that replaces the SQT_RUNS_DIR bound.
+    The second bound on an external path, inside the directory fence.
 
     The path is caller-supplied and reaches this library from an agent, so a
     reader that accepts any file is a way to read any file on the machine
-    into a tool result.
+    into a tool result. The directories it may come from are pinned in
+    test_external_fence.py; these files sit in tmp_path, which the suite's
+    conftest lists in SQT_EXTERNAL_DIRS.
     """
 
     @pytest.mark.parametrize("name", ["secrets.env", "id_rsa", "notes.docx"])

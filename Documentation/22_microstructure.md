@@ -191,6 +191,10 @@ The overlapping figure describes the *window*, not the flow. It is still
 returned as `overlapping_persistence` so the difference is visible rather
 than assumed away.
 
+The next bar's return is lined up with each imbalance **by position**, so a
+dated frame with a repeated timestamp is measured like any other rather than
+raising pandas' "cannot reindex on an axis with duplicate labels".
+
 ### `estimate_vpin`
 
 Flow one-sidedness measured in **volume time** rather than clock time —
@@ -319,6 +323,24 @@ consumer now aligns by position, and the signed volume cannot exceed what
 traded. The signing rule itself is unchanged; only the bookkeeping was
 wrong.
 
+**A tape out of time order keeps each print's own side.** Vendor tapes are
+not always in time order, and two pulls concatenated the wrong way round is
+an ordinary pattern. `signs_positional` computes the signs in *time* order —
+the tick rule means the previous print in time, the prevailing quote the
+last one before the trade — and returns them in the caller's *own row*
+order, which is what every consumer indexes its rows with (the Kyle-lambda
+tape path, the liquidity detector's signed-volume channel,
+`classify_trade_direction`). It used to return them in sorted order: on a
+live AAPL tape concatenated from two pulls, 524 of 1,505 prints (34.8%)
+carried another print's side and 10-second signed-volume buckets were off by
+up to 16x. `sign_trades` is unchanged — a labelled Series in time order, the
+reporting shape. The time sort is also **stable**: prints sharing a
+timestamp keep the order they arrived in, because the tick rule reads the
+previous print and, of two quote updates in one nanosecond, the later is the
+book that stood. An unstable sort reordered 228 of 1,022 tie groups on a
+live tape once a single row was out of place, so the same tape gave a
+different buy-volume fraction for each arrival order.
+
 **`detect_liquidity_events` reports the channel's memory, and isolates a
 channel's failure.** The CUSUM threshold is calibrated for i.i.d. noise,
 and real channels are not: a spread channel with lag-1 autocorrelation
@@ -339,7 +361,7 @@ the module declared computable, so the obvious call was the one that died.
 
 | Tool | Needs ticks | Answers |
 |---|:--:|---|
-| `classify_trade_direction` | yes | Sign the tape, Lee-Ready or tick rule, published; signs positionally, so a tape whose timestamps repeat (a quarter of a live one) classifies instead of raising |
+| `classify_trade_direction` | yes | Sign the tape, Lee-Ready or tick rule, published; signs positionally, in the tape's own row order, computed in time order — so a tape whose timestamps repeat (a quarter of a live one) classifies instead of raising, and one out of time order keeps each print's own side |
 | `get_quoted_spread_series` | yes | Spread and imbalance per quote, not averaged |
 | `get_effective_spread_series` | yes | What each trade paid, optionally split, with the realized and impact means beside the effective one |
 | `get_order_book_metrics` | yes | Microprice, imbalance at the touch and cumulatively, and the depth slope -- what a top-of-book quote cannot say; inline snapshots may carry an ISO `timestamp`, which the per-second rates need, and `include_order_counts` returns the orders resting at each level when the feed carries them |

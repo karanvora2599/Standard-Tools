@@ -30,8 +30,6 @@ from standard_quant_tools.modeling.features import transforms
 from standard_quant_tools.modeling.features.transforms import (
     cross_sectional_counts,
     rank_within_date,
-)
-from standard_quant_tools.modeling.features.transforms import (
     standardize_cross_sectional,
 )
 from standard_quant_tools.modeling.validation import metrics
@@ -791,3 +789,192 @@ class TestNeitherKernelNeedsARowCountGuard:
         python = weights_module.label_uniqueness_weights(dates, ends, entities)
         monkeypatch.undo()
         np.testing.assert_allclose(native, python, rtol=0, atol=1e-12)
+
+
+def _core():
+    from standard_quant_tools import _sqt_core
+
+    return _sqt_core
+
+
+# One call per binding that takes date or entity codes, with the codes
+# supplied by the caller and every other argument valid. Each returns the
+# binding's output so a test can also inspect what a valid call produced.
+def _call_rank(codes, n):
+    return _core().rank_by_date(np.ones((4, 2)), codes, n)
+
+
+def _call_standardize(codes, n):
+    return _core().standardize_by_date(np.ones((4, 2)), codes, n, 3.0)
+
+
+def _call_correlation(codes, n):
+    return _core().cross_sectional_correlation(
+        np.arange(4.0), np.arange(4.0), codes, n, True
+    )
+
+
+def _call_permutation(codes, n):
+    return _core().permutation_null_ic(
+        np.arange(4.0), np.arange(4.0), codes, n, 3, 1, True
+    )
+
+
+def _call_uniqueness(codes, n):
+    stamps = np.arange(4, dtype=np.int64)
+    return _core().label_uniqueness(stamps, stamps + 1, codes, n)
+
+
+_CODE_BINDINGS = [
+    _call_rank,
+    _call_standardize,
+    _call_correlation,
+    _call_permutation,
+    _call_uniqueness,
+]
+
+
+class TestCodeArguments:
+    """
+    Date and entity codes are integers in [0, n), checked before any kernel
+    runs.
+
+    They used to be taken with numpy's unsafe cast and never range-checked:
+    a float code was floored (0.9 ranked as date 0), a uint64 2**64-1 wrapped
+    to -1, and a row whose code fell outside [0, n) was dropped by the
+    kernel. rank_by_date and standardize_by_date then returned that row as
+    uninitialised memory -- different garbage on every call -- and
+    label_uniqueness left it at weight 1.0 while the Python path grouped it.
+    """
+
+    @pytest.mark.parametrize("call", _CODE_BINDINGS)
+    @pytest.mark.parametrize("bad", [-1, 1])
+    def test_a_code_outside_the_range_is_refused(self, call, bad):
+        codes = np.array([0, 0, bad, 0], dtype=np.int64)
+        with pytest.raises(ValueError, match="outside"):
+            call(codes, 1)
+
+    @pytest.mark.parametrize("call", _CODE_BINDINGS)
+    def test_a_float_code_is_refused_not_floored(self, call):
+        with pytest.raises(ValueError, match="integer"):
+            call(np.array([0.0, 0.9, 1.5, 1.99]), 2)
+
+    @pytest.mark.parametrize("call", _CODE_BINDINGS)
+    def test_a_uint64_code_is_not_wrapped(self, call):
+        codes = np.array([0, 0, 2**64 - 1, 0], dtype=np.uint64)
+        with pytest.raises(ValueError, match="outside"):
+            call(codes, 1)
+
+    @pytest.mark.parametrize("call", _CODE_BINDINGS)
+    @pytest.mark.parametrize(
+        "codes",
+        [
+            np.array([0, 1, 0, 1], dtype=np.int32),
+            np.array([0, 1, 0, 1], dtype=np.int64),
+            np.array([0, 1, 0, 1], dtype=np.uint8),
+            [0, 1, 0, 1],
+        ],
+        ids=["int32", "int64", "uint8", "list"],
+    )
+    def test_valid_codes_of_any_integer_kind_are_accepted(self, call, codes):
+        """The null case: every integer dtype, and a list, still work and
+        give the same answer as int64."""
+        got = np.asarray(call(codes, 2))
+        want = np.asarray(call(np.array([0, 1, 0, 1], dtype=np.int64), 2))
+        np.testing.assert_array_equal(got, want)
+
+    def test_two_dimensional_inputs_are_refused(self):
+        """Both used to flatten a (4, 2) input and answer for eight rows."""
+        core = _core()
+        with pytest.raises(ValueError, match="1-D"):
+            core.cross_sectional_correlation(
+                np.ones((4, 2)), np.ones((4, 2)), np.zeros(8, dtype=np.int64), 1, True
+            )
+        stamps = np.arange(8, dtype=np.int64).reshape(4, 2)
+        with pytest.raises(ValueError, match="1-D"):
+            core.label_uniqueness(stamps, stamps + 1, np.zeros((4, 2), np.int64), 1)
+
+
+class TestNaTDates:
+    """
+    `pd.factorize` codes a NaT date as -1. The pandas paths always treated
+    those rows as one more cross-section; the kernels dropped them and
+    returned uninitialised memory for them. The wrappers now give NaT rows a
+    cross-section of their own on both backends, so the answers agree.
+    """
+
+    @staticmethod
+    def _panel():
+        rng = np.random.default_rng(5)
+        dates = np.repeat(pd.date_range("2021-01-04", periods=6).to_numpy(), 5)
+        dates[[3, 11, 12, 27]] = np.datetime64("NaT")
+        frame = pd.DataFrame(rng.normal(0, 1, (30, 3)), columns=["a", "b", "c"])
+        return frame, dates
+
+    @pytest.mark.parametrize(
+        "transform",
+        [
+            rank_within_date,
+            standardize_cross_sectional,
+            cross_sectional_counts,
+        ],
+    )
+    def test_both_backends_agree(self, transform, monkeypatch):
+        frame, dates = self._panel()
+        native = transform(frame, dates).to_numpy()
+        monkeypatch.setattr(transforms, "HAS_CPP", False)
+        python = transform(frame, dates).to_numpy()
+        monkeypatch.undo()
+        assert np.isfinite(native).all()
+        np.testing.assert_allclose(native, python, rtol=0, atol=TOL)
+
+    def test_the_nat_rows_are_ranked_among_themselves(self):
+        frame, dates = self._panel()
+        ranked = rank_within_date(frame, dates)
+        nat_rows = [3, 11, 12, 27]
+        expected = frame.iloc[nat_rows].rank(method="average")
+        np.testing.assert_array_equal(
+            ranked.iloc[nat_rows].to_numpy(), expected.to_numpy()
+        )
+
+    def test_a_missing_entity_weights_the_same_on_both_backends(self, monkeypatch):
+        from standard_quant_tools.modeling.validation import weights as weights_module
+
+        index = pd.date_range("2020-01-01", periods=12, freq="B").to_numpy()
+        dates = np.tile(index, 2)
+        ends = np.tile(np.r_[index[3:], np.repeat(np.datetime64("NaT"), 3)], 2)
+        entities = np.array(["A"] * 12 + [None] * 12, dtype=object)
+        native = weights_module.label_uniqueness_weights(dates, ends, entities)
+        monkeypatch.setattr(weights_module, "HAS_CPP", False)
+        python = weights_module.label_uniqueness_weights(dates, ends, entities)
+        monkeypatch.undo()
+        np.testing.assert_allclose(native, python, rtol=0, atol=1e-12)
+
+
+class TestPublicWrappersRefuseTwoDimensionalInput:
+    """A (n, 2) array is two columns, not 2n rows; say so by name."""
+
+    def test_cross_sectional_ic(self):
+        from standard_quant_tools.error import ValidationError
+
+        with pytest.raises(ValidationError, match="1-D"):
+            cross_sectional_ic(
+                np.ones((4, 2)), np.ones((4, 2)), np.zeros((4, 2)), "spearman"
+            )
+
+    def test_label_uniqueness_weights(self):
+        from standard_quant_tools.error import ValidationError
+        from standard_quant_tools.modeling.validation.weights import (
+            label_uniqueness_weights,
+        )
+
+        stamps = pd.date_range("2020-01-01", periods=8).to_numpy().reshape(4, 2)
+        with pytest.raises(ValidationError, match="1-D"):
+            label_uniqueness_weights(stamps, stamps, np.zeros((4, 2)))
+
+    def test_one_dimensional_input_still_answers(self, monkeypatch):
+        """The null case."""
+        y = np.arange(8.0)
+        dates = np.repeat([0, 1], 4)
+        out = cross_sectional_ic(y, y, dates, "spearman")
+        np.testing.assert_allclose(out.to_numpy(), [1.0, 1.0])

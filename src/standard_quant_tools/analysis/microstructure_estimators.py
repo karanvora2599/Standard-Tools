@@ -701,6 +701,13 @@ def _kyle_data_from_trades(
             "kyle_lambda: trades need a datetime index or a `timestamp` column "
             "to be bucketed in time."
         )
+    # One sign per row of `tape`, in `tape`'s own row order whatever order
+    # the prints arrived in, so it indexes `size`, `price` and `tape.index`
+    # below position for position; `resample` puts the buckets in time
+    # order itself. A tape out of time order was once signed in sorted
+    # order and lined up against unsorted rows, which moved this lambda
+    # six-fold on two pulls concatenated the wrong way round. See the
+    # CHANGELOG entry of 2026-09-27.
     signs = signs_positional(tape, book)
     keep = np.isfinite(signs) & (signs != 0)
     size = tape["size"].astype(float).to_numpy()
@@ -768,15 +775,20 @@ def order_flow_imbalance(
 
     rolling_signed = signed.rolling(window).sum()
     rolling_total = frame["volume"].rolling(window).sum()
-    imbalance = (rolling_signed / rolling_total).dropna()
+    ratio = rolling_signed / rolling_total
+    complete = ratio.notna().to_numpy()
+    imbalance = ratio[complete]
     if imbalance.empty:
         raise ValidationError(
             f"order_flow_imbalance: window={window} left no complete windows."
         )
 
-    # Does today's imbalance say anything about tomorrow's return?
-    forward = returns.shift(-1).reindex(imbalance.index)
-    pair = pd.DataFrame({"imb": imbalance, "fwd": forward}).dropna()
+    # Does today's imbalance say anything about tomorrow's return? Lined up
+    # BY POSITION: the next bar is the next row. Reindexing by label raised
+    # "cannot reindex on an axis with duplicate labels" on any dated frame
+    # with a repeated stamp. See the CHANGELOG entry of 2026-09-27.
+    forward = returns.shift(-1).to_numpy()[complete]
+    pair = pd.DataFrame({"imb": imbalance.to_numpy(), "fwd": forward}).dropna()
     predictive = float(pair["imb"].corr(pair["fwd"])) if len(pair) > 10 else None
 
     # PERSISTENCE IS MEASURED ON NON-OVERLAPPING WINDOWS. The rolling series

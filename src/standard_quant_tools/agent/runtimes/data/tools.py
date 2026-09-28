@@ -1448,6 +1448,16 @@ def prepare_vendor_extract(
     Two of the decisions here CHANGE THE NUMBERS and neither is recoverable
     from the output: which timestamp became `timestamp`, and whether prices
     were divided by a billion. They come back in `notes` for that reason.
+
+    BOTH PATHS ARE FENCED, and the output first, before a byte is read. The
+    input is read only from the runs directory or a directory
+    `SQT_EXTERNAL_DIRS` lists. The output is a WRITE whose location an agent
+    chooses, so it is held tighter: a relative name lands in the
+    runs directory's `extracts` folder rather than wherever the process was
+    launched, and an absolute path has to lie in that folder or a listed
+    directory, never in the cache, the audit directory or the rest of the
+    runs directory. A dry run is fenced the same way, so it refuses what the
+    real run would.
     """
     import pandas as pd
 
@@ -1459,7 +1469,7 @@ def prepare_vendor_extract(
         split_empty_levels,
     )
 
-    out_path = Path(input_data.out_path)
+    out_path = external.resolve_output_path(input_data.out_path)
     if not input_data.dry_run and out_path.exists():
         raise ValidationError(
             f"{out_path} already exists. A conversion writes a new file "

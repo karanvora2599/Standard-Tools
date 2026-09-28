@@ -226,15 +226,134 @@ def _provider(client, **kw) -> DatabentoProvider:
 class TestSymbolMapping:
     @pytest.mark.parametrize(
         "given,expected",
-        [("NVDA", "NVDA"), ("BRK.B", "BRKB"), ("BRK-B", "BRKB"), ("aapl", "AAPL")],
+        [
+            ("NVDA", "NVDA"),
+            ("aapl", "AAPL"),
+            ("BRK.B", "BRK.B"),
+            ("BRK-B", "BRK.B"),
+            ("BRK/B", "BRK.B"),
+            ("brk.b", "BRK.B"),
+            ("BF.B", "BF.B"),
+            ("HEI.A", "HEI.A"),
+            ("LEN.B", "LEN.B"),
+            ("MKC.V", "MKC.V"),
+            ("BRK.B~equity", "BRK.B"),
+        ],
     )
-    def test_share_classes_lose_the_separator(self, given, expected) -> None:
+    def test_share_classes_keep_the_dot(self, given, expected) -> None:
+        """
+        Databento's Historical symbology spells a class share with a dot:
+        `BRK.B` resolves and `BRKB` is `not_found`. This test used to pin
+        the undotted `BRKB`, the spelling that made every share class fail
+        after a dozen requests; Yahoo's '-' and Bloomberg's '/' separators
+        now reach the same vendor spelling.
+        """
         assert DatabentoProvider.to_raw_symbol(given) == expected
 
     @pytest.mark.parametrize("given", ["", "TOOLONGSYM", "ES=F", "BTC/USD"])
     def test_anything_else_is_refused(self, given) -> None:
         with pytest.raises(ValidationError, match="raw_symbol"):
             DatabentoProvider.to_raw_symbol(given)
+
+
+class TestAnExchangeSuffixIsRefusedByName:
+    """
+    A single-letter exchange suffix used to read as a share class and fold
+    into the ticker: `GOOG.L` returned Alphabet class A (`GOOGL`) and
+    `BP.L` another company (`BPL`), with no warning.
+    """
+
+    @pytest.mark.parametrize(
+        "given,listing",
+        [
+            ("GOOG.L", "London Stock Exchange"),
+            ("BP.L", "London Stock Exchange"),
+            ("SHEL.L", "London Stock Exchange"),
+            ("SONY.T", "Tokyo Stock Exchange"),
+            ("7203.T", "Tokyo Stock Exchange"),
+            ("SAP.F", "Frankfurt Stock Exchange"),
+            ("NESN.S", "SIX Swiss Exchange"),
+            ("0700.HK", "Hong Kong Stock Exchange"),
+            ("RY.TO", "Toronto Stock Exchange"),
+            ("BHP.AX", "Australian Securities Exchange"),
+            ("GOOG.L~equity", "London Stock Exchange"),
+        ],
+    )
+    def test_a_foreign_listing_is_named_and_refused(self, given, listing) -> None:
+        with pytest.raises(ValidationError) as caught:
+            DatabentoProvider.to_raw_symbol(given)
+        message = str(caught.value)
+        assert listing in message
+        assert "exchange suffix" in message and "US listings only" in message
+
+    def test_the_us_ticker_is_offered_as_a_separate_listing(self) -> None:
+        with pytest.raises(ValidationError, match="ask for 'GOOG', a separate"):
+            DatabentoProvider.to_raw_symbol("GOOG.L")
+
+    def test_a_numeric_root_is_not_offered_as_a_us_ticker(self) -> None:
+        with pytest.raises(ValidationError) as caught:
+            DatabentoProvider.to_raw_symbol("0700.HK")
+        assert "US listing ask for" not in str(caught.value)
+
+    @pytest.mark.parametrize(
+        "given,venue,ticker",
+        [
+            ("IBM.N", "NYSE", "IBM"),
+            ("AAPL.O", "Nasdaq", "AAPL"),
+            ("MSFT.OQ", "Nasdaq", "MSFT"),
+        ],
+    )
+    def test_a_us_reuters_code_names_the_plain_ticker(
+        self, given, venue, ticker
+    ) -> None:
+        with pytest.raises(ValidationError) as caught:
+            DatabentoProvider.to_raw_symbol(given)
+        message = str(caught.value)
+        assert f"{venue} listing of {ticker!r}" in message
+        assert f"ask for {ticker!r}" in message and "exchange" in message
+
+    def test_a_refused_suffix_costs_no_request(self) -> None:
+        client = StubClient({CONSOLIDATED: SINCE_2023, BASIC: WIDE, DEPTH: WIDE})
+        with pytest.raises(ValidationError, match="exchange suffix"):
+            _provider(client).get_ohlcv("GOOG.L", "2025-03-03", "2025-03-07")
+        assert client.calls == []
+
+    @pytest.mark.parametrize(
+        "given,expected",
+        [
+            ("GOOGL", "GOOGL"),
+            ("NVDA", "NVDA"),
+            ("ES~equity", "ES"),
+            ("BRK.A", "BRK.A"),
+            ("PSTH.U", "PSTH.U"),
+        ],
+    )
+    def test_a_plain_ticker_or_class_is_not_mistaken_for_one(
+        self, given, expected
+    ) -> None:
+        """The US class letters (A, B, V, units' U) are not in the suffix
+        table: refusing them would refuse securities this provider serves."""
+        assert DatabentoProvider.to_raw_symbol(given) == expected
+
+
+class TestAShareClassIsFetchedByItsVendorSpelling:
+    def test_a_vendor_that_knows_only_the_dotted_form_answers_once(self) -> None:
+        """A stub vendor that resolves `BRK.B` and nothing undotted: one
+        request, five sessions, sent as the dotted raw symbol."""
+        unknown = [lambda kw: pd.DataFrame() if kw["symbols"] != ["BRK.B"] else None]
+        client = StubClient({CONSOLIDATED: SINCE_2023}, rules=unknown)
+        frame = _provider(client).get_ohlcv("BRK-B", "2025-03-03", "2025-03-07")
+        assert len(frame) == 5
+        assert [c["symbols"] for c in client.calls] == [["BRK.B"]]
+
+    def test_every_spelling_of_one_class_shares_one_cache_entry(self) -> None:
+        """The disk entry is named by the symbol as sent to the vendor, so
+        `BRK/B` after `BRK.B` is a cache hit, not a second metered fetch."""
+        client = StubClient({CONSOLIDATED: SINCE_2023})
+        _provider(client).get_ohlcv("BRK.B", "2025-03-03", "2025-03-07")
+        fresh = StubClient({CONSOLIDATED: SINCE_2023})
+        again = _provider(fresh).get_ohlcv("BRK/B", "2025-03-03", "2025-03-07")
+        assert fresh.calls == [] and len(again) == 5
 
 
 class TestTheInclusiveEndDate:

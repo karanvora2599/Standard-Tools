@@ -6,7 +6,7 @@
 
 namespace sqt {
 
-// AVX2+FMA implementation of the 4-accumulator reduction
+// AVX2+FMA implementation of the 5-accumulator reduction
 // rolling_beta_into's recompute_window step needs (item L: runtime ISA
 // dispatch demo). Lives in its own translation unit (rolling_beta_avx2.cpp)
 // compiled unconditionally with AVX2+FMA codegen enabled, independent of
@@ -26,11 +26,15 @@ namespace sqt {
 // @param x, y     Full series arrays (same ones rolling_beta_into received).
 // @param start    First index of the window (inclusive).
 // @param window   Window length.
-// @param cx, cy   Per-window reference points (x[start]/y[start]) already
+// @param cx, cy   Per-window reference points (the window's newest x and y,
+//                 or 0.0 where that value is not finite) already
 //                 subtracted from every element before accumulating, same
 //                 as the scalar path -- large-baseline catastrophic
 //                 cancellation protection carries over unchanged.
-// @param Sx, Sy, Sxy, Sxx  Output accumulators (overwritten, not added to).
+// @param Sx, Sy, Sxy, Sxx, Syy  Output accumulators (overwritten, not added
+//                 to). Syy is not part of beta: rolling_beta_into watches it,
+//                 with Sxx, to tell when a departed outlier has cost the
+//                 sliding sums enough digits that they must be rebuilt.
 //
 // SQT_NOINLINE is not a tuning hint. Release builds enable link-time
 // optimization, which inlines across translation units, so nothing in the
@@ -40,8 +44,8 @@ namespace sqt {
 // "graceful fallback on an older CPU" into an illegal-instruction crash.
 //
 // Measured on MSVC 19.44 with SQT_NATIVE_ARCH=OFF, that hoist does NOT
-// happen: the linked module contains exactly the 2 vfmadd instructions this
-// kernel issues, with or without the qualifier. So this is insurance against
+// happen: the linked module contained exactly the vfmadd instructions this
+// kernel issued (two at the time), with or without the qualifier. So this is insurance against
 // something the toolchain is permitted to do and currently does not, kept
 // because the cost is one out-of-line call per window and the alternative is
 // relying on an optimizer's present-day choice for a memory-safety property.
@@ -55,6 +59,7 @@ SQT_NOINLINE void rolling_beta_reduce_avx2(
     double&       Sx,
     double&       Sy,
     double&       Sxy,
-    double&       Sxx);
+    double&       Sxx,
+    double&       Syy);
 
 }  // namespace sqt

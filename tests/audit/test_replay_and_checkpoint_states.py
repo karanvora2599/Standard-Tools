@@ -136,7 +136,7 @@ class TestTheVerdictArrivesWithItsEvidence:
         assert result.new_output_hash_normalized is None
 
 
-# ── Signed checkpoints: which of seven states ─────────────────────────────────
+# ── Signed checkpoints: which of eight states ─────────────────────────────────
 
 
 def _write_day(audit_dir: Path, date: str = "2024-05-01") -> "audit.DecisionRecord":
@@ -239,13 +239,13 @@ class TestCheckpointStateNamesTheCause:
             "corrupt_signature"
         )
 
-    def test_content_drift_when_a_record_is_appended_after_signing(
-        self, tmp_path: Path
-    ):
-        """The ordinary, innocent case that used to read as a compromise: a
-        day is still being written to, so its final record hash moves past
-        what was signed. The signature itself is untouched and still
-        verifies."""
+    def test_extended_when_a_record_is_appended_after_signing(self, tmp_path: Path):
+        """The ordinary, innocent case: a day is still being written to, so
+        it grows past what was signed. The signature itself is untouched and
+        still verifies, and every record it covers still recomputes. This
+        was "content_drift", which a day cut short also produced; the grown
+        day now has a state of its own and the shortened one reads
+        "altered"."""
         record = _write_day(tmp_path)
         private_path, public_path = _keypair_files(tmp_path.parent)
         audit.checkpoint_and_sign(
@@ -268,7 +268,7 @@ class TestCheckpointStateNamesTheCause:
         with open(tmp_path / "2024-05-01.jsonl", "a", encoding="utf-8") as f:
             f.write(later.model_dump_json() + "\n")
 
-        assert _state_and_bool("2024-05-01", public_path, tmp_path) == "content_drift"
+        assert _state_and_bool("2024-05-01", public_path, tmp_path) == "extended"
 
     def test_unavailable_when_the_public_key_file_is_unreadable(self, tmp_path: Path):
         _write_day(tmp_path)
@@ -293,17 +293,21 @@ class TestCheckpointStateNamesTheCause:
             == "unavailable"
         )
 
-    def test_every_state_reached_here_is_one_of_the_seven(self, tmp_path: Path):
-        """A state nobody declared is a state nobody can handle."""
+    def test_every_state_reached_here_is_one_of_the_eight(self, tmp_path: Path):
+        """A state nobody declared is a state nobody can handle. The list
+        grew by one when a day that only grew after signing ("extended") was
+        told apart from one whose records no longer recompute ("altered")."""
         declared = {
             "valid",
+            "extended",
+            "altered",
             "no_checkpoint",
             "no_signature",
             "key_mismatch",
             "corrupt_signature",
-            "content_drift",
             "unavailable",
         }
+        assert set(audit.signing.CHECKPOINT_STATES) == declared
         _write_day(tmp_path)
         private_path, public_path = _keypair_files(tmp_path.parent)
         assert (

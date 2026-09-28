@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import sys
+import warnings
 from pathlib import Path
 from typing import Any, List, Optional
 
@@ -14,6 +15,56 @@ logger = logging.getLogger(__name__)
 
 def _audit_enabled() -> bool:
     return os.environ.get("SQT_AUDIT_ENABLED", "1").lower() not in ("0", "false", "")
+
+
+class AuditLocationWarning(UserWarning):
+    """The audit trail lives somewhere designed to be emptied."""
+
+
+def _legacy_cache_audit_dir() -> Path:
+    """Where the audit trail defaulted to before it moved out of the cache."""
+    return Path.home() / ".cache" / "standard_quant_tools" / "audit"
+
+
+def _is_legacy_cache_location(directory: Path) -> bool:
+    """Whether `directory` is that old cache location, however it was
+    reached -- by the default keeping an existing trail's home, or by
+    SQT_AUDIT_DIR naming it. Either way it is a directory cleanup tools
+    empty."""
+    try:
+        return Path(directory).resolve() == _legacy_cache_audit_dir().resolve()
+    except (OSError, RuntimeError):
+        return False
+
+
+_legacy_location_warned = False
+
+
+def _warn_legacy_location_once(legacy: Path) -> None:
+    """Say, once per process, that the trail is in the cache location.
+
+    It was a `logger.warning` on every resolution, which is to say on every
+    tool call, sent to a logger the package gives only a NullHandler -- so a
+    plain script, the `sqt` CLI and the MCP server never showed it, and a
+    host that did configure logging got it once per call. `warnings.warn`
+    reaches stderr by default and pytest's warnings summary; the log line is
+    kept for hosts that read their logs. See the CHANGELOG entry of
+    2026-09-27.
+    """
+    global _legacy_location_warned
+    if _legacy_location_warned:
+        return
+    _legacy_location_warned = True
+    message = (
+        f"The audit trail is still under {legacy}, which is a CACHE "
+        "directory -- cleanup tools empty it and the XDG spec says anything "
+        "there is disposable. It is being used anyway so the existing chain "
+        "stays continuous. Move it somewhere durable and set SQT_AUDIT_DIR."
+    )
+    logger.warning(message)
+    # stacklevel 3: past this helper and _audit_dir, to whoever asked where
+    # the trail lives.
+    warnings.warn(message, AuditLocationWarning, stacklevel=3)
 
 
 def _audit_dir() -> Path:
@@ -43,19 +94,15 @@ def _audit_dir() -> Path:
     # to make a missing day detectable has nothing to compare against. That
     # is the same event as a deletion, and it must not be caused by an
     # upgrade. Say so once, loudly enough to be acted on.
-    legacy = Path.home() / ".cache" / "standard_quant_tools" / "audit"
+    legacy = _legacy_cache_audit_dir()
     if legacy.exists() and any(legacy.glob("*.jsonl")):
-        logger.warning(
-            "The audit trail is still under %s, which is a CACHE directory -- "
-            "cleanup tools empty it and the XDG spec says anything there is "
-            "disposable. It is being used anyway so the existing chain stays "
-            "continuous. Move it somewhere durable and set SQT_AUDIT_DIR.",
-            legacy,
-        )
+        _warn_legacy_location_once(legacy)
         return legacy
 
     if sys.platform == "win32":
-        base = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
+        base = Path(
+            os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local")
+        )
         return base / "standard_quant_tools" / "audit"
     state = os.environ.get("XDG_STATE_HOME")
     root = Path(state) if state else Path.home() / ".local" / "state"

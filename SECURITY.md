@@ -63,7 +63,27 @@ user-supplied strategy code (custom signal callables passed to
   directory and the audit-bundle export — go through one containment check
   (`_containment.require_within`), which also handles Windows'
   extended-length prefix; before that, three of the four did not, and a cold
-  runs directory was refused as a traversal. If you find an input that
+  runs directory was refused as a traversal. The fifth door is external
+  data: `register_external_dataset`, `register_external_panel` and
+  `prepare_vendor_extract` take a whole path from the agent, and every read
+  through them — including the re-read each time a registered reference is
+  resolved — must land inside the runs directory or a directory listed in
+  `SQT_EXTERNAL_DIRS` (absolute paths, separated by the platform path
+  separator). The setting is read from the environment only, so no tool call
+  can widen it; the process working directory is never implied, because an
+  MCP client chooses it. The path is checked as text before the filesystem is
+  asked anything (a network or device path is refused without being
+  opened), again after links and junctions are followed, and, for a
+  directory dataset, file by file. A refusal reads the same whether or not
+  the path exists and echoes only the caller's own text. Environment
+  variables in a path (`$NAME`, `%NAME%`) are not expanded: they once were,
+  which put any variable's value — the redaction salt, a bearer token —
+  into the refusal and so into the append-only decision log.
+  `prepare_vendor_extract`'s output is held tighter still: a relative name
+  lands in the runs directory's `extracts` folder, an absolute one must lie
+  in a listed directory, and nothing is ever written into the OHLCV cache,
+  the audit directory or the rest of the runs directory, where a planted
+  file would be read back as the library's own. If you find an input that
   bypasses one of these checks and reaches an unintended path or code
   branch, that's a legitimate report — please include the specific tool name
   and payload.

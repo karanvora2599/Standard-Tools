@@ -233,14 +233,18 @@ Ols2Result ols2(const double* y, const double* x, std::size_t n) {
         ss_res += r.residuals[i] * r.residuals[i];
         ss_tot += (y[i] - y_mean) * (y[i] - y_mean);
     }
-    // ss_tot == 0 (a constant response) makes R^2 a 0/0. Reporting 0.0 is a
-    // convention, not a derivation -- and it is deliberately the SAME
-    // convention the NumPy fallback in analysis/regression.py uses
-    // (`1.0 - ss_res / ss_tot if ss_tot != 0 else 0.0`), so calculate_beta
-    // returns the same number whether or not the extension was built. Do not
-    // "correct" this to NaN on one side alone; ss_tot is a sum of squares, so
-    // `> 0` and `!= 0` select the same branch.
-    r.r_squared = (ss_tot > 0) ? 1.0 - ss_res / ss_tot : 0.0;
+    // ss_tot == 0 (a constant response) makes R^2 a 0/0: there is no
+    // variance to explain, so the fraction explained is undefined, and NaN
+    // says so. 0.0 read as "the regressor explains nothing", which is a
+    // measurement this data cannot make. The NumPy fallback in
+    // analysis/regression.py reports NaN for a constant y as well, so
+    // calculate_beta gives the same answer with or without the extension.
+    //
+    // A value test is not needed here the way it is in the fallback: y_mean
+    // above is cy + syd/s1 with cy = y[0], and for a constant y every shifted
+    // term is exactly 0, so ss_tot is exactly 0 rather than rounding residue.
+    // ss_tot is a sum of squares, so `> 0` and `!= 0` select the same branch.
+    r.r_squared = (ss_tot > 0) ? 1.0 - ss_res / ss_tot : kNaN;
     return r;
 }
 

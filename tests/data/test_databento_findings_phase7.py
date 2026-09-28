@@ -100,6 +100,38 @@ class TestTheDeadGenerationIsCollected:
     def test_a_missing_cache_directory_is_nothing_to_collect(self):
         assert dead_generations() == []
 
+    def test_a_provider_bump_retires_that_provider_alone(self):
+        """
+        Databento's generation moved on its own, because its files may name
+        one instrument and hold another's bars. Its previous files are dead;
+        yfinance and Polygon files at the shared version keep their names
+        and stay current, so a rate-limited cache is not refetched.
+        """
+        root = cache_module._CACHE_ROOT
+        root.mkdir(parents=True)
+        names = {
+            "v3_databento-EQUS.SUMMARY_GOOG.L_a_b_1d.parquet": True,
+            "v3_databento-GLBX.MDP3_ES.C.0_a_b_1d.parquet": True,
+            "v4_databento-EQUS.SUMMARY_AAPL_a_b_1d.parquet": False,
+            "v3_yfinance_AAPL_a_b_1d.parquet": False,
+            "v3_polygon_MSFT_a_b_1d.parquet": False,
+            "v2_polygon_MSFT_a_b_1d.parquet": True,
+        }
+        for name in names:
+            (root / name).write_bytes(b"x")
+        dead = {p.name for p in dead_generations(dry_run=True)}
+        assert dead == {name for name, is_dead in names.items() if is_dead}
+
+    def test_each_provider_writes_under_its_own_generation(self):
+        path = cache_module._parquet_path
+        assert path("AAPL", "2025-03-03", "2025-03-07", "1d").name.startswith("v3_")
+        polygon = path("AAPL", "2025-03-03", "2025-03-07", "1d", provider="polygon")
+        assert polygon.name.startswith("v3_polygon_")
+        databento = path(
+            "AAPL", "2025-03-03", "2025-03-07", "1d", provider="databento-XNAS.ITCH"
+        )
+        assert databento.name.startswith("v4_databento-XNAS.ITCH_")
+
 
 # ── the session cache and the guard ──────────────────────────────────────
 

@@ -17,6 +17,7 @@ readable as features accrete (retention/legal-hold, checkpoint signing,
 pluggable storage backends, ...):
 
     hashing     — content-fingerprint hashing (hash_payload, hash_dataframe)
+    json_native — what a record's input is made of before it is hashed
     context     — per-call request context + correlated-logging helper
     provenance  — git/package-version/strategy-source best-effort provenance
     paths       — audit-dir resolution, day-file discovery, advisory locking
@@ -66,8 +67,10 @@ from .replay import verify_replay
 from .retention import gc, gc_candidates, hold_day, is_held, release_hold, seal_day
 from .signing import (
     HAS_CRYPTOGRAPHY,
+    CheckpointVerification,
     checkpoint_and_sign,
     generate_keypair,
+    verify_checkpoint,
     verify_checkpoint_signature,
     verify_checkpoint_state,
 )
@@ -78,6 +81,7 @@ from .writer import AuditWriter
 __all__ = [
     "AuditStorageBackend",
     "AuditWriter",
+    "CheckpointVerification",
     "DecisionRecord",
     "ExportedBundle",
     "HAS_CRYPTOGRAPHY",
@@ -101,6 +105,7 @@ __all__ = [
     "seal_day",
     "verify_audit_log_integrity",
     "verify_audit_trail_integrity",
+    "verify_checkpoint",
     "verify_checkpoint_signature",
     "verify_checkpoint_state",
     "verify_replay",

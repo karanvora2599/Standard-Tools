@@ -15,12 +15,19 @@ caller already has, on their own disk, and makes it addressable WITHOUT
 moving it. What gets stored is a pointer and a schema. What gets read is a
 batch at a time.
 
-WHY PARQUET AND CSV ONLY. Not a limitation -- a containment boundary. The
-path is caller-supplied and reaches this library from an agent, so "read the
-file at this path and put it in a tool result" is a capability worth
-bounding. A columnar or delimited reader that fails on anything else refuses
-to be a general file-exfiltration primitive, and both formats cover what
-market-data vendors actually ship.
+WHERE IT MAY READ. The path is caller-supplied and reaches this library from
+an agent, so "read the file at this path and put it in a tool result" is a
+capability worth bounding, and it is bounded twice. First by DIRECTORY: a
+path is read only when it lies inside the runs directory or a directory the
+operator listed in `SQT_EXTERNAL_DIRS` (`external_roots`), checked on the
+text before anything touches the filesystem and again after links are
+followed, and for a directory dataset on every file inside it. Second by
+FORMAT: only Parquet and CSV are read, so even inside the fence a reader that
+fails on anything else refuses to be a general file-exfiltration primitive,
+and both formats cover what market-data vendors actually ship. The format
+bound alone was the whole bound until the CHANGELOG entry of 2026-09-27, and
+it still let any market-data-shaped file on the machine -- a blotter, a
+positions export -- be previewed row by row.
 
 WHAT A KIND IS FOR. The same thing it is for in `handoff.py`: a mismatched
 handoff should fail by name, immediately, rather than several frames deep in
@@ -44,11 +51,31 @@ import hashlib
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 import pandas as pd
 
+from standard_quant_tools._containment import is_within, is_within_any
+from standard_quant_tools._env import env_paths
 from standard_quant_tools.error import ValidationError
+
+#: The setting that lists the directories, beyond the runs directory, that
+#: external data may be read from and a converted extract written to.
+EXTERNAL_DIRS_ENV = "SQT_EXTERNAL_DIRS"
+
+#: Where, under the runs directory, a conversion with a relative `out_path`
+#: lands -- and the only part of the runs directory a conversion may write.
+EXTRACTS_DIR = "extracts"
+
+#: Two leading separators, in any mix, begin a network share or a device
+#: path on Windows (`\\host\share`, `\\.\PhysicalDrive0`). Refused on the
+#: text, because even asking whether one exists opens a connection to the
+#: host it names and authenticates this machine to it.
+_NETWORK_PREFIXES = ("\\\\", "//", "\\/", "/\\")
+
+#: Windows' extended-length prefix in front of a drive letter is a local
+#: path spelled long, and is accepted as the path it spells.
+_EXTENDED_DRIVE_PREFIX = "\\\\?\\"
 
 #: Suffix -> the pyarrow dataset format that reads it. A directory is
 #: probed by what is inside it, so a partitioned Parquet dataset and a
@@ -175,37 +202,380 @@ def _suffix(path: Path) -> str:
     return suffixes[-1] if suffixes else ""
 
 
-def resolve_path(path: str) -> Path:
-    """
-    Turn a caller-supplied path into one that exists, or say why not.
+# ── the fence ─────────────────────────────────────────────────────────
+#
+# WHY THE RUNS DIRECTORY AND NOT THE WORKING DIRECTORY. The working
+# directory of an MCP server is chosen by the client that launches it --
+# often the home directory or `/` -- and moves with `os.chdir`, so a fence
+# that included it would cover most of the disk on the machines where it
+# matters. The runs directory is where this library's own depth fetches
+# register their Parquet, so the built-in chains keep working with nothing
+# configured. Anything else is the operator's decision, made in the
+# environment the process starts with and never in a tool argument, so an
+# agent cannot widen it.
+#
+# WHY THE CACHE IS NEVER A WRITE TARGET. A Parquet named like a cache entry
+# for a window not yet fetched would be served as a hit. The audit
+# directory and the rest of the runs directory are refused for the same
+# reason: a file placed there is read back as something this library wrote.
 
-    Deliberately NOT constrained to `SQT_RUNS_DIR`, unlike everything in
-    `backtest/artifacts.py`. That containment exists because run_id and name
-    are agent-chosen slugs joined into a path; here the whole point is to
-    reach data this library did not write and will not copy. The bound that
-    replaces it is format: only Parquet and CSV are readable, so a path
-    that is not tabular market data refuses.
+
+def _runs_root() -> Path:
+    from standard_quant_tools._runspath import runs_dir
+
+    return runs_dir()
+
+
+def _resolved(path: Path) -> Path:
+    """`path` with links followed, or its absolute form if that fails."""
+    try:
+        return Path(path).resolve()
+    except (OSError, RuntimeError, ValueError):
+        return Path(os.path.abspath(path))
+
+
+def _spellings(roots: Sequence[Path]) -> Tuple[Path, ...]:
+    """Each root as written and as resolved, for the check on the text.
+
+    A root that is itself a link (`/tmp` on macOS is `/private/tmp`) is
+    matched either way before anything is opened; the check after links
+    are followed uses the resolved form only.
     """
+    spelled: List[Path] = []
+    for root in roots:
+        for form in (Path(os.path.abspath(root)), _resolved(root)):
+            if form not in spelled:
+                spelled.append(form)
+    return tuple(spelled)
+
+
+def _unique_resolved(roots: Sequence[Path]) -> Tuple[Path, ...]:
+    resolved: List[Path] = []
+    for root in roots:
+        form = _resolved(root)
+        if form not in resolved:
+            resolved.append(form)
+    return tuple(resolved)
+
+
+def configured_external_dirs() -> Tuple[Path, ...]:
+    """The directories `SQT_EXTERNAL_DIRS` lists, as written (absolute).
+
+    Refuses, by name, a relative entry or one naming a file.
+    """
+    return env_paths(EXTERNAL_DIRS_ENV)
+
+
+def external_roots() -> Tuple[Path, ...]:
+    """
+    Every directory external data may be read from, resolved: the runs
+    directory, then each directory `SQT_EXTERNAL_DIRS` lists.
+
+    The runs directory is always one of them, because this library's own
+    depth fetches register the Parquet they write there.
+    """
+    return _unique_resolved((_runs_root(),) + configured_external_dirs())
+
+
+def _extracts_root() -> Path:
+    return _runs_root() / EXTRACTS_DIR
+
+
+def _roots_text(roots: Sequence[Path]) -> str:
+    return os.pathsep.join(str(root) for root in roots) or "none"
+
+
+def _widen_hint() -> str:
+    return (
+        f"To use another directory, add it to {EXTERNAL_DIRS_ENV} -- absolute "
+        f"paths separated by {os.pathsep!r} -- in the environment this process "
+        "starts with. It is read from there and nowhere else, so no tool call "
+        "can widen it."
+    )
+
+
+def _read_refusal(text: str, roots: Sequence[Path]) -> ValidationError:
+    # The caller's own text is echoed and nothing derived from it: not the
+    # resolved form (which would disclose where a link points) and not an
+    # expansion. The same sentence whether or not the path exists, so the
+    # fence answers no question about what lies outside it.
+    return ValidationError(
+        f"{text!r} is outside the directories external data may be read from "
+        f"({_roots_text(roots)}). This process reads external data only from "
+        f"its runs directory and the directories {EXTERNAL_DIRS_ENV} lists. "
+        + _widen_hint()
+    )
+
+
+def _write_refusal(text: str) -> ValidationError:
+    return ValidationError(
+        f"{text!r} is outside the directories a converted extract may be "
+        f"written to: the runs directory's {EXTRACTS_DIR!r} folder "
+        f"({_extracts_root()}), where a relative name lands, and the "
+        f"directories {EXTERNAL_DIRS_ENV} lists "
+        f"({_roots_text(configured_external_dirs())}). " + _widen_hint()
+    )
+
+
+def _network_refusal(text: str) -> ValidationError:
+    return ValidationError(
+        f"{text!r} is a network or device path. Those are refused before "
+        "anything opens them, because opening one makes this machine "
+        "authenticate to whatever host it names. Copy the data to a local "
+        f"directory that {EXTERNAL_DIRS_ENV} lists."
+    )
+
+
+def _local_text(text: str) -> str:
+    """The path as the caller spelled it, minus a Windows extended-length
+    prefix in front of a drive letter; refuses network and device paths."""
+    if "\x00" in text:
+        raise ValidationError(
+            f"{text!r} contains a NUL character, which no path can hold."
+        )
+    local = text
+    rest = text[len(_EXTENDED_DRIVE_PREFIX) :]
+    if (
+        text.startswith(_EXTENDED_DRIVE_PREFIX)
+        and len(rest) >= 2
+        and rest[0].isalpha()
+        and rest[1] == ":"
+    ):
+        local = rest
+    if local[:2] in _NETWORK_PREFIXES:
+        raise _network_refusal(text)
+    expanded = os.path.expanduser(local)
+    if expanded[:2] in _NETWORK_PREFIXES:
+        raise _network_refusal(text)
+    return expanded
+
+
+def _follow(lexical: Path, text: str) -> Path:
+    try:
+        return lexical.resolve()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ValidationError(
+            f"{text!r} could not be resolved ({type(exc).__name__}). Pass a "
+            "plain absolute path to a file or directory."
+        ) from exc
+
+
+def _fenced_read(text: str) -> Path:
+    """The fence for a read, before anything is known about the target.
+
+    The order is the point. The TEXT is checked first, so a network share,
+    another drive or a `..` walk out of a root is refused without the
+    filesystem being asked anything. Links are followed second and the
+    answer checked again, so a link or junction inside a root that points
+    out is refused. Only a path inside the fence is ever asked whether it
+    exists.
+    """
+    roots = external_roots()
+    lexical = Path(os.path.abspath(_local_text(text)))
+    if not is_within_any(lexical, _spellings(roots)):
+        raise _read_refusal(text, roots)
+    resolved = _follow(lexical, text)
+    if not is_within_any(resolved, roots):
+        raise _read_refusal(text, roots)
+    return resolved
+
+
+def _vetted_files(directory: Path, roots: Sequence[Path]) -> List[Path]:
+    """Every file a directory dataset holds, each confirmed inside the fence.
+
+    The directory being inside is not enough: the walk follows file links
+    and junctions, and so does the reader, so one link planted among the
+    partitions would put a file from anywhere into the dataset.
+    """
+    files = _files(directory)
+    for file in files:
+        target = _resolved(file)
+        if not is_within_any(target, roots):
+            relative = file.relative_to(directory)
+            raise ValidationError(
+                f"{directory} holds {str(relative)!r}, which is a link to a "
+                "file outside the directories external data may be read from "
+                f"({_roots_text(roots)}). A directory is read file by file, so "
+                "every file in it has to lie inside them too. Remove the link, "
+                "or copy the file into the directory. " + _widen_hint()
+            )
+    return files
+
+
+def _resolve_readable(path: str) -> Tuple[Path, List[Path]]:
+    """`resolve_path`, plus the vetted file list the reader is given."""
     text = str(path).strip()
     if not text:
         raise ValidationError(
             "an external dataset needs a path; got an empty string. Pass the "
             "file, or the directory holding a partitioned dataset."
         )
-    resolved = Path(os.path.expandvars(os.path.expanduser(text))).resolve()
+    resolved = _fenced_read(text)
     if not resolved.exists():
         raise ValidationError(
             f"no file or directory at {resolved}. Nothing is copied when a "
             "dataset is registered, so the path has to be readable from "
             "wherever this library runs, not only from where it was typed."
         )
+    if resolved.is_dir():
+        return resolved, _vetted_files(resolved, external_roots())
+    return resolved, [resolved]
+
+
+def resolve_path(path: str) -> Path:
+    """
+    Turn a caller-supplied path into one that exists inside the fence, or
+    say why not.
+
+    Every read of external data comes through here -- registration, the
+    re-read on every `resolve()` and `describe()` of a registered reference,
+    a vendor conversion's input and an external model panel -- so this is
+    the one place the fence has to hold. Narrowing `SQT_EXTERNAL_DIRS`
+    therefore revokes access to what was registered under the wider value:
+    a reference whose file now lies outside stops resolving.
+
+    `~` is expanded, because the fence decides where it may point.
+    Environment variables are NOT: a model-chosen `$NAME` or `%NAME%` would
+    otherwise put that variable's value into a refusal, and a refusal is
+    written verbatim into the decision log.
+    """
+    return _resolve_readable(path)[0]
+
+
+def resolve_output_path(path: str) -> Path:
+    """
+    Where a conversion may write `path`, resolved, or a refusal.
+
+    A relative name lands under the runs directory's `extracts` folder,
+    never in the working directory. An absolute path has to lie inside that
+    folder or a directory `SQT_EXTERNAL_DIRS` lists, and never inside the
+    OHLCV cache, the audit directory or the rest of the runs directory --
+    even when a listed directory contains them. Whether something is
+    already at the path is the caller's check, made after this one.
+    """
+    text = str(path).strip()
+    if not text:
+        raise ValidationError(
+            "a conversion needs an out_path; got an empty string. Give a file "
+            f"name, which lands in the runs directory's {EXTRACTS_DIR!r} folder."
+        )
+    local = Path(_local_text(text))
+    extracts = _extracts_root()
+    if not local.is_absolute():
+        local = extracts / local
+    configured = configured_external_dirs()
+    allowed = (extracts,) + configured
+    lexical = Path(os.path.abspath(local))
+    if not is_within_any(lexical, _spellings(allowed)):
+        raise _write_refusal(text)
+    resolved = _follow(lexical, text)
+    if not is_within_any(resolved, _unique_resolved(allowed)):
+        raise _write_refusal(text)
+    _refuse_owned_stores(resolved, text, extracts)
     return resolved
+
+
+def _owned_stores() -> List[Tuple[Path, str, str]]:
+    """The directories this library reads back as its own, with what a
+    planted file would be mistaken for."""
+    from standard_quant_tools.audit.paths import _audit_dir
+    from standard_quant_tools.data import _cache
+
+    stores = []
+    # The cache root the cache itself is using: frozen at import, and what a
+    # test that relocates the cache assigns.
+    cache_root = getattr(_cache, "_CACHE_ROOT", None)
+    if cache_root is None and callable(getattr(_cache, "cache_root", None)):
+        cache_root = _cache.cache_root()
+    if cache_root is not None:
+        stores.append(
+            (
+                Path(cache_root),
+                "the OHLCV cache directory",
+                "a cache hit for a window nobody fetched",
+            )
+        )
+    stores.append((_audit_dir(), "the audit directory", "part of the decision record"))
+    stores.append(
+        (
+            _runs_root(),
+            f"the runs directory outside its {EXTRACTS_DIR!r} folder",
+            "an artifact nothing published",
+        )
+    )
+    return stores
+
+
+def _inside(resolved: Path, store: Path) -> bool:
+    """Whether `resolved` lies inside `store`, asking the filesystem when
+    the spelling alone cannot say.
+
+    Path comparison is case-sensitive on macOS while its filesystem usually
+    is not, so `Cache/x` and `cache/x` can be one directory spelled two
+    ways. For a store this library owns, the wrong answer lets a write in,
+    so an existing ancestor is compared by identity as well as by name.
+    """
+    if is_within(resolved, store):
+        return True
+    try:
+        store_stat = os.stat(store)
+    except OSError:
+        return False
+    if not store_stat.st_ino:  # a filesystem with no file identity to compare
+        return False
+    for ancestor in (resolved, *resolved.parents):
+        try:
+            if os.path.samestat(os.stat(ancestor), store_stat):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _refuse_owned_stores(resolved: Path, text: str, extracts: Path) -> None:
+    extracts_resolved = _resolved(extracts)
+    in_extracts = is_within(resolved, extracts_resolved)
+    for root, label, mistaken_for in _owned_stores():
+        store = _resolved(root)
+        if not _inside(resolved, store):
+            continue
+        # The extracts folder is the one place a conversion is meant to
+        # write, so a store that CONTAINS it (the runs directory always; a
+        # cache configured as a parent of the runs directory) does not
+        # claim what lands inside it.
+        if in_extracts and is_within(extracts_resolved, store):
+            continue
+        raise ValidationError(
+            f"{text!r} lies inside {label}, which this library owns. A "
+            "converted extract is never written there, even when "
+            f"{EXTERNAL_DIRS_ENV} covers it, because a file placed there would "
+            f"be read back as {mistaken_for}. Give a bare file name, which "
+            f"lands in {extracts}, or a path in a directory "
+            f"{EXTERNAL_DIRS_ENV} lists."
+        )
 
 
 def _files(path: Path) -> List[Path]:
     if path.is_file():
         return [path]
     return sorted(p for p in path.rglob("*") if p.is_file())
+
+
+def _reader_files(directory: Path, files: Sequence[Path]) -> List[str]:
+    """The files of a directory the reader is handed, by name.
+
+    The same ones the reader's own directory discovery would pick -- it
+    skips any name starting with `.` or `_` (`_SUCCESS`, `.crc`) -- but
+    taken from the list the fence already checked, so a link planted after
+    the check is not picked up by a second walk.
+    """
+    chosen = []
+    for file in files:
+        parts = file.relative_to(directory).parts
+        if any(part.startswith((".", "_")) for part in parts):
+            continue
+        chosen.append(str(file))
+    return chosen
 
 
 def fingerprint(path: Path) -> str:
@@ -316,16 +686,26 @@ class ExternalDataset:
 
 
 def open_dataset(path: Path, *, fmt: Optional[str] = None):
-    """The pyarrow dataset for a file or a directory of them."""
+    """
+    The pyarrow dataset for a file or a directory of them.
+
+    Fenced on every call, a `Path` included: a handle outlives the check
+    made when it was created, and this is where bytes are actually read.
+    """
+    resolved, files = _resolve_readable(str(path))
+    return _open(resolved, files, fmt)
+
+
+def _open(resolved: Path, files: Sequence[Path], fmt: Optional[str]):
     arrow_dataset = _pyarrow_dataset()
-    resolved = path if isinstance(path, Path) else resolve_path(str(path))
     fmt = fmt or _infer_format(resolved)
     if fmt not in FORMATS:
         raise ValidationError(
             f"unknown format {fmt!r}; expected one of {list(FORMATS)}"
         )
+    source: Any = _reader_files(resolved, files) if resolved.is_dir() else str(resolved)
     try:
-        return arrow_dataset.dataset(str(resolved), format=fmt)
+        return arrow_dataset.dataset(source, format=fmt)
     except Exception as exc:  # noqa: BLE001 -- one refusal, not an arrow trace
         raise ValidationError(
             f"{resolved} could not be opened as a {fmt} dataset -- {exc}. A "
@@ -358,9 +738,9 @@ def inspect(
     bytes are not the ones that were counted) passes `count_rows=True` with
     no `known_rows` and gets a fresh number.
     """
-    resolved = resolve_path(path)
+    resolved, vetted = _resolve_readable(path)
     fmt = fmt or _infer_format(resolved)
-    dataset = open_dataset(resolved, fmt=fmt)
+    dataset = _open(resolved, vetted, fmt)
     schema = dataset.schema
     columns = tuple(str(name) for name in schema.names)
     if not columns:
@@ -378,7 +758,6 @@ def inspect(
         except Exception:  # noqa: BLE001 - a count is a convenience, not the point
             rows = None
 
-    files = _files(resolved)
     handle = ExternalDataset(
         path=resolved,
         kind=str(kind),
@@ -386,7 +765,7 @@ def inspect(
         columns=columns,
         dtypes={str(name): str(schema.field(name).type) for name in schema.names},
         rows=rows,
-        n_files=len(files),
+        n_files=len(vetted),
         size_bytes=total_bytes(resolved),
         fingerprint=fingerprint(resolved),
     )
@@ -491,16 +870,21 @@ def check_schema(kind: str, columns: Sequence[str]) -> List[str]:
 __all__ = [
     "DEFAULT_BATCH_ROWS",
     "DEFAULT_SCAN_LIMIT",
+    "EXTERNAL_DIRS_ENV",
+    "EXTRACTS_DIR",
     "FORMATS",
     "KIND_COLUMNS",
     "KIND_DESCRIPTIONS",
     "ExternalDataset",
     "book_levels",
     "check_schema",
+    "configured_external_dirs",
+    "external_roots",
     "fingerprint",
     "inspect",
     "open_dataset",
     "required_columns",
+    "resolve_output_path",
     "resolve_path",
     "total_bytes",
 ]

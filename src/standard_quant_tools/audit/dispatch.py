@@ -13,6 +13,7 @@ from standard_quant_tools.error import AuditIntegrityError
 
 from .context import _data_sources_var, _request_id_var, new_request_id
 from .hashing import hash_payload
+from .json_native import to_json_native
 from .models import DecisionRecord
 from .paths import _audit_enabled
 from .provenance import (
@@ -114,7 +115,14 @@ def _run_and_record(
         if _audit_enabled():
             try:
                 fields = _redact_fields()
-                raw_input = model_instance.model_dump()
+                # JSON-native before anything reads it, and the SAME
+                # converted dict feeds both redactions below, so the value a
+                # placeholder stands for in `input` is the value scrubbed
+                # from `error_message`. A NaN is kept as the token "NaN"
+                # rather than null so a replay rebuilds the call that was
+                # made; a numpy value no longer makes the record unwritable.
+                # See the CHANGELOG entry of 2026-09-27.
+                raw_input = to_json_native(model_instance.model_dump())
                 # Redacting `input` alone isn't enough -- a tool exception's
                 # own message can echo a redacted value back (e.g.
                 # ValueError(f"Unknown account: {account_id}")), leaking it

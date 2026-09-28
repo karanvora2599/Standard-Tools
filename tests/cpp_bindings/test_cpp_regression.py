@@ -408,3 +408,80 @@ class TestRollingFactorLoadingsWrapper:
         asset, factors = factor_data
         result = rfl_wrapper(asset, factors, window=60)
         pd.testing.assert_index_equal(result.index, DATES)
+
+
+def _exact_window_beta(y, x):
+    """cov/var of one window in exact rational arithmetic: the reference no
+    floating-point sliding sum can be compared against too strictly."""
+    from fractions import Fraction
+
+    fx = [Fraction(float(v)) for v in x]
+    fy = [Fraction(float(v)) for v in y]
+    mx, my = sum(fx) / len(fx), sum(fy) / len(fy)
+    num = sum((a - mx) * (b - my) for a, b in zip(fx, fy))
+    return float(num / sum((a - mx) ** 2 for a in fx))
+
+
+@requires_cpp
+class TestRollingBetaAfterAnOutlier:
+    """
+    A large finite value is subtracted back out of the sliding sums when it
+    leaves the window, and takes their low-order digits with it. Measured
+    with one 1e8 print among 0.01-scale returns: 19 consecutive betas wrong
+    by up to 9.6x, signs flipped, until the next scheduled rebuild. The
+    kernel now rebuilds as soon as a second moment falls four decades below
+    its peak, and centres each rebuild on a value still in the window.
+    """
+
+    @pytest.mark.parametrize("magnitude", [1e5, 1e6, 1e8])
+    @pytest.mark.parametrize("side", ["x", "y"])
+    def test_every_later_window_matches_the_exact_beta(self, magnitude, side):
+        window = 60
+        for seed in range(20):
+            rng = np.random.default_rng(seed)
+            x = rng.normal(0, 0.01, 200)
+            y = 0.001 + 1.3 * x + rng.normal(0, 0.001, 200)
+            (x if side == "x" else y)[100] = magnitude
+            got = _cpp.rolling_beta(y, x, window)
+            for i in range(160, 200):  # every window after the print left
+                want = _exact_window_beta(y[i - 59 : i + 1], x[i - 59 : i + 1])
+                assert abs(got[i] - want) <= 1e-9 * abs(want), (seed, i)
+
+    @pytest.mark.parametrize("position", [60, 120])
+    def test_a_print_at_a_rebuild_boundary(self, position):
+        """A print that opened a rebuilt window used to become the reference
+        point every value in the window was shifted by."""
+        rng = np.random.default_rng(position)
+        x = rng.normal(0, 0.01, 240)
+        y = 0.5 * x + rng.normal(0, 0.001, 240)
+        x[position] = 1e8
+        got = _cpp.rolling_beta(y, x, 60)
+        for i in range(position + 60, 240):
+            want = _exact_window_beta(y[i - 59 : i + 1], x[i - 59 : i + 1])
+            assert abs(got[i] - want) <= 1e-9 * abs(want), i
+
+    @pytest.mark.parametrize("poison", [np.nan, np.inf])
+    def test_a_bad_bar_is_nan_for_exactly_its_windows(self, poison):
+        """A NaN or inf cannot be subtracted back out either; the output used
+        to stay NaN up to window-1 bars past the last window containing it."""
+        rng = np.random.default_rng(1)
+        x = rng.normal(0, 0.01, 40)
+        y = 0.5 * x + rng.normal(0, 0.001, 40)
+        x[10] = poison
+        got = _cpp.rolling_beta(y, x, 5)
+        assert np.isnan(got[10:15]).all()
+        assert np.isfinite(got[4:10]).all() and np.isfinite(got[15:]).all()
+        for i in range(15, 40):
+            want = _exact_window_beta(y[i - 4 : i + 1], x[i - 4 : i + 1])
+            assert got[i] == pytest.approx(want, rel=1e-9)
+
+    def test_a_clean_series_is_the_exact_beta(self):
+        """The null case: ordinary data needs no extra rebuilds and stays at
+        the exact beta to rounding."""
+        rng = np.random.default_rng(7)
+        x = rng.normal(0, 0.01, 400)
+        y = 0.8 * x + rng.normal(0, 0.002, 400)
+        got = _cpp.rolling_beta(y, x, 60)
+        for i in range(59, 400, 7):
+            want = _exact_window_beta(y[i - 59 : i + 1], x[i - 59 : i + 1])
+            assert abs(got[i] - want) <= 1e-12 * abs(want)

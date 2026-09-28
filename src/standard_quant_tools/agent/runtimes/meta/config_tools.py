@@ -1,10 +1,11 @@
 """
 What this process is actually configured to do.
 
-Twenty `SQT_*` environment variables govern whether decisions are recorded,
-where artifacts land, which provider can be reached, whether the compiled
-extension is used and how a model package is signed -- and until now not
-one of them was reported by any tool. An agent learned its own
+Twenty-one `SQT_*` environment variables govern whether decisions are
+recorded, where artifacts land, which directories external data may be read
+from, which provider can be reached, whether the compiled extension is used
+and how a model package is signed -- and until now not one of them was
+reported by any tool. An agent learned its own
 configuration by triggering it: a run whose artifacts vanished, a fetch
 that refused for want of a credential, a decision log that recorded
 nothing. That is the same enforced-but-unreadable shape the numeric
@@ -168,6 +169,12 @@ def _cache_dir_value() -> Optional[str]:
     from standard_quant_tools.data import _cache
 
     return str(_cache._CACHE_ROOT)
+
+
+def _external_dirs_value() -> Optional[str]:
+    from standard_quant_tools.data.external import external_roots
+
+    return os.pathsep.join(str(root) for root in external_roots())
 
 
 def _native_disabled_value() -> Optional[str]:
@@ -354,6 +361,23 @@ _OTHER_SETTINGS: Tuple[_Setting, ...] = (
         resolve=_cache_dir_value,
     ),
     _Setting(
+        name="SQT_EXTERNAL_DIRS",
+        category="storage",
+        reader="data.external.external_roots",
+        default="the runs directory only",
+        is_secret=False,
+        effect=(
+            "The directories, separated by the platform path separator, "
+            "that register_external_dataset, register_external_panel and "
+            "prepare_vendor_extract may read from and a conversion may "
+            "write to, in addition to the runs directory. The value "
+            "reported is every directory in force, runs directory first. "
+            "Read from the environment only, so no tool call can widen it; "
+            "a relative entry is refused by name."
+        ),
+        resolve=_external_dirs_value,
+    ),
+    _Setting(
         name="SQT_DISABLE_NATIVE",
         category="execution",
         reader="standard_quant_tools.native_disabled",
@@ -484,7 +508,7 @@ _OTHER_SETTINGS: Tuple[_Setting, ...] = (
     ),
 )
 
-#: The twenty settings this library reads, in one place.
+#: The twenty-one settings this library reads, in one place.
 SETTINGS: Tuple[_Setting, ...] = AUDIT_SETTINGS + _OTHER_SETTINGS
 
 #: Consulted by the audit path when SQT_AUDIT_DIR is unset. Not this

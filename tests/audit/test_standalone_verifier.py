@@ -181,3 +181,108 @@ class TestStandaloneVerifierEndToEnd:
     def test_cli_entrypoint_exits_nonzero_without_args(self, standalone):
         with pytest.raises(SystemExit):
             standalone.main([])
+
+
+def _old_writer_day(directory: Path, value) -> Path:
+    """One record as the previous writer wrote it for this input: hashed
+    over the live values, written as pydantic's JSON (a NaN becomes null)."""
+    w = audit.AuditWriter(audit_dir=directory)
+    day = directory / "2024-01-01.jsonl"
+    record = audit.DecisionRecord(
+        request_id="r1",
+        timestamp_utc="2024-01-01T00:00:00+00:00",
+        tool_name="t1",
+        input=value,
+        cpp_available=False,
+        duration_ms=1.0,
+        status="ok",
+    )
+    record.prev_record_hash = w._bootstrap_new_day(day)
+    record.record_hash = audit.hash_payload(
+        {**record.model_dump(exclude={"record_hash"}), "record_hash": None}
+    )
+    day.write_text(record.model_dump_json() + "\n", encoding="utf-8")
+    return day
+
+
+class TestBothVerifiersReadAnOldNonFiniteLineAlike:
+    """The library and the auditor's copy must accept exactly the same
+    lines as written-before-the-fix, with the same words, and refuse the
+    same edits -- the explanation is bounded, and a bound applied in one
+    copy only would make them disagree about a line with many nulls."""
+
+    def test_the_same_note_and_no_problem(self, standalone, tmp_path: Path):
+        value = {f"unset_{i}": None for i in range(12)}
+        value["spot"] = [100.0, float("nan"), float("inf")]
+        _old_writer_day(tmp_path, value)
+
+        real_notes: list = []
+        standalone_notes: list = []
+        assert audit.verify_audit_trail_integrity(tmp_path, notes=real_notes) == []
+        assert standalone.verify_trail(tmp_path, notes=standalone_notes) == []
+        assert real_notes and real_notes == standalone_notes
+
+    @pytest.mark.parametrize(
+        "edit",
+        [
+            lambda line: line["input"]["spot"].__setitem__(0, None),
+            lambda line: line["input"]["spot"].__setitem__(0, 101.0),
+            lambda line: line.__setitem__("tool_name", "t2"),
+        ],
+        ids=["a value nulled", "a value changed", "another field changed"],
+    )
+    def test_an_edit_is_a_problem_for_both(self, standalone, tmp_path: Path, edit):
+        day = _old_writer_day(tmp_path, {"spot": [100.0, float("nan")]})
+        line = json.loads(day.read_text(encoding="utf-8").splitlines()[0])
+        edit(line)
+        day.write_text(json.dumps(line) + "\n", encoding="utf-8")
+
+        real_notes: list = []
+        standalone_notes: list = []
+        real = audit.verify_audit_trail_integrity(tmp_path, notes=real_notes)
+        mirrored = standalone.verify_trail(tmp_path, notes=standalone_notes)
+        assert real and len(real) == len(mirrored)
+        assert real_notes == standalone_notes == []
+
+    def test_the_bounds_are_the_same_in_both(self, standalone):
+        from standard_quant_tools.audit import verify as verify_module
+
+        assert standalone._EXPLAIN_MAX_TRIALS == verify_module._EXPLAIN_MAX_TRIALS
+        assert standalone._EXPLAIN_MAX_BYTES == verify_module._EXPLAIN_MAX_BYTES
+
+    def test_the_auditor_script_prints_the_note_and_passes(
+        self, standalone, tmp_path: Path, capsys
+    ):
+        _old_writer_day(tmp_path, {"spot": [float("nan")]})
+
+        assert standalone.main([str(tmp_path)]) == 0
+        output = capsys.readouterr().out
+        assert "OK" in output and "note(s), not problems" in output
+
+
+class TestRecordsWrittenNowVerifyInBoth:
+    @pytest.mark.parametrize(
+        "value",
+        [
+            {"x": [1.0, float("nan")], "y": float("-inf")},
+            {"b": b"\x00\xff"},
+            {"s": {"zeta", "alpha"}, "d": {2: "a", 10: "b"}},
+        ],
+        ids=["non-finite", "bytes", "set and integer keys"],
+    )
+    def test_the_writer_and_both_verifiers_agree(
+        self, standalone, tmp_path: Path, value
+    ):
+        record = audit.DecisionRecord(
+            request_id="r1",
+            timestamp_utc="2024-01-01T00:00:00+00:00",
+            tool_name="t1",
+            input=value,
+            cpp_available=False,
+            duration_ms=1.0,
+            status="ok",
+        )
+        audit.AuditWriter(audit_dir=tmp_path).write(record)
+
+        assert audit.verify_audit_trail_integrity(tmp_path) == []
+        assert standalone.verify_trail(tmp_path) == []

@@ -43,20 +43,49 @@ def _iid(n: int = 600, seed: int = 0) -> pd.Series:
     return pd.Series(rng.normal(0.0, 0.01, n), index=_dates(n))
 
 
-def _cycling_variance(n: int = 600, seed: int = 0, period: int = 20) -> pd.Series:
+def _cycling_variance(
+    n: int = 600, seed: int = 0, period: int = 10, amplitude: float = 0.9
+) -> pd.Series:
     """
-    Volatility that cycles on a fixed 20-bar period: quiet, loud, quiet.
+    Volatility that cycles on a fixed 10-bar period: quiet, loud, quiet.
 
     GARCH(1,1) models variance as geometric decay from the last shock. A
     cycle is not geometric decay, so the fit converges onto the best
     single-decay approximation of it and the clustering survives into the
     squared standardized residuals. That is the case the diagnostic exists
     for -- the optimizer succeeded and the model is the wrong one.
+
+    The cycle used to be 20 bars at amplitude 0.95. On that one the
+    likelihood's maximum lies at persistence >= 1 on 31 of 40 seeds -- a
+    slow cycle looks like a variance that never mean-reverts -- so a fit
+    that reaches the maximum rightly reports `converged` False there. It
+    read True on all 40 only because the optimizer stopped near its
+    starting point and nothing checked the gradient. The 10-bar cycle has
+    an interior maximum on every seed measured, which is what these tests
+    need: a fit that converged and is still the wrong model.
     """
     rng = np.random.default_rng(seed)
     t = np.arange(n)
-    vol = 0.01 * (1.0 + 0.95 * np.sin(2 * np.pi * t / period))
+    vol = 0.01 * (1.0 + amplitude * np.sin(2 * np.pi * t / period))
     return pd.Series(rng.normal(0.0, 1.0, n) * vol, index=_dates(n))
+
+
+def _simulated_garch(
+    n: int = 2000,
+    seed: int = 0,
+    omega: float = 2e-6,
+    alpha: float = 0.15,
+    beta: float = 0.80,
+) -> pd.Series:
+    """GARCH(1,1) with normal innovations: the model's own case."""
+    rng = np.random.default_rng(seed)
+    shocks = rng.standard_normal(n)
+    variance = omega / (1.0 - alpha - beta)
+    values = np.empty(n)
+    for t in range(n):
+        values[t] = np.sqrt(variance) * shocks[t]
+        variance = omega + alpha * values[t] ** 2 + beta * variance
+    return pd.Series(values, index=_dates(n))
 
 
 def _ar1_in_mean(n: int = 600, seed: int = 0, phi: float = 0.25) -> pd.Series:
@@ -77,6 +106,15 @@ class TestTheNullSampleIsNotFlagged:
         at its nominal 5% and no more. Bounded rather than pinned at zero:
         a test that never fires on the null is a test with no size, and 5%
         of 40 seeds is 2.
+
+        This used to require all 40 fits to converge. They did only because
+        the optimizer stopped a few iterations from its start on every
+        sample and `converged` never looked at the gradient. A fit that
+        reaches the maximum finds that on a few iid samples the likelihood
+        is highest at the edge of the parameter space -- alpha at zero, or
+        persistence at 1, a sample whose variance drifts a little -- and
+        says so. What must hold is that every fit either converged or went
+        to that edge, which is where no ARCH effect puts it.
         """
         converged = 0
         flagged = 0
@@ -84,11 +122,54 @@ class TestTheNullSampleIsNotFlagged:
             result = garch_volatility_forecast(_iid(seed=seed))
             converged += result["converged"]
             flagged += result["misspecified"]
-        assert converged == N_SEEDS, f"only {converged}/{N_SEEDS} fits converged"
+            assert result["converged"] or (
+                result["alpha"] < 1e-3 or result["persistence"] >= 1.0
+            ), (
+                f"seed {seed}: not converged away from the no-ARCH edge "
+                f"(alpha {result['alpha']:.4f}, persistence "
+                f"{result['persistence']:.4f})"
+            )
+        assert converged >= 32, f"only {converged}/{N_SEEDS} fits converged"
         assert flagged <= 6, (
             f"{flagged}/{N_SEEDS} iid samples were called misspecified; the "
             "nominal rate at the 0.05 threshold is 2"
         )
+
+    def test_an_iid_sample_finds_no_arch_effect(self):
+        """
+        The null for the parameters themselves. With no clustering the
+        typical fitted alpha is near zero; a fit that stops near its 0.05
+        starting point reports a median alpha around 0.05 whatever the
+        sample, and that is the number the old fit returned.
+        """
+        alphas = [
+            garch_volatility_forecast(_iid(seed=seed))["alpha"]
+            for seed in range(N_SEEDS)
+        ]
+        assert float(np.median(alphas)) < 0.02
+        assert max(alphas) < 0.15
+
+    def test_alpha_on_its_floor_is_named_and_warned_about(self):
+        """
+        Seed 0 is one of the iid samples whose maximum puts alpha on its
+        lower bound. Beta is then not identified -- the variance path is
+        the constant omega / (1 - beta) for any beta -- so the reported
+        0.99 carries no information, and the result has to say that rather
+        than leave a persistence that reads like a strongly clustered
+        series.
+        """
+        result = garch_volatility_forecast(_iid(seed=0))
+        assert result["converged"] is True
+        assert "alpha" in result["at_bound"]
+        assert any(
+            "no ARCH effect" in w and "not identified" in w for w in result["warnings"]
+        )
+
+    def test_a_clustered_sample_has_no_bound_and_no_such_warning(self):
+        result = garch_volatility_forecast(_simulated_garch(seed=3))
+        assert result["converged"] is True
+        assert result["at_bound"] == []
+        assert result["warnings"] == []
 
     def test_the_null_sample_leaves_roughly_normal_residuals(self):
         result = garch_volatility_forecast(_iid(n=2000, seed=7))
@@ -112,7 +193,10 @@ class TestClusteringTheFitCannotRemove:
 
     def test_converged_alone_would_have_reported_these_as_healthy(self):
         """The whole point: the two flags are independent, and the one that
-        was reported is the one that says nothing about the model."""
+        was reported is the one that says nothing about the model. Every
+        seed of the 10-bar cycle reaches an interior maximum; see
+        `_cycling_variance` for why the fixture is no longer the 20-bar
+        one."""
         converged = sum(
             garch_volatility_forecast(_cycling_variance(seed=s))["converged"]
             for s in range(N_SEEDS)
@@ -217,3 +301,48 @@ class TestTheRollingSharpeSeriesIsReturned:
         assert "rolling_sharpe" in rolling_sharpe_stability.__doc__
         warnings = rolling_sharpe_stability(self._returns(), window=60)["warnings"]
         assert any("rolling_sharpe" in w for w in warnings)
+
+
+class TestTheToolCarriesTheFitsOwnVerdict:
+    """`run_garch_volatility_forecast` reports the gradient, the bounds and
+    the fit's warnings, not only the flags it builds from the residuals."""
+
+    @staticmethod
+    def _run(monkeypatch, returns: pd.Series):
+        from unittest.mock import MagicMock
+
+        from standard_quant_tools.agent.models import GarchVolatilityForecastInput
+        from standard_quant_tools.agent.tools import run_garch_volatility_forecast
+        from standard_quant_tools.data.factory import DataFactory
+
+        close = 100.0 * np.cumprod(1.0 + returns)
+        bars = pd.DataFrame(
+            {"Open": close, "High": close, "Low": close, "Close": close},
+            index=returns.index,
+        ).assign(Volume=1e6)
+        stub = MagicMock()
+        stub.get_ohlcv.return_value = bars
+        monkeypatch.setattr(DataFactory, "get_provider", lambda *a, **kw: stub)
+        return run_garch_volatility_forecast(
+            GarchVolatilityForecastInput(
+                symbol="AAA",
+                start_date=str(returns.index[0].date()),
+                end_date=str(returns.index[-1].date()),
+            )
+        )
+
+    def test_alpha_on_its_floor_reaches_the_agent(self, monkeypatch):
+        result = self._run(monkeypatch, _iid(seed=0))
+        assert result.converged is True
+        assert result.gradient_norm < 1e-4
+        assert "alpha" in result.at_bound
+        assert any("no ARCH effect" in w for w in result.warnings)
+
+    def test_a_clustered_series_carries_no_such_warning(self, monkeypatch):
+        result = self._run(monkeypatch, _simulated_garch(seed=3))
+        assert result.converged is True
+        assert result.gradient_norm < 1e-4
+        assert result.at_bound == []
+        assert not any(
+            "no ARCH effect" in w or "NOT CONVERGED" in w for w in result.warnings
+        )

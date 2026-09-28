@@ -226,6 +226,47 @@ class TestCppBollingerBands:
 # ══════════════════════════════════════════════════════════════════════════════
 
 
+def _exact_window_std(p):
+    from fractions import Fraction
+
+    fp = [Fraction(float(v)) for v in p]
+    m = sum(fp) / len(fp)
+    return float(sum((a - m) ** 2 for a in fp) / (len(fp) - 1)) ** 0.5
+
+
+@requires_cpp
+class TestCppBollingerAfterAnOutlier:
+    """
+    The same sliding-sum defect rolling_beta had: a large FINITE print is
+    subtracted back out of Sxx and takes its low-order digits with it.
+    Measured with one 1e8 print among ~100 +/- 0.01 prices: band width wrong
+    by up to 327x for the rest of the refresh cycle; a 1e12 print drove the
+    variance so negative that the kernel raised, and the public wrapper
+    answered from pandas instead. The exact per-window standard deviation is
+    the reference.
+    """
+
+    @pytest.mark.parametrize("magnitude", [1e5, 1e8, 1e12])
+    @pytest.mark.parametrize("position", [100, 120, 137])
+    def test_later_windows_match_the_exact_std(self, magnitude, position):
+        rng = np.random.default_rng(position)
+        prices = 100.0 + rng.normal(0, 0.01, 200)
+        prices[position] = magnitude
+        out = _cpp.bollinger_bands(prices, 20, 2.0)  # must not raise
+        for i in range(position + 20, 200):
+            want = _exact_window_std(prices[i - 19 : i + 1])
+            got = (out[i, 0] - out[i, 1]) / 2.0
+            assert abs(got - want) <= 1e-9 * want, i
+
+    def test_a_clean_series_is_unchanged(self):
+        """The null case: no outlier, no extra rebuild, exact to rounding."""
+        prices = 100.0 + np.random.default_rng(0).normal(0, 0.5, 300)
+        out = _cpp.bollinger_bands(prices, 20, 2.0)
+        for i in range(19, 300, 11):
+            want = _exact_window_std(prices[i - 19 : i + 1])
+            assert abs((out[i, 0] - out[i, 1]) / 2.0 - want) <= 1e-12 * want
+
+
 class TestBollingerBandsWrapper:
 
     def test_cpp_and_pandas_paths_agree(self, price_series):

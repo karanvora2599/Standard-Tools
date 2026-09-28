@@ -20,9 +20,10 @@
 //
 // It does not currently do that, and that was checked rather than assumed.
 // Built with SQT_NATIVE_ARCH=OFF and disassembled with dumpbin, the linked
-// module contains exactly 2 vfmadd instructions -- the two this kernel
-// issues for vSxy and vSxx -- and the count is identical with and without
-// SQT_NOINLINE. MSVC 19.44 LTCG leaves the body here.
+// module contained exactly the vfmadd instructions this kernel issues --
+// two at the time, for vSxy and vSxx; vSyy has since made it three -- and
+// the count was identical with and without SQT_NOINLINE. MSVC 19.44 LTCG
+// leaves the body here.
 //
 // SQT_NOINLINE stays anyway. The isolation this file's design depends on is
 // otherwise guaranteed by nothing but an optimizer's present-day choice,
@@ -61,12 +62,14 @@ SQT_NOINLINE void rolling_beta_reduce_avx2(
     double&       Sx,
     double&       Sy,
     double&       Sxy,
-    double&       Sxx)
+    double&       Sxx,
+    double&       Syy)
 {
     __m256d vSx  = _mm256_setzero_pd();
     __m256d vSy  = _mm256_setzero_pd();
     __m256d vSxy = _mm256_setzero_pd();
     __m256d vSxx = _mm256_setzero_pd();
+    __m256d vSyy = _mm256_setzero_pd();
     const __m256d vcx = _mm256_set1_pd(cx);
     const __m256d vcy = _mm256_set1_pd(cy);
 
@@ -83,18 +86,21 @@ SQT_NOINLINE void rolling_beta_reduce_avx2(
         vSy  = _mm256_add_pd(vSy, yd);
         vSxy = _mm256_fmadd_pd(xd, yd, vSxy);
         vSxx = _mm256_fmadd_pd(xd, xd, vSxx);
+        vSyy = _mm256_fmadd_pd(yd, yd, vSyy);
     }
 
     // Horizontal reduction of each 4-lane accumulator.
-    double bufx[4], bufy[4], bufxy[4], bufxx[4];
+    double bufx[4], bufy[4], bufxy[4], bufxx[4], bufyy[4];
     _mm256_storeu_pd(bufx,  vSx);
     _mm256_storeu_pd(bufy,  vSy);
     _mm256_storeu_pd(bufxy, vSxy);
     _mm256_storeu_pd(bufxx, vSxx);
+    _mm256_storeu_pd(bufyy, vSyy);
     Sx  = bufx[0]  + bufx[1]  + bufx[2]  + bufx[3];
     Sy  = bufy[0]  + bufy[1]  + bufy[2]  + bufy[3];
     Sxy = bufxy[0] + bufxy[1] + bufxy[2] + bufxy[3];
     Sxx = bufxx[0] + bufxx[1] + bufxx[2] + bufxx[3];
+    Syy = bufyy[0] + bufyy[1] + bufyy[2] + bufyy[3];
 
     // Scalar tail for the remainder (window not a multiple of 4).
     for (; j < end; ++j) {
@@ -104,6 +110,7 @@ SQT_NOINLINE void rolling_beta_reduce_avx2(
         Sy  += yd;
         Sxy += xd * yd;
         Sxx += xd * xd;
+        Syy += yd * yd;
     }
 }
 
@@ -119,7 +126,8 @@ SQT_NOINLINE void rolling_beta_reduce_avx2(
     double&       /*Sx*/,
     double&       /*Sy*/,
     double&       /*Sxy*/,
-    double&       /*Sxx*/)
+    double&       /*Sxx*/,
+    double&       /*Syy*/)
 {
     // Unreachable: detect_isa_features().avx2 is unconditionally false on
     // non-x86 (isa_dispatch.cpp), so rolling_beta_into's AVX2 dispatch

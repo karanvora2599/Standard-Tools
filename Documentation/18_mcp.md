@@ -30,7 +30,8 @@ Then point a client at the `sqt-mcp` entry point:
       "env": {
         "SQT_RUNS_DIR":  "/absolute/path/to/runs",
         "SQT_AUDIT_DIR": "/absolute/path/to/audit",
-        "SQT_CACHE_DIR": "/absolute/path/to/cache"
+        "SQT_CACHE_DIR": "/absolute/path/to/cache",
+        "SQT_EXTERNAL_DIRS": "/absolute/path/to/vendor/data"
       }
     }
   }
@@ -43,6 +44,15 @@ directory nobody chose, so an unset `SQT_RUNS_DIR` does not fail at startup
 artifact, and resource links stop resolving across restarts. The server
 warns on stderr when they are missing and refuses to start if one is set but
 not writable.
+
+**`SQT_EXTERNAL_DIRS` is optional** and lists, separated by the platform path
+separator, the directories `register_external_dataset`,
+`register_external_panel` and `prepare_vendor_extract` may read from beyond
+the runs directory. Leave it unset and only the runs directory is readable —
+the server's working directory is never implied, because the client chose it.
+It is set here, in the environment the server starts with, and nowhere a
+tool call can reach, so an agent cannot widen it. See
+[26_data.md](26_data.md#where-external-data-may-come-from).
 
 ---
 
@@ -63,6 +73,7 @@ export SQT_MCP_TOKEN=$(openssl rand -base64 32)
 export SQT_RUNS_DIR=/var/lib/sqt/runs
 export SQT_AUDIT_DIR=/var/lib/sqt/audit
 export SQT_CACHE_DIR=/var/lib/sqt/cache
+export SQT_EXTERNAL_DIRS=/srv/vendor-extracts     # optional; runs dir only when unset
 
 sqt-mcp --transport http --categories all --port 8765
 ```

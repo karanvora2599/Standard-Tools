@@ -56,7 +56,7 @@ because the order is the point.
 | `list_features` | optional category filter → the feature catalog (id, description, params, temporal_support, scope, lookback, and for a point-in-time feature the `frame_kind` and `fields` it reads, which is how an agent learns that `fundamental.*` needs `provider="polygon"`) |
 | `check_leakage` | a feature set → whether it is temporally safe to fit on, from each feature's declared temporal support, answered **before** a dataset is built with it; with a `dataset_id`, the empirical lead-lag screen also runs on the built panel, and `scope` says which of the two `safe` rests on |
 | `build_model_dataset` | `DatasetSpec` → fetches OHLCV, computes features + target, persists a Parquet panel, returns a `dataset_id` |
-| `register_external_panel` | a Parquet/CSV feature matrix computed ELSEWHERE → a `dataset_id`, without copying it. Declares one label or SEVERAL, each with its own horizon, so one panel serves a whole horizon curve |
+| `register_external_panel` | a Parquet/CSV feature matrix computed ELSEWHERE → a `dataset_id`, without copying it. Declares one label or SEVERAL, each with its own horizon, so one panel serves a whole horizon curve. The path must lie in the runs directory or a directory listed in `SQT_EXTERNAL_DIRS` |
 | `build_model_ensemble` | several `model_id`s → one combined `sqt://predictions` reference, from their OUT-OF-SAMPLE series only. Reports the pairwise correlation that says whether it was worth building, and `correlation_basis` saying whether that correlation was taken on ranks or on levels. The reference carries no realized outcome, so `score_predictions` refuses it directly — run it through `attach_model_outcomes` first, which the description and a run-time warning both say |
 | `analyze_model_errors` | a `model_id` → where its errors are, by entity, period, prediction decile and any feature's decile, plus whether its SCALE is right. The question an R2 cannot answer |
 | `list_datasets` | → every built panel, newest first, with row/entity/feature counts and date span |
@@ -826,6 +826,12 @@ where it was written — no `panel.parquet` is copied under `SQT_RUNS_DIR`,
 because the matrices this exists for are often partitioned directories and
 copying one is exactly the materialization the external-dataset contract was
 built to avoid.
+
+**The path is fenced.** It must lie in the runs directory or a directory
+listed in `SQT_EXTERNAL_DIRS`, the same fence `register_external_dataset`
+applies ([26_data.md](26_data.md#where-external-data-may-come-from)), checked
+at registration and again on every load. A panel registered under a wider
+`SQT_EXTERNAL_DIRS` stops loading when its directory is no longer listed.
 
 **Integrity is not weakened by that.** The engine loads the panel whole
 either way, so the content hash is computed on the loaded frame rather than

@@ -17,14 +17,14 @@ The variance recursion is inherently sequential (sigma2[t] depends on
 sigma2[t-1]) and can't be vectorized across time in plain numpy; it's
 numba-@njit'd instead, the same tool this codebase already uses for
 strategies.py's state-machine loops — no native build step required, unlike
-the optional C++ extension. Fitting (MLE via scipy.optimize) calls that
-njit recursion a few dozen times; even at millions of bars this is well
-under a second (the recursion itself runs at C speed via numba, and each
-optimizer iteration is a single O(n) pass).
+the optional C++ extension. Fitting (MLE via scipy.optimize, from three
+starting points on returns rescaled to unit mean square) makes a few
+hundred O(n) passes of that recursion; two million bars fit in about a
+second with the C++ kernel.
 """
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -67,6 +67,42 @@ except ImportError:
 
 _MIN_OBS = 100
 _MIN_SIGMA2 = 1e-12
+
+# THE FIT RUNS ON RESCALED RETURNS. On daily returns omega is ~1e-6 while
+# alpha and beta are ~0.1 and ~0.9, and the gradient at the old starting
+# point was ~[4.6e7, -219, 1286]: the omega direction dominated by five
+# orders of magnitude, L-BFGS-B's default ftol was met within a few
+# iterations, and the fit stopped near where it started while `success`
+# said True. Measured on simulated GARCH(1,1) with alpha = 0.25, n = 4000:
+# a fitted alpha of 0.07, 111 nats of likelihood left on the table, and a
+# different wrong answer from each of the two gradient sources below.
+# Dividing the squared residuals by their mean makes every parameter O(1);
+# the likelihood is scale-equivariant, so omega is multiplied back and
+# alpha and beta need nothing. See the CHANGELOG entry of 2026-09-27.
+_PARAM_NAMES = ("omega", "alpha", "beta")
+
+#: (alpha, beta) starting pairs, each with omega = 1 - alpha - beta on the
+#: rescaled problem, so every start sits at the sample variance. A single
+#: start can stop on the (alpha -> 0, beta -> 1) ridge of a weak-ARCH
+#: sample; three cut the mean shortfall against an independent optimizer on
+#: iid samples from 0.15 nats to 0.02.
+_STARTS = ((0.05, 0.90), (0.10, 0.80), (0.20, 0.60))
+
+_BOUNDS = ((1e-12, None), (1e-8, 1.0 - 1e-8), (1e-8, 1.0 - 1e-8))
+
+#: Tight enough that the stop is decided by the gradient, not by a relative
+#: change in the objective that a flat ridge satisfies early.
+_OPTIONS = {"ftol": 1e-12, "gtol": 1e-8, "maxiter": 2000}
+
+#: Largest projected-gradient component per observation that still counts
+#: as a maximum. Fits that stopped short measured 0.07 to 0.53; fits at
+#: the maximum measured 1e-8 to 1e-6, so the threshold is not a knife edge.
+_GRADIENT_TOL = 1e-4
+
+#: How close to a bound (on the rescaled problem) counts as on it.
+#: L-BFGS-B projects onto the box, so a parameter pushed against a bound
+#: lands on it exactly; this only absorbs the last rounding.
+_BOUND_TOL = 1e-9
 
 
 def _require_scipy(context: str) -> None:
@@ -162,6 +198,111 @@ def _garch11_neg_loglik_and_grad(
     return float(nll), np.asarray(grad, dtype=float)
 
 
+def _finite_difference_gradient(params: np.ndarray, z2: np.ndarray) -> np.ndarray:
+    """
+    Gradient of the penalized negative log-likelihood by differences, for
+    the convergence verdict when there is no analytic gradient. Central
+    where both neighbours are inside the bounds, one-sided at a bound so the
+    check never evaluates a parameter the fit could not take.
+    """
+    grad = np.empty(3)
+    for i, (lower, upper) in enumerate(_BOUNDS):
+        step = 1e-6 * max(1.0, abs(float(params[i])))
+        up, down = params.copy(), params.copy()
+        up[i] += step
+        down[i] -= step
+        if lower is not None and down[i] < lower:
+            grad[i] = (
+                _garch11_neg_loglik(up, z2, True)
+                - _garch11_neg_loglik(params, z2, True)
+            ) / step
+        elif upper is not None and up[i] > upper:
+            grad[i] = (
+                _garch11_neg_loglik(params, z2, True)
+                - _garch11_neg_loglik(down, z2, True)
+            ) / step
+        else:
+            grad[i] = (
+                _garch11_neg_loglik(up, z2, True) - _garch11_neg_loglik(down, z2, True)
+            ) / (2.0 * step)
+    return grad
+
+
+def _at_bound(params: np.ndarray) -> List[str]:
+    """Names of the parameters sitting on a bound of the rescaled fit."""
+    names = []
+    for name, value, (lower, upper) in zip(_PARAM_NAMES, params, _BOUNDS):
+        if (lower is not None and value <= lower + _BOUND_TOL) or (
+            upper is not None and value >= upper - _BOUND_TOL
+        ):
+            names.append(name)
+    return names
+
+
+def _projected_gradient_norm(params: np.ndarray, grad: np.ndarray) -> float:
+    """
+    Largest absolute component of the projected gradient; the caller
+    divides by the number of observations. A component pointing out of the
+    box at a bound is zero, because the fit cannot move that way: alpha
+    pinned at its floor with a positive gradient is at a constrained
+    maximum, not short of one.
+    """
+    projected = np.array(grad, dtype=float)
+    for i, (lower, upper) in enumerate(_BOUNDS):
+        if lower is not None and params[i] <= lower + _BOUND_TOL and projected[i] > 0:
+            projected[i] = 0.0
+        if upper is not None and params[i] >= upper - _BOUND_TOL and projected[i] < 0:
+            projected[i] = 0.0
+    return float(np.max(np.abs(projected)))
+
+
+def _fit_rescaled(z2: np.ndarray):
+    """
+    Maximum likelihood on squared residuals whose mean is 1, from every
+    start in `_STARTS`; the best optimum and the gradient at it.
+
+    Both gradient sources run the same starts, bounds and options, so they
+    reach the same optimum: measured to 1.6e-7 in the parameters and 3e-11
+    nats between them on simulated GARCH(1,1). Before the rescaling they
+    stopped at different wrong points, about 10 nats apart on one real
+    series.
+    """
+    analytic = HAS_CPP and _cpp_core is not None
+    best = None
+    for alpha0, beta0 in _STARTS:
+        x0 = np.array([1.0 - alpha0 - beta0, alpha0, beta0])
+        if analytic:
+            # jac=True: fun returns (value, grad) together, computed in one
+            # fused C++ pass -- one recursion per iteration instead of
+            # scipy's finite-difference estimate of a 3-parameter gradient.
+            opt = _scipy_minimize(  # type: ignore[misc]
+                _garch11_neg_loglik_and_grad,
+                x0,
+                args=(z2, True),
+                method="L-BFGS-B",
+                jac=True,
+                bounds=_BOUNDS,
+                options=_OPTIONS,
+            )
+        else:
+            opt = _scipy_minimize(  # type: ignore[misc]
+                _garch11_neg_loglik,
+                x0,
+                args=(z2, True),
+                method="L-BFGS-B",
+                bounds=_BOUNDS,
+                options=_OPTIONS,
+            )
+        if best is None or opt.fun < best.fun:
+            best = opt
+    params = np.asarray(best.x, dtype=float)
+    if analytic:
+        grad = _garch11_neg_loglik_and_grad(params, z2, True)[1]
+    else:
+        grad = _finite_difference_gradient(params, z2)
+    return best, params, grad
+
+
 #: Conventional level for the squared-residual test. A p-value below this is
 #: the sample saying the fitted model left volatility clustering behind.
 _MISSPECIFICATION_ALPHA = 0.05
@@ -172,8 +313,9 @@ def _residual_diagnostics(resid: np.ndarray, sigma2: np.ndarray) -> Dict[str, An
     Whether the fit removed the clustering it was fitted to remove.
 
     `converged` answers a question about the OPTIMIZER -- that L-BFGS-B
-    reached a stationary point inside the bounds with a stationary
-    persistence. It says nothing about whether GARCH(1,1) with normal
+    reached a maximum of the likelihood (its projected gradient is
+    negligible) inside the bounds with a stationary persistence. It says
+    nothing about whether GARCH(1,1) with normal
     innovations and a constant mean is the right model for this series, and
     a fit can converge cleanly onto a specification the data rejects.
 
@@ -247,12 +389,20 @@ def garch_volatility_forecast(
     Returns
     -------
     dict with keys: omega, alpha, beta, persistence, converged,
-    log_likelihood, aic, bic, n_obs, current_annualized_vol,
-    long_run_annualized_vol, forecast_annualized_vol (List[float], length
-    forecast_horizon), conditional_variance (pd.Series on the returns'
-    index -- the whole variance path, not just its last value), and the
-    residual diagnostics ljung_box_p, ljung_box_squared_p,
-    standardized_skew, standardized_kurtosis (EXCESS) and misspecified.
+    gradient_norm, at_bound, log_likelihood, aic, bic, n_obs,
+    current_annualized_vol, long_run_annualized_vol,
+    forecast_annualized_vol (List[float], length forecast_horizon),
+    conditional_variance (pd.Series on the returns' index -- the whole
+    variance path, not just its last value), the residual diagnostics
+    ljung_box_p, ljung_box_squared_p, standardized_skew,
+    standardized_kurtosis (EXCESS) and misspecified, and warnings.
+
+    `converged` is True only when L-BFGS-B reported success, persistence
+    is below 1, AND `gradient_norm` -- the largest projected-gradient
+    component of the negative log-likelihood per observation, on returns
+    rescaled to unit mean square -- is below 1e-4. `at_bound` names the
+    parameters sitting on a bound; 'alpha' there means no ARCH effect,
+    with beta not identified, and a warning says so.
 
     `converged` and `misspecified` are independent: the first is about the
     optimizer, the second about the specification. See
@@ -261,8 +411,8 @@ def garch_volatility_forecast(
     Raises
     ------
     ValidationError: forecast_horizon <= 0, fewer than 100 observations
-    (GARCH is known to be unstable/unreliable on small samples), or scipy
-    is not installed.
+    (GARCH is known to be unstable/unreliable on small samples), constant
+    returns (no variance to model), or scipy is not installed.
     """
     if forecast_horizon <= 0:
         raise ValidationError(f"forecast_horizon must be > 0, got {forecast_horizon}")
@@ -288,37 +438,62 @@ def garch_volatility_forecast(
     resid = arr - arr.mean()
     resid_sq = resid**2
 
-    alpha0, beta0 = 0.05, 0.90
-    omega0 = resid_sq.mean() * (1.0 - alpha0 - beta0)
-    x0 = np.array([omega0, alpha0, beta0])
-    bounds = [(1e-12, None), (1e-8, 1.0 - 1e-8), (1e-8, 1.0 - 1e-8)]
+    # The rescaling below divides by the mean squared residual, and a
+    # constant series has none -- numerically a rounding residue, so the
+    # test is the library's relative one rather than `== 0`. Imported here:
+    # `metrics` imports `analysis` at package level, so a module-level
+    # import would close a cycle.
+    from standard_quant_tools.metrics.risk_metrics import has_no_dispersion
 
-    logger.debug("[garch] n_obs=%d  x0=%s", n, x0)
-    if HAS_CPP and _cpp_core is not None:
-        # jac=True: fun returns (value, grad) together, computed in one
-        # fused C++ pass -- an optimizer using the gradient pays for one
-        # recursion per iteration instead of scipy's default finite-
-        # difference approach (2*3=6 extra NLL evaluations per iteration
-        # to numerically estimate a 3-parameter gradient).
-        opt = _scipy_minimize(  # type: ignore[misc]
-            _garch11_neg_loglik_and_grad,
-            x0,
-            args=(resid_sq, True),
-            method="L-BFGS-B",
-            jac=True,
-            bounds=bounds,
+    if has_no_dispersion(arr):
+        raise ValidationError(
+            "garch_volatility_forecast: every return is the same value, so "
+            "there is no variance for GARCH(1,1) to model. Pass returns "
+            "(not a constant or forward-filled series) with some movement."
         )
-    else:
-        opt = _scipy_minimize(  # type: ignore[misc]
-            _garch11_neg_loglik,
-            x0,
-            args=(resid_sq, True),
-            method="L-BFGS-B",
-            bounds=bounds,
-        )
-    omega, alpha, beta = (float(v) for v in opt.x)
+    scale = float(resid_sq.mean())
+    logger.debug("[garch] n_obs=%d  scale=%.3e", n, scale)
+    opt, scaled_params, grad = _fit_rescaled(resid_sq / scale)
+    omega = float(scaled_params[0]) * scale
+    alpha, beta = float(scaled_params[1]), float(scaled_params[2])
     persistence = alpha + beta
-    converged = bool(opt.success) and persistence < 1.0
+    gradient_norm = _projected_gradient_norm(scaled_params, grad) / n
+    at_bound = _at_bound(scaled_params)
+    # Three conditions, because each has failed alone: L-BFGS-B said
+    # success while stopped far from the maximum, a maximum can sit on the
+    # non-stationary side where the soft penalty only discourages it, and
+    # an iteration limit leaves the gradient large with success False.
+    converged = (
+        bool(opt.success) and persistence < 1.0 and gradient_norm < _GRADIENT_TOL
+    )
+
+    warnings: List[str] = []
+    if "alpha" in at_bound:
+        warnings.append(
+            f"alpha sits at its lower bound ({alpha:.1e}): this sample shows "
+            "no ARCH effect -- yesterday's squared shock does not move "
+            "today's variance -- and with alpha at zero beta is not "
+            "identified, because the variance path is then the constant "
+            "omega / (1 - beta) for any beta. The fitted beta and persistence "
+            "carry no information; read the series as constant-variance."
+        )
+    if not converged:
+        reasons = []
+        if not opt.success:
+            reasons.append(f"the optimizer stopped without success ({opt.message})")
+        if persistence >= 1.0:
+            reasons.append(
+                f"persistence is {persistence:.6f} >= 1, so the unconditional "
+                "variance does not exist and long_run_annualized_vol is an "
+                "artifact of the 0.9999 clamp"
+            )
+        if gradient_norm >= _GRADIENT_TOL:
+            reasons.append(
+                f"the projected gradient is {gradient_norm:.1e} per "
+                f"observation, above {_GRADIENT_TOL:.0e}, so the parameters "
+                "are not at a maximum of the likelihood"
+            )
+        warnings.append("NOT CONVERGED: " + "; ".join(reasons) + ".")
 
     # Report likelihood/AIC/BIC without the soft stationarity penalty — at a
     # converged optimum the penalty is zero anyway, but recomputing cleanly
@@ -344,7 +519,7 @@ def garch_volatility_forecast(
     # variance omega/(1-persistence) does not exist. The clamp below keeps the
     # forecast recursion finite, but it means long_run_annualized_vol is then
     # an artifact of the 0.9999 clamp (~omega*10000), NOT an estimated
-    # quantity — `converged` is False in exactly that case, so check it before
+    # quantity — `converged` is always False in that case, so check it before
     # using long_run_annualized_vol for anything.
     persistence_safe = min(persistence, 0.9999)
     long_run_var = omega / (1.0 - persistence_safe)
@@ -365,6 +540,10 @@ def garch_volatility_forecast(
         "beta": beta,
         "persistence": persistence,
         "converged": converged,
+        # Scale-free: measured on the rescaled problem, so it reads the same
+        # for returns in decimals or in percent.
+        "gradient_norm": float(gradient_norm),
+        "at_bound": at_bound,
         "log_likelihood": float(log_likelihood),
         "aic": float(aic),
         "bic": float(bic),
@@ -382,6 +561,7 @@ def garch_volatility_forecast(
             sigma2, index=cleaned.index, name="conditional_variance"
         ),
         **diagnostics,
+        "warnings": warnings,
     }
     logger.debug(
         "[garch] omega=%.8f  alpha=%.4f  beta=%.4f  persistence=%.4f  " "converged=%s",

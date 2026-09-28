@@ -517,6 +517,118 @@ class TestVarianceRatio:
             variance_ratio(np.arange(100.0) + 100, period=1)
 
 
+def _level(returns: np.ndarray) -> np.ndarray:
+    """A level series whose simple differences are exactly `returns`. It
+    starts at zero, so `variance_ratio` differences it rather than taking
+    logs, and the test controls the increments to the last bit."""
+    return np.concatenate([[0.0], np.cumsum(returns)])
+
+
+def _ma1(n: int, theta: float, seed: int) -> np.ndarray:
+    shocks = np.random.default_rng(seed).normal(0.0, 1.0, n + 1)
+    return shocks[1:] + theta * shocks[:-1]
+
+
+def _garch_increments(n: int, seed: int) -> np.ndarray:
+    """Uncorrelated increments whose variance clusters: a random walk under
+    the heteroskedastic null the robust statistic is built for."""
+    rng = np.random.default_rng(seed)
+    omega, alpha, beta = 0.05, 0.10, 0.85
+    variance = omega / (1.0 - alpha - beta)
+    out = np.empty(n)
+    for t in range(n):
+        out[t] = np.sqrt(variance) * rng.standard_normal()
+        variance = omega + alpha * out[t] ** 2 + beta * variance
+    return out
+
+
+def _lo_mackinlay(prices: np.ndarray, q: int) -> tuple:
+    """
+    The statistic as Lo and MacKinlay (1988) write it, index for index:
+    prices X_0..X_T, T = nq increments, overlapping q-differences, the
+    unbiased variance estimators, and the heteroskedasticity-robust z*.
+    Loops rather than vector algebra, so it shares nothing with the
+    library's code but the formula.
+    """
+    T = len(prices) - 1
+    mu = (prices[T] - prices[0]) / T
+    sigma_a = sum((prices[k] - prices[k - 1] - mu) ** 2 for k in range(1, T + 1))
+    sigma_a /= T - 1
+    m = q * (T - q + 1) * (1.0 - q / T)
+    sigma_c = (
+        sum((prices[k] - prices[k - q] - q * mu) ** 2 for k in range(q, T + 1)) / m
+    )
+    vr = sigma_c / sigma_a
+    denominator = (
+        sum((prices[k] - prices[k - 1] - mu) ** 2 for k in range(1, T + 1)) ** 2
+    )
+    theta = 0.0
+    for j in range(1, q):
+        delta = (
+            T
+            * sum(
+                (prices[k] - prices[k - 1] - mu) ** 2
+                * (prices[k - j] - prices[k - j - 1] - mu) ** 2
+                for k in range(j + 1, T + 1)
+            )
+            / denominator
+        )
+        theta += (2.0 * (q - j) / q) ** 2 * delta
+    return vr, np.sqrt(T) * (vr - 1.0) / np.sqrt(theta)
+
+
+class TestTheVarianceRatioStatistic:
+    """
+    The z statistic was missing its sqrt(T) and the overlapping variance
+    its (1 - q/T), so z had a standard deviation near 0.03 instead of 1
+    and the test never rejected anything: an MA(1) with theta = -0.8 and
+    VR(8) = 0.15 came back p = 0.79. Every p-value it produced was inert.
+    """
+
+    @pytest.mark.parametrize("period", [2, 4, 8])
+    def test_reverting_increments_are_rejected(self, period):
+        values = _level(_ma1(1000, -0.8, seed=5))
+        result = variance_ratio(values, period=period)
+        assert result["differencing"] == "level"
+        assert result["variance_ratio"] < 0.7
+        assert result["z_statistic"] < -5.0
+        assert result["p_value"] < 1e-6
+
+    @pytest.mark.parametrize("period", [2, 5, 8])
+    def test_it_is_the_textbook_statistic(self, period):
+        rng = np.random.default_rng(17)
+        increments = np.empty(600)
+        increments[0] = rng.normal()
+        for t in range(1, 600):
+            increments[t] = 0.15 * increments[t - 1] + rng.normal()
+        prices = _level(increments)
+        vr, z = _lo_mackinlay(prices, period)
+        result = variance_ratio(prices, period=period)
+        assert result["variance_ratio"] == pytest.approx(vr, rel=1e-10)
+        assert result["z_statistic"] == pytest.approx(z, rel=1e-10)
+
+    @pytest.mark.parametrize("period", [2, 4, 8])
+    @pytest.mark.parametrize("kind", ["iid", "garch"])
+    def test_a_random_walk_is_rejected_at_the_nominal_rate(self, kind, period):
+        """The null, homoskedastic and heteroskedastic: 1000 walks of 500
+        increments. Size near 5% and a z whose spread is that of a standard
+        normal -- the old z had a spread of 0.03 and a size of 0. A thousand
+        rather than a few hundred because the size of 200 walks moves
+        between 3.5% and 9.5% from one block of seeds to the next."""
+        n_walks = 1000
+        zs, rejected = [], 0
+        for seed in range(n_walks):
+            if kind == "iid":
+                increments = np.random.default_rng(seed).normal(0.0, 1.0, 500)
+            else:
+                increments = _garch_increments(500, seed)
+            result = variance_ratio(_level(increments), period=period)
+            zs.append(result["z_statistic"])
+            rejected += result["p_value"] < 0.05
+        assert 0.03 <= rejected / n_walks <= 0.08, rejected
+        assert 0.9 <= float(np.std(zs)) <= 1.1
+
+
 class TestRegimes:
     def test_it_separates_a_calm_half_from_a_volatile_one(self):
         rng = np.random.default_rng(0)

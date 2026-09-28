@@ -213,6 +213,39 @@ consumer written for a fetched panel pull forty gigabytes through an `.iloc`
 without anyone deciding to. Rows come out through `batches()`, and column
 projection means reading four columns of a sixty-column book reads four.
 
+### Where external data may come from
+
+The path is chosen by an agent, so it is fenced. A file is read only when it
+lies inside the runs directory or a directory listed in `SQT_EXTERNAL_DIRS`
+— absolute paths separated by the platform path separator (`;` on Windows,
+`:` elsewhere). Unset, the runs directory is the only one, which is where
+`fetch_order_book` and `fetch_order_events` register what they write, so
+the built-in chains work with nothing configured. The working directory is
+never implied: an MCP client chooses it, and it is often the home directory.
+The setting is read from the environment the process starts with and never
+from a tool argument, so no call can widen it; `describe_effective_config`
+reports the directories in force.
+
+```bash
+export SQT_EXTERNAL_DIRS="/data/vendor:/mnt/extracts"      # POSIX
+set SQT_EXTERNAL_DIRS=D:\vendor;E:\extracts                # Windows
+```
+
+The check runs on the text first, so a network share, another drive or a
+`..` walk out of a listed directory is refused before the filesystem is
+asked anything; again after links and junctions are followed, so a link
+inside a listed directory that points out is refused; and, for a directory
+dataset, on every file inside it, because the reader follows links too. The
+refusal names `SQT_EXTERNAL_DIRS` and reads the same whether or not the
+path exists. `~` is expanded; `$NAME` and `%NAME%` are not, so a path can
+never carry an environment variable's value into a refusal or the decision
+log.
+
+The same check runs every time a registered reference is resolved or
+described, so narrowing `SQT_EXTERNAL_DIRS` revokes access: a registration
+whose file now lies outside stops resolving until its directory is listed
+again.
+
 | kind | what it holds |
 | --- | --- |
 | `order_book_panel` | L2 depth snapshots, the shape `get_order_book_metrics` reads |
@@ -305,6 +338,19 @@ before committing a session of depth to disk.
 Output is always Parquet whatever went in. The conversion's whole value is
 correct dtypes — datetime64 stamps, floats that have been de-scaled — and
 CSV would discard them and reintroduce the ambiguity just resolved.
+
+**Where it writes is fenced tighter than where it reads**, because
+`out_path` is a write whose location the agent chooses. The input
+follows the [external-data fence](#where-external-data-may-come-from). A bare
+or relative `out_path` lands in the runs directory's `extracts` folder — not
+in the working directory, where it used to — and the `out_path` the result
+returns is absolute, so the `next_step` it names registers cleanly. An
+absolute `out_path` must lie in a directory listed in `SQT_EXTERNAL_DIRS`, and
+is refused inside the OHLCV cache, the audit directory or the rest of the runs
+directory even when a listed directory contains them: a Parquet planted there
+would be read back as a cache hit, part of the decision record or an artifact
+nothing published. A dry run is fenced the same way, so it refuses what the
+real run would.
 
 `kind` selects the normalizer: `order_book_panel` from MBP-10 depth,
 `order_event_panel` from MBO order-by-order events, `quote_panel` from

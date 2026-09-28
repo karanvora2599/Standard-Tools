@@ -5,16 +5,56 @@ Data fixtures are session-scoped (computed once per pytest run).
 Provider/factory fixtures are function-scoped (fresh mock per test).
 """
 
-import asyncio
-from unittest.mock import AsyncMock, MagicMock
+# The suite runs against its own audit trail, artifact store and cache, never
+# the machine's. Every `dispatch()` appends a decision record, and the default
+# audit directory is the one a regulator or an incident review reads: before
+# this block, twenty-five test files outside the two subtrees that contained
+# themselves wrote several hundred synthetic records into it per run, with no
+# field telling them apart from real decisions and no way to remove them from
+# an append-only chain. The artifact store was being filled the same way.
+#
+# Module level and forced, not a fixture and not setdefault: the OHLCV cache
+# root is read once at import and the imports below reach it, and a developer
+# whose shell exports the production SQT_AUDIT_DIR has to be contained too.
+# The audit behaviour settings are cleared so a developer's shell cannot
+# change what the tests observe.
+import atexit
+import os
+import shutil
+import tempfile
 
-import numpy as np
-import pandas as pd
-import pytest
+_SQT_TEST_SCRATCH = tempfile.mkdtemp(prefix="sqt-tests-")
+for _variable, _subdirectory in (
+    ("SQT_AUDIT_DIR", "audit"),
+    ("SQT_RUNS_DIR", "runs"),
+    ("SQT_CACHE_DIR", "ohlcv"),
+):
+    os.environ[_variable] = os.path.join(_SQT_TEST_SCRATCH, _subdirectory)
+# External data is read only from directories the environment lists. Tests
+# register files under pytest's tmp_path, which lives in the system temp
+# directory; tests of that fence set their own value.
+os.environ["SQT_EXTERNAL_DIRS"] = tempfile.gettempdir()
+for _variable in (
+    "SQT_AUDIT_ENABLED",
+    "SQT_AUDIT_FAIL_CLOSED",
+    "SQT_AUDIT_REDACT_FIELDS",
+    "SQT_AUDIT_REDACT_SALT",
+    "SQT_AUDIT_RETENTION_DAYS",
+    "SQT_AUDIT_SIGNING_KEY_PATH",
+):
+    os.environ.pop(_variable, None)
+atexit.register(shutil.rmtree, _SQT_TEST_SCRATCH, ignore_errors=True)
 
-from standard_quant_tools.data.base import FinancialRatios, TickerInfo
-from standard_quant_tools.data.factory import DataFactory
-from standard_quant_tools.data.metadata import DataSetMetadata
+import asyncio  # noqa: E402
+from unittest.mock import AsyncMock, MagicMock  # noqa: E402
+
+import numpy as np  # noqa: E402
+import pandas as pd  # noqa: E402
+import pytest  # noqa: E402
+
+from standard_quant_tools.data.base import FinancialRatios, TickerInfo  # noqa: E402
+from standard_quant_tools.data.factory import DataFactory  # noqa: E402
+from standard_quant_tools.data.metadata import DataSetMetadata  # noqa: E402
 
 # ── Synthetic market data ─────────────────────────────────────────────────────
 

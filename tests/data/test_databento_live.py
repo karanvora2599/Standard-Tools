@@ -571,11 +571,24 @@ class TestTheOperationalClaims:
         assert caught.value is not None
 
     def test_the_share_class_mapping_is_the_one_the_feeds_use(self):
+        """The dotted spelling: the Historical symbology resolves `BRK.B`
+        and not `BRKB`, which this test used to expect."""
         assert DatabentoProvider.to_raw_symbol("AAPL") == "AAPL"
-        assert DatabentoProvider.to_raw_symbol("BRK.B") == "BRKB"
-        assert DatabentoProvider.to_raw_symbol("brk.b") == "BRKB"
+        assert DatabentoProvider.to_raw_symbol("BRK.B") == "BRK.B"
+        assert DatabentoProvider.to_raw_symbol("brk.b") == "BRK.B"
         with pytest.raises(ValidationError):
             DatabentoProvider.to_raw_symbol("NOT A TICKER")
+
+    @pytest.mark.parametrize("share_class", ["BRK.B", "BF.B", "HEI.A", "LEN.B"])
+    def test_a_share_class_is_served_under_its_dotted_spelling(
+        self, provider, share_class
+    ):
+        """The live confirmation of the dotted raw_symbol: a daily window
+        for each class share comes back from the summary feed, sent as
+        spelled with its dot."""
+        frame = provider.get_ohlcv(share_class, BAR_START, BAR_END, interval="1d")
+        assert len(frame) > 0
+        assert frame.attrs["dataset"] == "EQUS.SUMMARY"
 
     def test_depth_is_refused_rather_than_served_one_level_deep(self, provider):
         """The base class refuses to substitute top-of-book for depth, and

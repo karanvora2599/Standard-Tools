@@ -79,6 +79,10 @@ from standard_quant_tools.audit.paths import (
     _iter_day_files,
 )
 from standard_quant_tools.audit.replay import verify_replay as _verify_replay
+from standard_quant_tools.audit.signing import (
+    CHECKPOINT_FAILURES,
+    CHECKPOINT_STATE_NOTES,
+)
 from standard_quant_tools.audit.verify import verify_audit_log_integrity as _verify_day
 from standard_quant_tools.audit.verify import (
     verify_audit_trail_integrity as _verify_trail,
@@ -409,47 +413,26 @@ def _indexed_chain_head(date: str, directory: Path) -> Optional[str]:
 #: a day nobody ever anchored, a checkpoint with no signature beside it, a
 #: check that could not be made at all -- are the ABSENCE of evidence, and
 #: reporting them as False made "nobody signed this day" read exactly like
-#: "this day was forged".
-_SIGNATURE_CHECK_FAILED = {"key_mismatch", "corrupt_signature", "content_drift"}
+#: "this day was forged". A day that only grew after signing ("extended")
+#: is not a failure either: what was signed still holds.
+_SIGNATURE_CHECK_FAILED = set(CHECKPOINT_FAILURES)
 
-#: What each non-valid checkpoint state means and what to do about it. A
-#: single boolean collapsed all six into "no", which is the same shape of
-#: answer as an integrity check that cannot tell an empty directory from
-#: an intact trail.
+#: What each non-valid checkpoint state means and what to do about it, from
+#: the audit package's one table so this tool and `sqt verify --checkpoint`
+#: cannot describe a state two ways. A single boolean collapsed all of them
+#: into "no", which is the same shape of answer as an integrity check that
+#: cannot tell an empty directory from an intact trail.
 _SIGNATURE_STATE_NOTES: Dict[str, str] = {
-    "no_checkpoint": (
-        "No checkpoint file exists for this day, so there is nothing to "
-        "verify -- the day was never anchored. This is not evidence of "
-        "tampering; it is the absence of the evidence that would detect it."
-    ),
-    "no_signature": (
-        "A checkpoint exists for this day but its signature file does not, "
-        "so the checkpoint is unsigned and proves nothing on its own."
-    ),
-    "key_mismatch": (
-        "The signature is well-formed but was not made by the key that "
-        "matches the public key supplied. Either the wrong public key was "
-        "given, or the checkpoint was signed by someone else."
-    ),
-    "corrupt_signature": (
-        "The signature file could not be read as a signature over this "
-        "checkpoint -- truncated, re-encoded or altered bytes."
-    ),
-    "content_drift": (
-        "The signature is valid, but the day's content has moved since it "
-        "was signed. Verifying a signed checkpoint is itself a recorded "
-        "call -- THIS call appends a record to today's file -- so today's "
-        "day drifts by design. Sign a day after it closes, or verify "
-        "yesterday's date, before reading this as tampering."
-    ),
-    "unavailable": (
-        "The signature could not be checked at all -- no public key file at "
-        "that path, an unreadable key or checkpoint, a day whose tail cannot "
-        "be read, or no Ed25519 implementation installed. This is a MISSING "
-        "check, not a failed one, so it is reported as unknown rather than "
-        "as a broken signature."
-    ),
+    state: note for state, note in CHECKPOINT_STATE_NOTES.items() if state != "valid"
 }
+
+#: Said only here, because only here is the verification itself recorded.
+_EXTENDED_BY_THIS_CALL = (
+    "Verifying a signed checkpoint through this tool is itself a recorded "
+    "call -- THIS call appends a record to today's file -- so a signed day "
+    "that is still today is extended by design. Sign a day after it closes, "
+    "or verify yesterday's date."
+)
 
 
 def verify_audit_integrity(
@@ -473,17 +456,19 @@ def verify_audit_integrity(
     written to — three different states that all produced the same
     reassuring boolean. `verdict` separates them, `recording_enabled` says
     whether calls made now are recorded at all, and `signature_state`
-    names which of six things a failed checkpoint check means.
+    names which of eight states the checkpoint check is in.
     """
     notes: List[str] = []
+    chain_notes: List[str] = []
     signature_valid: Optional[bool] = None
     signature_state: Optional[str] = None
+    records_after_checkpoint: Optional[int] = None
     directory = _audit_dir()
     recording_enabled = _audit_enabled()
     day_files = _iter_day_files(directory)
 
     if input_data.date is None:
-        problems = list(_verify_trail())
+        problems = list(_verify_trail(notes=chain_notes))
         scope = "trail"
     else:
         # Day files are named YYYY-MM-DD.jsonl under the audit dir. Built
@@ -503,7 +488,7 @@ def verify_audit_integrity(
         # the first is called broken.
         expected_head = _indexed_chain_head(input_data.date, directory)
         if expected_head is None:
-            problems = list(_verify_day(path))
+            problems = list(_verify_day(path, notes=chain_notes))
             notes.append(
                 f"The chain index has no entry for {input_data.date}, so "
                 "this file's first record was checked against the genesis "
@@ -513,27 +498,38 @@ def verify_audit_integrity(
                 "trail check reports (omit `date`)."
             )
         else:
-            problems = list(_verify_day(path, expected_prev_hash=expected_head))
+            problems = list(
+                _verify_day(path, expected_prev_hash=expected_head, notes=chain_notes)
+            )
         scope = input_data.date
         notes.append(
             "A single day verified in isolation cannot detect a MISSING "
             "day. Omit `date` to verify the cross-day trail as well."
         )
+    # Lines the chain accepted with an explanation -- written by an older
+    # writer, not altered -- are named rather than passed over in silence.
+    notes.extend(chain_notes)
 
     if input_data.public_key_path is not None:
         try:
-            from standard_quant_tools.audit.signing import verify_checkpoint_state
+            from standard_quant_tools.audit.signing import verify_checkpoint
 
-            signature_state = str(
-                verify_checkpoint_state(
-                    input_data.date,  # type: ignore[arg-type]
-                    input_data.public_key_path,
-                )
+            found = verify_checkpoint(
+                input_data.date,  # type: ignore[arg-type]
+                input_data.public_key_path,
             )
+            signature_state = str(found.state)
+            records_after_checkpoint = found.records_after
+            if found.detail:
+                notes.append(f"checkpoint: {found.detail}.")
         except Exception as exc:
             signature_state = "unavailable"
             notes.append(f"checkpoint signature could not be verified: {exc}")
-        if signature_state == "valid":
+        if signature_state in ("valid", "extended"):
+            # "extended": the signature checks out and every record it
+            # covers still recomputes to what it signed; the records after
+            # it are the chain's to vouch for, and `problems` says whether
+            # they do.
             signature_valid = True
         elif signature_state in _SIGNATURE_CHECK_FAILED:
             signature_valid = False
@@ -547,6 +543,8 @@ def verify_audit_integrity(
                 f"signature_state={signature_state}: "
                 f"{_SIGNATURE_STATE_NOTES[signature_state]}"
             )
+        if signature_state == "extended":
+            notes.append(_EXTENDED_BY_THIS_CALL)
     elif input_data.date is not None:
         notes.append(
             "No public key supplied, so this is a chain check only. The "
@@ -598,6 +596,7 @@ def verify_audit_integrity(
         problems=problems,
         checkpoint_signature_valid=signature_valid,
         signature_state=signature_state,
+        records_after_checkpoint=records_after_checkpoint,
         notes=notes,
     )
 

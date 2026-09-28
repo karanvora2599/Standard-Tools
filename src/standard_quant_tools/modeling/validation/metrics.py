@@ -234,6 +234,16 @@ def cross_sectional_ic(
     y_true = np.asarray(y_true, dtype=np.float64)
     y_pred = np.asarray(y_pred, dtype=np.float64)
     dates = np.asarray(dates)
+    # One value per (entity, date) row. A 2-D input used to be flattened by
+    # the native kernel and answered as though it were twice as many rows,
+    # and refused by pandas with a message about its own internals.
+    for name, array in (("y_true", y_true), ("y_pred", y_pred), ("dates", dates)):
+        if array.ndim != 1:
+            raise ValidationError(
+                f"cross_sectional_ic: {name} must be 1-D (one value per row), "
+                f"got shape {array.shape}. Pass a single column, e.g. "
+                "frame['target'].to_numpy()."
+            )
 
     if y_true.size == 0:
         return pd.Series(dtype=float)

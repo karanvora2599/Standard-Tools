@@ -413,25 +413,49 @@ void bollinger_bands_into(
     std::size_t nan_in_window = 0;
     bool        sums_polluted = false;
 
+    // ── Finite outliers ───────────────────────────────────────────────────
+    // `sums_polluted` covers a value the sums cannot subtract back out. A
+    // large FINITE print is subtracted out, but it takes the low-order bits
+    // with it: while it is in the window Sxx is of order print^2, and after
+    // `Sxx -= d*d` removes it the remainder carries an absolute error of
+    // order eps * print^2. Measured, one 1e8 print among ~100 +/- 0.01
+    // prices left the band width wrong by up to 327x for the rest of the
+    // refresh cycle, and a 1e12 print drove the variance so negative that
+    // clamp_near_zero_sumsq threw -- which the Python wrapper caught and
+    // silently answered from pandas instead. The digits lost are
+    // log10(peak / current) of Sxx, so the sums are rebuilt whenever Sxx
+    // falls more than kShrink below its peak since the last rebuild (a
+    // negative Sxx from cancellation trips the same test). Clean data never
+    // moves Sxx four decades inside one window, so this costs nothing there.
+    constexpr double kShrink = 1e4;
+    double peak_Sxx = 0.0;
+
     auto recompute_window = [&](std::size_t start) {
+        const std::size_t end = start + static_cast<std::size_t>(period);
         Sx = 0.0;
         Sxx = 0.0;
         nan_in_window = 0;
-        for (std::size_t j = start; j < start + static_cast<std::size_t>(period); ++j) {
+        for (std::size_t j = start; j < end; ++j) {
             if (!std::isfinite(prices[j])) ++nan_in_window;
         }
         // The reference point must itself be finite or it poisons every
-        // shifted value in the window. prices[start] is the natural choice
-        // (it keeps the shifted values near the window's own variation);
-        // fall back to 0.0 only when the window is unevaluable anyway.
-        c = std::isfinite(prices[start]) ? prices[start] : 0.0;
-        for (std::size_t j = start; j < start + static_cast<std::size_t>(period); ++j) {
+        // shifted value in the window; fall back to 0.0 only when the
+        // window is unevaluable anyway. It is the NEWEST price of the
+        // window: that bar is the last to leave, on exactly the slide the
+        // next periodic refresh fires, so the reference is always a price
+        // inside the current window. The oldest price, used before, left one
+        // slide after the refresh -- and when it was a large print, every
+        // later window was shifted by the print's magnitude until the next
+        // refresh, which is the cancellation the shift exists to prevent.
+        c = std::isfinite(prices[end - 1]) ? prices[end - 1] : 0.0;
+        for (std::size_t j = start; j < end; ++j) {
             const double d = prices[j] - c;
             Sx += d;
             Sxx += d * d;
         }
         since_refresh = 0;
         sums_polluted = (nan_in_window > 0);
+        peak_Sxx = Sxx;
     };
 
     auto write_bands = [&](std::size_t i) {
@@ -482,11 +506,18 @@ void bollinger_bands_into(
         Sx  += (prices[i] - c) - (prices[old] - c);
         Sxx += (prices[i] - c) * (prices[i] - c) - (prices[old] - c) * (prices[old] - c);
         ++since_refresh;
+        // NaN compares false, so a polluted Sxx never becomes the peak or
+        // trips the shrink test; sums_polluted covers that case.
+        if (Sxx > peak_Sxx) peak_Sxx = Sxx;
 
         // Second condition: the window just became clean but the sums still
         // carry a NaN/Inf that no subtraction can remove -- rebuild now
         // instead of reporting NaN until the refresh cadence catches up.
-        if (since_refresh >= period_sz || (nan_in_window == 0 && sums_polluted)) {
+        // Third: a large finite print has left and taken Sxx's low-order
+        // digits with it (see kShrink above).
+        if (since_refresh >= period_sz ||
+            (nan_in_window == 0 &&
+             (sums_polluted || peak_Sxx > kShrink * Sxx))) {
             recompute_window(old + 1);
         }
 

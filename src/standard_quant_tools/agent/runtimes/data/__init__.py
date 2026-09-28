@@ -246,7 +246,10 @@ TOOL_DEFS = [
         "Writes a new Parquet and REPORTS the two judgements that change the "
         "numbers and cannot be recovered from the output: which timestamp "
         "became `timestamp`, and whether prices were divided by a billion. "
-        "Use dry_run to see both before committing a large file.",
+        "Use dry_run to see both before committing a large file. Reads only "
+        "from the runs directory or a directory listed in SQT_EXTERNAL_DIRS; "
+        "a relative out_path lands in the runs directory's `extracts` folder, "
+        "an absolute one must lie in a listed directory.",
         PrepareVendorExtractInput,
     ),
     (
@@ -259,7 +262,9 @@ TOOL_DEFS = [
         "Registration reads the schema, checks the columns the declared kind "
         "requires, and stores a pointer. It does NOT read the rows, so a book "
         "with its bid and ask columns transposed registers cleanly -- run "
-        "validate_external_dataset next.",
+        "validate_external_dataset next. The path must lie in the runs "
+        "directory or a directory the operator listed in SQT_EXTERNAL_DIRS; "
+        "anything else is refused, and no tool call can widen that list.",
         RegisterExternalDatasetInput,
     ),
     (

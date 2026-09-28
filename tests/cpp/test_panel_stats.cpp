@@ -100,6 +100,32 @@ static void test_quantile_endpoints() {
     expect_near(fitted.hi[0], 5.0, 1e-15, "q=1 is the maximum");
 }
 
+static void test_quantile_endpoints_on_a_long_column() {
+    std::printf("test_quantile_endpoints_on_a_long_column\n");
+    // Five values cannot catch a q=1 answer read from an unordered slot:
+    // below 33 values nth_element insertion-sorts, which orders the buffer
+    // as a side effect. 100 shuffled values can. Each (q_low, q_high) pair
+    // runs the q_low partition first, which is what leaves slot n-1
+    // holding something other than the maximum.
+    const std::size_t n = 100;
+    std::vector<double> values(n);
+    // A fixed permutation of 0..99 (37 is coprime with 100), then scaled so
+    // the extremes are not the obvious 0 and 99.
+    for (std::size_t i = 0; i < n; ++i)
+        values[i] = 0.25 + 1.5 * static_cast<double>((i * 37 + 11) % n);
+    const double lo_true = 0.25;
+    const double hi_true = 0.25 + 1.5 * 99.0;
+    const double pairs[][2] = {{0.0, 1.0}, {0.01, 1.0}, {0.0, 0.99}};
+    for (const auto& q : pairs) {
+        Fitted fitted(1);
+        sqt::fit_preprocess_stats(values.data(), n, 1, q[0], q[1], fitted.view());
+        if (q[1] == 1.0)
+            expect_near(fitted.hi[0], hi_true, 0.0, "q_high=1 is the maximum");
+        if (q[0] == 0.0)
+            expect_near(fitted.lo[0], lo_true, 0.0, "q_low=0 is the minimum");
+    }
+}
+
 // ── Moments ───────────────────────────────────────────────────────────────────
 
 static void test_std_uses_ddof_one() {
@@ -355,6 +381,53 @@ static void test_rank_empty_panel_is_a_no_op() {
     expect_near(out[0], 7.0, 0.0, "nothing was written");
 }
 
+// -- rows whose date code is outside [0, n_dates) ------------------------------
+
+static void test_out_of_range_codes_come_back_nan() {
+    std::printf("test_out_of_range_codes_come_back_nan\n");
+    // The output is pre-filled with a sentinel standing in for whatever the
+    // allocator left behind. A row the kernel cannot place used to keep it.
+    constexpr double kSentinel = 12345.0;
+    const double values[] = {1.0, 10.0, 2.0, 20.0, 3.0, 30.0, 4.0, 40.0};
+    const long long below[] = {0, 0, -1, 0};   // pd.factorize's code for NaT
+    const long long above[] = {0, 0, 1, 0};    // == n_dates
+    for (const long long* codes : {below, above}) {
+        double ranked[8], standardized[8];
+        for (double& v : ranked) v = kSentinel;
+        for (double& v : standardized) v = kSentinel;
+        expect(sqt::rank_by_date(values, 4, 2, codes, 1, ranked), "rank success");
+        expect(sqt::standardize_by_date(values, 4, 2, codes, 1, 0.0, standardized),
+               "standardize success");
+        expect(std::isnan(ranked[4]) && std::isnan(ranked[5]),
+               "the unplaceable row is NaN in every rank column");
+        expect(std::isnan(standardized[4]) && std::isnan(standardized[5]),
+               "the unplaceable row is NaN in every standardized column");
+        bool sentinel_left = false;
+        for (int i = 0; i < 8; ++i)
+            sentinel_left = sentinel_left || ranked[i] == kSentinel ||
+                            standardized[i] == kSentinel;
+        expect(!sentinel_left, "every output element was written");
+        // The placeable rows rank among themselves: 1, 2, 4 -> 1, 2, 3.
+        expect_near(ranked[0], 1.0, 0.0, "placeable rows still rank");
+        expect_near(ranked[6], 3.0, 0.0, "placeable rows still rank");
+    }
+}
+
+static void test_in_range_codes_leave_no_nan() {
+    std::printf("test_in_range_codes_leave_no_nan\n");
+    // The null case: every code valid, nothing extra is written as NaN.
+    const double values[] = {1.0, 2.0, 3.0, 4.0};
+    const long long codes[] = {0, 1, 0, 1};
+    double ranked[4] = {0, 0, 0, 0}, standardized[4] = {0, 0, 0, 0};
+    expect(sqt::rank_by_date(values, 4, 1, codes, 2, ranked), "rank success");
+    expect(sqt::standardize_by_date(values, 4, 1, codes, 2, 0.0, standardized),
+           "standardize success");
+    for (int i = 0; i < 4; ++i) {
+        expect(!std::isnan(ranked[i]), "valid rows rank");
+        expect(!std::isnan(standardized[i]), "valid rows standardize");
+    }
+}
+
 
 // -- permutation_null_ic ------------------------------------------------------
 
@@ -428,6 +501,7 @@ int main() {
     std::printf("=== sqt panel_stats tests ===\n");
     test_quantile_is_linearly_interpolated();
     test_quantile_endpoints();
+    test_quantile_endpoints_on_a_long_column();
     test_std_uses_ddof_one();
     test_moments_are_of_the_clipped_column();
     test_constant_column_gets_unit_std();
@@ -446,6 +520,8 @@ int main() {
     test_rank_does_not_need_sorted_dates();
     test_rank_all_nan_date_is_all_nan();
     test_rank_empty_panel_is_a_no_op();
+    test_out_of_range_codes_come_back_nan();
+    test_in_range_codes_leave_no_nan();
     test_permutation_is_reproducible_from_its_seed();
     test_permutation_seeds_differ();
     test_permutation_stays_in_range();

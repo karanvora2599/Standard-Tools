@@ -176,31 +176,47 @@ class TestCppNegLoglikVsNumpy:
         assert result_native_path == pytest.approx(result_fallback_path, abs=1e-8)
 
 
+def _simulated_garch(n, omega, alpha, beta, seed):
+    """GARCH(1,1) returns with normal innovations, after a burn-in."""
+    import pandas as pd
+
+    rng = np.random.default_rng(seed)
+    shocks = rng.standard_normal(n + 500)
+    variance = omega / (1.0 - alpha - beta)
+    values = np.empty(n + 500)
+    for t in range(n + 500):
+        values[t] = np.sqrt(variance) * shocks[t]
+        variance = omega + alpha * values[t] ** 2 + beta * variance
+    return pd.Series(values[500:])
+
+
 class TestGarchForecastEndToEndParity:
-    """Confirms garch_volatility_forecast()'s C++ and numba/NumPy paths
-    converge to essentially the same fit -- not necessarily *bit-identical*
-    anymore. Before the analytic-gradient fusion (item 3 of the performance
-    architecture review), both paths used scipy's default finite-difference
-    gradient over the identical NLL formula, so they agreed to numerical
-    precision. Now the C++ path passes jac=True with a real analytic
-    gradient (verified independently against central differences in
-    tests/cpp/test_garch.cpp) while the numba/NumPy fallback still uses
-    finite differences -- L-BFGS-B with a different gradient source can
-    genuinely converge to a very slightly different point near a flat
-    likelihood surface (real GARCH persistence/omega surfaces are often
-    nearly flat near the optimum), which is expected optimizer behavior,
-    not a correctness regression. This test now checks "same fit quality"
-    (tight relative tolerance) rather than "bit-identical convergence
-    point"."""
+    """
+    garch_volatility_forecast()'s C++ path (analytic gradient, jac=True) and
+    its numba path (scipy's finite differences) reach the SAME optimum.
+
+    This test used to run on iid returns at a 1% tolerance, and passed
+    because both paths stopped at their shared starting point: on iid data
+    there was nowhere either of them went. On a series with real clustering
+    they stopped at different wrong points -- the raw-scale likelihood
+    surface was so badly conditioned that the route taken decided where
+    the optimizer gave up, and the two gradient sources took different
+    routes, about 10 nats apart on one real series. The fit now runs on
+    rescaled returns from three starts with tolerances tight enough that
+    the gradient decides the stop, and both paths land on the maximum:
+    measured to 1.6e-7 in the parameters and 3e-11 nats.
+    """
 
     @requires_cpp
-    def test_forecast_output_matches_closely_with_and_without_cpp(self):
-        import pandas as pd
-
+    @pytest.mark.parametrize(
+        "true_params, seed",
+        [((2e-6, 0.15, 0.80), 2), ((5e-6, 0.25, 0.65), 3), ((1e-6, 0.08, 0.90), 4)],
+    )
+    def test_forecast_output_matches_with_and_without_cpp(self, true_params, seed):
         import standard_quant_tools.analysis.garch as garch_module
 
-        rng = np.random.default_rng(2)
-        returns = pd.Series(rng.standard_normal(400) * 0.01)
+        returns = _simulated_garch(2000, *true_params, seed=seed)
+        scale = float(((returns - returns.mean()) ** 2).mean())
 
         result_cpp = garch_volatility_forecast(returns, forecast_horizon=10)
 
@@ -210,18 +226,19 @@ class TestGarchForecastEndToEndParity:
         finally:
             garch_module.HAS_CPP = True
 
-        assert result_cpp["omega"] == pytest.approx(result_numba["omega"], rel=1e-2)
-        assert result_cpp["alpha"] == pytest.approx(result_numba["alpha"], rel=1e-2)
-        assert result_cpp["beta"] == pytest.approx(result_numba["beta"], rel=1e-2)
-        assert result_cpp["current_annualized_vol"] == pytest.approx(
-            result_numba["current_annualized_vol"], rel=1e-2
+        # omega compared on the rescaled problem the fit runs on, where all
+        # three parameters are O(1) and one tolerance means the same thing.
+        assert result_cpp["omega"] / scale == pytest.approx(
+            result_numba["omega"] / scale, abs=1e-4
+        )
+        assert result_cpp["alpha"] == pytest.approx(result_numba["alpha"], abs=1e-4)
+        assert result_cpp["beta"] == pytest.approx(result_numba["beta"], abs=1e-4)
+        assert result_cpp["log_likelihood"] == pytest.approx(
+            result_numba["log_likelihood"], abs=1e-6
         )
         assert result_cpp["forecast_annualized_vol"] == pytest.approx(
-            result_numba["forecast_annualized_vol"], rel=1e-2
+            result_numba["forecast_annualized_vol"], rel=1e-4
         )
-        # The two fits' own log-likelihoods must be close too -- the real
-        # invariant that matters (both found a comparably good optimum),
-        # not that they landed on the exact same point to get there.
-        assert result_cpp["log_likelihood"] == pytest.approx(
-            result_numba["log_likelihood"], rel=1e-3
-        )
+        assert result_cpp["converged"] is result_numba["converged"] is True
+        assert result_cpp["gradient_norm"] < 1e-4
+        assert result_numba["gradient_norm"] < 1e-4

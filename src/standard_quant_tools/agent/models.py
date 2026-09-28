@@ -1423,10 +1423,30 @@ class GarchVolatilityForecastResult(BaseModel):
     converged: bool = Field(
         ...,
         description=(
-            "The OPTIMIZER reached a stationary point inside the bounds with "
-            "persistence < 1. It is not a verdict on the specification -- for "
-            "that read `misspecified`, which is computed from the fit's own "
-            "residuals and is independent of this flag."
+            "The OPTIMIZER reached a maximum of the likelihood: L-BFGS-B "
+            "reported success, persistence < 1, and `gradient_norm` is below "
+            "1e-4. It is not a verdict on the specification -- for that read "
+            "`misspecified`, which is computed from the fit's own residuals "
+            "and is independent of this flag."
+        ),
+    )
+    gradient_norm: Stat = Field(
+        None,
+        description=(
+            "Largest component of the projected gradient of the negative "
+            "log-likelihood at the answer, per observation, on returns "
+            "rescaled to unit mean square, so it does not depend on the "
+            "returns' units. A fit at the maximum reads about 1e-6 or less; "
+            "one that stopped short reads 1e-2 or more. Below 1e-4 is one of "
+            "the conditions of `converged`."
+        ),
+    )
+    at_bound: List[str] = Field(
+        default_factory=list,
+        description=(
+            "The parameters ('omega', 'alpha', 'beta') sitting on a bound of "
+            "the fit. 'alpha' means the sample shows no ARCH effect and "
+            "`beta` is not identified, and a warning says so."
         ),
     )
     current_annualized_vol: float
@@ -5613,8 +5633,10 @@ class VerifyAuditIntegrityResult(BaseModel):
     checkpoint_signature_valid: Optional[bool] = Field(
         None,
         description=(
-            "True when the signature checks out. False when a check ran and "
-            "did not pass. None when no public key was supplied, or when "
+            "True when the signature checks out and every record it covers "
+            "still recomputes to what it signed ('valid', or 'extended' when "
+            "records were appended after signing). False when a check ran "
+            "and did not pass. None when no public key was supplied, or when "
             "there was nothing to check -- a day nobody anchored has no "
             "signature to break. `signature_state` says which."
         ),
@@ -5623,12 +5645,22 @@ class VerifyAuditIntegrityResult(BaseModel):
         None,
         description=(
             "Why the checkpoint check came out the way it did, when a "
-            "public key was supplied: 'valid', 'no_checkpoint' (that day "
-            "was never anchored), 'no_signature', 'key_mismatch' (signed by "
-            "a different key), 'corrupt_signature', 'content_drift' (the "
-            "signature verifies but the day's content moved after it was "
-            "signed) or 'unavailable' (the check could not be made at all). "
-            "A single boolean collapsed all six into 'no'."
+            "public key was supplied: 'valid' (the day's records recompute "
+            "to exactly what was signed), 'extended' (they still do, and "
+            "more records were appended after signing), 'altered' (they no "
+            "longer do: an edit, a truncation, a rewrite), 'no_checkpoint' "
+            "(that day was never anchored), 'no_signature', 'key_mismatch' "
+            "(signed by a different key), 'corrupt_signature' or "
+            "'unavailable' (the check could not be made at all). A single "
+            "boolean collapsed all of these into 'no'."
+        ),
+    )
+    records_after_checkpoint: Optional[int] = Field(
+        None,
+        description=(
+            "How many records were appended after the ones the signature "
+            "covers: 0 for 'valid', at least 1 for 'extended', null when no "
+            "signed endpoint could be located in the day's records."
         ),
     )
     notes: List[str] = Field(default_factory=list)

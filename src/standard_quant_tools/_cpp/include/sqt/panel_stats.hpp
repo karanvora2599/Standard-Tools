@@ -141,6 +141,10 @@ bool cross_sectional_correlation(const double* y_true,
  *
  * `values` and `out` are row-major (n_rows, n_cols) and may alias.
  * `date_codes[i]` is row i's date index, as above; rows need not be sorted.
+ * A row whose code is outside [0, n_dates) belongs to no cross-section and
+ * comes back NaN in every column. The binding refuses such a code before
+ * this runs; the NaN keeps a direct C++ caller from reading unwritten
+ * memory.
  *
  * Per date and column: subtract the mean, divide by the ddof=1 standard
  * deviation, then clip to +/- clip_sigma (0 disables the clip). A date whose
@@ -167,7 +171,9 @@ bool standardize_by_date(const double* values,
  * Average rank of every value within its own date's cross-section.
  *
  * `values` and `out` are row-major (n_rows, n_cols) and may alias.
- * `date_codes[i]` is row i's date index; rows need not be sorted.
+ * `date_codes[i]` is row i's date index; rows need not be sorted. A row
+ * whose code is outside [0, n_dates) comes back NaN in every column, as in
+ * standardize_by_date.
  *
  * Ranks are 1-based and ties take the mean of the ordinals they span --
  * `Series.rank(method="average")`, which is what the callers here mean by

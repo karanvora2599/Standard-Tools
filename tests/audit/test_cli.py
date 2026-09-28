@@ -416,18 +416,26 @@ class TestCmdKeygenAnchorAndCheckpointVerify:
         assert exit_code == 1
         assert "--pubkey" in capsys.readouterr().err
 
-    def test_verify_checkpoint_missing_date_fails(
+    def test_verify_checkpoint_on_a_day_never_signed_names_the_state(
         self, patched_factory, audit_dir: Path, tmp_path: Path, capsys
     ):
+        """A day nobody anchored has nothing to verify, and that is not a
+        failed signature. This used to exit 1 with "Signature invalid, or
+        checkpoint/signature file not found" -- the same words as a forged
+        day -- which is why it now names the state and exits 2, the code for
+        "nothing to check"."""
         keys_dir = tmp_path / "keys"
         cli.main(["keygen", "--out", str(keys_dir)])
         pub_path = keys_dir / "audit_signing_key.public"
+        capsys.readouterr()
 
         exit_code = cli.main(
             ["verify", "--checkpoint", "2099-01-01", "--pubkey", str(pub_path)]
         )
-        assert exit_code == 1
-        assert "invalid" in capsys.readouterr().out.lower()
+        output = capsys.readouterr().out
+        assert exit_code == 2
+        assert "no_checkpoint" in output
+        assert "invalid" not in output.lower()
 
     def test_anchor_without_key_or_env_var_errors(
         self,

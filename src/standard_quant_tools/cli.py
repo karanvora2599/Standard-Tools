@@ -48,9 +48,19 @@ Command-line interface for the audit trail's JSONL decision records
                                             Key from --key or
                                             SQT_AUDIT_SIGNING_KEY_PATH.
     sqt verify --checkpoint <date>
-               --pubkey PATH             — verify a checkpoint's Ed25519
-                                            signature using only the public
-                                            key. Exit 0 if valid, 1 otherwise.
+               --pubkey PATH             — verify the full trail's hash chain
+                                            AND that day's Ed25519 checkpoint
+                                            (public key only), and print the
+                                            checkpoint's state by name.
+                                            Exit code: 0 = chain clean and
+                                            checkpoint valid, 1 = a chain
+                                            problem or a failed checkpoint
+                                            (altered, key_mismatch,
+                                            corrupt_signature), 2 = nothing
+                                            to check or unable to check
+                                            (no_checkpoint, no_signature,
+                                            unavailable), 3 = extended (the
+                                            day grew after it was signed).
 
 `keygen`/`anchor`/`--checkpoint` verification require the optional
 `cryptography` dependency (`pip install standard_quant_tools[signing]`) —
@@ -194,25 +204,32 @@ def cmd_compare(
 
 
 def cmd_verify(
-    file: Optional[Path] = None, audit_dir: Optional[Path] = None
+    file: Optional[Path] = None,
+    audit_dir: Optional[Path] = None,
+    notes: Optional[List[str]] = None,
 ) -> List[str]:
     """
     Check hash-chain integrity. `file` (a single day's .jsonl) checks just
     that file in isolation; no `file` checks the full cross-day trail
     (every day file plus the chain index) rooted at `audit_dir`.
 
-    Returns a list of human-readable problems (empty if clean).
+    Returns a list of human-readable problems (empty if clean). `notes`,
+    when given, receives what was found and is not a problem.
     """
     if file is not None:
-        return audit.verify_audit_log_integrity(file)
-    return audit.verify_audit_trail_integrity(audit_dir)
+        return audit.verify_audit_log_integrity(file, notes=notes)
+    return audit.verify_audit_trail_integrity(audit_dir, notes=notes)
 
 
-def _format_verify(problems: List[str]) -> str:
+def _format_verify(problems: List[str], notes: Optional[List[str]] = None) -> str:
     if not problems:
-        return "OK — no integrity problems found."
-    lines = [f"{len(problems)} problem(s) found:"]
-    lines.extend(f"  - {p}" for p in problems)
+        lines = ["OK — no integrity problems found."]
+    else:
+        lines = [f"{len(problems)} problem(s) found:"]
+        lines.extend(f"  - {p}" for p in problems)
+    if notes:
+        lines.append(f"{len(notes)} note(s), not problems:")
+        lines.extend(f"  - {n}" for n in notes)
     return "\n".join(lines)
 
 
@@ -280,8 +297,43 @@ def cmd_anchor(
 
 def cmd_verify_checkpoint(
     date: str, pubkey: Path, audit_dir: Optional[Path] = None
-) -> bool:
-    return audit.verify_checkpoint_signature(date, pubkey, audit_dir=audit_dir)
+) -> "audit.CheckpointVerification":
+    """The checkpoint's full state, not a boolean. A bool printed "Signature
+    invalid" for a day nobody signed, a missing key file and a record
+    appended after signing alike, and each calls for a different response.
+    """
+    return audit.verify_checkpoint(date, pubkey, audit_dir=audit_dir)
+
+
+#: Exit code per checkpoint state. 0 only for "valid"; 1 where a check ran
+#: and failed, as for a chain problem; 2 where there was nothing to check or
+#: no way to check it; 3 for a day that has only grown since it was signed,
+#: which a script watching a day still being written to must be able to tell
+#: apart from both.
+_CHECKPOINT_EXIT_CODES = {
+    "valid": 0,
+    "altered": 1,
+    "key_mismatch": 1,
+    "corrupt_signature": 1,
+    "no_checkpoint": 2,
+    "no_signature": 2,
+    "unavailable": 2,
+    "extended": 3,
+}
+
+
+def _format_checkpoint(date: str, found: "audit.CheckpointVerification") -> str:
+    if found.state == "valid":
+        return f"Checkpoint {date}: valid\nSignature valid."
+    from standard_quant_tools.audit.signing import CHECKPOINT_STATE_NOTES
+
+    lines = [f"Checkpoint {date}: {found.state}"]
+    note = CHECKPOINT_STATE_NOTES.get(found.state)
+    if note:
+        lines.append(f"  {note}")
+    if found.detail:
+        lines.append(f"  ({found.detail})")
+    return "\n".join(lines)
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -314,8 +366,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--checkpoint",
         metavar="DATE",
         default=None,
-        help="Verify an Ed25519-signed checkpoint for this date instead of "
-        "the hash chain. Requires --pubkey.",
+        help="Also verify the Ed25519-signed checkpoint for this date, after "
+        "the full trail's hash chain, and print its state. Requires --pubkey.",
     )
     p_verify.add_argument(
         "--pubkey",
@@ -418,15 +470,23 @@ def main(argv: Optional[List[str]] = None) -> int:
                 if args.pubkey is None:
                     print("error: --checkpoint requires --pubkey", file=sys.stderr)
                     return 1
-                ok = cmd_verify_checkpoint(args.checkpoint, args.pubkey)
-                print(
-                    "Signature valid."
-                    if ok
-                    else "Signature invalid, or checkpoint/signature file not found."
-                )
-                return 0 if ok else 1
-            problems = cmd_verify(file=args.file)
-            print(_format_verify(problems))
+                # The chain is checked as well, every time. On its own the
+                # checkpoint check ran INSTEAD of the chain and printed
+                # "Signature valid." with exit 0 for a day whose records had
+                # been edited; the two catch different things, and a command
+                # named `verify` should not be able to pass a trail that
+                # `sqt verify` fails. See the CHANGELOG entry of 2026-09-27.
+                notes: List[str] = []
+                problems = cmd_verify(notes=notes)
+                print(_format_verify(problems, notes))
+                found = cmd_verify_checkpoint(args.checkpoint, args.pubkey)
+                print(_format_checkpoint(args.checkpoint, found))
+                if problems:
+                    return 1
+                return _CHECKPOINT_EXIT_CODES.get(found.state, 1)
+            notes = []
+            problems = cmd_verify(file=args.file, notes=notes)
+            print(_format_verify(problems, notes))
             return 1 if problems else 0
         elif args.command == "hold":
             path = cmd_hold(args.date, reason=args.reason)

@@ -230,3 +230,123 @@ class TestNativePathBoundaries:
         assert set(stats) == {"a", "b"}
         out = apply_preprocessing(frame, stats)
         assert out.shape == frame.shape
+
+
+class TestQuantileEndpoints:
+    """
+    The kernel's q=1 bound is the column maximum, and q=0 the minimum.
+
+    The winsorizing callers pass 0.01/0.99, but the binding accepts any q in
+    [0, 1]. q=1 used to be read from a buffer slot the previous quantile's
+    partition had left there -- right only on columns of 32 values or fewer,
+    where the standard library's nth_element happens to insertion-sort --
+    and the clipped moments were wrong with it. pandas' quantile, clip, mean
+    and std are the oracle.
+    """
+
+    @pytest.mark.parametrize("n", [33, 50, 200, 1000])
+    @pytest.mark.parametrize("q_low,q_high", [(0.0, 1.0), (0.01, 1.0), (0.0, 0.99)])
+    def test_matches_pandas(self, n, q_low, q_high):
+        rng = np.random.default_rng(n)
+        values = rng.normal(0, 1, (n, 3))
+        native = transforms._cpp_core.fit_preprocess_stats(
+            np.ascontiguousarray(values), q_low, q_high
+        )
+        for c in range(values.shape[1]):
+            column = pd.Series(values[:, c])
+            lo, hi = column.quantile(q_low), column.quantile(q_high)
+            clipped = column.clip(lower=lo, upper=hi)
+            assert abs(native["lo"][c] - lo) <= TOL
+            assert abs(native["hi"][c] - hi) <= TOL
+            assert abs(native["mean"][c] - clipped.mean()) <= TOL
+            assert abs(native["std"][c] - clipped.std()) <= TOL
+
+    @pytest.mark.parametrize("n", [5, 17, 32])
+    def test_short_columns_still_agree(self, n):
+        """The null case: the sizes that were right by coincidence stay right."""
+        values = np.random.default_rng(n).normal(0, 1, (n, 1))
+        native = transforms._cpp_core.fit_preprocess_stats(values, 0.0, 1.0)
+        assert native["lo"][0] == values.min()
+        assert native["hi"][0] == values.max()
+
+    def test_an_infinite_maximum_is_the_maximum(self):
+        """Infinities are order statistics here, not missing values, so the
+        q=1 bound of a column holding +inf is +inf. (pandas 2.x answers NaN
+        for this one case, because its interpolation forms inf - inf.)"""
+        values = np.random.default_rng(3).normal(0, 1, (100, 1))
+        values[57, 0] = np.inf
+        native = transforms._cpp_core.fit_preprocess_stats(values, 0.01, 1.0)
+        assert native["hi"][0] == np.inf
+        assert native["lo"][0] == pd.Series(values[:, 0]).quantile(0.01)
+
+
+class TestStatsThatNoFitProduces:
+    """
+    `apply_preprocessing` reads its statistics back from a persisted
+    preprocessing_stats.json, so they are not necessarily a fit's output.
+    std = 0 answered +/-inf and NaN, a negative std flipped every sign, and
+    lo > hi was answered differently by the two backends (pandas' clip swaps
+    the bounds; the kernel pinned every value to hi). Both paths now refuse
+    them with the same error.
+    """
+
+    FRAME = pd.DataFrame({"a": [-1.0, 0.0, 1.0], "b": [2.0, 3.0, 4.0]})
+
+    @staticmethod
+    def _stats(**column_a):
+        good = {"lo": -1.0, "hi": 1.0, "mean": 0.0, "std": 1.0}
+        return {
+            "a": {**good, **column_a},
+            "b": {"lo": 2.0, "hi": 4.0, "mean": 3.0, "std": 1.0},
+        }
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            dict(std=0.0),
+            dict(std=-1.0),
+            dict(std=np.nan),
+            dict(std=np.inf),
+            dict(lo=2.0, hi=1.0),
+        ],
+    )
+    @pytest.mark.parametrize("native", [True, False])
+    def test_refused_on_both_paths(self, bad, native, monkeypatch):
+        from standard_quant_tools.error import ValidationError
+
+        monkeypatch.setattr(transforms, "HAS_CPP", native)
+        with pytest.raises(ValidationError, match="apply_preprocessing"):
+            apply_preprocessing(self.FRAME, self._stats(**bad))
+
+    @pytest.mark.parametrize(
+        "bad,match",
+        [
+            (dict(std=0.0), "std"),
+            (dict(std=-1.0), "std"),
+            (dict(std=np.nan), "std"),
+            (dict(std=np.inf), "std"),
+            (dict(lo=2.0, hi=1.0), "lo"),
+        ],
+    )
+    def test_refused_by_the_binding(self, bad, match):
+        stats = self._stats(**bad)["a"]
+        with pytest.raises(ValueError, match=match):
+            transforms._cpp_core.apply_preprocess_stats(
+                np.array([[0.5]]),
+                np.array([stats["lo"]]),
+                np.array([stats["hi"]]),
+                np.array([stats["mean"]]),
+                np.array([stats["std"]]),
+            )
+
+    @pytest.mark.parametrize("native", [True, False])
+    def test_an_all_nan_columns_stats_still_apply(self, native, monkeypatch):
+        """The null case: NaN lo/hi/mean with std 1.0 is what a fit reports
+        for a column with no values, and it must keep applying."""
+        frame = pd.DataFrame({"a": [np.nan, np.nan, np.nan], "b": [1.0, 2.0, 4.0]})
+        monkeypatch.setattr(transforms, "HAS_CPP", native)
+        stats = fit_preprocessing(frame)
+        assert np.isnan(stats["a"]["lo"]) and stats["a"]["std"] == 1.0
+        out = apply_preprocessing(frame, stats)
+        assert out["a"].isna().all()
+        assert out["b"].notna().all()

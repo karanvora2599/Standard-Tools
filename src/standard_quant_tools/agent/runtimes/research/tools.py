@@ -1099,15 +1099,17 @@ def run_garch_volatility_forecast(
         returns, forecast_horizon=input_data.forecast_horizon
     )
 
-    warnings: List[str] = []
+    # The fit's own warnings first: a bound or a failed convergence changes
+    # how every number below is read, the residual checks included.
+    warnings: List[str] = list(result["warnings"])
     if result["misspecified"]:
         warnings.append(
             "MISSPECIFIED: the Ljung-Box test on the squared standardized "
             f"residuals returns p = {result['ljung_box_squared_p']:.4f}, so "
             "the fitted model did not remove the volatility clustering it "
             "was fitted to remove. `converged` is about the OPTIMIZER -- it "
-            "says L-BFGS-B reached a stationary point inside the bounds, not "
-            "that GARCH(1,1) with normal innovations and a constant mean "
+            "says L-BFGS-B reached a maximum of the likelihood inside the "
+            "bounds, not that GARCH(1,1) with normal innovations and a constant mean "
             "describes this series. The forecast is the model's, and this is "
             "the sample saying the model is the wrong one. The usual next "
             "step is an asymmetric variance equation (EGARCH or GJR-GARCH) "
@@ -1145,6 +1147,8 @@ def run_garch_volatility_forecast(
         beta=round(result["beta"], 6),
         persistence=round(result["persistence"], 6),
         converged=result["converged"],
+        gradient_norm=result["gradient_norm"],
+        at_bound=result["at_bound"],
         current_annualized_vol=round(result["current_annualized_vol"], 6),
         long_run_annualized_vol=round(result["long_run_annualized_vol"], 6),
         forecast_annualized_vol=[

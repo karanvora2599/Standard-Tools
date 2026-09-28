@@ -12,6 +12,7 @@
 #include "sqt/cointegration.hpp"
 #include "sqt/qr.hpp"
 
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstdint>
@@ -126,6 +127,26 @@ static void test_ols2_r2_in_unit_interval() {
     auto noise = lcg_noise(50, 3, 2.0);
     std::vector<double> y(50);
     for (int i = 0; i < 50; ++i) y[i] = 1.5 * x[i] + noise[i];
+    auto r = sqt::ols2(y.data(), x.data(), x.size());
+    CHECK(r.r_squared >= 0.0 && r.r_squared <= 1.0);
+}
+
+static void test_ols2_constant_response_has_undefined_r2() {
+    // A constant y has no variance to explain, so R^2 is 0/0. It used to be
+    // reported as 0.0, which reads as "x explains nothing" -- a measurement
+    // this data cannot make -- while the NumPy fallback reported NaN for the
+    // same call. The fit itself is still defined: slope 0, intercept y.
+    auto x = linspace(0.0, 10.0, 25);
+    for (double level : {0.0, 0.01, -3.5, 1.0e9}) {
+        std::vector<double> y(x.size(), level);
+        auto r = sqt::ols2(y.data(), x.data(), x.size());
+        CHECK_NAN(r.r_squared);
+        CHECK_NEAR(r.slope, 0.0, 1e-12);
+        CHECK_NEAR(r.intercept, level, 1e-12 * std::max(1.0, std::abs(level)));
+    }
+    // The null case: any variation at all gives a number in [0, 1].
+    std::vector<double> y(x.size(), 0.01);
+    y[3] = 0.02;
     auto r = sqt::ols2(y.data(), x.data(), x.size());
     CHECK(r.r_squared >= 0.0 && r.r_squared <= 1.0);
 }
@@ -838,6 +859,7 @@ int main() {
     // ols2
     test_ols2_perfect_line();
     test_ols2_residuals_sum_to_zero();
+    test_ols2_constant_response_has_undefined_r2();
     test_ols2_r2_in_unit_interval();
     test_ols2_flat_predictor();
     test_ols2_large_baseline_no_catastrophic_cancellation();

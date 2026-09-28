@@ -49,7 +49,23 @@ _TRADE_COLUMNS = ("price", "size")
 _QUOTE_COLUMNS = ("bid_price", "ask_price")
 
 
-def _require_frame(frame: pd.DataFrame, columns: tuple, label: str) -> pd.DataFrame:
+def _time_order(index: pd.DatetimeIndex) -> np.ndarray:
+    """
+    Row positions in time order, rows sharing a timestamp kept in the order
+    they arrived.
+
+    STABLE, because the order within a tie is information. Live tapes repeat
+    timestamps on a fifth to over half of their prints; the tick rule reads
+    the previous print, and of two quote updates in one nanosecond the later
+    is the book that stood. An unstable sort permuted every tie group as
+    soon as one row was out of place, so one tape gave a different
+    buy-volume fraction per arrival order. See the CHANGELOG entry of
+    2026-09-27.
+    """
+    return np.asarray(index.argsort(kind="stable"))
+
+
+def _check_frame(frame: pd.DataFrame, columns: tuple, label: str) -> None:
     if not isinstance(frame, pd.DataFrame) or frame.empty:
         raise ValidationError(f"{label} is empty; there is nothing to measure")
     missing = [c for c in columns if c not in frame.columns]
@@ -63,8 +79,14 @@ def _require_frame(frame: pd.DataFrame, columns: tuple, label: str) -> pd.DataFr
             "matches trades to the quote that preceded them, which needs a "
             "real time index rather than a positional one."
         )
+
+
+def _require_frame(frame: pd.DataFrame, columns: tuple, label: str) -> pd.DataFrame:
+    """The frame, refused by name if unusable, in time order (see
+    `_time_order`)."""
+    _check_frame(frame, columns, label)
     if not frame.index.is_monotonic_increasing:
-        frame = frame.sort_index()
+        frame = frame.iloc[_time_order(frame.index)]
     return frame
 
 
@@ -141,7 +163,9 @@ def sign_trades(
     own effect on the book classify it, biasing every downstream spread
     toward zero and every impact measure toward zero as well.
 
-    Returns a Series of +1/-1 aligned to `trades.index`. Trades that
+    Returns a Series of +1/-1 labelled by `trades.index`, in TIME order
+    whatever order the rows arrived in -- the reporting shape;
+    `signs_positional` is the one in the caller's own row order. Trades that
     neither test can classify -- an opening trade at the midpoint with no
     prior price -- are dropped rather than defaulted, because assigning
     them a side would put a coin flip into a mean.
@@ -166,8 +190,26 @@ def signs_positional(
     a tape whose whole volume was 64,780. Positions never collide, so
     everything that has to line a sign up against a trade row -- inside
     this module and out -- takes this array instead.
+
+    COMPUTED IN TIME ORDER, RETURNED IN ROW ORDER. The tick rule means the
+    previous print in time and the prevailing quote means the last one
+    before the trade, so the signs are worked out on the tape put in time
+    order (ties kept in arrival order) and then scattered back to the rows
+    they belong to. A tape that arrives out of order -- a vendor inversion,
+    two pulls concatenated the wrong way round -- used to get its signs in
+    SORTED order, so every caller indexing its own rows with them signed
+    one print with another's side: a coin flip on half of a concatenated
+    tape. See the CHANGELOG entry of 2026-09-27.
     """
-    return _sign_series(trades, quotes).to_numpy(dtype=float)
+    _check_frame(trades, _TRADE_COLUMNS, "trades")
+    if trades.index.is_monotonic_increasing:
+        # Already in time order: row order and time order are the same.
+        return _sign_series(trades, quotes).to_numpy(dtype=float)
+    order = _time_order(trades.index)
+    in_time = _sign_series(trades.iloc[order], quotes).to_numpy(dtype=float)
+    signs = np.empty(len(trades), dtype=float)
+    signs[order] = in_time
+    return signs
 
 
 #: The spelling this had while it was private, kept so an importer that
@@ -179,7 +221,9 @@ def _sign_series(
     trades: pd.DataFrame, quotes: Optional[pd.DataFrame] = None
 ) -> pd.Series:
     """The full-length sign series behind `sign_trades`, one entry per
-    trade row in order, undecided trades left as NaN."""
+    trade row IN TIME ORDER (the order `_require_frame` returns), undecided
+    trades left as NaN. `signs_positional` maps it back to the caller's
+    rows."""
     trades = _require_frame(trades, _TRADE_COLUMNS, "trades")
     price = trades["price"].astype(float)
 
@@ -206,7 +250,7 @@ def _sign_series(
     left = pd.DataFrame({"_pos": np.arange(n)[order]}, index=price.index[order])
     matched = pd.merge_asof(
         left,
-        q[["mid"]].sort_index(),
+        q[["mid"]].sort_index(kind="stable"),
         left_index=True,
         right_index=True,
         direction="backward",
@@ -273,8 +317,8 @@ def effective_spread(
     )
 
     matched = pd.merge_asof(
-        frame.sort_index(),
-        q[["mid", "spread_bps"]].sort_index(),
+        frame.sort_index(kind="stable"),
+        q[["mid", "spread_bps"]].sort_index(kind="stable"),
         left_index=True,
         right_index=True,
         direction="backward",
@@ -297,8 +341,8 @@ def effective_spread(
         # from the trade lands on the first quote at or after t+horizon.
         future.index = future.index - realized_horizon
         matched = pd.merge_asof(
-            matched.sort_index(),
-            future.sort_index(),
+            matched.sort_index(kind="stable"),
+            future.sort_index(kind="stable"),
             left_index=True,
             right_index=True,
             direction="forward",

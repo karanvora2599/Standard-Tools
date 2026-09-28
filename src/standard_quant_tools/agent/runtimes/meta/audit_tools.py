@@ -126,6 +126,15 @@ class AuditDaySummary(BaseModel):
 
 class AuditLogResult(_Result):
     audit_dir: str = ""
+    audit_dir_is_legacy_cache: bool = Field(
+        False,
+        description=(
+            "The trail lives in the old default under the user's cache "
+            "directory -- kept so an existing chain stays continuous, but a "
+            "directory cleanup tools are entitled to empty. Move it "
+            "somewhere durable and set SQT_AUDIT_DIR."
+        ),
+    )
     recording_enabled: bool = True
     days: int = 0
     oldest_date: Optional[str] = None
@@ -350,11 +359,16 @@ def describe_audit_log(input_data: AuditLogInput) -> AuditLogResult:
     deletion from the tampering it exists to detect, so deletion stays an
     operator action with a CLI.
     """
-    from standard_quant_tools.audit.paths import _audit_dir, _iter_day_files
+    from standard_quant_tools.audit.paths import (
+        _audit_dir,
+        _is_legacy_cache_location,
+        _iter_day_files,
+    )
     from standard_quant_tools.audit.retention import gc_candidates, is_held
     from standard_quant_tools.audit.signing import HAS_CRYPTOGRAPHY
 
     directory = _audit_dir()
+    legacy_location = _is_legacy_cache_location(directory)
     day_files = _iter_day_files(directory)
     config = _audit_configuration()
 
@@ -429,6 +443,15 @@ def describe_audit_log(input_data: AuditLogInput) -> AuditLogResult:
         )
 
     warnings: List[str] = []
+    if legacy_location:
+        # The process-wide warning fires once and only reaches whoever reads
+        # stderr; an agent asking what the log is gets it here, every time.
+        warnings.append(
+            f"The trail lives under {directory}, the old default inside the "
+            "user's cache directory. It is used so the existing chain stays "
+            "continuous, but cleanup tools empty cache directories. Move the "
+            "trail somewhere durable and set SQT_AUDIT_DIR to it."
+        )
     if not recording_enabled:
         warnings.append(
             "Recording is OFF, so calls made from now on leave no record "
@@ -475,6 +498,7 @@ def describe_audit_log(input_data: AuditLogInput) -> AuditLogResult:
     )
     return AuditLogResult(
         audit_dir=str(directory),
+        audit_dir_is_legacy_cache=legacy_location,
         recording_enabled=recording_enabled,
         days=len(day_files),
         oldest_date=day_files[0].stem if day_files else None,
