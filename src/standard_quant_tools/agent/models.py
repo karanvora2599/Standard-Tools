@@ -321,6 +321,12 @@ class AnalysisResult(BaseModel):
     var_95: float
     cvar_95: float
     information_ratio: float
+    warnings: List[str] = Field(
+        default_factory=list,
+        description="What the provider dropped from or flagged on the bars "
+        "these figures were computed from: bars with no Close, and a last "
+        "bar whose session had not closed.",
+    )
 
 
 # ──────────────────────────────────────────────
@@ -375,6 +381,12 @@ class TechnicalResult(BaseModel):
     last_close: float
     signals: Dict[str, Any]
     last_values: Dict[str, Any]
+    warnings: List[str] = Field(
+        default_factory=list,
+        description="What the provider dropped from or flagged on the bars "
+        "the indicators read: bars with no Close, and a last bar whose "
+        "session had not closed, whose Close is then the latest price.",
+    )
 
 
 # ──────────────────────────────────────────────
@@ -3175,6 +3187,12 @@ class TailRiskResult(BaseModel):
     var_historical_comparison: float
     method: str
     tail_classification: str
+    warnings: List[str] = Field(
+        default_factory=list,
+        description="What the provider dropped from or flagged on the bars "
+        "the losses were computed from: bars with no Close, and a last bar "
+        "whose session had not closed.",
+    )
 
 
 # ──────────────────────────────────────────────
@@ -6020,6 +6038,16 @@ class DataSourceRef(BaseModel):
             "change."
         ),
     )
+    fetch_ms: Optional[float] = Field(
+        None,
+        description=(
+            "How long the call spent getting this frame: the time from the "
+            "start of the call, or from its previous data access, to this "
+            "one completing. Computation a tool does between two fetches "
+            "lands in the later one's figure, so it is an upper bound on "
+            "that fetch. None for records written before it was recorded."
+        ),
+    )
 
 
 class ExplainDecisionResult(BaseModel):
@@ -6030,6 +6058,23 @@ class ExplainDecisionResult(BaseModel):
     input: Dict[str, Any]
     data_sources: List[DataSourceRef] = Field(default_factory=list)
     duration_ms: float
+    fetch_ms: Optional[float] = Field(
+        None,
+        description=(
+            "The part of duration_ms spent getting market data: the data "
+            "sources' fetch_ms summed. None for records written before the "
+            "split was recorded."
+        ),
+    )
+    compute_ms: Optional[float] = Field(
+        None,
+        description=(
+            "The rest of duration_ms, floored at 0 -- the answer to 'slow "
+            "kernel or slow vendor' with fetch_ms. None for a FAILED call, "
+            "whose last fetch may have failed without reporting itself, "
+            "and for records written before the split was recorded."
+        ),
+    )
     execution_path: str = Field(
         ...,
         description=(
@@ -6051,6 +6096,18 @@ class ExplainDecisionResult(BaseModel):
             "field existed."
         ),
     )
+    native_isa: Optional[str] = Field(
+        None,
+        description=(
+            "WHICH instruction-set path the compiled kernels took on the "
+            "machine that wrote the record: 'avx2+fma' or 'scalar', or "
+            "'none' when no extension ran. One build takes either path "
+            "depending on the CPU, and the two agree to twelve significant "
+            "digits rather than bit for bit, so an output hash is bit-exact "
+            "only for the same native_build on the same native_isa. None "
+            "for records written before the field existed."
+        ),
+    )
     output_hash: Optional[str] = None
     output_hash_normalized: Optional[str] = Field(
         None,
@@ -6060,6 +6117,16 @@ class ExplainDecisionResult(BaseModel):
             "tools that mint a fresh id per run, whose literal output_hash "
             "can never reproduce. None for records written before the "
             "field existed."
+        ),
+    )
+    output_hash_rounded: Optional[str] = Field(
+        None,
+        description=(
+            "The output hashed with run-specific identifiers normalized "
+            "away and every float rounded to twelve significant digits. "
+            "Replay compares it when the exact hash misses on a different "
+            "build or instruction-set path, where only twelve digits are "
+            "promised. None for records written before the field existed."
         ),
     )
     n_workers: Optional[int] = Field(
@@ -6152,11 +6219,21 @@ class ReplayDecisionResult(BaseModel):
     )
     data_source_matches: List[DataSourceMatch] = Field(default_factory=list)
     verdict: Literal[
-        "reproduced", "data_changed", "code_changed", "not_comparable", "failed"
+        "reproduced",
+        "reproduced_to_12_digits",
+        "data_changed",
+        "code_changed",
+        "not_comparable",
+        "failed",
     ] = Field(
         ...,
         description=(
-            "'reproduced' output and data both match. 'data_changed' the "
+            "'reproduced' output and data both match. "
+            "'reproduced_to_12_digits' the output is not bit-identical but "
+            "agrees to twelve significant digits, and the record was written "
+            "by a different native build or instruction-set path -- which "
+            "is all an output hash promises across builds, so it does not "
+            "implicate the code. 'data_changed' the "
             "inputs no longer hash the same, so a different output is "
             "EXPECTED and says nothing about the code. 'code_changed' the "
             "data still matches but the output does not — the only "
@@ -6178,6 +6255,26 @@ class ReplayDecisionResult(BaseModel):
             "stored_output_hash so a 'code_changed' verdict comes with the "
             "two values it was decided from, which is the difference "
             "between an answer and an assertion."
+        ),
+    )
+    rounded_output_match: Optional[bool] = Field(
+        None,
+        description=(
+            "Whether the output agrees to twelve significant digits, by its "
+            "rounded hash. Compared only when the exact hash missed; None "
+            "when it matched or the record predates the rounded hash."
+        ),
+    )
+    stored_output_hash_rounded: Optional[str] = None
+    new_output_hash_rounded: Optional[str] = None
+    build_differences: List[str] = Field(
+        default_factory=list,
+        description=(
+            "How the native build and instruction-set path that wrote the "
+            "record differ from the ones replaying it, reported when the "
+            "exact hash missed. Empty means the same build on the same "
+            "path -- the one case in which the exact hash is promised to "
+            "reproduce."
         ),
     )
     notes: List[str] = Field(default_factory=list)

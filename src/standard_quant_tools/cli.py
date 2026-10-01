@@ -176,8 +176,20 @@ def _replay_exit_code(result: audit.ReplayResult) -> int:
     0 = output reproduced exactly, 1 = output_match is False (confirmed
     mismatch — code or data changed the result), 2 = output_match is None
     (the stored record has no output_hash to compare against, so replay
-    success can't be determined either way).
+    success can't be determined either way), 3 = the exact hash missed but
+    the output reproduced to twelve significant digits on a different native
+    build or instruction-set path.
+
+    3 is not folded into 0 or 1. It is not bit-exact, so 0 would claim more
+    than happened; and nothing changed in the code or the data, so 1 would
+    send an automated check after a regression that is not there.
     """
+    if (
+        result.output_match is False
+        and result.rounded_output_match is True
+        and result.build_differences
+    ):
+        return 3
     if result.output_match is False:
         return 1
     if result.output_match is None:

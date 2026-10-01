@@ -210,9 +210,10 @@ def install(monkeypatch: Any) -> None:
     The Parquet tier is switched off for the same span, so fake bars are never
     written where a later test outside this layer would read them as real
     ones, and the session tier is emptied on the way in and out so no real
-    bars fetched earlier are mixed in. A retry sleeps for nothing: an invalid
-    date reaching the provider is retried as if the network had failed, and
-    three seconds per ticker of that would dominate the run.
+    bars fetched earlier are mixed in. A retry sleeps for nothing: an
+    impossible date or a frame that cannot be repaired is refused once, but
+    a probe that provokes a transient-looking failure is still retried, and
+    three seconds per ticker of backoff would dominate the run.
     """
     import standard_quant_tools.data._cache as cache
     import standard_quant_tools.data._retry as retry

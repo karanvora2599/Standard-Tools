@@ -16,7 +16,8 @@ This is a package, not a single module, split by concern so it stays
 readable as features accrete (retention/legal-hold, checkpoint signing,
 pluggable storage backends, ...):
 
-    hashing     — content-fingerprint hashing (hash_payload, hash_dataframe)
+    hashing     — content-fingerprint hashing (hash_payload, hash_dataframe,
+                  round_floats for the twelve-digit output hash)
     json_native — what a record's input is made of before it is hashed
     context     — per-call request context + correlated-logging helper
     provenance  — git/package-version/strategy-source best-effort provenance
@@ -47,7 +48,7 @@ from .context import (
 )
 from .dispatch import _run_and_record, last_request_id
 from .export import ExportedBundle, export_bundle
-from .hashing import hash_dataframe, hash_payload
+from .hashing import hash_dataframe, hash_payload, round_floats
 from .models import DecisionRecord, ReplayResult
 from .paths import (
     _DAY_FILE_RE,
@@ -61,6 +62,7 @@ from .provenance import (
     _cpp_available,
     _git_sha,
     _native_build_label,
+    _native_isa_label,
     _package_version,
     _strategy_source_hash,
 )
@@ -112,6 +114,7 @@ __all__ = [
     "record_data_access",
     "release_hold",
     "repair_torn_tail",
+    "round_floats",
     "seal_day",
     "verify_audit_log_integrity",
     "verify_audit_trail_integrity",

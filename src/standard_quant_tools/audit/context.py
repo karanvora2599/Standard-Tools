@@ -1,10 +1,13 @@
 """Per-call request context: the `request_id`/in-flight `data_sources` list
 threaded through a `dispatch()` call via `contextvars` (so it survives the
-thread-pool hop in async data fetches), plus the opt-in correlated-logging
-helper that reads `request_id` back out of that same context."""
+thread-pool hop in async data fetches), the clock that times each data
+access, plus the opt-in correlated-logging helper that reads `request_id`
+back out of that same context."""
 
 import contextvars
 import logging
+import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
@@ -14,6 +17,46 @@ _request_id_var: "contextvars.ContextVar[Optional[str]]" = contextvars.ContextVa
 )
 _data_sources_var: "contextvars.ContextVar[Optional[List[Dict[str, Any]]]]" = (
     contextvars.ContextVar("sqt_data_sources", default=None)
+)
+
+
+class _FetchClock:
+    """
+    Where one call's timeline stands: the moment the call started, then the
+    moment each of its data accesses completed.
+
+    A provider reports a data access once it has the frame, and says
+    nothing when it starts fetching, so the time a fetch took is read here
+    as the time since the previous mark -- the start of the call, or the
+    data access before it. Laid end to end those laps cover the call from
+    its start to its last data access, which is the share of `duration_ms`
+    spent getting data; what follows the last access is computation. Any
+    computation a tool does BETWEEN two fetches lands in the second lap, so
+    a lap is an upper bound on that fetch, exact for the usual shape of a
+    tool (fetch, then compute).
+
+    One object per call, shared by reference: a context copied into a
+    worker thread copies the reference, so concurrent fetches advance the
+    same clock, and the first to finish carries the wait they shared.
+    """
+
+    __slots__ = ("_mark", "_lock")
+
+    def __init__(self, start: Optional[float] = None) -> None:
+        self._mark = time.perf_counter() if start is None else start
+        self._lock = threading.Lock()
+
+    def lap_ms(self) -> float:
+        """Milliseconds since the previous mark, and move the mark to now."""
+        with self._lock:
+            now = time.perf_counter()
+            elapsed = (now - self._mark) * 1000.0
+            self._mark = now
+        return elapsed
+
+
+_fetch_clock_var: "contextvars.ContextVar[Optional[_FetchClock]]" = (
+    contextvars.ContextVar("sqt_fetch_clock", default=None)
 )
 
 
@@ -72,22 +115,34 @@ def record_data_access(
     interval: str,
     source: str,
     content_hash: str,
+    fetch_ms: Optional[float] = None,
 ) -> None:
     """
     Report an OHLCV pull into the currently-open decision record, if any.
     No-op when no decision record is in progress (e.g. calling a data
     provider directly outside of `dispatch()`).
+
+    The entry carries `fetch_ms`, how long the call spent getting this
+    frame. A provider that timed its own fetch passes that figure; without
+    one it is the lap of the call's fetch clock (see `_FetchClock`): the
+    time since the call started or since its previous data access
+    completed. Either way the clock moves to now, so the next lap starts
+    here.
     """
     sources = _data_sources_var.get()
     if sources is None:
         return
-    sources.append(
-        {
-            "symbol": symbol,
-            "start": start,
-            "end": end,
-            "interval": interval,
-            "source": source,
-            "content_hash": content_hash,
-        }
-    )
+    clock = _fetch_clock_var.get()
+    lap = clock.lap_ms() if clock is not None else None
+    measured = fetch_ms if fetch_ms is not None else lap
+    entry: Dict[str, Any] = {
+        "symbol": symbol,
+        "start": start,
+        "end": end,
+        "interval": interval,
+        "source": source,
+        "content_hash": content_hash,
+    }
+    if measured is not None:
+        entry["fetch_ms"] = round(float(measured), 3)
+    sources.append(entry)

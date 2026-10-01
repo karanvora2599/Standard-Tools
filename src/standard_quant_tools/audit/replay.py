@@ -14,8 +14,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from standard_quant_tools.error import ValidationError
 
+from . import provenance as _provenance
 from .context import _data_sources_var
-from .hashing import hash_payload
+from .hashing import ROUNDED_SIGNIFICANT_DIGITS, hash_payload, round_floats
 from .models import ReplayResult
 
 # Identifiers minted fresh on every modeling run: `ds_` + 12 hex for a
@@ -95,6 +96,30 @@ def normalize_identifiers(obj: Any) -> Any:
 # Internal alias kept so call sites read consistently with the other
 # underscore-prefixed helpers in this module.
 _normalize_identifiers = normalize_identifiers
+
+
+def _build_differences(record: Dict[str, Any]) -> List[str]:
+    """
+    How the native build and instruction-set path that wrote `record`
+    differ from the ones replaying it, one line per field that differs.
+
+    A field the record does not carry counts as different: a record that
+    predates it cannot vouch for having run where the replay runs. Empty
+    means the same build on the same path, the one case in which the exact
+    output hash is promised to reproduce.
+    """
+    current = {
+        "native_build": _provenance._native_build_label(),
+        "native_isa": _provenance._native_isa_label(),
+    }
+    differences: List[str] = []
+    for name, now in current.items():
+        then = record.get(name)
+        if then is None:
+            differences.append(f"{name}: not recorded, now {now!r}")
+        elif then != now:
+            differences.append(f"{name}: recorded {then!r}, now {now!r}")
+    return differences
 
 
 def _redacted_input_fields(node: Any, prefix: str = "") -> List[str]:
@@ -249,6 +274,68 @@ def verify_replay(record: Dict[str, Any]) -> ReplayResult:
                 "Re-record to get a comparable hash."
             )
 
+    # ── The twelve-significant-digit comparison ──────────────────────────
+    # An output hash is bit-exact only for the same native build on the
+    # same instruction-set path: the AVX2+FMA reduction fuses each
+    # multiply-add and sums in four lanes, so it rounds differently from
+    # the scalar loop, and a different compiler or OpenMP runtime may move
+    # the last bits too. Across builds or paths the promise is twelve
+    # significant digits. So when the exact hash misses, the rounded one
+    # decides between "reproduced to twelve digits elsewhere" and a real
+    # difference -- and on the SAME build and path a miss keeps the verdict
+    # it always had.
+    digits = ROUNDED_SIGNIFICANT_DIGITS
+    rounded_match: Optional[bool] = None
+    new_rounded_hash: Optional[str] = None
+    stored_rounded_hash = record.get("output_hash_rounded")
+    build_differences: List[str] = []
+    if output_match is False:
+        build_differences = _build_differences(record)
+        new_rounded_hash = hash_payload(
+            round_floats(_normalize_identifiers(new_output), digits)
+        )
+        where = "; ".join(build_differences)
+        if stored_rounded_hash is None:
+            notes.append(
+                "This record predates the rounded output hash, so a "
+                "difference in the last bits -- which a different native "
+                "build or instruction-set path produces by itself -- cannot "
+                f"be told apart from a real one. {digits}-digit comparison "
+                "is only possible for records written since it existed."
+                + (f" The build differs: {where}." if where else "")
+            )
+        else:
+            rounded_match = new_rounded_hash == stored_rounded_hash
+            if rounded_match and build_differences:
+                notes.append(
+                    f"Reproduced to {digits} significant digits, not bit for "
+                    f"bit, on a different build or instruction-set path "
+                    f"({where}). That is the contract across builds: an "
+                    "output hash is bit-exact only for the same native build "
+                    "on the same instruction-set path, and elsewhere the "
+                    f"outputs agree to {digits} significant digits. It is "
+                    "not evidence that the code changed."
+                )
+            elif rounded_match:
+                notes.append(
+                    f"The output agrees to {digits} significant digits but "
+                    "not bit for bit, on the same native build and "
+                    "instruction-set path. The build label names the C++ "
+                    "sources, not the compiler, its flags or the Python-side "
+                    "libraries, so something it does not record moved the "
+                    "last bits."
+                )
+            elif build_differences:
+                notes.append(
+                    f"The output differs beyond {digits} significant digits "
+                    f"as well, so the different build or path ({where}) does "
+                    "not account for it on its own. (Two values a last bit "
+                    "apart can still round apart at a rounding boundary, so "
+                    "this is strong rather than conclusive.)"
+                )
+    reproduced_elsewhere = bool(rounded_match) and bool(build_differences)
+    output_moved = output_match is False and not reproduced_elsewhere
+
     old_by_key = {
         (s["symbol"], s["start"], s["end"], s["interval"]): s["content_hash"]
         for s in record.get("data_sources", [])
@@ -281,7 +368,7 @@ def verify_replay(record: Dict[str, Any]) -> ReplayResult:
 
     data_all_match = all(m["match"] for m in data_matches) if data_matches else True
     if not data_all_match:
-        if output_match is False:
+        if output_moved:
             notes.append(
                 "Underlying data changed and the output changed accordingly — "
                 "the provider likely revised historical values."
@@ -291,7 +378,7 @@ def verify_replay(record: Dict[str, Any]) -> ReplayResult:
                 "Underlying data changed but the output is unaffected "
                 "(e.g. a scale- or shift-invariant metric) — worth a closer look."
             )
-    elif output_match is False:
+    elif output_moved:
         notes.append(
             "Output changed even though input data is identical — "
             "code/logic likely changed since the record was written."
@@ -306,4 +393,8 @@ def verify_replay(record: Dict[str, Any]) -> ReplayResult:
         new_output_hash=new_output_hash,
         stored_output_hash=stored_output_hash,
         new_output_hash_normalized=normalized_hash,
+        rounded_output_match=rounded_match,
+        new_output_hash_rounded=new_rounded_hash,
+        stored_output_hash_rounded=stored_rounded_hash,
+        build_differences=build_differences,
     )

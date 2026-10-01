@@ -1,5 +1,6 @@
-"""Best-effort reproducibility provenance: C++ extension availability and
-which build of it ran, the current git commit, the installed package version, and a content hash of a
+"""Best-effort reproducibility provenance: C++ extension availability, which
+build of it ran and which instruction-set path its kernels took, the current
+git commit, the installed package version, and a content hash of a
 registered strategy's source code. All of these fail silently (return
 `None`/`False`) rather than raise — provenance is a nice-to-have, never a
 reason to break a tool call."""
@@ -29,6 +30,20 @@ def _native_build_label() -> Optional[str]:
         from standard_quant_tools._native_build import native_build_status
 
         return native_build_status().label
+    except Exception:
+        return None
+
+
+def _native_isa_label() -> Optional[str]:
+    """Which instruction-set path the compiled kernels take on this machine
+    (`avx2+fma`, `scalar`), or `none` when no extension ran. Recorded beside
+    `native_build` because the build alone does not fix the last bits of an
+    output: the same binary rounds differently on the AVX2+FMA path than on
+    the scalar one."""
+    try:
+        from standard_quant_tools._native_build import native_isa
+
+        return native_isa()
     except Exception:
         return None
 

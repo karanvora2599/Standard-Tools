@@ -70,6 +70,30 @@ action is a finding rather than a false positive.
 
 ---
 
+## What the provider drops and flags before any check runs
+
+Two conditions are handled by every provider before a frame reaches a
+check or a tool, and both are written on `df.attrs` (see
+[01_data_fetching.md](01_data_fetching.md#a-bar-with-no-close-is-dropped-and-a-bar-still-trading-is-flagged)):
+
+- **A bar with no Close is dropped.** After the last priced bar it is a
+  placeholder for a session that has not traded (`dropped_placeholder_bars`);
+  before it, a missing bar (`dropped_missing_bars`). A whole window without
+  a Close is refused with `NonRetryableAPIError`, once. A dropped interior
+  bar is therefore a gap in the index, and `detect_missing_bars` reports it
+  like any other gap — against the calendar, so it is a finding rather than
+  a holiday.
+- **A last daily bar whose session has not closed is flagged**
+  (`partial_last_bar`, with the session's date and the UTC instant it
+  closes), judged against the exchange calendar when `exchange_calendars` is
+  installed and the venue's regular close otherwise. Its volume is a
+  partial session's, so `detect_volume_anomalies` may report it as thin —
+  the flag says why.
+
+The agent tools that fetch bars say both in `warnings`, per symbol.
+
+---
+
 ## Data Quality Checks (`data/quality.py`)
 
 Pure functions operating on an already-fetched OHLCV `DataFrame` — no new

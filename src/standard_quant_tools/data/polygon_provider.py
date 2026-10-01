@@ -83,6 +83,13 @@ from ._cache import (
     trim_to_inclusive_end,
 )
 from ._retry import retry
+from .bar_hygiene import (
+    US_EQUITY,
+    UTC_DAY,
+    SessionClock,
+    disclose_served,
+    drop_unusable_closes,
+)
 from .base import DataProvider, FinancialRatios, TickerInfo
 from .metadata import DataSetMetadata
 
@@ -114,6 +121,16 @@ _TIMESPAN_MAP = {
 # convention YFinanceProvider's _normalize_ohlcv_index establishes for every
 # other provider in this package.
 _DAY_OR_COARSER = frozenset({"day", "week", "month"})
+
+
+def _session_clock(symbol: str) -> SessionClock:
+    """When a Polygon daily bar stops changing: a crypto ('X:') or currency
+    ('C:') aggregate is a whole UTC day; a stock, index or option is the
+    NYSE session."""
+    upper = str(symbol).strip().upper()
+    if upper.startswith(("X:", "C:")):
+        return UTC_DAY
+    return US_EQUITY
 
 
 def _resolve_polygon_api_key(api_key: Optional[str] = None) -> str:
@@ -283,6 +300,11 @@ def _parse_ticks(
     return frame.sort_index()
 
 
+def _maybe_float(value: Any) -> float:
+    """A field of a bar that may be absent, as a float or NaN."""
+    return float("nan") if value is None else float(value)
+
+
 def _parse_aggs(
     results: List[Dict[str, Any]], symbol: str, timespan: str
 ) -> pd.DataFrame:
@@ -291,27 +313,46 @@ def _parse_aggs(
     `results` list (each a dict with "o"/"h"/"l"/"c"/"v"/"t" keys). Pure
     function, independent of the network call that produced it.
 
+    A bar with no close ("c") is kept with a NaN Close, for the provider to
+    drop and disclose as a missing bar -- the rule every provider follows
+    (see data/bar_hygiene.py) -- rather than refusing the whole response.
+
     Raises:
-        APIError: a bar is missing a required field.
+        NonRetryableAPIError: a bar has a close but no timestamp, open, high
+            or low. That is the shape of Polygon's answer, and asking again
+            returns it unchanged.
     """
     rows = []
     index = []
     for bar in results:
-        required = ("o", "h", "l", "c", "t")
-        missing = [f for f in required if bar.get(f) is None]
-        if missing:
-            raise APIError(
-                f"Incomplete aggregate bar for '{symbol}': missing {missing}."
+        if bar.get("c") is None and bar.get("t") is not None:
+            rows.append(
+                {
+                    "Open": _maybe_float(bar.get("o")),
+                    "High": _maybe_float(bar.get("h")),
+                    "Low": _maybe_float(bar.get("l")),
+                    "Close": float("nan"),
+                    "Volume": float(bar.get("v") or 0.0),
+                }
             )
-        rows.append(
-            {
-                "Open": float(bar["o"]),
-                "High": float(bar["h"]),
-                "Low": float(bar["l"]),
-                "Close": float(bar["c"]),
-                "Volume": float(bar.get("v") or 0.0),
-            }
-        )
+        else:
+            required = ("o", "h", "l", "c", "t")
+            missing = [f for f in required if bar.get(f) is None]
+            if missing:
+                raise NonRetryableAPIError(
+                    f"Incomplete aggregate bar for '{symbol}': missing {missing}. "
+                    "Polygon returns the same bar to the same request; ask "
+                    "another provider (source=...) or a window without it."
+                )
+            rows.append(
+                {
+                    "Open": float(bar["o"]),
+                    "High": float(bar["h"]),
+                    "Low": float(bar["l"]),
+                    "Close": float(bar["c"]),
+                    "Volume": float(bar.get("v") or 0.0),
+                }
+            )
         ts = pd.Timestamp(bar["t"], unit="ms", tz="UTC")
         if timespan in _DAY_OR_COARSER:
             index.append(ts.tz_localize(None).normalize())
@@ -584,6 +625,7 @@ class PolygonProvider(DataProvider):
             end_str,
             interval,
         )
+        clock = _session_clock(symbol)
         cached_df = _session_cache_get(cache_key)
         if cached_df is not None:
             audit.record_data_access(
@@ -594,11 +636,11 @@ class PolygonProvider(DataProvider):
                 source="session_cache",
                 content_hash=audit.hash_dataframe(cached_df),
             )
-            return cached_df.copy()
+            return disclose_served(cached_df.copy(), symbol, interval, clock)
 
         result = self._get_ohlcv_uncached(symbol, start_str, end_str, interval)
         _session_cache_set(cache_key, result, end=end_str)
-        return result.copy()
+        return disclose_served(result.copy(), symbol, interval, clock)
 
     @retry(times=3, delay=1)
     def _get_ohlcv_uncached(
@@ -663,6 +705,9 @@ class PolygonProvider(DataProvider):
         result = trim_to_inclusive_end(
             _parse_aggs(results, symbol, timespan), end_str, interval
         )
+        # A bar with no close is dropped and disclosed, by the rule every
+        # provider follows, so the frame cached below is the one served.
+        result = drop_unusable_closes(result, symbol, provider="polygon")
         audit.record_data_access(
             symbol,
             start_str,

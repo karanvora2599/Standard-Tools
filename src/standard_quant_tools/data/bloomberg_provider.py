@@ -49,11 +49,20 @@ from standard_quant_tools.error import (
     APIError,
     DataNotFoundError,
     InvalidSymbolError,
+    NonRetryableAPIError,
     ValidationError,
 )
 
 from ._cache import trim_to_inclusive_end
 from ._retry import retry
+from .bar_hygiene import (
+    CME_TRADE_DATE,
+    US_EQUITY,
+    SessionClock,
+    disclose_served,
+    drop_unusable_closes,
+    local_day,
+)
 from .base import DataProvider, FinancialRatios, TickerInfo
 from .metadata import DataSetMetadata
 
@@ -196,6 +205,34 @@ def _bloomberg_timezone(bloomberg_ticker: str) -> str:
     return "America/New_York"
 
 
+def _session_clock(bloomberg_ticker: str) -> SessionClock:
+    """
+    When a Bloomberg daily bar stops changing, from the ticker alone.
+
+    A US listing (or a ticker with no exchange key, such as 'SPX Index') is
+    the NYSE session; a 'Comdty' future the CME trade date; a currency the
+    whole New York day it trades through; any other listing is forming
+    until its exchange's local midnight -- later than its close, so a
+    closed session can be flagged for a few hours but a forming one is
+    never called closed.
+    """
+    parts = bloomberg_ticker.split()
+    sector = parts[-1] if parts else ""
+    if sector == "Comdty":
+        return CME_TRADE_DATE
+    if sector == "Curncy":
+        return local_day("America/New_York")
+    yellow_key = parts[-2].upper() if len(parts) >= 3 else "US"
+    if yellow_key == "US" or yellow_key not in _YELLOW_KEY_TIMEZONES:
+        return US_EQUITY
+    return local_day(_YELLOW_KEY_TIMEZONES[yellow_key])
+
+
+def _maybe_float(value: Any) -> float:
+    """A field of a bar that may be absent, as a float or NaN."""
+    return float("nan") if value is None else float(value)
+
+
 def _parse_historical_bars(bars: List[Dict[str, Any]], symbol: str) -> pd.DataFrame:
     """
     Build the standard OHLCV DataFrame from already-extracted historical
@@ -204,9 +241,15 @@ def _parse_historical_bars(bars: List[Dict[str, Any]], symbol: str) -> pd.DataFr
     blpapi-Element-consuming step that produces this shape). Pure function,
     independent of blpapi, so it's directly unit-testable.
 
+    A bar with no PX_LAST is kept with a NaN Close, for the provider to drop
+    and disclose as a missing bar -- the rule every provider follows (see
+    data/bar_hygiene.py) -- rather than refusing the whole response.
+
     Raises:
         DataNotFoundError: bars is empty.
-        APIError: a bar is missing a required field.
+        NonRetryableAPIError: a bar has a PX_LAST but no date, PX_OPEN,
+            PX_HIGH or PX_LOW. The Terminal returns the same bar to the
+            same request.
     """
     if not bars:
         raise DataNotFoundError(
@@ -215,11 +258,24 @@ def _parse_historical_bars(bars: List[Dict[str, Any]], symbol: str) -> pd.DataFr
     required = ("date", "PX_OPEN", "PX_HIGH", "PX_LOW", "PX_LAST")
     rows = []
     for bar in bars:
+        if bar.get("PX_LAST") is None and bar.get("date") is not None:
+            rows.append(
+                {
+                    "Open": _maybe_float(bar.get("PX_OPEN")),
+                    "High": _maybe_float(bar.get("PX_HIGH")),
+                    "Low": _maybe_float(bar.get("PX_LOW")),
+                    "Close": float("nan"),
+                    "Volume": float(bar.get("PX_VOLUME") or 0.0),
+                }
+            )
+            continue
         missing = [f for f in required if bar.get(f) is None]
         if missing:
-            raise APIError(
+            raise NonRetryableAPIError(
                 f"Incomplete historical bar for '{symbol}' on "
-                f"{bar.get('date')!r}: missing {missing}."
+                f"{bar.get('date')!r}: missing {missing}. The Terminal returns "
+                "the same bar to the same request; ask for a window without "
+                "it, or fewer fields of a security that does not publish them."
             )
         rows.append(
             {
@@ -334,7 +390,16 @@ class BloombergProvider(DataProvider):
                 "HistoricalDataRequest). Intraday bars would need a separate "
                 "IntradayBarRequest integration that isn't implemented here."
             )
-        return self._get_ohlcv_uncached(symbol, start_date, end_date, interval)
+        result = self._get_ohlcv_uncached(symbol, start_date, end_date, interval)
+        # BDH labels a weekly or monthly bar by the END of its period, so
+        # the last bar's own date is the session that completes it.
+        return disclose_served(
+            result,
+            symbol,
+            interval,
+            _session_clock(_to_bloomberg_ticker(symbol)),
+            anchor="end",
+        )
 
     @retry(times=3, delay=1)
     def _get_ohlcv_uncached(
@@ -374,6 +439,9 @@ class BloombergProvider(DataProvider):
         result = trim_to_inclusive_end(
             _parse_historical_bars(bars, symbol), end_date, interval
         )
+        # A bar with no PX_LAST is dropped and disclosed, by the rule every
+        # provider follows.
+        result = drop_unusable_closes(result, symbol, provider="bloomberg")
         audit.record_data_access(
             symbol,
             start_str,

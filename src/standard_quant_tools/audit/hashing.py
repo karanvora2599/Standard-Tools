@@ -1,10 +1,19 @@
 """Content-fingerprint hashing shared by every other module in this package:
 `hash_payload` for JSON-serializable objects (decision records, chain-index
-entries), `hash_dataframe` for OHLCV data provenance."""
+entries), `hash_dataframe` for OHLCV data provenance, and `round_floats`,
+which an output passes through before its rounded hash is taken."""
 
 import hashlib
 import json
+import math
 from typing import Any
+
+#: Significant digits an output's rounded hash keeps. Twelve because that is
+#: what the reproducibility contract promises across native builds and
+#: instruction-set paths: the AVX2+FMA and scalar reductions differ by a few
+#: units in the last place (measured worst case 6e-15 relative on
+#: rolling_beta), three orders of magnitude inside the twelfth digit.
+ROUNDED_SIGNIFICANT_DIGITS = 12
 
 
 def hash_dataframe(df: Any) -> str:
@@ -66,6 +75,56 @@ def _canonical_default(obj: Any) -> Any:
     if isinstance(obj, (bytes, bytearray)):
         return obj.hex()
     return str(obj)
+
+
+def round_floats(obj: Any, digits: int = ROUNDED_SIGNIFICANT_DIGITS) -> Any:
+    """
+    `obj` with every float rounded to `digits` significant decimal digits,
+    for a hash that survives a change in the last bits and nothing more.
+
+    Exactly:
+
+    - a finite, non-zero float becomes the double nearest its value
+      correctly rounded to `digits` significant digits, ties to even --
+      what `format(x, '.11e')` prints for twelve, read back. The rounding
+      is decimal and relative, so 1234.56789012345 and 1.23456789012345e-9
+      both keep twelve digits;
+    - 0.0 and -0.0 both become 0.0: the sign of a zero is a last-bit
+      difference, and JSON spells the two apart;
+    - NaN, inf and -inf are kept. Their JSON tokens carry no low bits, so
+      there is nothing to round, and an infinity keeps its sign;
+    - int and bool are untouched, at any size: an integer is a count or an
+      index, and rounding one would hide a real difference;
+    - str, None and dict KEYS are untouched; dict values, list and tuple
+      items are rounded at any depth (a tuple comes back as a list, which
+      JSON spells the same way);
+    - a numpy array or scalar is converted with `tolist()` first, as the
+      exact hash's encoder converts it, then rounded;
+    - anything else is returned as it is and hashed as before.
+
+    What it cannot do: a value that is zero in exact arithmetic but comes
+    out as rounding noise (1e-17 on one path, -3e-18 on another) agrees to
+    no number of significant digits, so the rounded hash differs there. And
+    two values a last bit apart that straddle a twelfth-digit rounding
+    boundary round apart; the chance is about the size of their difference
+    relative to the twelfth digit, measured at none in 7,231 rolling betas.
+    """
+    if obj is None or isinstance(obj, (bool, int, str)):
+        return obj
+    if isinstance(obj, float):
+        if not math.isfinite(obj):
+            return obj
+        if obj == 0.0:
+            return 0.0
+        return float(format(obj, f".{digits - 1}e"))
+    if isinstance(obj, dict):
+        return {key: round_floats(value, digits) for key, value in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [round_floats(value, digits) for value in obj]
+    tolist = getattr(obj, "tolist", None)
+    if callable(tolist):  # numpy ndarray / scalar, pandas Series/Index
+        return round_floats(tolist(), digits)
+    return obj
 
 
 def hash_payload(obj: Any) -> str:

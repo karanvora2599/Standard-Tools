@@ -1,5 +1,48 @@
 # Changelog
 
+## A bar that has not traded no longer refuses a year, and a record says where its time went
+
+A consumer polling the risk, technical, Hurst and tail-risk tools for AAPL
+and NVDA lost most of its overnight calls: outside market hours yfinance
+lists the next session before it trades, with no Close, and one such row
+refused the whole year — three times, because the refusal was retried as if
+the network had failed. Separately, nothing in a decision record could say
+whether a slow call was a slow kernel or a slow vendor, and a replay on
+another build or CPU read a last-bit difference as a code change.
+
+- **A bar with no Close no longer refuses the series.** Every provider drops
+  it and records the dates: `attrs["dropped_placeholder_bars"]` for rows
+  after the last priced bar (a session listed before it traded) and
+  `attrs["dropped_missing_bars"]` for a hole, logged as a warning, in the
+  live path and the cache alike. Dropping a bar gives the native indicator
+  recursions the same values as their gap rule. A window with no Close at
+  all, a frame missing a column, an incomplete vendor bar and an impossible
+  date (`2019-13-45`, which used to reach the vendor three times) are refused
+  once, by type, instead of being retried.
+- **A daily bar whose session has not closed is flagged.** It is kept and
+  marked `attrs["partial_last_bar"]` with its session and closing time,
+  judged by the exchange calendar when installed, otherwise the venue's
+  close (16:00 New York, the CME trade date, the UTC day for crypto). The
+  risk, technical, Hurst, tail-risk and fetch tools report every one of
+  these disclosures in `warnings`, per symbol.
+- **A decision record says where its time went.** Each data source carries
+  `fetch_ms`, and the record carries `fetch_ms` and `compute_ms`;
+  `explain_decision` shows the split and `describe_audit_log` reports each
+  tool's median and p95 of both.
+- **A record names the instruction-set path its kernels took** (`native_isa`,
+  from the new `_sqt_core.isa_path()`: `avx2+fma` or `scalar`) and carries a
+  hash of its output rounded to twelve significant digits. An output hash is
+  bit-exact for the same native build on the same path; across builds or
+  paths, outputs agree to twelve digits (measured: the AVX2 and scalar paths
+  of the rolling regression differ in the last bits on most windows, worst
+  relative gap 6.2e-15, none apart at twelve digits). Replay reports that
+  case as `reproduced_to_12_digits` instead of a code change, and
+  `sqt replay` exits 3 for it.
+- **The build guide explains why MSVC builds use OpenMP 2.0**: no MSVC mode
+  reaches OpenMP 4.5, `/openmp:llvm` and `/openmp:experimental` trade
+  features rather than add them, and the one `omp simd` in the code sits on
+  a fallback AVX2 hardware never runs.
+
 ## The profile-guided build works, and the extension names its OpenMP runtime
 
 Two build options were wired and never exercised. Run end to end, one of

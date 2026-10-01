@@ -53,6 +53,10 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 
 from standard_quant_tools.backtest.artifacts import save_artifact
+from standard_quant_tools.data.bar_hygiene import (
+    DISCLOSURE_KEYS,
+    collect_served_bars,
+)
 from standard_quant_tools.data.bundle import DataBundle, validate_bundle
 from standard_quant_tools.data.comparison import compare_ratio_sources
 from standard_quant_tools.data.continuous import build_continuous_futures
@@ -391,12 +395,15 @@ def _tape_fetch(provider: Any, method: str, input_data: Any, tool: str):
 def fetch_ohlcv(input_data: FetchOhlcvInput) -> FetchResult:
     """One symbol's OHLCV bars, published as a `price_panel` reference."""
     provider = _provider(input_data)
-    frame = provider.get_ohlcv(
-        input_data.symbol,
-        input_data.start_date,
-        input_data.end_date,
-        input_data.interval,
-    )
+    # The bars the provider dropped (no Close) or flagged (a last session
+    # still trading) are said in `warnings`, as for every bar fetch here.
+    with collect_served_bars() as served:
+        frame = provider.get_ohlcv(
+            input_data.symbol,
+            input_data.start_date,
+            input_data.end_date,
+            input_data.interval,
+        )
     return _published(
         frame,
         "price_panel",
@@ -404,6 +411,7 @@ def fetch_ohlcv(input_data: FetchOhlcvInput) -> FetchResult:
         input_data.name,
         "fetch_ohlcv",
         entities=[input_data.symbol],
+        warnings=served.warnings(),
     )
 
 
@@ -416,12 +424,13 @@ def fetch_ohlcv_panel(input_data: FetchOhlcvPanelInput) -> FetchResult:
     # the raw error names only the symbol that happened to raise first and
     # a caller cannot tell from it whether the other forty are fine.
     try:
-        by_symbol: Dict[str, pd.DataFrame] = fetch_ohlcv_panel_sync(
-            list(input_data.tickers),
-            input_data.start_date,
-            input_data.end_date,
-            input_data.interval,
-        )
+        with collect_served_bars() as served:
+            by_symbol: Dict[str, pd.DataFrame] = fetch_ohlcv_panel_sync(
+                list(input_data.tickers),
+                input_data.start_date,
+                input_data.end_date,
+                input_data.interval,
+            )
     except (ValidationError, ValueError):
         raise
     except Exception as exc:  # noqa: BLE001 -- one refusal, not a traceback
@@ -432,7 +441,7 @@ def fetch_ohlcv_panel(input_data: FetchOhlcvPanelInput) -> FetchResult:
             "run it again rather than expecting the rest to arrive."
         ) from exc
 
-    warnings: List[str] = []
+    warnings: List[str] = served.warnings()
     # A ticker whose frame comes back EMPTY is dropped here rather than
     # stacked. That is the reachable case: the fetch succeeded and returned
     # nothing, which is different from the fetch raising.
@@ -450,6 +459,11 @@ def fetch_ohlcv_panel(input_data: FetchOhlcvPanelInput) -> FetchResult:
             continue
         part = frame.copy()
         part["entity"] = symbol
+        # Said per symbol in `warnings` above. Left on the part, one
+        # symbol's dropped bar would make the parts' attrs differ, and
+        # pandas would then drop every attr from the stacked panel --
+        # the dataset that answered among them.
+        part.attrs = {k: v for k, v in frame.attrs.items() if k not in DISCLOSURE_KEYS}
         stacked.append(part)
     if not stacked:
         raise ValidationError(
@@ -469,13 +483,17 @@ def fetch_ohlcv_panel(input_data: FetchOhlcvPanelInput) -> FetchResult:
 
 def fetch_returns_panel(input_data: FetchReturnsPanelInput) -> FetchResult:
     """A wide date x ticker frame of returns, ready for any panel analysis."""
-    panel = fetch_returns_sync(
-        list(input_data.tickers),
-        input_data.start_date,
-        input_data.end_date,
-        input_data.interval,
-    )
-    warnings: List[str] = []
+    # The per-ticker frames do not survive into the wide panel, and their
+    # attrs with them; what each provider dropped or flagged is collected
+    # as it is served instead.
+    with collect_served_bars() as served:
+        panel = fetch_returns_sync(
+            list(input_data.tickers),
+            input_data.start_date,
+            input_data.end_date,
+            input_data.interval,
+        )
+    warnings: List[str] = served.warnings()
     missing = [t for t in input_data.tickers if t not in list(panel.columns)]
     if missing:
         warnings.append(

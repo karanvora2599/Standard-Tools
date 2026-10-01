@@ -118,6 +118,7 @@ from standard_quant_tools.analysis.pca import factor_contributions, pca_returns
 from standard_quant_tools.analysis.rally import detect_rally
 from standard_quant_tools.analysis.regression import calculate_beta, rolling_beta
 from standard_quant_tools.backtest.artifacts import save_artifact
+from standard_quant_tools.data.bar_hygiene import collect_served_bars
 from standard_quant_tools.data.factory import DataFactory
 from standard_quant_tools.data.quality import (
     detect_duplicate_timestamps,
@@ -234,8 +235,11 @@ def analyze_stock_risk(input_data: AnalysisInput) -> AnalysisResult:
     end = datetime.datetime.now()
     start = _parse_period(input_data.period)
 
-    asset_df = provider.get_ohlcv(input_data.symbol, start, end)
-    bench_df = provider.get_ohlcv(input_data.benchmark, start, end)
+    # What the provider dropped from or flagged on either series -- a bar
+    # with no Close, a last bar still trading -- reaches `warnings`.
+    with collect_served_bars() as served:
+        asset_df = provider.get_ohlcv(input_data.symbol, start, end)
+        bench_df = provider.get_ohlcv(input_data.benchmark, start, end)
 
     asset_ret = asset_df["Close"].pct_change(fill_method=None).dropna()
     bench_ret = bench_df["Close"].pct_change(fill_method=None).dropna()
@@ -255,6 +259,7 @@ def analyze_stock_risk(input_data: AnalysisInput) -> AnalysisResult:
         var_95=round(var_historical(asset_ret, 0.95), 6),
         cvar_95=round(cvar(asset_ret, 0.95), 6),
         information_ratio=round(information_ratio(asset_ret, bench_ret), 4),
+        warnings=served.warnings(),
     )
     logger.debug(
         "[analyze_risk] beta=%.4f  alpha=%.6f  sharpe=%.3f  VaR95=%.3f%%  maxdd=%.2f%%",
@@ -280,9 +285,10 @@ def get_technical_analysis(input_data: TechnicalInput) -> TechnicalResult:
         input_data.indicators,
     )
     provider = DataFactory.get_provider()
-    df = provider.get_ohlcv(
-        input_data.symbol, input_data.start_date, input_data.end_date
-    )
+    with collect_served_bars() as served:
+        df = provider.get_ohlcv(
+            input_data.symbol, input_data.start_date, input_data.end_date
+        )
     close = df["Close"]
     high = df["High"]
     low = df["Low"]
@@ -466,6 +472,7 @@ def get_technical_analysis(input_data: TechnicalInput) -> TechnicalResult:
         last_close=round(last_close, 4),
         signals=signals,
         last_values=last_vals,
+        warnings=served.warnings(),
     )
 
 
@@ -978,9 +985,10 @@ def run_hurst_analysis(input_data: HurstInput) -> HurstResult:
         input_data.rolling_window,
     )
     provider = DataFactory.get_provider()
-    df = provider.get_ohlcv(
-        input_data.symbol, input_data.start_date, input_data.end_date
-    )
+    with collect_served_bars() as served:
+        df = provider.get_ohlcv(
+            input_data.symbol, input_data.start_date, input_data.end_date
+        )
     returns = df["Close"].pct_change(fill_method=None).dropna()
 
     result = hurst_exponent(
@@ -990,7 +998,7 @@ def run_hurst_analysis(input_data: HurstInput) -> HurstResult:
         max_window=input_data.max_window,
     )
 
-    warnings = list(result.get("warnings", []))
+    warnings = served.warnings() + list(result.get("warnings", []))
     rolling_current = None
     rolling_regime_fractions = None
     if input_data.rolling_window:
@@ -1729,9 +1737,10 @@ def get_tail_risk_metrics(input_data: TailRiskInput) -> TailRiskResult:
         input_data.method,
     )
     provider = DataFactory.get_provider()
-    close = provider.get_ohlcv(
-        input_data.symbol, input_data.start_date, input_data.end_date
-    )["Close"]
+    with collect_served_bars() as served:
+        close = provider.get_ohlcv(
+            input_data.symbol, input_data.start_date, input_data.end_date
+        )["Close"]
     returns = close.pct_change(fill_method=None).dropna()
 
     result = evt_tail_risk(
@@ -1759,6 +1768,7 @@ def get_tail_risk_metrics(input_data: TailRiskInput) -> TailRiskResult:
         var_historical_comparison=round(hist_comparison, 6),
         method=result["method"],
         tail_classification=result["tail_classification"],
+        warnings=served.warnings(),
     )
 
 

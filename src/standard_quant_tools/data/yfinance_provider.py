@@ -2,6 +2,7 @@ import asyncio
 import contextvars
 import functools
 import logging
+import re
 import time
 import uuid
 from datetime import datetime
@@ -22,6 +23,7 @@ from standard_quant_tools.error import (
     APIError,
     DataNotFoundError,
     InvalidSymbolError,
+    NonRetryableAPIError,
     ValidationError,
 )
 
@@ -39,6 +41,15 @@ from ._cache import (
     trim_to_inclusive_end,
 )
 from ._retry import retry
+from .bar_hygiene import (
+    CME_TRADE_DATE,
+    US_EQUITY,
+    UTC_DAY,
+    SessionClock,
+    disclose_served,
+    drop_unusable_closes,
+    local_day,
+)
 from .base import DataProvider, FinancialRatios, TickerInfo
 from .metadata import DataSetMetadata
 
@@ -85,6 +96,62 @@ _EXCHANGE_SUFFIX_TIMEZONES = {
     ".V": "America/Toronto",
     ".SA": "America/Sao_Paulo",
 }
+
+# The exchange calendar each suffix's listings trade on, consulted to decide
+# whether a daily bar's session has closed. Shenzhen keeps Shanghai's hours,
+# the NSE Bombay's and the TSX Venture the TSX's, and exchange_calendars
+# carries the second of each pair.
+_EXCHANGE_SUFFIX_CALENDARS = {
+    ".L": "XLON",
+    ".DE": "XETR",
+    ".PA": "XPAR",
+    ".MI": "XMIL",
+    ".AS": "XAMS",
+    ".SW": "XSWX",
+    ".ST": "XSTO",
+    ".HK": "XHKG",
+    ".T": "XTKS",
+    ".SS": "XSHG",
+    ".SZ": "XSHG",
+    ".KS": "XKRX",
+    ".TW": "XTAI",
+    ".NS": "XBOM",
+    ".BO": "XBOM",
+    ".AX": "XASX",
+    ".TO": "XTSE",
+    ".V": "XTSE",
+    ".SA": "BVMF",
+}
+
+#: Yahoo's crypto pairs: a coin and a quote currency of three or more
+#: letters. A share class is one letter ('BRK-B'), so the two never meet.
+_CRYPTO_RE = re.compile(r"^[A-Z0-9]+-(USD|USDT|USDC|EUR|GBP|JPY|BTC|ETH)$")
+
+
+def _session_clock(symbol: str) -> SessionClock:
+    """
+    How to tell whether a Yahoo symbol's daily bar has closed, from the
+    symbol's own convention -- no network call.
+
+    A future ('ES=F') is a CME trade date; a currency pair ('EURUSD=X') a
+    whole London day, the zone Yahoo labels its FX bars in; a crypto pair
+    ('BTC-USD') a whole UTC day, weekends included; a suffixed listing its
+    exchange's calendar, or its local midnight without one. Everything else
+    -- US stocks, ETFs and indices -- is the NYSE session, which over-flags
+    a foreign index like '^N225' until New York's close rather than ever
+    calling a forming bar closed.
+    """
+    upper = symbol.upper()
+    if upper.endswith("=F"):
+        return CME_TRADE_DATE
+    if upper.endswith("=X"):
+        return local_day("Europe/London")
+    if _CRYPTO_RE.match(upper):
+        return UTC_DAY
+    for suffix, tz_name in _EXCHANGE_SUFFIX_TIMEZONES.items():
+        if upper.endswith(suffix):
+            return local_day(tz_name, _EXCHANGE_SUFFIX_CALENDARS.get(suffix))
+    return US_EQUITY
 
 
 class YFinanceProvider(DataProvider):
@@ -153,6 +220,7 @@ class YFinanceProvider(DataProvider):
             interval,
         )
 
+        clock = _session_clock(symbol)
         cached_df = _session_cache_get(cache_key)
         if cached_df is not None:
             audit.record_data_access(
@@ -163,13 +231,16 @@ class YFinanceProvider(DataProvider):
                 source="session_cache",
                 content_hash=audit.hash_dataframe(cached_df),
             )
-            return cached_df.copy()
+            return disclose_served(cached_df.copy(), symbol, interval, clock)
 
         result = self._fetch_ohlcv_uncached(
             symbol, start_date, end_date, interval, start_str, end_str
         )
         _session_cache_set(cache_key, result, end=end_str)
-        return result.copy()
+        # Judged on the copy handed out, at the moment it is handed out: a
+        # window served from the session cache a minute later may have
+        # closed in between.
+        return disclose_served(result.copy(), symbol, interval, clock)
 
     @retry(times=3, delay=1)
     def _fetch_ohlcv_uncached(
@@ -254,17 +325,26 @@ class YFinanceProvider(DataProvider):
             required = ["Open", "High", "Low", "Close", "Volume"]
             missing = [c for c in required if c not in df.columns]
             if missing:
-                raise APIError(
-                    f"Incomplete data from yfinance. Missing columns: {missing}"
+                # The shape of yfinance's answer, which a re-fetch of the
+                # same window reproduces: refused once, not three times.
+                raise NonRetryableAPIError(
+                    f"Incomplete data from yfinance for {symbol}: missing "
+                    f"columns {missing} (got {list(df.columns)}). Asking again "
+                    "returns the same frame; try another provider (source=...) "
+                    "or check that the symbol is a priced instrument."
                 )
-            if df["Close"].isnull().any():
-                raise APIError(f"Data for {symbol} contains NaNs in Close column.")
 
             # Trim AFTER normalization so the comparison happens in the same
             # tz-naive space the index was just converted into.
             result = trim_to_inclusive_end(
                 _normalize_ohlcv_index(df[required], interval), end_date, interval
             )
+            # A row with no Close -- the placeholder yfinance appends outside
+            # market hours for the next session, or a hole -- is dropped and
+            # disclosed rather than refusing the whole series (see the
+            # CHANGELOG entry of 2026-10-01). After the trim, so a row past
+            # the window is not reported as dropped from it.
+            result = drop_unusable_closes(result, symbol, provider="yfinance")
 
         except (DataNotFoundError, InvalidSymbolError, APIError):
             raise

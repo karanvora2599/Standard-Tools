@@ -124,6 +124,35 @@ class AuditDaySummary(BaseModel):
     )
 
 
+class ToolTiming(BaseModel):
+    """Where one tool's time goes, over the days a breakdown listed."""
+
+    model_config = ConfigDict(extra="allow")
+
+    tool_name: str = ""
+    split: int = Field(
+        0,
+        description=(
+            "Records carrying both fetch_ms and compute_ms: successful "
+            "calls written since the split was recorded. The four "
+            "statistics below are over these alone."
+        ),
+    )
+    not_split: int = Field(
+        0,
+        description=(
+            "Records without the split: written before it was recorded, "
+            "or calls that FAILED, whose last fetch may have failed without "
+            "reporting itself, so their remaining time cannot be called "
+            "computation."
+        ),
+    )
+    fetch_ms_median: Stat = None
+    fetch_ms_p95: Stat = None
+    compute_ms_median: Stat = None
+    compute_ms_p95: Stat = None
+
+
 class AuditLogResult(_Result):
     audit_dir: str = ""
     audit_dir_is_legacy_cache: bool = Field(
@@ -177,6 +206,16 @@ class AuditLogResult(_Result):
     )
     fail_closed: bool = False
     day_summaries: List[AuditDaySummary] = Field(default_factory=list)
+    tool_timings: List[ToolTiming] = Field(
+        default_factory=list,
+        description=(
+            "Per tool, over the days listed in day_summaries, the median "
+            "and p95 (linear interpolation) of fetch_ms -- time spent "
+            "getting market data -- and compute_ms, the rest of the call. "
+            "Answers 'slow kernel or slow vendor' per tool. Filled when "
+            "include_days is set; sorted by tool name."
+        ),
+    )
     notes: List[str] = Field(default_factory=list)
 
 
@@ -304,10 +343,29 @@ def _count_lines(path: Path) -> int:
     return total
 
 
-def _edges(path: Path) -> Tuple[Optional[str], Optional[str]]:
-    """The first and last timestamp in a day file, or (None, None)."""
+#: One record's timing, as `_read_day` collects it: the tool, and its
+#: fetch_ms and compute_ms when the record carries both (else None, None).
+_Timing = Tuple[str, Optional[float], Optional[float]]
+
+
+def _number(value: Any) -> Optional[float]:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _read_day(
+    path: Path,
+) -> Tuple[Optional[str], Optional[str], List[_Timing]]:
+    """The first and last timestamp in a day file, and every record's
+    timing, from one parse of it. (None, None, []) when it cannot be read.
+
+    The per-day breakdown already parses every record for its edges, so
+    the fetch/compute split is gathered in the same pass rather than by a
+    second read of a trail that can run to hundreds of megabytes."""
     first: Optional[str] = None
     last: Optional[str] = None
+    timings: List[_Timing] = []
     try:
         for line in path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
@@ -317,6 +375,13 @@ def _edges(path: Path) -> Tuple[Optional[str], Optional[str]]:
                 record = json.loads(line)
             except ValueError:
                 continue
+            if not isinstance(record, dict):
+                continue
+            fetch = _number(record.get("fetch_ms"))
+            compute = _number(record.get("compute_ms"))
+            if fetch is None or compute is None:
+                fetch = compute = None
+            timings.append((str(record.get("tool_name") or ""), fetch, compute))
             stamp = record.get("timestamp_utc")
             if stamp is None:
                 continue
@@ -325,7 +390,43 @@ def _edges(path: Path) -> Tuple[Optional[str], Optional[str]]:
             last = str(stamp)
     except OSError:
         logger.debug("[describe_audit_log] unreadable day file %s", path)
-    return first, last
+    return first, last, timings
+
+
+def _tool_timings(timings: List[_Timing]) -> List[ToolTiming]:
+    """Median and p95 of fetch_ms and compute_ms per tool, over the records
+    that carry the split; the rest are counted as not split."""
+    import numpy as np
+
+    fetches: Dict[str, List[float]] = {}
+    computes: Dict[str, List[float]] = {}
+    not_split: Dict[str, int] = {}
+    for tool, fetch, compute in timings:
+        if fetch is None or compute is None:
+            not_split[tool] = not_split.get(tool, 0) + 1
+            continue
+        fetches.setdefault(tool, []).append(fetch)
+        computes.setdefault(tool, []).append(compute)
+
+    out: List[ToolTiming] = []
+    for tool in sorted(set(fetches) | set(not_split)):
+        fetch_values = fetches.get(tool, [])
+        compute_values = computes.get(tool, [])
+        if not fetch_values:
+            out.append(ToolTiming(tool_name=tool, not_split=not_split.get(tool, 0)))
+            continue
+        out.append(
+            ToolTiming(
+                tool_name=tool,
+                split=len(fetch_values),
+                not_split=not_split.get(tool, 0),
+                fetch_ms_median=float(np.median(fetch_values)),
+                fetch_ms_p95=float(np.percentile(fetch_values, 95)),
+                compute_ms_median=float(np.median(compute_values)),
+                compute_ms_p95=float(np.percentile(compute_values, 95)),
+            )
+        )
+    return out
 
 
 def _audit_configuration() -> Dict[str, Any]:
@@ -410,9 +511,11 @@ def describe_audit_log(input_data: AuditLogInput) -> AuditLogResult:
         candidates = []
 
     summaries: List[AuditDaySummary] = []
+    timings: List[_Timing] = []
     if input_data.include_days:
         for path in list(reversed(day_files))[: input_data.max_days]:
-            first, last = _edges(path)
+            first, last, day_timings = _read_day(path)
+            timings.extend(day_timings)
             summaries.append(
                 AuditDaySummary(
                     date=path.stem,
@@ -450,7 +553,18 @@ def describe_audit_log(input_data: AuditLogInput) -> AuditLogResult:
     elif not input_data.include_days and day_files:
         notes.append(
             "Per-day detail was not asked for. Set include_days to see "
-            "which days are held, sealed or signed."
+            "which days are held, sealed or signed, and how each tool's "
+            "time splits between fetching data and computing."
+        )
+    tool_timings = _tool_timings(timings) if input_data.include_days else []
+    n_not_split = sum(t.not_split for t in tool_timings)
+    if n_not_split:
+        notes.append(
+            f"{n_not_split} record(s) in the listed days carry no "
+            "fetch/compute split and are counted as not_split: records "
+            "written before the split was recorded, and failed calls, "
+            "whose remaining time may be a fetch that failed without "
+            "reporting itself. The medians and p95s are over the rest."
         )
 
     warnings: List[str] = list(refusals)
@@ -524,6 +638,7 @@ def describe_audit_log(input_data: AuditLogInput) -> AuditLogResult:
         signing_available=bool(HAS_CRYPTOGRAPHY),
         fail_closed=fail_closed,
         day_summaries=summaries,
+        tool_timings=tool_timings,
         notes=notes,
         warnings=warnings,
     )
@@ -711,6 +826,7 @@ __all__ = [
     "DecisionMatch",
     "FindDecisionsInput",
     "FindDecisionsResult",
+    "ToolTiming",
     "describe_audit_log",
     "find_decisions",
 ]

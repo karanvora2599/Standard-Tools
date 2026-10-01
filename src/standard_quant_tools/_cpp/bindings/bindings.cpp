@@ -24,6 +24,7 @@
 #include "sqt/options.hpp"
 #include "sqt/panel_stats.hpp"
 #include "sqt/build_info.hpp"
+#include "sqt/isa_dispatch.hpp"
 
 namespace py = pybind11;
 
@@ -336,6 +337,25 @@ PYBIND11_MODULE(_sqt_core, m) {
         m.attr("__build_info__") =
             py::module_::import("types").attr("MappingProxyType")(stamp);
     }
+
+    // ── Instruction-set path ──────────────────────────────────────────────────
+    // Which reduction rolling_beta takes on THIS machine: the AVX2+FMA one or
+    // the portable scalar loop. The two agree to about twelve significant
+    // digits, not bit for bit, so a result is only bit-reproducible on the
+    // path that produced it and a decision record names that path. It is a
+    // property of the CPU the process runs on, not of the binary -- one
+    // build takes either path depending on where it runs -- so it is asked
+    // here at runtime rather than stamped into `__build_info__`, and it stays
+    // out of the source digest.
+    m.def(
+        "isa_path",
+        []() -> std::string {
+            return sqt::detect_isa_features().avx2 ? "avx2+fma" : "scalar";
+        },
+        "The instruction-set path the rolling kernels take on this machine:\n"
+        "'avx2+fma' when the CPU and the OS both support AVX2 with FMA, otherwise\n"
+        "'scalar'. Outputs on the two paths agree to about twelve significant\n"
+        "digits; only outputs on the same path are bit-identical.");
 
     // ── Hurst exponent ────────────────────────────────────────────────────────
 

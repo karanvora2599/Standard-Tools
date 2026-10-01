@@ -108,6 +108,78 @@ day resolved to **one** file and the second silently served the first's
 bars. Intraday bounds now carry `HHMMSS`; daily tokens are unchanged, so
 existing daily cache files stay addressable.
 
+### A bar with no Close is dropped, and a bar still trading is flagged
+
+Every provider applies the same three rules before it hands a frame back
+(`data/bar_hygiene.py`), and writes what it did on `df.attrs`:
+
+| Condition | What happens | `attrs` |
+|---|---|---|
+| A row **after** the last bar with a Close — a session listed before it traded | dropped, logged | `dropped_placeholder_bars`: the dates |
+| A row with no Close **inside** the window | dropped as a missing bar, logged | `dropped_missing_bars`: the dates |
+| The last **daily or coarser** bar's session has not closed | kept, logged | `partial_last_bar=True`, `partial_last_bar_session`, `partial_last_bar_closes_at` (UTC) |
+| No row has a Close at all | refused: `NonRetryableAPIError`, naming the window and the remedy | — |
+
+**Why drop rather than refuse.** Outside US market hours yfinance lists the
+next session as a row with no price. One such row used to refuse the whole
+year with `"Data for AAPL contains NaNs in Close column."`, as a plain
+`APIError` the retry layer repeated three times — 3 to 8 seconds spent
+re-fetching rows that could not change, on every call of a consumer polling
+at 8 pm New York. Dropping the row is the answer the native indicator
+recursions already give a gap (they step over a NaN bar), and a tool with no
+notion of a gap — returns, risk, Hurst, tail risk — sees a shorter series
+instead of a NaN. A return across a dropped bar spans both sessions as one
+observation; the warning says so.
+
+**Why flag rather than drop a bar still trading.** During a session the last
+daily bar is the session so far: its Close is the latest price and its
+volume a fraction of a day's (3.4M shares at 09:41 against 49.9M the day
+before). It is kept — a caller may want it — and flagged, so no tool reads
+it as a complete session without saying so. Whether the session has closed
+is decided, in order, by:
+
+- the exchange calendar, when the optional `exchange_calendars` package is
+  installed (XNYS for US equities, so an early close before a holiday is an
+  early close; the listing's exchange for a suffixed Yahoo symbol);
+- otherwise the venue's regular close: **16:00 America/New_York** for US
+  equities, ETFs and indices; **16:00 America/Chicago on the CME trade
+  date** for futures (the convention Databento's futures daily bars are
+  built by); the end of the UTC day for crypto pairs and for a Databento
+  feed whose daily bar is a UTC day; and the listing's local midnight for a
+  non-US listing without the calendar — later than its close, so a closed
+  session can be flagged for a few hours but a forming one is never called
+  closed.
+
+The flag is decided when a frame is **served**, not when it was fetched, so
+a frame from the session cache carries the answer for the moment it is
+handed out. Intraday bars are never flagged: each is a complete interval of
+its own. A weekly or monthly bar is flagged until the last session of its
+period closes.
+
+**What is cached is what was served.** The drop happens before the disk
+write, and Parquet keeps `attrs`, so a cached frame and a live one agree,
+disclosures included. The cache read still evicts a file holding a null
+Close — no current writer produces one.
+
+**The tools say it.** Every tool that fetches bars through a provider —
+`analyze_stock_risk`, `get_technical_analysis`, `run_hurst_analysis`,
+`get_tail_risk_metrics`, `fetch_ohlcv`, `fetch_ohlcv_panel` and
+`fetch_returns_panel` — puts one warning per condition, per symbol, in its
+result's `warnings`. A tool reads them with
+`bar_hygiene.collect_served_bars()`, which collects what each frame
+disclosed as it was served — including on the worker threads of an async
+panel fetch — so a panel whose attrs pandas dropped on a concat still says
+which symbol lost which bar.
+
+```python
+from standard_quant_tools.data.bar_hygiene import bar_warnings
+
+df = provider.get_ohlcv("AAPL", "2025-10-02", "2026-10-02")
+df.attrs.get("dropped_placeholder_bars")   # ['2026-10-02'] when fetched the evening before
+df.attrs.get("partial_last_bar")           # True when fetched at 09:41 New York on the 2nd
+bar_warnings(df, "AAPL")                   # the same, as sentences
+```
+
 ---
 
 ## Async Batch Fetching
@@ -259,7 +331,7 @@ df = provider.get_ohlcv("NVDA", "2020-01-01", "2024-01-01")
 print(f"Cached call: {time.perf_counter() - t0:.3f}s")
 ```
 
-**A cache entry is checked like a live answer before it is served.** Every provider reads the disk tier through one shared read, and it applies the checks the live paths make: the five `Open`/`High`/`Low`/`Close`/`Volume` columns, numeric; at least one bar; no null `Close`; and every bar inside the requested window (widened by one bar period for weekly and monthly bars, which are labelled by the start of their period, and by a day for intraday windows, whose bounds are in the caller's zone). A file that fails — truncated, garbage, or a readable Parquet file that is not a plausible answer, such as one holding only a `Close` column or another window's bars — is logged, deleted, and the data is refetched from the provider and rewritten; callers never see it or an exception because of it. A live answer the read would refuse is not written in the first place. Duplicate or out-of-order bar labels are logged rather than evicted: no writer here produces them, so a refetch would bring them back — `get_data_quality_report` reports them.
+**A cache entry is checked like a live answer before it is served.** Every provider reads the disk tier through one shared read, and it applies the checks the live paths make: the five `Open`/`High`/`Low`/`Close`/`Volume` columns, numeric; at least one bar; no null `Close`; and every bar inside the requested window (widened by one bar period for weekly and monthly bars, which are labelled by the start of their period, and by a day for intraday windows, whose bounds are in the caller's zone). A file that fails — truncated, garbage, or a readable Parquet file that is not a plausible answer, such as one holding only a `Close` column or another window's bars — is logged, deleted, and the data is refetched from the provider and rewritten; callers never see it or an exception because of it. A live answer the read would refuse is not written in the first place; a bar with no `Close` never reaches the write, because every provider drops it first and records the dates in `attrs`, which the Parquet file keeps (see [above](#a-bar-with-no-close-is-dropped-and-a-bar-still-trading-is-flagged)). Duplicate or out-of-order bar labels are logged rather than evicted: no writer here produces them, so a refetch would bring them back — `get_data_quality_report` reports them.
 
 **A Windows sharing violation is not corruption.** Opening an entry that another process is renaming a new version over, or has open, raises `PermissionError` on Windows. Each provider used to treat that as a corrupt file and delete a valid entry (a metered refetch), and yfinance and Polygon could turn a second refusal on the delete into an `APIError` with no request made. The read is now retried briefly; if it still cannot open, the call is served live and the entry is kept.
 
@@ -304,7 +376,7 @@ except APIError as e:
 
 Errors are designed to be descriptive enough for LLM self-correction — the message always includes the symbol and the reason for failure.
 
-`NonRetryableAPIError` is a subclass of `APIError` (so an existing `except APIError` still catches it — it's a narrowing, not a new branch you have to add), used for failures the shared `retry` decorator knows will never succeed no matter how many times it's retried — currently just `PolygonProvider`'s HTTP 401/403 (an invalid/expired API key). Everything else `APIError`-shaped (429 rate limits, 5xx, network errors) is retried with the usual exponential backoff; `DataNotFoundError`/`InvalidSymbolError` are also never retried, for the same reason (retrying "the symbol doesn't exist" can't change the answer).
+`NonRetryableAPIError` is a subclass of `APIError` (so an existing `except APIError` still catches it — it's a narrowing, not a new branch you have to add), used for failures the shared `retry` decorator knows will never succeed no matter how many times it's retried: a rejected credential (Polygon's and Databento's HTTP 401/403), and a vendor answer whose **shape** a re-fetch reproduces — a window in which no bar has a Close, a frame missing an OHLCV column, a Polygon or Bloomberg bar with a close but no high, low, open or date. Those used to be plain `APIError`s and were asked three times. Everything else `APIError`-shaped (429 rate limits, 5xx, network errors) is retried with the usual exponential backoff; `DataNotFoundError`/`InvalidSymbolError` are also never retried, for the same reason (retrying "the symbol doesn't exist" can't change the answer).
 
 ### What `retry` retries, precisely
 
@@ -313,7 +385,7 @@ Errors are designed to be descriptive enough for LLM self-correction — the mes
 | `APIError` (429, 5xx) | yes | `APIError` |
 | `ValueError` | yes | `APIError` |
 | Raw network/stdlib errors (`ConnectionError`, `TimeoutError`, `socket.gaierror`, `aiohttp`/`requests` client errors) | yes | `APIError`, chained from the original |
-| `NonRetryableAPIError` (401/403) | no | `NonRetryableAPIError` |
+| `NonRetryableAPIError` (401/403; a window with no Close; missing columns or bar fields) | no | `NonRetryableAPIError` |
 | `InvalidSymbolError`, `DataNotFoundError` | no | unchanged |
 | `ValidationError` and every other non-`APIError` `QuantError` | no | **unchanged** |
 

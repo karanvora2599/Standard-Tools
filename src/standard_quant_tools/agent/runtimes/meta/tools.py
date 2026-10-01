@@ -176,7 +176,12 @@ def explain_decision(input_data: ExplainDecisionInput) -> ExplainDecisionResult:
     The execution path is the field that cannot be reconstructed later by
     any other means. C++, Numba and pure Python are chosen at call time and
     fall back transparently, so "which one ran" is knowable only because
-    the record says so.
+    the record says so. So is the instruction-set path the compiled kernels
+    took, which decides the last bits of the output.
+
+    The timing comes split: `fetch_ms` is the share of `duration_ms` spent
+    getting market data, per source and summed, and `compute_ms` the rest,
+    so a slow call says whether the kernel or the vendor was slow.
 
     Every field the record carries crosses. Four of them used not to, and
     the notable one is `strategy_source_hash`: a registered strategy's
@@ -199,6 +204,7 @@ def explain_decision(input_data: ExplainDecisionInput) -> ExplainDecisionResult:
             # otherwise unrecoverable after the fact.
             source=source.get("source"),
             interval=source.get("interval"),
+            fetch_ms=source.get("fetch_ms"),
         )
         for source in record.get("data_sources", [])
     ]
@@ -210,11 +216,15 @@ def explain_decision(input_data: ExplainDecisionInput) -> ExplainDecisionResult:
         input=record.get("input", {}),
         data_sources=sources,
         duration_ms=float(record.get("duration_ms", 0.0)),
+        fetch_ms=record.get("fetch_ms"),
+        compute_ms=record.get("compute_ms"),
         execution_path="C++" if record.get("cpp_available") else "Python/Numba",
         native_build=record.get("native_build"),
+        native_isa=record.get("native_isa"),
         n_workers=record.get("n_workers"),
         output_hash=record.get("output_hash"),
         output_hash_normalized=record.get("output_hash_normalized"),
+        output_hash_rounded=record.get("output_hash_rounded"),
         strategy_source_hash=record.get("strategy_source_hash"),
         git_commit_sha=record.get("git_commit_sha"),
         package_version=record.get("package_version"),
@@ -230,14 +240,21 @@ def replay_decision(input_data: ReplayDecisionInput) -> ReplayDecisionResult:
     """
     Re-run a recorded call and say whether it still produces the same answer.
 
-    The useful part is the four-way verdict, not the boolean. A different
-    output on its own means nothing: the market data behind the call may
-    have been revised, and yfinance guarantees neither point-in-time values
-    nor that adjusted prices stay put. So the data hashes are checked
-    FIRST, and only "the inputs still hash the same but the output does
-    not" implicates the library -- that is `code_changed`. When the inputs
+    The useful part is the verdict, not the boolean. A different output on
+    its own means nothing: the market data behind the call may have been
+    revised, and yfinance guarantees neither point-in-time values nor that
+    adjusted prices stay put. So the data hashes are checked FIRST, and
+    only "the inputs still hash the same but the output does not"
+    implicates the library -- that is `code_changed`. When the inputs
     moved, the verdict is `data_changed` and the output difference is
     expected rather than suspicious.
+
+    Nor does a different build. An output hash is bit-exact only for the
+    same native build on the same instruction-set path; elsewhere the
+    promise is twelve significant digits. A replay that misses bit for bit
+    but matches the twelve-digit hash, on a build or path other than the
+    record's, is `reproduced_to_12_digits` -- not `code_changed`. On the
+    same build and path a miss keeps its verdict.
 
     The hashes behind the verdict come with it: the stored and new output
     hash, and both hashes of every data source, so a caller told the code
@@ -276,6 +293,8 @@ def replay_decision(input_data: ReplayDecisionInput) -> ReplayDecisionResult:
         verdict = "not_comparable"
     elif result.output_match:
         verdict = "reproduced"
+    elif result.rounded_output_match and result.build_differences:
+        verdict = "reproduced_to_12_digits"
     elif data_moved:
         verdict = "data_changed"
     else:
@@ -313,6 +332,10 @@ def replay_decision(input_data: ReplayDecisionInput) -> ReplayDecisionResult:
         # caller can carry to a diff.
         stored_output_hash=result.stored_output_hash,
         new_output_hash=result.new_output_hash,
+        rounded_output_match=result.rounded_output_match,
+        stored_output_hash_rounded=result.stored_output_hash_rounded,
+        new_output_hash_rounded=result.new_output_hash_rounded,
+        build_differences=list(result.build_differences),
         notes=notes,
     )
 

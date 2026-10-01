@@ -546,6 +546,43 @@ def screen_extension(package: Any, disabled: bool = False) -> NativeBuildStatus:
     return result
 
 
+#: `native_isa()` when no compiled kernel can run in this process, so no
+#: instruction-set path was taken.
+ISA_NONE = "none"
+
+#: `native_isa()` when the extension in use predates the question.
+ISA_UNKNOWN = "unknown"
+
+
+def native_isa() -> str:
+    """
+    The instruction-set path the compiled rolling kernels take on this
+    machine: `avx2+fma` or `scalar`, as the extension's own CPU detection
+    decides it; `none` when no extension is in use, so every kernel ran its
+    Python path; `unknown` for an extension that cannot say.
+
+    A property of the machine, not of the build: one binary takes either
+    path depending on the CPU it runs on, so it is asked at runtime and is
+    no part of the source digest. It matters because the two paths agree to
+    twelve significant digits rather than bit for bit, so an output hash is
+    reproducible only on the path that produced it. Never raises.
+    """
+    status = native_build_status()
+    if not status.used:
+        return ISA_NONE
+    try:
+        from standard_quant_tools import _sqt_core  # type: ignore[attr-defined]
+    except ImportError:
+        return ISA_NONE
+    probe = getattr(_sqt_core, "isa_path", None)
+    if not callable(probe):
+        return ISA_UNKNOWN
+    try:
+        return str(probe())
+    except Exception:  # noqa: BLE001 - a provenance field, never a failure
+        return ISA_UNKNOWN
+
+
 def native_build_status() -> NativeBuildStatus:
     """
     The verdict on the compiled extension this process reached at import:

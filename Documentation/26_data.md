@@ -83,6 +83,18 @@ returned nothing. They are named in `warnings`, because a complete-case join
 downstream will not see they were ever requested — the panel simply looks
 like a smaller universe that someone chose.
 
+**A bar the provider dropped, or one still trading, is named per symbol.**
+Every provider drops a bar with no Close — the row a vendor lists for the
+next session before it trades, or a hole — and flags a last daily bar whose
+session has not closed (see
+[01_data_fetching.md](01_data_fetching.md#a-bar-with-no-close-is-dropped-and-a-bar-still-trading-is-flagged)).
+`fetch_ohlcv`, `fetch_ohlcv_panel` and `fetch_returns_panel` say which
+symbol lost which dates, and which symbol's last bar is a session still in
+progress. The panels say it even though the per-symbol frames, and their
+attrs, do not survive the stacking: the disclosures are collected as each
+frame is served. A window in which no bar has a Close is refused once, as
+`NonRetryableAPIError`, rather than retried.
+
 **A truncated tape is not a short one.** `fetch_tick_tape`,
 `fetch_quote_panel`, `fetch_order_book` and `fetch_order_events` take a
 `limit`, and hitting it means the window is incomplete. The cap is a PREFIX

@@ -86,14 +86,18 @@ produces a record like:
   "input": {"symbol": "AAPL", "start_date": "2022-01-01", "end_date": "2022-06-01", "...": "..."},
   "data_sources": [
     {"symbol": "AAPL", "start": "2022-01-01", "end": "2022-06-01", "interval": "1d",
-     "source": "live_fetch", "content_hash": "1d975f555f10aeb8"}
+     "source": "live_fetch", "content_hash": "1d975f555f10aeb8", "fetch_ms": 6421.337}
   ],
   "cpp_available": false,
   "native_build": "absent",
+  "native_isa": "none",
   "n_workers": null,
   "duration_ms": 6765.8,
+  "fetch_ms": 6421.337,
+  "compute_ms": 344.463,
   "output_hash": "8a2b0ca80ac84ba1",
-  "output_hash_normalized": null,
+  "output_hash_normalized": "8a2b0ca80ac84ba1",
+  "output_hash_rounded": "5e0d93c7a1b24f68",
   "status": "ok",
   "error_type": null,
   "error_message": null,
@@ -116,6 +120,16 @@ than the Python calling it used to be recorded exactly like a current one.
 Records written before the field existed have no such key and still verify:
 a record is hashed as it was stored. See
 [the build guide](30_build_guide.md#was-it-built-from-these-sources).
+
+`native_isa` says which instruction-set path the compiled kernels took on
+the machine that wrote the record: `avx2+fma` when the CPU and the OS both
+support AVX2 with FMA, `scalar` otherwise, and `none` when no extension ran.
+The extension's own CPU detection answers it (`_sqt_core.isa_path()`, read
+through `standard_quant_tools._native_build.native_isa()`). It is a property
+of the machine, not of the build — one binary takes either path depending on
+the CPU it lands on — so it is asked at runtime and is no part of the build
+stamp or the source digest. It is recorded because the two paths round
+differently; see [the reproducibility contract](#the-reproducibility-contract).
 
 `data_sources` has one entry per OHLCV pull, tagged `disk_cache`,
 `live_fetch`, or `session_cache`, with a content hash of the DataFrame
@@ -154,6 +168,42 @@ answered by two datasets. Failed calls still produce a record —
 > change: it used `default=str`, which routed NumPy arrays through their
 > abbreviating `...` repr, so two large arrays differing only in the middle
 > hashed identically. That path is not reachable from any decision record.)
+
+### Where the time went: `fetch_ms` and `compute_ms`
+
+`duration_ms` is end to end, so a slow call could not say whether the
+kernel or the vendor was slow. Each data source carries its own `fetch_ms`,
+and the record carries two sums: `fetch_ms`, over its data sources, and
+`compute_ms`, which is `duration_ms - fetch_ms` floored at 0.
+
+A provider reports a data access when it has the frame and says nothing
+when it starts fetching, so the audit times each access as a **lap**: the
+time from the start of the call, or from its previous data access, to this
+one completing. Laid end to end the laps cover the call up to its last data
+access, and what follows is computation. That is exact for the usual shape
+of a tool (fetch, then compute). Computation a tool does *between* two
+fetches lands in the later fetch's lap, so a lap is an upper bound on that
+fetch. Concurrent fetches share one clock — a context copied into a worker
+thread carries it — so the first to finish carries the wait they shared,
+and laps alone never add up to more than the call. A provider that timed
+its own fetch can pass `fetch_ms=` to `record_data_access`, and that figure
+is used instead; concurrent fetches timed that way can sum past
+`duration_ms`, which is why `compute_ms` is floored at 0.
+
+A **failed** call records `fetch_ms` (its completed accesses) and
+`compute_ms: null`. A fetch that fails — a vendor timing out, a refused
+frame retried until it gave up — never reports itself, so the time after
+the last completed access may be a fetch rather than computation, and
+calling it compute would answer "slow kernel or slow vendor" backwards for
+exactly the calls that ask it.
+
+`explain_decision` shows the split for one call, per source and summed.
+`describe_audit_log` with `include_days` reports, per tool, the median and
+p95 of both over the listed days; records without the split — written
+before it existed, or failed calls — are counted as `not_split` rather than
+folded in. Records written before these fields have no such keys and still
+verify, in both verifiers and under a signed checkpoint: a record is hashed
+as it was stored.
 
 ## What replay can and cannot reproduce
 
@@ -563,6 +613,10 @@ hashes:
   under a price rebase) — still worth a closer look.
 - **Data matches, output mismatch** — the code/logic changed since the
   record was written.
+- **Output mismatch bit for bit, match to twelve significant digits, on a
+  different native build or instruction-set path** — reproduced to twelve
+  digits, which is all an output hash promises across builds; not a code
+  change. See [the reproducibility contract](#the-reproducibility-contract).
 
 `data_source_matches` also reports a data source that was in the original
 record but **disappeared** from the replay (e.g. the tool changed which
@@ -612,6 +666,97 @@ mismatch on such a record is not evidence either way — not `False`.
 Reporting a freshly-minted id as a mismatch would look like evidence of
 drift when nothing had changed, which is the failure mode most likely to
 make someone distrust a replay result that was actually correct.
+
+---
+
+## The reproducibility contract
+
+**An output hash is bit-exact for the same native build on the same
+instruction-set path. Across builds or instruction-set paths, outputs agree
+to twelve significant digits — and replay says which of the two it saw.**
+
+Why bits are not promised across them:
+
+- **The AVX2 path fuses and reorders.** `rolling_beta`'s window reduction
+  has two implementations, chosen at runtime by the CPU's own feature
+  flags: hand-written AVX2 intrinsics that accumulate in four lanes and
+  fuse each multiply-add into one rounding instead of two, and a portable
+  scalar loop. The same binary, on the same inputs, gives different last
+  bits on a machine without AVX2 and FMA. Measured, not assumed: the C++
+  suite (`cpp_rolling_regression`) runs both paths on ten years of daily
+  return-scale data at windows of 20, 60 and 252 bars. Between 75% and 94%
+  of the betas differ in their last bits, the worst by 6.2e-15 relative;
+  every one agrees to twelve significant digits; and none of the 7,231
+  rounds differently when both are printed to twelve digits. The scalar
+  path can only be forced from that suite: the Python binding reports the
+  path, it does not choose it.
+- **Compilers and OpenMP runtimes.** A different compiler may contract a
+  multiply-add where another rounds twice, and on GCC and Clang the scalar
+  fallback's `omp simd reduction` licenses reassociating its sums, which no
+  MSVC mode compiles (see
+  [the build guide](30_build_guide.md#why-the-msvc-build-uses-openmp-20)).
+  A different compiler, its flags or the OpenMP runtime may therefore
+  differ in the last bits.
+- **What the build label cannot see.** `native_build` names the C++
+  sources the extension was built from, not the compiler, its flags, a PGO
+  profile or the Python-side libraries (NumPy, pandas) whose own reductions
+  round too. Two builds of the same sources by different toolchains share a
+  label; the bit-exact promise is about the binary.
+
+### The rounded hash
+
+`output_hash_rounded` is the output hashed with run-specific identifiers
+normalized away (as for `output_hash_normalized`) and every float rounded to
+twelve significant digits by `audit.round_floats`. Exactly:
+
+- a finite, non-zero float becomes the double nearest its value correctly
+  rounded to twelve significant decimal digits, ties to even — what
+  `format(x, ".11e")` prints, read back. The rounding is relative, so
+  `1234.56789012345` and `1.23456789012345e-9` both keep twelve digits;
+- `0.0` and `-0.0` both become `0.0`: the sign of a zero is a last-bit
+  difference, and JSON spells the two apart;
+- `NaN`, `Infinity` and `-Infinity` are kept — their JSON tokens carry no
+  low bits — and an infinity keeps its sign;
+- integers and booleans are untouched at any size: an integer is a count or
+  an index, and rounding one would hide a real difference;
+- strings, `null` and dict keys are untouched; dict values and list and
+  tuple items are rounded at any depth;
+- NumPy arrays and scalars are converted with `tolist()` first, as the exact
+  hash's encoder converts them.
+
+What it cannot absorb: a value that is zero in exact arithmetic but comes
+out as rounding noise (`1e-17` on one path, `-3e-18` on another) agrees to
+no number of significant digits; and two values a last bit apart that
+straddle a twelfth-digit rounding boundary round apart. The second is rare
+— about the size of their difference relative to the twelfth digit, none in
+the 7,231 betas above — but it means a rounded miss is strong evidence, not
+proof, of a real difference.
+
+### What replay says
+
+When the exact hash (or, for a modeling record, the normalized one) misses,
+replay compares the rounded hash and the build and path the record names:
+
+| Record against replay | Exact | Rounded | `replay_decision` verdict |
+|---|---|---|---|
+| any | match | — | `reproduced` |
+| different `native_build` or `native_isa` | miss | match | `reproduced_to_12_digits` — not a code change |
+| same build, same path | miss | match or miss | unchanged: `code_changed`, or `data_changed` if an input moved; a note says when twelve digits agree |
+| different build or path | miss | miss | unchanged, with a note that the build alone does not account for it |
+| record predates the rounded hash | miss | — | unchanged, with a note |
+
+A record that predates `native_build` or `native_isa` counts as a different
+build or path: it cannot vouch for having run where the replay runs.
+`ReplayResult` carries `rounded_output_match`, both rounded hashes and
+`build_differences` (`"native_isa: recorded 'scalar', now 'avx2+fma'"`);
+`output_match` stays the bit-level answer, so on `reproduced_to_12_digits`
+it is `false`. `sqt replay` prints the same notes and exits 3 on
+`reproduced_to_12_digits` — neither a bit-exact reproduction (0) nor a
+confirmed mismatch (1) — so automation can tell a different build from a
+regression.
+
+Records written before these fields have no such keys and still verify:
+a record is hashed as it was stored.
 
 ---
 

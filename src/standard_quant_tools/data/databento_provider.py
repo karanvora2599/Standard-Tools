@@ -83,6 +83,14 @@ from standard_quant_tools.data._cache import (
     trim_to_inclusive_end,
 )
 from standard_quant_tools.data._retry import retry
+from standard_quant_tools.data.bar_hygiene import (
+    CME_TRADE_DATE,
+    US_EQUITY,
+    UTC_DAY,
+    SessionClock,
+    disclose_served,
+    drop_unusable_closes,
+)
 from standard_quant_tools.data.base import DataProvider, FinancialRatios, TickerInfo
 from standard_quant_tools.data.databento import (
     CONSOLIDATED_START,
@@ -467,6 +475,27 @@ def _with_attrs(frame: pd.DataFrame, attrs: Dict[str, Any]) -> pd.DataFrame:
     the served dataset must survive either way."""
     frame.attrs.update(dict(attrs))
     return frame
+
+
+def _bar_clock(symbol: str, frame: pd.DataFrame) -> Optional[SessionClock]:
+    """
+    When a daily bar from this provider stops changing.
+
+    A future's daily bar is a CME trade date (`_cme_trade_date_bars`), so it
+    closes at 16:00 Chicago on the date. The summary feed's daily bar is
+    the consolidated session, so it closes with the NYSE session. Every
+    other feed's `ohlcv-1d` is a UTC day, which keeps taking after-hours
+    prints until UTC midnight -- later than the session's close.
+    """
+    try:
+        family = DatabentoProvider.resolve_symbol(symbol).family
+    except ValidationError:
+        return None
+    if family == "future":
+        return CME_TRADE_DATE
+    if frame.attrs.get("dataset") == DATASET_SUMMARY:
+        return US_EQUITY
+    return UTC_DAY
 
 
 def _cme_trade_date_bars(hourly: pd.DataFrame) -> pd.DataFrame:
@@ -1208,7 +1237,8 @@ class DatabentoProvider(DataProvider):
                 f"{cached.attrs.get('dataset', '?')}:session_cache",
                 cached,
             )
-            return _with_attrs(cached.copy(), cached.attrs)
+            served = _with_attrs(cached.copy(), cached.attrs)
+            return disclose_served(served, symbol, interval, _bar_clock(symbol, served))
         result, preferred = self._fetch_ohlcv_uncached(
             symbol, start_date, end_date, interval, schema, start_str, end_str
         )
@@ -1218,7 +1248,8 @@ class DatabentoProvider(DataProvider):
             # on this instance asks the better feed again rather than
             # repeating the degraded answer for an hour.
             _session_cache_set(key, result, end=end_str)
-        return _with_attrs(result.copy(), result.attrs)
+        served = _with_attrs(result.copy(), result.attrs)
+        return disclose_served(served, symbol, interval, _bar_clock(symbol, served))
 
     @retry(times=3, delay=1)
     def _fetch_ohlcv_uncached(
@@ -1506,7 +1537,14 @@ class DatabentoProvider(DataProvider):
             # uint64 from the vendor: `Volume.diff()` on it returned
             # 1.8e19 instead of -1,150,414. int64 like every other provider.
             out["Volume"] = out["Volume"].astype("int64")
-        return trim_to_inclusive_end(out, end_date, interval)
+        # A bar with no Close is dropped and disclosed, by the rule every
+        # provider follows, so this frame and a yfinance frame of the same
+        # sessions agree, and what is cached is what was served. After the
+        # trade-date aggregation and the trim: a trade date is judged by its
+        # own Close, and a row past the window is not reported as dropped.
+        return drop_unusable_closes(
+            trim_to_inclusive_end(out, end_date, interval), symbol, provider="databento"
+        )
 
     @staticmethod
     def _to_ohlcv(frame: pd.DataFrame, symbol: str) -> pd.DataFrame:
@@ -1515,9 +1553,13 @@ class DatabentoProvider(DataProvider):
             c for c in ("open", "high", "low", "close", "volume") if c not in columns
         ]
         if missing:
-            raise APIError(
+            # The shape of the vendor's answer, which asking again returns
+            # unchanged: refused once rather than retried.
+            raise NonRetryableAPIError(
                 f"Databento bars for {symbol} are missing {missing}; got "
-                f"{list(frame.columns)[:12]}"
+                f"{list(frame.columns)[:12]}. The same request returns the same "
+                "columns; pin another dataset (DATABENTO_OHLCV_DATASET) or ask "
+                "another provider (source=...)."
             )
         out = pd.DataFrame(index=frame.index)
         # Prices are fixed-point in the raw store and float dollars from
@@ -1537,11 +1579,8 @@ class DatabentoProvider(DataProvider):
         out["Volume"] = pd.to_numeric(frame[columns["volume"]], errors="coerce")
         out.index = pd.to_datetime(out.index, utc=True, errors="coerce")
         out = out[out.index.notna()]
-        if out["Close"].isna().any():
-            raise APIError(
-                f"Databento bars for {symbol} contain a null Close, which no "
-                "downstream return calculation can use."
-            )
+        # A null Close is no longer refused here: `_shape_bars` drops and
+        # discloses it once the bars are in their final shape.
         return out.sort_index()
 
     async def get_ohlcv_async(

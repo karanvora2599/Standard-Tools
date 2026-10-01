@@ -327,8 +327,9 @@ def modeling_capabilities() -> Dict[str, Any]:
 #: 42 until the six `_zerocopy` bindings came out; they had no caller in
 #: `src/` and wiring them was measured at a mean saving of zero. 38 with
 #: the two option-chain kernels, implied_volatility_batch and
-#: black_scholes_greeks_batch.
-_EXPECTED_NATIVE_EXPORTS = 38
+#: black_scholes_greeks_batch. 39 with isa_path, which reports the
+#: instruction-set path the rolling kernels take on this machine.
+_EXPECTED_NATIVE_EXPORTS = 39
 
 
 def _importable(module: str) -> bool:

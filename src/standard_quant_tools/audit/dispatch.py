@@ -5,14 +5,20 @@ import logging
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from standard_quant_tools._env import env_flag
 from standard_quant_tools.error import AuditIntegrityError
 from standard_quant_tools.numeric_contract import require_finite_scalar_fields
 
-from .context import _data_sources_var, _request_id_var, new_request_id
-from .hashing import hash_payload
+from .context import (
+    _data_sources_var,
+    _fetch_clock_var,
+    _FetchClock,
+    _request_id_var,
+    new_request_id,
+)
+from .hashing import hash_payload, round_floats
 from .json_native import to_json_native
 from .models import DecisionRecord
 from .paths import _audit_enabled
@@ -20,6 +26,7 @@ from .provenance import (
     _cpp_available,
     _git_sha,
     _native_build_label,
+    _native_isa_label,
     _package_version,
     _strategy_source_hash,
 )
@@ -87,6 +94,33 @@ def _forget_last_request_id() -> None:
     _last_record.request_id = None
 
 
+def _split_duration(
+    duration_ms: float, data_sources: List[Dict[str, Any]], status: str
+) -> Tuple[float, Optional[float]]:
+    """
+    `(fetch_ms, compute_ms)` for one call: the data sources' own `fetch_ms`
+    summed, and the rest of `duration_ms`, floored at 0 (concurrent fetches
+    and rounding can make the sum overshoot by a hair).
+
+    A failed call gets no `compute_ms`. A fetch that fails -- a vendor
+    timing out, a refused frame retried until it gave up -- never reports
+    itself, so the time after the last completed access may be a fetch
+    rather than computation, and calling it compute would answer "slow
+    kernel or slow vendor" backwards for exactly the calls that ask it.
+    """
+    fetch_ms = round(
+        sum(
+            float(value)
+            for value in (source.get("fetch_ms") for source in data_sources)
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+        ),
+        3,
+    )
+    if status != "ok":
+        return fetch_ms, None
+    return fetch_ms, round(max(0.0, duration_ms - fetch_ms), 3)
+
+
 def _run_and_record(
     tool_name: str, fn: Callable[[Any], Any], model_instance: Any
 ) -> Dict[str, Any]:
@@ -113,12 +147,15 @@ def _run_and_record(
     request_id = new_request_id()
     token_req = _request_id_var.set(request_id)
     token_data = _data_sources_var.set([])
+    # The fetch clock starts on the call's own clock, so the laps it hands
+    # each data access partition `duration_ms` rather than overlap it.
+    t0 = time.perf_counter()
+    token_clock = _fetch_clock_var.set(_FetchClock(start=t0))
     # The context variables are reset on EVERY way out, including the two
     # audit failures below that re-raise. They used to be reset only after
     # the write, so a refused write left this call's request id in the
     # context and stamped every later log line on the thread with it.
     try:
-        t0 = time.perf_counter()
         status = "ok"
         error_type: Optional[str] = None
         error_message: Optional[str] = None
@@ -147,7 +184,7 @@ def _run_and_record(
             error_message = str(exc)
             raise
         finally:
-            duration_ms = (time.perf_counter() - t0) * 1000
+            duration_ms = round((time.perf_counter() - t0) * 1000, 3)
             if recording:
                 try:
                     fields = _redact_fields()
@@ -170,16 +207,23 @@ def _run_and_record(
                         if error_message is not None
                         else None
                     )
+                    data_sources = list(_data_sources_var.get() or [])
+                    fetch_ms, compute_ms = _split_duration(
+                        duration_ms, data_sources, status
+                    )
                     record = DecisionRecord(
                         request_id=request_id,
                         timestamp_utc=datetime.now(timezone.utc).isoformat(),
                         tool_name=tool_name,
                         input=_redact(raw_input, fields),
-                        data_sources=list(_data_sources_var.get() or []),
+                        data_sources=data_sources,
                         cpp_available=_cpp_available(),
                         native_build=_native_build_label(),
+                        native_isa=_native_isa_label(),
                         n_workers=getattr(model_instance, "n_workers", None),
-                        duration_ms=round(duration_ms, 3),
+                        duration_ms=duration_ms,
+                        fetch_ms=fetch_ms,
+                        compute_ms=compute_ms,
                         output_hash=(
                             hash_payload(output) if output is not None else None
                         ),
@@ -194,6 +238,18 @@ def _run_and_record(
                         # still detects any change for deterministic tools.
                         output_hash_normalized=(
                             hash_payload(normalize_identifiers(output))
+                            if output is not None
+                            else None
+                        ),
+                        # A third, with every float also rounded to twelve
+                        # significant digits: the exact hash reproduces
+                        # only on the same native build and
+                        # instruction-set path, and this is what lets a
+                        # replay elsewhere say how far it reproduced
+                        # rather than calling a last-bit difference a
+                        # code change.
+                        output_hash_rounded=(
+                            hash_payload(round_floats(normalize_identifiers(output)))
                             if output is not None
                             else None
                         ),
@@ -238,3 +294,4 @@ def _run_and_record(
     finally:
         _request_id_var.reset(token_req)
         _data_sources_var.reset(token_data)
+        _fetch_clock_var.reset(token_clock)

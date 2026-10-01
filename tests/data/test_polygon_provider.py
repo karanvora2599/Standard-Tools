@@ -23,6 +23,7 @@ from email.message import Message
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -118,9 +119,22 @@ class TestParseAggs:
         df = _parse_aggs(results, "AAPL", "day")
         assert df["Volume"].iloc[0] == 0.0
 
-    def test_missing_required_field_raises_api_error(self):
+    def test_a_bar_with_no_close_is_kept_for_the_provider_to_drop(self):
+        """A bar with no close is a missing bar, dropped and disclosed by
+        the provider after the trim -- not a refusal of the response."""
         results = [{"o": 100.0, "t": 1672704000000}]  # no h/l/c
-        with pytest.raises(APIError):
+        df = _parse_aggs(results, "AAPL", "day")
+        assert len(df) == 1
+        assert np.isnan(df["Close"].iloc[0])
+
+    def test_a_bar_with_a_close_but_no_high_is_refused_without_a_retry(self):
+        results = [{"o": 100.0, "l": 99.0, "c": 100.5, "t": 1672704000000}]
+        with pytest.raises(NonRetryableAPIError, match="missing"):
+            _parse_aggs(results, "AAPL", "day")
+
+    def test_a_bar_with_no_timestamp_is_refused_without_a_retry(self):
+        results = [{"o": 100.0, "h": 101.0, "l": 99.0, "c": 100.5}]
+        with pytest.raises(NonRetryableAPIError, match="missing"):
             _parse_aggs(results, "AAPL", "day")
 
     def test_intraday_bars_keep_time_component(self):

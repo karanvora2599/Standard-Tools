@@ -151,6 +151,49 @@ class TestCmdReplay:
         assert "output_match : True" in output
 
 
+class TestReplayExitCodes:
+    """`sqt replay`'s exit code is what automation reads. A replay that
+    agrees to twelve significant digits on a different native build or
+    instruction-set path is neither a bit-exact reproduction (0) nor a
+    regression (1), so it has its own code."""
+
+    @staticmethod
+    def _result(**fields):
+        from standard_quant_tools.audit.models import ReplayResult
+
+        return ReplayResult(request_id="r", tool_name="t", **fields)
+
+    def test_twelve_digits_on_a_different_build_is_three(self):
+        result = self._result(
+            output_match=False,
+            rounded_output_match=True,
+            build_differences=["native_isa: recorded 'scalar', now 'avx2+fma'"],
+        )
+        assert cli._replay_exit_code(result) == 3
+
+    def test_twelve_digits_on_the_same_build_is_still_a_mismatch(self):
+        """Null case: on the same build and path the rounding does not
+        explain a miss, so it stays a confirmed mismatch."""
+        result = self._result(
+            output_match=False, rounded_output_match=True, build_differences=[]
+        )
+        assert cli._replay_exit_code(result) == 1
+
+    def test_the_other_codes_are_unchanged(self):
+        assert cli._replay_exit_code(self._result(output_match=True)) == 0
+        assert cli._replay_exit_code(self._result(output_match=None)) == 2
+        assert (
+            cli._replay_exit_code(
+                self._result(
+                    output_match=False,
+                    rounded_output_match=False,
+                    build_differences=["native_build: not recorded"],
+                )
+            )
+            == 1
+        )
+
+
 class TestCmdVerify:
     def test_clean_trail_reports_no_problems(self, patched_factory, audit_dir: Path):
         dispatch(

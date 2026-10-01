@@ -236,6 +236,16 @@ def _norm_date(d: Union[str, datetime, _date]) -> str:
         raise ValidationError(
             f"date must be in YYYY-MM-DD format, got {d!r} (normalized: {norm!r})"
         )
+    # The shape is not enough: '2019-13-45' matches it, reached the vendor,
+    # failed there, and the retry layer asked twice more for a date that
+    # does not exist. Refused here, by name, before any request.
+    try:
+        datetime.strptime(norm, "%Y-%m-%d")
+    except ValueError as exc:
+        raise ValidationError(
+            f"date {d!r} is not a calendar date ({exc}). Dates are YYYY-MM-DD "
+            "with a real month and day."
+        ) from exc
     return norm
 
 
@@ -741,6 +751,13 @@ def _cached_frame_problem(
     cache needs: every bar inside the requested window. A readable Parquet
     file holding a single `Close` column, or another window's bars, was
     served as a hit because the read path checked none of this.
+
+    NO NULL CLOSE, BECAUSE NO LIVE PATH SERVES ONE. Every provider drops a
+    bar with no Close before it returns or writes a frame, and records the
+    dates it dropped in the frame's attrs, which Parquet keeps -- so what is
+    cached is what was served, disclosures included. A file that still
+    holds a null Close was not written that way, and is evicted rather than
+    served with a hole the live path would have reported.
     """
     missing = [c for c in REQUIRED_OHLCV_COLUMNS if c not in frame.columns]
     if missing:

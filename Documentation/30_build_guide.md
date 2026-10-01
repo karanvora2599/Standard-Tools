@@ -469,7 +469,14 @@ carries it under `native_extension_detail.build`; and every decision record
 writes `native_build` — the verdict and the short digest, for example
 `match:df27c6e4af54` — beside `cpp_available`, so a record says *which* build
 computed it. Records written before that field existed have no such key and
-still verify.
+still verify. Beside it the record writes `native_isa`, the instruction-set
+path the build's rolling kernels took on that machine (`avx2+fma` or
+`scalar`, from `_sqt_core.isa_path()`): the same binary takes either path
+depending on the CPU, and the two agree to twelve significant digits rather
+than bit for bit — see
+[the reproducibility contract](10_auditability.md#the-reproducibility-contract).
+It is asked at runtime and is no part of the stamp, because it describes the
+machine, not the binary.
 
 **The suite refuses to pass on a stale build.** A refused extension turns
 every `@requires_cpp` test into a skip, which on its own would read as green.
@@ -679,7 +686,7 @@ Standard Tools/
 │           │   └── signal_state_machines.hpp ← Donchian / VWAP-reversion signal hysteresis API
 │           ├── src/
 │           │   ├── build_info.cpp           ← The one translation unit that includes the generated stamp
-│           │   ├── isa_dispatch.cpp         ← CPUID detection + test-only override hook
+│           │   ├── isa_dispatch.cpp         ← CPUID detection + test-only override hook (the path taken is reported by `_sqt_core.isa_path()`)
 │           │   ├── hurst.cpp                ← Hurst implementation (OpenMP across rolling windows, one-pass DFA)
 │           │   ├── indicators.cpp           ← RSI / ADX / PSAR / Wilder ATR / Bollinger / Stochastic + technical_indicators implementation
 │           │   ├── cointegration.cpp        ← OLS / ADF / cointegration / Kalman filter implementation
@@ -943,7 +950,9 @@ no OpenMP support — the build still succeeds either way (`_OPENMP` is then
 undefined, and the affected loops run their identical serial code). To get
 the parallel path on macOS, install LLVM's OpenMP runtime
 (`brew install libomp`) before configuring. `__build_info__` names the
-runtime a build linked (`openmp_runtime`).
+runtime a build linked (`openmp_runtime`). Why MSVC stays on 2.0, with
+what each of its modes compiles:
+[Why the MSVC build uses OpenMP 2.0](#why-the-msvc-build-uses-openmp-20).
 
 **`SQT_OPENMP_LLVM` (MSVC only, off by default)**  
 `-DSQT_OPENMP_LLVM=ON` compiles with `/openmp:llvm`, which links LLVM's
@@ -1086,3 +1095,48 @@ process that ran the training, and they must be merged with
 `llvm-profdata merge -o default.profdata` into the directory the compiler
 runs in at step 3 — `-fprofile-use` without a path reads
 `default.profdata` from there.
+
+### Why the MSVC build uses OpenMP 2.0
+
+The compiler sets the OpenMP version, not this project, and on Windows that
+is a ceiling nothing here can lift. MSVC's `/openmp` has implemented OpenMP
+2.0 (March 2002) since Visual Studio 2005 and has not been advanced: there is
+no MSVC mode for 4.5, 5.x or 6.0. Its two other modes are partial, and they
+are a trade rather than an upgrade:
+
+- **`/openmp:llvm`** swaps the runtime (LLVM's `libomp140` for `vcomp140`;
+  this build's `SQT_OPENMP_LLVM` option, above) and admits tasking and
+  unsigned loop counters — but still reports `_OPENMP = 200203`, the 2.0
+  value, so code that gates on the macro sees 2.0 either way, and it still
+  refuses `simd`.
+- **`/openmp:experimental`** compiles `simd` (and reports the non-standard
+  `_OPENMP = 2019`) but refuses tasking and unsigned loop counters, and
+  drops a `simd` loop's `reduction` clause (C4849).
+
+Directive by mode, measured on MSVC 19.44:
+
+| Directive | OpenMP | `/openmp` | `/openmp:llvm` | `/openmp:experimental` |
+|---|---|---|---|---|
+| `collapse(2)` | 3.0 | compiles | compiles | compiles |
+| unsigned loop counter | 3.0 | C3016 | compiles | C3016 |
+| `task` | 3.0 | C7660 | compiles | C7660 |
+| `simd` | 4.0 | C7660 | C7660 | compiles |
+| `schedule(nonmonotonic:)` | 4.5 | C3022 | C3022 | C3022 |
+
+No mode reaches 4.5, and none combines `simd` with tasking. Plain `/openmp`
+is not strictly 2.0 either — `collapse` is a 3.0 feature and compiles under
+all three — so the version number is a floor, not a description.
+
+**Why no action is needed.** The code uses one directive past what `/openmp`
+compiles: the `omp simd reduction` on the scalar fallback of `rolling_beta`'s
+window reduction in `rolling_regression.cpp`, scoped to non-MSVC compilers.
+On x86 that loop only runs on a CPU without AVX2 and FMA; every other CPU
+takes the hand-written AVX2 intrinsics instead, so on AVX2 hardware the
+ceiling costs nothing. GCC and Clang builds compile the same pragmas against
+their own, much newer OpenMP, and there the hint is live. (That part is from
+those compilers' documentation; only the MSVC table above was measured
+here.) One consequence is worth knowing: a reduction the pragma lets the
+compiler reorder rounds differently from one it does not, which is one of
+the reasons the audit trail promises twelve significant digits, not bits,
+across builds — see
+[the reproducibility contract](10_auditability.md#the-reproducibility-contract).

@@ -16,6 +16,16 @@ class DecisionRecord(BaseModel):
     cpp_available: bool
     n_workers: Optional[int] = None
     duration_ms: float
+    # Where `duration_ms` went. `fetch_ms` is the sum of the `fetch_ms` each
+    # data source carries -- the call's time from its start to its last
+    # completed data access -- and `compute_ms` is `duration_ms - fetch_ms`,
+    # floored at 0. A FAILED call has no `compute_ms`: a fetch that fails
+    # never reports itself, so the time after the last completed access
+    # may be a vendor that never answered rather than computation. Both
+    # None for records written before the split existed; those still
+    # verify, because a record is hashed as it was stored.
+    fetch_ms: Optional[float] = None
+    compute_ms: Optional[float] = None
     output_hash: Optional[str] = None
     # The same output hashed with run-specific dataset/model identifiers
     # normalized away (see replay.normalize_identifiers). Modeling mints a
@@ -25,6 +35,15 @@ class DecisionRecord(BaseModel):
     # this field existed, which replay reports as "not comparable" rather
     # than as a mismatch.
     output_hash_normalized: Optional[str] = None
+    # The output hashed once more with run-specific identifiers normalized
+    # away (as above) AND every float rounded to twelve significant digits
+    # (hashing.round_floats). The exact hash is bit-for-bit, and bits are
+    # only promised on the same native build and instruction-set path: the
+    # AVX2+FMA and scalar reductions round differently. This is the hash
+    # replay falls back to when the exact one misses on a different build
+    # or path, so it can say "reproduced to twelve digits" rather than
+    # "the code changed". None for records written before it existed.
+    output_hash_rounded: Optional[str] = None
     status: str
     error_type: Optional[str] = None
     error_message: Optional[str] = None
@@ -42,6 +61,12 @@ class DecisionRecord(BaseModel):
     # records written before this field existed; those still verify,
     # because a record is hashed as it was stored.
     native_build: Optional[str] = None
+    # WHICH instruction-set path the compiled kernels took on the machine
+    # that wrote the record: "avx2+fma" or "scalar", or "none" when no
+    # extension ran. A property of the CPU, not of the build -- one binary
+    # takes either path -- and the paths agree to twelve significant
+    # digits, not bit for bit. None for records written before the field.
+    native_isa: Optional[str] = None
     # Hash-chain tamper-evidence: each record's hash covers its own content
     # plus the previous record's hash, so editing a past line changes that
     # line's hash and breaks the chain for every record after it (unless an
@@ -75,3 +100,14 @@ class ReplayResult:
     new_output_hash: Optional[str] = None
     stored_output_hash: Optional[str] = None
     new_output_hash_normalized: Optional[str] = None
+    # The twelve-significant-digit comparison, made only when the exact one
+    # missed. `rounded_output_match` is None when it was not made: the exact
+    # hash matched, or the record predates the rounded hash.
+    rounded_output_match: Optional[bool] = None
+    new_output_hash_rounded: Optional[str] = None
+    stored_output_hash_rounded: Optional[str] = None
+    # How the build that wrote the record differs from the one replaying it
+    # ("native_build: recorded 'match:…', now 'match:…'", or "not recorded"
+    # for a record that predates the field). Filled whenever the exact hash
+    # missed; empty means same build on the same instruction-set path.
+    build_differences: List[str] = field(default_factory=list)

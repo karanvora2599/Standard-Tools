@@ -19,6 +19,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <vector>
 
@@ -472,6 +473,78 @@ static void test_rolling_beta_clean_series_matches_two_pass() {
     }
 }
 
+// ── rolling_beta: what an output hash can promise across ISA paths ──────────
+//
+// A decision record hashes a tool's output bit for bit, and the trail's
+// stated contract is that the hash reproduces only on the same native build
+// and the same instruction-set path; across paths the outputs agree to
+// twelve significant digits. Both halves are measured here on return-scale
+// data rather than assumed: the AVX2+FMA reduction accumulates in four
+// lanes and fuses each multiply-add, so its sums round differently from the
+// scalar loop's, and that difference reaches the betas.
+
+static bool same_bits(double a, double b) {
+    std::uint64_t ua = 0, ub = 0;
+    std::memcpy(&ua, &a, sizeof ua);
+    std::memcpy(&ub, &b, sizeof ub);
+    return ua == ub;
+}
+
+static void test_rolling_beta_isa_paths_agree_to_twelve_significant_digits() {
+    sqt::reset_isa_features_override_for_testing();
+    const bool real_avx2 = sqt::detect_isa_features().avx2;
+    int differing_total = 0;
+    for (int window : {20, 60, 252}) {
+        const int n = 2520;  // ten years of daily bars
+        std::vector<double> x(n), y(n);
+        std::uint64_t state = 4242 + static_cast<std::uint64_t>(window);
+        for (int i = 0; i < n; ++i) {
+            x[i] = 0.01 * pseudo_random(state);
+            y[i] = 0.0002 + 1.1 * x[i] + 0.01 * pseudo_random(state);
+        }
+
+        sqt::reset_isa_features_override_for_testing();
+        auto dispatched = sqt::rolling_beta(y.data(), x.data(), n, window);
+        sqt::force_isa_features_for_testing({false, false});
+        auto scalar = sqt::rolling_beta(y.data(), x.data(), n, window);
+        sqt::reset_isa_features_override_for_testing();
+
+        int differing = 0, rounded_apart = 0;
+        double worst = 0.0;
+        for (int i = window - 1; i < n; ++i) {
+            CHECK_NOT_NAN(scalar[i]);
+            if (same_bits(dispatched[i], scalar[i])) continue;
+            ++differing;
+            const double rel = std::abs(dispatched[i] - scalar[i]) / std::abs(scalar[i]);
+            worst = std::max(worst, rel);
+            // Twelve significant digits as a tolerance: half a unit in the
+            // twelfth digit is at least 5e-13 of the value.
+            CHECK(rel <= 5e-13);
+            // ...and as the audit trail's rounded hash sees it: both values
+            // printed to twelve significant digits.
+            char a[32], b[32];
+            std::snprintf(a, sizeof a, "%.11e", dispatched[i]);
+            std::snprintf(b, sizeof b, "%.11e", scalar[i]);
+            if (std::strcmp(a, b) != 0) ++rounded_apart;
+        }
+        differing_total += differing;
+        std::printf("  rolling_beta window=%d: %d of %d betas differ in their last bits "
+                    "between the dispatched (%s) and scalar paths; worst relative "
+                    "difference %.3g; %d round apart at twelve significant digits\n",
+                    window, differing, n - window + 1,
+                    real_avx2 ? "avx2+fma" : "scalar", worst, rounded_apart);
+    }
+    // On an AVX2 machine the two paths are different arithmetic, and the
+    // contract says so; if they ever became bit-identical, the contract and
+    // the documentation behind it would be describing a difference that is
+    // no longer there. Without AVX2 both runs take the scalar path.
+    if (real_avx2) {
+        CHECK(differing_total > 0);
+    } else {
+        CHECK(differing_total == 0);
+    }
+}
+
 int main() {
     test_nan_prefix_and_shape();
     test_single_factor_recovers_known_coefficients();
@@ -488,6 +561,7 @@ int main() {
     test_rolling_beta_finite_outlier_leaving_the_window();
     test_rolling_beta_bad_bar_is_nan_for_exactly_its_windows();
     test_rolling_beta_clean_series_matches_two_pass();
+    test_rolling_beta_isa_paths_agree_to_twelve_significant_digits();
 
     std::printf("\n%d / %d tests passed.\n",
                 g_tests_run - g_tests_failed, g_tests_run);

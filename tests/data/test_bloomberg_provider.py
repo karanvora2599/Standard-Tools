@@ -42,6 +42,7 @@ from standard_quant_tools.error import (
     APIError,
     DataNotFoundError,
     InvalidSymbolError,
+    NonRetryableAPIError,
     ValidationError,
 )
 
@@ -173,11 +174,26 @@ class TestParseHistoricalBars:
         with pytest.raises(DataNotFoundError):
             _parse_historical_bars([], "AAPL")
 
-    def test_missing_required_field_raises_api_error(self):
+    def test_a_bar_with_no_last_price_is_kept_for_the_provider_to_drop(self):
+        """A bar with no PX_LAST is a missing bar, dropped and disclosed by
+        the provider after the trim -- not a refusal of the response."""
         bars = [
             {"date": datetime.date(2023, 1, 3), "PX_OPEN": 100.0}
         ]  # no PX_LAST etc.
-        with pytest.raises(APIError):
+        df = _parse_historical_bars(bars, "AAPL")
+        assert len(df) == 1
+        assert pd.isna(df["Close"].iloc[0])
+
+    def test_a_bar_with_a_last_price_but_no_high_is_refused_without_a_retry(self):
+        bars = [
+            {
+                "date": datetime.date(2023, 1, 3),
+                "PX_OPEN": 100.0,
+                "PX_LOW": 99.0,
+                "PX_LAST": 100.5,
+            }
+        ]
+        with pytest.raises(NonRetryableAPIError, match="missing"):
             _parse_historical_bars(bars, "AAPL")
 
 
