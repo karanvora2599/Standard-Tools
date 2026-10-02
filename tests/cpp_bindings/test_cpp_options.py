@@ -64,7 +64,10 @@ class TestReasonCodesADirectCallerCanReach:
     def test_a_good_contract_beside_a_bad_one_is_still_solved(self):
         out = _iv([4.759422392871528, 5.0], [42.0, 0.0], 40.0, 0.5, 0.10, 0.0, 1)
         assert out["reason"].tolist() == [0, INVALID_INPUT]
-        assert out["implied_volatility"][0] == 0.2
+        # The price was computed with one C runtime's exp and erfc; glibc's
+        # differ from MSVC's in the last bit, so the solve lands within a few
+        # ulps of 0.2 rather than on it.
+        assert out["implied_volatility"][0] == pytest.approx(0.2, rel=0, abs=1e-14)
 
     def test_a_greek_outside_the_domain_is_nan(self):
         out = _cpp.black_scholes_greeks_batch(

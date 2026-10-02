@@ -41,7 +41,7 @@ decision means seeing the numbers as they were, mistakes included.
 
 from __future__ import annotations
 
-from typing import Iterable, List, Optional, Sequence
+from typing import Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -173,6 +173,9 @@ def asof_join(
     if by_entity:
         right_columns.append(ENTITY)
     right = records[right_columns].copy()
+    left[date_col], right[AVAILABLE_TIME] = _one_resolution(
+        left[date_col], date_col, right[AVAILABLE_TIME], AVAILABLE_TIME
+    )
 
     # merge_asof requires BOTH sides sorted by the join key, and sorts of the
     # `by` key are not enough -- an unsorted left side does not raise, it
@@ -208,6 +211,42 @@ def asof_join(
         name = f"{prefix}{field}"
         out[name] = attached[name].reindex(np.arange(len(out))).to_numpy()
     return out
+
+
+_UNITS = ("s", "ms", "us", "ns")
+
+
+def _one_resolution(
+    left: pd.Series, left_name: str, right: pd.Series, right_name: str
+) -> Tuple[pd.Series, pd.Series]:
+    """Both join keys at one resolution, the finer of the two.
+
+    pandas 3 keeps the resolution a column was built with -- a parsed date
+    or a range comes out in microseconds where another source carries
+    nanoseconds -- and `merge_asof` refuses keys whose resolutions differ,
+    where pandas 2 held every timestamp in nanoseconds. The finer unit is
+    used so no timestamp is rounded; a key too far from 1970 for it is
+    refused by name.
+    """
+    units = [getattr(s.dt, "unit", "ns") for s in (left, right)]
+    finest = max(units, key=_UNITS.index)
+    converted = []
+    for series, name, unit in (
+        (left, left_name, units[0]),
+        (right, right_name, units[1]),
+    ):
+        if unit == finest:
+            converted.append(series)
+            continue
+        try:
+            converted.append(series.dt.as_unit(finest))
+        except (OverflowError, pd.errors.OutOfBoundsDatetime) as exc:
+            raise ValidationError(
+                f"asof_join: {name!r} holds a timestamp that cannot be compared "
+                f"with the other side's {finest} resolution ({exc}). Keep both "
+                "time columns within the years 1678 to 2262."
+            ) from exc
+    return converted[0], converted[1]
 
 
 def observed_revisions(records: pd.DataFrame, *, by_entity: bool = True) -> dict:

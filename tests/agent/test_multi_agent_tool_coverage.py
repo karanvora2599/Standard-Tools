@@ -154,7 +154,7 @@ class TestWorkerToolCoverage:
             "backtest_validation",
             "custom_signal",
             "derivatives",
-        "delta_one",
+            "delta_one",
             "portfolio_risk",
             "discovery",
             "provenance",

@@ -250,7 +250,10 @@ static void test_hull_solves_in_one_newton_step() {
     CHECK(r.reason == sqt::kIvSolved);
     CHECK(r.method == sqt::kIvMethodNewton);
     CHECK(r.iterations == 1);
-    CHECK(r.vol == 0.2);
+    // The price was computed with one C runtime's exp and erfc; glibc's
+    // differ from MSVC's in the last bit, so the one Newton step lands within
+    // a few ulps of 0.2 rather than on it.
+    CHECK_NEAR(r.vol, 0.2, 1e-14);
 }
 
 static void test_a_price_at_intrinsic_is_a_ceiling() {

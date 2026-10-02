@@ -103,7 +103,9 @@ class TestTheHashSurvivesAnAdditiveField:
 
     def test_a_changed_feature_parameter_still_changes_it(self):
         kwargs = _spec_kwargs()
-        changed = dict(kwargs, features=[FeatureSpec(id="technical.rsi", params={"period": 21})])
+        changed = dict(
+            kwargs, features=[FeatureSpec(id="technical.rsi", params={"period": 21})]
+        )
         assert dataset_spec_hash(DatasetSpec(**kwargs)) != dataset_spec_hash(
             DatasetSpec(**changed)
         )
@@ -136,7 +138,9 @@ class TestTheVersionTravelsWithTheDataset:
     def test_a_built_dataset_records_version_2(self, dataset_id):
         meta = _artifacts.load_json(str(self._meta_path(dataset_id)))
         assert meta["spec_hash_version"] == 2
-        assert meta["spec_hash"] == dataset_spec_hash(DatasetSpec(**_spec_kwargs()), version=2)
+        assert meta["spec_hash"] == dataset_spec_hash(
+            DatasetSpec(**_spec_kwargs()), version=2
+        )
 
     def test_the_experiment_verifies_and_the_manifest_records_it(self, dataset_id):
         result = run_model_experiment(

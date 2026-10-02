@@ -274,3 +274,47 @@ class TestCoverageReport:
         joined = asof_join(panel, EARNINGS, fields=["eps"])
         warnings = coverage_report(joined, ["eps"])
         assert any("every other" in w for w in warnings)
+
+
+class TestJoinKeysOfDifferentResolutions:
+    """pandas 3 keeps the resolution a column was built with -- a parsed date
+    or a range comes out in microseconds where another source carries
+    nanoseconds -- and `merge_asof` refused the join outright when the panel
+    and the records differed (see the CHANGELOG entry of 2026-10-02)."""
+
+    DATES = ["2026-07-15", "2026-07-29", "2026-08-14", "2026-10-28"]
+
+    @pytest.mark.parametrize(
+        "panel_unit, records_unit",
+        [("us", "ns"), ("ns", "us"), ("s", "ns"), ("ms", "ms")],
+    )
+    def test_the_join_does_not_depend_on_either_side_s_resolution(
+        self, panel_unit, records_unit
+    ):
+        expected = asof_join(_panel(self.DATES), EARNINGS, fields=["eps"])
+        panel = _panel(self.DATES)
+        panel["date"] = panel["date"].dt.as_unit(panel_unit)
+        records = EARNINGS.copy()
+        for column in ("event_time", "available_time"):
+            records[column] = pd.to_datetime(records[column]).dt.as_unit(records_unit)
+        out = asof_join(panel, records, fields=["eps"])
+        np.testing.assert_array_equal(out["eps"].to_numpy(), expected["eps"].to_numpy())
+        assert (
+            out["date"].dt.unit == panel_unit
+        ), "the caller's panel comes back as given"
+
+    def test_a_record_too_late_for_the_finer_resolution_is_refused_by_name(self):
+        panel = _panel(self.DATES)
+        panel["date"] = panel["date"].dt.as_unit("ns")
+        records = pd.DataFrame(
+            {
+                "entity": ["AAA"],
+                # Built in microseconds directly: parsing would go through
+                # nanoseconds on pandas 2 and overflow before the join.
+                "event_time": np.array(["2300-01-01"], dtype="datetime64[us]"),
+                "available_time": np.array(["2300-02-01"], dtype="datetime64[us]"),
+                "eps": [1.0],
+            }
+        )
+        with pytest.raises(ValidationError, match="available_time"):
+            asof_join(panel, records, fields=["eps"])

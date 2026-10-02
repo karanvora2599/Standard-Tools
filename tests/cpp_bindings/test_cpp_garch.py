@@ -239,6 +239,8 @@ class TestGarchForecastEndToEndParity:
         assert result_cpp["forecast_annualized_vol"] == pytest.approx(
             result_numba["forecast_annualized_vol"], rel=1e-4
         )
-        assert result_cpp["converged"] is result_numba["converged"] is True
+        # Each path's own NOT CONVERGED line names why, should one stop short.
+        assert result_cpp["converged"] is True, result_cpp["warnings"]
+        assert result_numba["converged"] is True, result_numba["warnings"]
         assert result_cpp["gradient_norm"] < 1e-4
         assert result_numba["gradient_norm"] < 1e-4

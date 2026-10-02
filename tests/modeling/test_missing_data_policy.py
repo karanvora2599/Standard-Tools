@@ -141,14 +141,18 @@ class TestTheSpec:
         with pytest.raises(PydanticValidationError, match="does not produce"):
             _spec(
                 MissingDataSpec(
-                    policy="forward_fill_bounded", max_staleness_bars=2, features=["nope"]
+                    policy="forward_fill_bounded",
+                    max_staleness_bars=2,
+                    features=["nope"],
                 )
             )
 
     def test_a_fill_spec_survives_its_own_serialization(self):
         spec = _spec(
             MissingDataSpec(
-                policy="forward_fill_bounded", max_staleness_bars=3, features=["test.gappy"]
+                policy="forward_fill_bounded",
+                max_staleness_bars=3,
+                features=["test.gappy"],
             )
         )
         assert DatasetSpec(**spec.model_dump()) == spec
@@ -181,7 +185,9 @@ class TestForwardFillBounded:
             )
         )
 
-    def test_a_wide_enough_bound_carries_bar_99_across_the_gap(self, patched_multi_factory):
+    def test_a_wide_enough_bound_carries_bar_99_across_the_gap(
+        self, patched_multi_factory
+    ):
         built = self._built(5)
         dates = _bar_dates()
         for entity in UNIVERSE:
@@ -214,7 +220,9 @@ class TestForwardFillBounded:
     def test_the_fill_is_reported_with_its_count(self, patched_multi_factory):
         built = self._built(5)
         # Four gap bars plus the final bar, per entity.
-        assert any("test.gappy 15" in w and "forward-filled" in w for w in built["warnings"])
+        assert any(
+            "test.gappy 15" in w and "forward-filled" in w for w in built["warnings"]
+        )
 
     def test_a_feature_not_named_is_not_filled(self, patched_multi_factory):
         """Only test.gappy is allowlisted; the RSI warm-up is a leading NaN
@@ -256,13 +264,18 @@ class TestKeep:
         assert not set(dates[-5:]) & set(rows.index)
         assert not built["panel"]["target"].isna().any()
 
-    def test_the_attribution_says_what_drop_would_have_removed(self, patched_multi_factory):
+    def test_the_attribution_says_what_drop_would_have_removed(
+        self, patched_multi_factory
+    ):
         kept = build_dataset(_spec(MissingDataSpec(policy="keep")))
         dropped = build_dataset(_spec())
         attribution = kept["drop_attribution"]
         assert attribution["policy"] == "keep"
         assert attribution["rows_after_alignment"] == len(kept["panel"])
-        assert attribution["rows_that_drop_would_remove"] == dropped["drop_attribution"]["rows_dropped"]
+        assert (
+            attribution["rows_that_drop_would_remove"]
+            == dropped["drop_attribution"]["rows_dropped"]
+        )
         assert attribution["rows_with_missing_features"] == int(
             kept["panel"][kept["feature_ids"]].isna().any(axis=1).sum()
         )
@@ -273,7 +286,10 @@ class TestKeep:
             build_dataset(
                 _spec(
                     MissingDataSpec(policy="keep"),
-                    features=[FeatureSpec(id="technical.rsi"), FeatureSpec(id="test.inf")],
+                    features=[
+                        FeatureSpec(id="technical.rsi"),
+                        FeatureSpec(id="test.inf"),
+                    ],
                 )
             )
 
@@ -310,7 +326,11 @@ class TestTheEngineUnderKeep:
     def test_an_impute_step_closes_the_hole_with_the_training_median(self, kept):
         result = run_experiment(
             kept,
-            _model("ridge", steps=[StepSpec(type="impute"), StepSpec(type="zscore")], alpha=1.0),
+            _model(
+                "ridge",
+                steps=[StepSpec(type="impute"), StepSpec(type="zscore")],
+                alpha=1.0,
+            ),
             "ds",
         )
         state = load_preprocessing_state(result["model_id"])
@@ -319,7 +339,9 @@ class TestTheEngineUnderKeep:
         assert result["n_folds"] >= 2
 
     def test_an_estimator_that_accepts_nan_needs_no_impute(self, kept):
-        assert accepts_missing(get_estimator_class("regression", "hist_gradient_boosting"))
+        assert accepts_missing(
+            get_estimator_class("regression", "hist_gradient_boosting")
+        )
         result = run_experiment(
             kept, _model("hist_gradient_boosting", max_iter=20), "ds", register=False
         )
@@ -335,12 +357,18 @@ class TestTheEngineUnderKeep:
 
 
 class TestScoringUnderKeep:
-    def test_the_latest_bar_with_a_hole_is_scored_through_impute(self, patched_multi_factory):
+    def test_the_latest_bar_with_a_hole_is_scored_through_impute(
+        self, patched_multi_factory
+    ):
         """The planted feature is NaN on the final bar of every entity, so
         under `keep` the row scoring wants to score carries a hole."""
         model_id, _dataset = _register(
             _spec(MissingDataSpec(policy="keep")),
-            _model("ridge", steps=[StepSpec(type="impute"), StepSpec(type="zscore")], alpha=1.0),
+            _model(
+                "ridge",
+                steps=[StepSpec(type="impute"), StepSpec(type="zscore")],
+                alpha=1.0,
+            ),
             "ds_keep_score",
         )
         result = score_model(model_id, as_of="2023-12-29", universe=UNIVERSE)
@@ -349,7 +377,9 @@ class TestScoringUnderKeep:
         predictions = _artifacts.load_artifact(result["predictions_uri"])["prediction"]
         assert np.isfinite(predictions.to_numpy()).all()
 
-    def test_a_nan_tolerant_estimator_scores_the_hole_directly(self, patched_multi_factory):
+    def test_a_nan_tolerant_estimator_scores_the_hole_directly(
+        self, patched_multi_factory
+    ):
         model_id, _dataset = _register(
             _spec(MissingDataSpec(policy="keep")),
             _model("hist_gradient_boosting", max_iter=20),

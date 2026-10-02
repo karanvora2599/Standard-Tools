@@ -93,7 +93,9 @@ def _offline(monkeypatch, prices):
         def get_ohlcv(self, symbol, start, end, interval="1d"):
             return prices
 
-    monkeypatch.setattr(mod.DataFactory, "get_provider", staticmethod(lambda *a, **k: _Provider()))
+    monkeypatch.setattr(
+        mod.DataFactory, "get_provider", staticmethod(lambda *a, **k: _Provider())
+    )
 
 
 def _input(strategy_type: str) -> BacktestInput:
@@ -122,9 +124,7 @@ def test_one_tool_runs_whichever_strategy_is_named(tool):
     """The regression, stated directly: the same tool, asked for different
     strategies, must not return the same backtest four times."""
     results = {name: _run(tool, name) for name in DISPATCHABLE}
-    signatures = {
-        (round(r.total_return, 10), r.num_trades) for r in results.values()
-    }
+    signatures = {(round(r.total_return, 10), r.num_trades) for r in results.values()}
     assert len(signatures) > 1, (
         f"{tool} returned an identical backtest for every strategy_type in "
         f"{DISPATCHABLE} — strategy_type is being ignored"
@@ -137,12 +137,15 @@ def test_every_tool_agrees_on_a_given_strategy(strategy):
     must not change the answer once `strategy_type` names the strategy — the
     tool names are aliases, and an alias that changes the result is not one."""
     outcomes = {
-        tool: (round(_run(tool, strategy).total_return, 10), _run(tool, strategy).num_trades)
+        tool: (
+            round(_run(tool, strategy).total_return, 10),
+            _run(tool, strategy).num_trades,
+        )
         for tool in TOOLS
     }
-    assert len(set(outcomes.values())) == 1, (
-        f"the four tools disagree on {strategy}: {outcomes}"
-    )
+    assert (
+        len(set(outcomes.values())) == 1
+    ), f"the four tools disagree on {strategy}: {outcomes}"
 
 
 def test_the_result_carries_no_strategy_label_so_the_caller_owns_the_name():
@@ -258,6 +261,10 @@ def test_the_enum_and_the_registry_have_not_drifted():
     `custom_signal` is the one deliberate exception, and it is refused by name."""
     import typing
 
-    advertised = set(typing.get_args(BacktestInput.model_fields["strategy_type"].annotation))
+    advertised = set(
+        typing.get_args(BacktestInput.model_fields["strategy_type"].annotation)
+    )
     missing = advertised - set(RUNNABLE) - {"custom_signal"}
-    assert not missing, f"the schema offers strategies the registry cannot run: {missing}"
+    assert (
+        not missing
+    ), f"the schema offers strategies the registry cannot run: {missing}"

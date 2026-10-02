@@ -1,5 +1,42 @@
 # Changelog
 
+## CI is green again on Linux and Python 3.10, and a point-in-time join takes keys of any resolution
+
+The continuous-integration runs had failed since 2026-09-28, on Linux and
+on the oldest supported Python, for reasons the Windows development machine
+could not show. Four were defects in the library and three in the tests.
+
+- **`asof_join` (`join_point_in_time`) works on pandas 3.** pandas 3 keeps
+  the resolution a datetime column was built with, so a panel parsed in
+  microseconds and records in nanoseconds reached `merge_asof` as keys it
+  refuses to compare, and the tool raised a bare `MergeError`. Both keys are
+  now joined at the finer of the two resolutions, so no timestamp is
+  rounded, and the caller's panel comes back with its own column unchanged.
+  A key too far from 1970 for that resolution is refused by name.
+- **The MCP progress heartbeat works on Python 3.10.** It caught
+  `BaseExceptionGroup`, which Python only provides from 3.11, so on 3.10
+  every tool call that asked for progress failed with a `NameError` in
+  place of its own result or refusal. On 3.10 the name comes from the
+  `exceptiongroup` backport anyio already installs there.
+- **A directory dataset holding a link out of the fence is refused on every
+  platform.** On Windows the walk descends into a junction and meets the
+  files behind it, which the fence refused; on Linux and macOS it lists a
+  directory symlink without descending, so the link passed in silence.
+  Every entry the walk lists is now checked, directories included, and the
+  files the reader is given come from that same walk. Nothing outside the
+  fence was ever read — the reader is given only checked files — but the
+  link is now refused as it was meant to be.
+- **Tests that held one C runtime's last bit.** Hull's implied-volatility
+  example solves to 0.2 exactly with MSVC's `exp` and `erfc` and to
+  0.1999999999999992 with glibc's; the C++ and Python checks now allow a few
+  ulps. The bar-hygiene tests build their expected index in nanoseconds,
+  the unit the provider returns, rather than in pandas 3's default
+  microseconds. The GARCH parity test, which failed once on one runner with
+  matching parameters, now reports each path's own NOT CONVERGED reasons.
+- **The Windows build job runs its tests under bash**, which reads the
+  trailing backslash as a line continuation where PowerShell did not, and
+  twelve files are formatted for the current black and isort.
+
 ## ADX and Wilder's ATR no longer lose to their own fallback, and the CUSUM null is scanned natively
 
 - **The ADX and Wilder's ATR kernels were slower than the Numba code they

@@ -44,7 +44,9 @@ from standard_quant_tools.data.bar_hygiene import (
 from standard_quant_tools.data.yfinance_provider import YFinanceProvider
 from standard_quant_tools.error import APIError, NonRetryableAPIError
 
-SESSIONS = pd.bdate_range("2026-06-01", "2026-09-29")
+# In nanoseconds, the unit the provider returns: pandas 3 builds a range in
+# microseconds, and the frames would then differ in their index dtype alone.
+SESSIONS = pd.bdate_range("2026-06-01", "2026-09-29").as_unit("ns")
 LAST = "2026-09-29"
 NEXT = "2026-09-30"
 

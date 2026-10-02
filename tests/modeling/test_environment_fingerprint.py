@@ -88,7 +88,10 @@ class TestTheManifestCarriesIt:
                 universe=["AAA", "BBB", "CCC"],
                 start="2022-01-01",
                 end="2023-12-31",
-                features=[FeatureSpec(id="technical.rsi"), FeatureSpec(id="market.momentum")],
+                features=[
+                    FeatureSpec(id="technical.rsi"),
+                    FeatureSpec(id="market.momentum"),
+                ],
                 target=TargetSpec(horizon=5),
                 benchmark="SPY",
             )
@@ -111,4 +114,6 @@ class TestTheManifestCarriesIt:
         lineage = inspect_model(
             InspectModelInput(model_id=result["model_id"], view="lineage")
         )
-        assert lineage.data["environment"]["packages"]["numpy"] == metadata.version("numpy")
+        assert lineage.data["environment"]["packages"]["numpy"] == metadata.version(
+            "numpy"
+        )

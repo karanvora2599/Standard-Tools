@@ -132,7 +132,9 @@ class CrossSectionalStandardize(Preprocessor):
                 "cross_sectional_standardize needs one date per row: got "
                 f"{0 if ctx.dates is None else len(ctx.dates)} dates for {len(X)} rows."
             )
-        return standardize_cross_sectional(X, ctx.dates, float(self.params["clip_sigma"]))
+        return standardize_cross_sectional(
+            X, ctx.dates, float(self.params["clip_sigma"])
+        )
 
 
 class RobustScale(Preprocessor):
@@ -363,7 +365,11 @@ class PCAWhiten(Preprocessor):
         variance = (singular[:k] ** 2) / float(n_rows - 1)
         total = float((singular**2).sum() / float(n_rows - 1)) or 1.0
         if bool(self.params["whiten"]):
-            scale = np.where(variance > 0.0, 1.0 / np.sqrt(np.where(variance > 0, variance, 1.0)), 1.0)
+            scale = np.where(
+                variance > 0.0,
+                1.0 / np.sqrt(np.where(variance > 0, variance, 1.0)),
+                1.0,
+            )
         else:
             scale = np.ones(k, dtype=np.float64)
         return {
@@ -460,7 +466,10 @@ register_preprocessor(
         schema=EstimatorParamSchema(
             bounds={
                 "n_quantiles": ParamBound(
-                    "int", 10, 10_000, note="Knots in the reference grid; the state grows with it."
+                    "int",
+                    10,
+                    10_000,
+                    note="Knots in the reference grid; the state grows with it.",
                 ),
                 "output": ParamBound("str", choices=("normal", "uniform")),
             }

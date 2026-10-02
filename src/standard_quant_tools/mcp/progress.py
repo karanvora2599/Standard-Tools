@@ -35,11 +35,16 @@ heartbeat is a task in the loop, not a callback from the tool.
 
 from __future__ import annotations
 
+import sys
 import time
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Optional
 
 import anyio
+
+if sys.version_info < (3, 11):  # pragma: no cover - a builtin from 3.11
+    # anyio raises the backport's group on 3.10 and installs it there.
+    from exceptiongroup import BaseExceptionGroup
 
 #: Seconds between heartbeats. Short enough that a client's idle timeout
 #: never fires between two of them, long enough that a tool taking minutes

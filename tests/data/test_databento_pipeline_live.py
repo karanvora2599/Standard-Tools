@@ -33,8 +33,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from standard_quant_tools.data.databento_provider import DatabentoProvider
 from standard_quant_tools.analysis import regression
+from standard_quant_tools.data.databento_provider import DatabentoProvider
 from standard_quant_tools.indicators import momentum, trend, volatility, volume
 from standard_quant_tools.metrics import return_metrics, risk_metrics
 
@@ -57,7 +57,11 @@ BENCHMARK = "SPY"
 def _no_inherited_dataset_pins():
     saved = {
         name: os.environ.pop(name, None)
-        for name in ("DATABENTO_DATASET", "DATABENTO_DEPTH_DATASET", "DATABENTO_OHLCV_DATASET")
+        for name in (
+            "DATABENTO_DATASET",
+            "DATABENTO_DEPTH_DATASET",
+            "DATABENTO_OHLCV_DATASET",
+        )
     }
     yield
     for name, value in saved.items():
@@ -118,7 +122,9 @@ class TestTrendIndicatorsMatchTheirDefinitions:
     def test_sma_is_the_rolling_mean_including_its_warm_up(self, close):
         got = trend.sma(close, period=50)
         want = close.rolling(window=50).mean()
-        assert len(got) == len(close), "an indicator must not silently shorten the frame"
+        assert len(got) == len(
+            close
+        ), "an indicator must not silently shorten the frame"
         pd.testing.assert_series_equal(
             got.dropna(), want.dropna(), check_names=False, rtol=1e-12
         )
@@ -166,9 +172,9 @@ class TestMomentumAndVolatilityMatchTheirDefinitions:
         period = 14
         got = momentum.rsi(close, period=period).dropna()
         assert len(got) > 400
-        assert (got >= 0).all() and (got <= 100).all(), (
-            f"RSI left [0, 100]: min {got.min():.4f} max {got.max():.4f}"
-        )
+        assert (got >= 0).all() and (
+            got <= 100
+        ).all(), f"RSI left [0, 100]: min {got.min():.4f} max {got.max():.4f}"
         # Wilder's smoothing is an EMA with alpha = 1/period.
         delta = close.diff()
         gain = delta.clip(lower=0).ewm(alpha=1 / period, adjust=False).mean()
@@ -206,7 +212,9 @@ class TestMomentumAndVolatilityMatchTheirDefinitions:
         upper, lower = frame[column["upper"]], frame[column["lower"]]
         middle_name = column.get("middle") or column.get("ma") or column.get("mid")
         both = pd.concat([upper, lower], axis=1).dropna()
-        assert (both.iloc[:, 0] >= both.iloc[:, 1]).all(), "the upper band fell below the lower"
+        assert (
+            both.iloc[:, 0] >= both.iloc[:, 1]
+        ).all(), "the upper band fell below the lower"
         if middle_name:
             middle = frame[middle_name]
             rolling = close.rolling(20).mean()
@@ -218,24 +226,33 @@ class TestMomentumAndVolatilityMatchTheirDefinitions:
                 (width - want.loc[width.index]).abs().max(),
                 (width - alt.loc[width.index]).abs().max(),
             )
-            assert near < 1e-6, f"the band half-width is neither 2 population nor 2 sample sd ({near:.2e})"
+            assert (
+                near < 1e-6
+            ), f"the band half-width is neither 2 population nor 2 sample sd ({near:.2e})"
         # Roughly nineteen in twenty closes sit inside two standard deviations;
         # a real tape has fat tails, so the bound is one-sided and loose.
         inside = ((close >= lower) & (close <= upper)).loc[both.index]
-        assert inside.mean() > 0.80, f"only {inside.mean():.1%} of closes are inside the bands"
+        assert (
+            inside.mean() > 0.80
+        ), f"only {inside.mean():.1%} of closes are inside the bands"
 
 
 class TestVolumeIndicatorsOnRealVolume:
     def test_vwap_is_volume_weighted_and_sits_within_the_price_range(self, bars):
-        high, low, close, vol = bars["High"], bars["Low"], bars["Close"], bars["Volume"].astype(float)
+        high, low, close, vol = (
+            bars["High"],
+            bars["Low"],
+            bars["Close"],
+            bars["Volume"].astype(float),
+        )
         got = volume.vwap(high, low, close, vol).dropna()
         typical = (high + low + close) / 3.0
         want = (typical * vol).cumsum() / vol.cumsum()
         common = got.index.intersection(want.index)
         assert len(common) > 400
-        assert (got.loc[common] - want.loc[common]).abs().max() < 1e-6, (
-            "VWAP is not the cumulative volume-weighted typical price"
-        )
+        assert (
+            got.loc[common] - want.loc[common]
+        ).abs().max() < 1e-6, "VWAP is not the cumulative volume-weighted typical price"
         assert got.min() >= float(low.min()) - 1e-9
         assert got.max() <= float(high.max()) + 1e-9
 
@@ -246,9 +263,9 @@ class TestVolumeIndicatorsOnRealVolume:
         want = (direction * vol).fillna(0).cumsum()
         common = got.index.intersection(want.index)[1:]
         difference = (got.loc[common] - want.loc[common]).abs()
-        assert difference.max() < 1.0, (
-            f"OBV differs from its definition by up to {difference.max():,.0f} shares"
-        )
+        assert (
+            difference.max() < 1.0
+        ), f"OBV differs from its definition by up to {difference.max():,.0f} shares"
 
 
 # --- metrics, against arithmetic done here --------------------------------------
@@ -299,7 +316,9 @@ class TestRiskAndReturnMetricsOnRealReturns:
         assert min(abs(got - want), abs(got - alt)) < 1e-6, f"{got} vs {want}/{alt}"
         assert -5 < got < 5, f"a Sharpe of {got:.2f} from two years of daily bars"
 
-    def test_the_drawdown_series_is_never_positive_and_finds_the_real_trough(self, close):
+    def test_the_drawdown_series_is_never_positive_and_finds_the_real_trough(
+        self, close
+    ):
         got = risk_metrics.drawdown_series(close)
         assert (got <= 1e-12).all(), "a drawdown above the running peak"
         want = close / close.cummax() - 1.0
@@ -315,12 +334,14 @@ class TestRiskAndReturnMetricsOnRealReturns:
         var = float(returns.quantile(0.05))
         tail = returns[returns <= var]
         assert len(tail) > 5, "not enough tail to condition on"
-        assert got <= var + 1e-9 or abs(got) >= abs(var) - 1e-9, (
-            f"CVaR {got:.6f} is milder than the 5% VaR {var:.6f}"
-        )
+        assert (
+            got <= var + 1e-9 or abs(got) >= abs(var) - 1e-9
+        ), f"CVaR {got:.6f} is milder than the 5% VaR {var:.6f}"
         assert abs(got) < 0.5, f"a one-day conditional loss of {got:.2%}"
 
-    def test_beta_against_a_real_benchmark_is_near_one_for_a_mega_cap(self, close, benchmark):
+    def test_beta_against_a_real_benchmark_is_near_one_for_a_mega_cap(
+        self, close, benchmark
+    ):
         market = benchmark["Close"].astype(float).pct_change().dropna()
         asset = close.pct_change().dropna()
         joined = pd.concat([asset, market], axis=1, join="inner").dropna()
@@ -331,7 +352,9 @@ class TestRiskAndReturnMetricsOnRealReturns:
         covariance = float(np.cov(joined["asset"], joined["market"], ddof=1)[0, 1])
         want = covariance / float(joined["market"].var(ddof=1))
         assert math.isclose(beta, want, rel_tol=1e-6), f"{beta} vs {want}"
-        assert 0.3 < beta < 2.5, f"a beta of {beta:.2f} for {SYMBOL} against {BENCHMARK}"
+        assert (
+            0.3 < beta < 2.5
+        ), f"a beta of {beta:.2f} for {SYMBOL} against {BENCHMARK}"
 
 
 # --- the two vendors, through the library's own provider seam -------------------
@@ -360,8 +383,12 @@ class TestTheSameAnalyticOverTwoVendors:
         joined.columns = ["ours", "theirs"]
         assert len(joined) > 300, f"only {len(joined)} sessions joined"
 
-        our_vol = return_metrics.annualized_volatility(joined["ours"].pct_change().dropna(), 252)
-        their_vol = return_metrics.annualized_volatility(joined["theirs"].pct_change().dropna(), 252)
+        our_vol = return_metrics.annualized_volatility(
+            joined["ours"].pct_change().dropna(), 252
+        )
+        their_vol = return_metrics.annualized_volatility(
+            joined["theirs"].pct_change().dropna(), 252
+        )
         assert abs(our_vol - their_vol) < 0.03, (
             f"annualised volatility differs by {abs(our_vol - their_vol):.2%} "
             f"between vendors ({our_vol:.2%} vs {their_vol:.2%})"

@@ -43,10 +43,15 @@ def closes():
     """Ten sessions of closes, the shape the lost task was working in."""
     index = pd.date_range("2026-06-01", periods=10, freq="D")
     frame = pd.DataFrame(
-        {"close": [205.16 + i for i in range(10)], "volume": [1000 + i for i in range(10)]},
+        {
+            "close": [205.16 + i for i in range(10)],
+            "volume": [1000 + i for i in range(10)],
+        },
         index=index,
     )
-    return handoff.publish(frame, "returns_panel", "run_read", "closes", producer="test")
+    return handoff.publish(
+        frame, "returns_panel", "run_read", "closes", producer="test"
+    )
 
 
 def test_an_anchor_date_yields_its_actual_close(closes):

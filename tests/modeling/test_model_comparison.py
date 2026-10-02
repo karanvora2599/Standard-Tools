@@ -130,9 +130,13 @@ class TestDieboldMariano:
     def test_newey_west_grows_with_positive_autocorrelation(self):
         rng = np.random.default_rng(8)
         persistent = _ar1(2000, 0.7, 1.0, rng)
-        assert newey_west_variance(persistent, 10) > 2.0 * newey_west_variance(persistent, 0)
+        assert newey_west_variance(persistent, 10) > 2.0 * newey_west_variance(
+            persistent, 0
+        )
         white = rng.normal(size=2000)
-        assert newey_west_variance(white, 10) == pytest.approx(newey_west_variance(white, 0), rel=0.2)
+        assert newey_west_variance(white, 10) == pytest.approx(
+            newey_west_variance(white, 0), rel=0.2
+        )
 
     def test_lag_zero_is_the_variance_of_the_mean(self):
         x = np.array([1.0, 2.0, 4.0, 7.0])
@@ -157,7 +161,13 @@ def _panel(n_entities: int = 12, seed: int = 0):
     for date in DATES[:120]:
         signal = rng.normal(size=n_entities)
         for i in range(n_entities):
-            rows.append({"date": date, "entity": f"E{i}", "target": signal[i] + rng.normal(0, 0.5)})
+            rows.append(
+                {
+                    "date": date,
+                    "entity": f"E{i}",
+                    "target": signal[i] + rng.normal(0, 0.5),
+                }
+            )
     return pd.DataFrame(rows), rng
 
 
@@ -166,7 +176,9 @@ class TestPairedComparison:
         panel, rng = _panel()
         perfect = panel.assign(prediction=panel["target"])
         shuffled = panel.assign(prediction=rng.permutation(panel["target"].to_numpy()))
-        result = paired_comparison(shuffled, perfect, task="regression", horizon=5, seed=1)
+        result = paired_comparison(
+            shuffled, perfect, task="regression", horizon=5, seed=1
+        )
         assert result["mean_b"] == pytest.approx(1.0)
         assert abs(result["mean_a"]) < 0.15
         assert result["verdict"] == "b_better"
@@ -209,7 +221,9 @@ class TestPairedComparison:
     def test_a_classifier_gets_a_brier_test(self):
         panel, rng = _panel()
         binary = panel.assign(target=(panel["target"] > 0).astype(float))
-        good = binary.assign(prediction=np.clip(0.5 + 0.4 * np.sign(panel["target"]), 0, 1))
+        good = binary.assign(
+            prediction=np.clip(0.5 + 0.4 * np.sign(panel["target"]), 0, 1)
+        )
         coin = binary.assign(prediction=rng.uniform(size=len(panel)))
         result = paired_comparison(coin, good, task="classification", n_bootstrap=200)
         assert result["diebold_mariano"]["loss"] == "brier"

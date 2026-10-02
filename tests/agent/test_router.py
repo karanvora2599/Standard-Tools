@@ -129,8 +129,7 @@ class TestRoutingAccuracyEval:
             "delta_one",
         ),
         (
-            "How many ES contracts do I short to hedge a $250m book with "
-            "beta 1.12?",
+            "How many ES contracts do I short to hedge a $250m book with " "beta 1.12?",
             "delta_one",
         ),
         # backtest_execution -- run one strategy, fixed parameters

@@ -386,20 +386,26 @@ def _vetted_files(directory: Path, roots: Sequence[Path]) -> List[Path]:
     The directory being inside is not enough: the walk follows file links
     and junctions, and so does the reader, so one link planted among the
     partitions would put a file from anywhere into the dataset.
+
+    Every entry the walk lists is checked, directories included, and the
+    files are taken from that one walk. On Windows the walk descends into a
+    junction and meets the files behind it; on POSIX it lists a directory
+    symlink without descending, so checking files alone let such a link
+    pass in silence there while Windows refused it.
     """
-    files = _files(directory)
-    for file in files:
-        target = _resolved(file)
+    entries = sorted(directory.rglob("*")) if directory.is_dir() else [directory]
+    for entry in entries:
+        target = _resolved(entry)
         if not is_within_any(target, roots):
-            relative = file.relative_to(directory)
+            relative = entry.relative_to(directory) if entry != directory else entry
             raise ValidationError(
                 f"{directory} holds {str(relative)!r}, which is a link to a "
-                "file outside the directories external data may be read from "
+                "location outside the directories external data may be read from "
                 f"({_roots_text(roots)}). A directory is read file by file, so "
                 "every file in it has to lie inside them too. Remove the link, "
                 "or copy the file into the directory. " + _widen_hint()
             )
-    return files
+    return [entry for entry in entries if entry.is_file()]
 
 
 def _resolve_readable(path: str) -> Tuple[Path, List[Path]]:

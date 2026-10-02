@@ -174,9 +174,17 @@ class TestBarsObeyTheMarket:
         assert not bars.empty, "no bars came back for a month of regular sessions"
         assert bars.index.is_monotonic_increasing, "bars are out of order"
         assert bars.index.is_unique, "a session is reported twice"
-        assert bars.index.tz is not None, "a naive timestamp cannot be placed in a session"
+        assert (
+            bars.index.tz is not None
+        ), "a naive timestamp cannot be placed in a session"
         weekdays = {ts.weekday() for ts in bars.index}
-        assert weekdays <= {0, 1, 2, 3, 4}, f"a weekend session appeared: {sorted(weekdays)}"
+        assert weekdays <= {
+            0,
+            1,
+            2,
+            3,
+            4,
+        }, f"a weekend session appeared: {sorted(weekdays)}"
         # Roughly 21 sessions a month; the window is about seven weeks.
         assert 25 <= len(bars) <= 40, f"{len(bars)} sessions in {BAR_START}..{BAR_END}"
 
@@ -201,7 +209,9 @@ class TestBarsObeyTheMarket:
             assert series.notna().all(), f"{column} has gaps"
             assert (series > 0).all(), f"{column} has a non-positive price"
             # A scaling error lands orders of magnitude away, not a tick.
-            assert (series < 100_000).all(), f"{column} looks unscaled: max {series.max()}"
+            assert (
+                series < 100_000
+            ).all(), f"{column} looks unscaled: max {series.max()}"
         assert (bars["Volume"] > 0).all(), "a regular session with no volume"
 
     def test_a_day_to_day_move_is_a_market_move_not_a_units_change(self, bars):
@@ -229,7 +239,9 @@ class TestASecondVendorAgrees:
     def test_closes_agree_with_an_independent_consolidated_source(self, bars):
         theirs = _vendor_daily(SYMBOL, BAR_START, BAR_END)
         ours = _as_naive_days(bars)
-        joined = ours[["Close"]].join(theirs[["Close"]], how="inner", lsuffix="_db", rsuffix="_yf")
+        joined = ours[["Close"]].join(
+            theirs[["Close"]], how="inner", lsuffix="_db", rsuffix="_yf"
+        )
         assert len(joined) >= 20, (
             f"only {len(joined)} sessions joined; the indices are not comparable, "
             "which would make every agreement test below pass vacuously"
@@ -251,7 +263,9 @@ class TestASecondVendorAgrees:
         ours = _as_naive_days(bars)
         missing = sorted(set(theirs.index) - set(ours.index))
         extra = sorted(set(ours.index) - set(theirs.index))
-        assert not extra, f"Databento reports sessions the other vendor does not: {extra}"
+        assert (
+            not extra
+        ), f"Databento reports sessions the other vendor does not: {extra}"
         assert len(missing) <= 1, f"Databento is missing sessions: {missing}"
 
     def test_the_bars_are_unadjusted_and_say_so(self, provider, bars):
@@ -260,7 +274,9 @@ class TestASecondVendorAgrees:
         right about a dividend, and the metadata is what tells a caller
         which one they hold."""
         meta = provider.get_metadata(SYMBOL, interval="1d")
-        assert meta.adjusted is False, "raw venue prices must never be reported as adjusted"
+        assert (
+            meta.adjusted is False
+        ), "raw venue prices must never be reported as adjusted"
         assert meta.provider == "databento"
         assert meta.timezone == "UTC"
 
@@ -285,8 +301,12 @@ class TestWhichDatasetIsTheConsolidatedTape:
 
         client = db.Historical(os.environ["DATABENTO_API_KEY"])
         store = client.timeseries.get_range(
-            dataset=dataset, schema="ohlcv-1d", symbols=[symbol],
-            start=BAR_START, end=BAR_END, stype_in="raw_symbol",
+            dataset=dataset,
+            schema="ohlcv-1d",
+            symbols=[symbol],
+            start=BAR_START,
+            end=BAR_END,
+            stype_in="raw_symbol",
         )
         frame = store.to_df()
         if frame.empty:
@@ -298,7 +318,9 @@ class TestWhichDatasetIsTheConsolidatedTape:
         theirs = _vendor_daily(symbol, BAR_START, BAR_END)
         joined = daily.join(theirs[["Close", "Volume"]], how="inner")
         assert not joined.empty, f"{dataset} and the second vendor share no session"
-        share = (joined["volume"].astype(float) / joined["Volume"].astype(float)).median()
+        share = (
+            joined["volume"].astype(float) / joined["Volume"].astype(float)
+        ).median()
         error = ((joined["close"] - joined["Close"]).abs() / joined["Close"]).median()
         return float(share), float(error)
 
@@ -310,7 +332,9 @@ class TestWhichDatasetIsTheConsolidatedTape:
                 f"EQUS.SUMMARY volume for {symbol} is {share:.4f} of the "
                 "consolidated tape; it was the dataset that matched it exactly"
             )
-            assert error < 0.001, f"EQUS.SUMMARY close for {symbol} is off by {error:.4%}"
+            assert (
+                error < 0.001
+            ), f"EQUS.SUMMARY close for {symbol} is off by {error:.4%}"
 
     def test_equs_mini_is_a_sample_and_its_prices_are_still_right(self):
         """The trap, written down.
@@ -356,8 +380,12 @@ class TestWhichDatasetIsTheConsolidatedTape:
     def test_the_default_bars_carry_consolidated_volume(self, bars):
         ours = _as_naive_days(bars)
         theirs = _vendor_daily(SYMBOL, BAR_START, BAR_END)
-        joined = ours[["Volume"]].join(theirs[["Volume"]], how="inner", lsuffix="_db", rsuffix="_yf")
-        share = (joined["Volume_db"].astype(float) / joined["Volume_yf"].astype(float)).median()
+        joined = ours[["Volume"]].join(
+            theirs[["Volume"]], how="inner", lsuffix="_db", rsuffix="_yf"
+        )
+        share = (
+            joined["Volume_db"].astype(float) / joined["Volume_yf"].astype(float)
+        ).median()
         assert 0.9 <= share <= 1.1, (
             f"the provider's default bars carry {share:.4f} of consolidated volume "
             f"(DATASET_CONSOLIDATED is {DATASET_CONSOLIDATED})"
@@ -407,21 +435,31 @@ class TestTheRealOrderBook:
     def test_the_sentinels_were_masked_before_they_were_scaled(self, book):
         """An unmasked UNDEF_PRICE is `int64` max, and scaling it produces a
         number nine billion times the stock rather than a missing level."""
-        prices = [c for c in book.columns if c.endswith(tuple(str(i) for i in range(10))) and "price" in c]
+        prices = [
+            c
+            for c in book.columns
+            if c.endswith(tuple(str(i) for i in range(10))) and "price" in c
+        ]
         values = book[prices].stack().dropna()
         assert not values.empty
         assert (values > 0).all(), "a non-positive price survived normalisation"
-        assert (values < 100_000).all(), (
-            f"a price of {values.max():g} is an unmasked sentinel, not a quote"
-        )
+        assert (
+            values < 100_000
+        ).all(), f"a price of {values.max():g} is an unmasked sentinel, not a quote"
 
     def test_sizes_are_counts_not_prices(self, book):
-        sizes = book[[f"bid_size_{i}" for i in range(5)] + [f"ask_size_{i}" for i in range(5)]]
+        sizes = book[
+            [f"bid_size_{i}" for i in range(5)] + [f"ask_size_{i}" for i in range(5)]
+        ]
         stacked = sizes.stack().dropna()
         assert (stacked >= 0).all(), "a negative resting size"
-        assert stacked.max() < 10_000_000, "a size that large is a price in the wrong column"
+        assert (
+            stacked.max() < 10_000_000
+        ), "a size that large is a price in the wrong column"
 
-    def test_every_quote_sits_inside_that_session_s_own_range(self, book, session_range):
+    def test_every_quote_sits_inside_that_session_s_own_range(
+        self, book, session_range
+    ):
         """Cross-schema, and the check that would catch a scaling error.
 
         The depth feed and the daily bar are different products from
@@ -459,8 +497,10 @@ class TestTheDepthAnalyticsOnRealDepth:
         """It weights each side by the opposite side's size, so it can lean
         but it cannot leave the spread."""
         value = ob.microprice(
-            book["bid_price_0"], book["bid_size_0"],
-            book["ask_price_0"], book["ask_size_0"],
+            book["bid_price_0"],
+            book["bid_size_0"],
+            book["ask_price_0"],
+            book["ask_size_0"],
         )
         series = pd.Series(pd.array(value, dtype="float64"), index=book.index).dropna()
         assert len(series) > 0.9 * len(book), "the microprice is undefined too often"
@@ -475,20 +515,24 @@ class TestTheDepthAnalyticsOnRealDepth:
         profile = ob.depth_profile(book, levels=5)["profile"]
         assert len(profile) == 5
         distances = [row["mean_bid_distance_bps"] for row in profile]
-        assert distances == sorted(distances), (
-            f"levels are not ordered by distance from the touch: {distances}"
-        )
+        assert distances == sorted(
+            distances
+        ), f"levels are not ordered by distance from the touch: {distances}"
         assert profile[0]["mean_bid_size"] > 0 and profile[-1]["mean_bid_size"] > 0
         near = profile[0]["mean_bid_size"] + profile[0]["mean_ask_size"]
         far = profile[-1]["mean_bid_size"] + profile[-1]["mean_ask_size"]
-        assert far > near, f"the touch ({near:.0f}) rests more than the back ({far:.0f})"
+        assert (
+            far > near
+        ), f"the touch ({near:.0f}) rests more than the back ({far:.0f})"
 
     def test_book_dynamics_measure_a_plausible_update_rate(self, book):
         dynamics = ob.book_dynamics(book)
         assert dynamics["n_pairs"] == len(book) - 1
         assert dynamics["elapsed_seconds"] > 0
         rate = dynamics["updates_per_second"]
-        assert 1 < rate < 100_000, f"{rate:.1f} book updates a second is not a real feed"
+        assert (
+            1 < rate < 100_000
+        ), f"{rate:.1f} book updates a second is not a real feed"
         assert dynamics["mid_changes"] >= 0
         assert dynamics["mid_changes"] <= dynamics["n_pairs"]
 
@@ -497,13 +541,21 @@ class TestTheDepthAnalyticsOnRealDepth:
 
 
 class TestTradesAndQuotes:
-    def test_trades_print_inside_the_session_they_belong_to(self, provider, session_range):
+    def test_trades_print_inside_the_session_they_belong_to(
+        self, provider, session_range
+    ):
         low, high = session_range
-        trades = provider.get_trades(SYMBOL, f"{SESSION}T14:30:00", f"{SESSION}T14:35:00")
+        trades = provider.get_trades(
+            SYMBOL, f"{SESSION}T14:30:00", f"{SESSION}T14:35:00"
+        )
         assert not trades.empty, "five minutes after the open with no prints"
         assert (trades["price"] > 0).all()
-        outside = trades[(trades["price"] < low - 1e-6) | (trades["price"] > high + 1e-6)]
-        assert outside.empty, f"{len(outside)} trades printed outside the session's range"
+        outside = trades[
+            (trades["price"] < low - 1e-6) | (trades["price"] > high + 1e-6)
+        ]
+        assert (
+            outside.empty
+        ), f"{len(outside)} trades printed outside the session's range"
         # This asserted that no print has size 0, and the venue tape carries
         # them (a third of the prints in one measured minute); what is
         # checked now is that every one of them is counted on the frame.
@@ -512,14 +564,16 @@ class TestTradesAndQuotes:
         assert trades.index.is_monotonic_increasing, "trades are out of time order"
 
     def test_the_quoted_spread_is_the_right_way_round(self, provider):
-        quotes = provider.get_quotes(SYMBOL, f"{SESSION}T14:30:00", f"{SESSION}T14:31:00")
+        quotes = provider.get_quotes(
+            SYMBOL, f"{SESSION}T14:30:00", f"{SESSION}T14:31:00"
+        )
         assert not quotes.empty
         both = quotes.dropna(subset=["bid_price", "ask_price"])
         assert len(both) > 0.9 * len(quotes), "top of book is missing too often"
         inverted = both[both["bid_price"] > both["ask_price"] + 1e-9]
-        assert len(inverted) / len(both) < 0.001, (
-            f"{len(inverted)} of {len(both)} quotes are inverted"
-        )
+        assert (
+            len(inverted) / len(both) < 0.001
+        ), f"{len(inverted)} of {len(both)} quotes are inverted"
 
     def test_the_traded_volume_is_a_share_of_that_venue_s_day(self, provider, bars):
         """Five minutes of one venue cannot exceed the whole session.
@@ -527,7 +581,9 @@ class TestTradesAndQuotes:
         Loose on purpose: the point is the direction of the inequality, and
         a tighter bound would fail on a day with an opening auction print.
         """
-        trades = provider.get_trades(SYMBOL, f"{SESSION}T14:30:00", f"{SESSION}T14:35:00")
+        trades = provider.get_trades(
+            SYMBOL, f"{SESSION}T14:30:00", f"{SESSION}T14:35:00"
+        )
         day = _as_naive_days(bars)
         row = day.loc[day.index == pd.Timestamp(SESSION)]
         if row.empty:
@@ -552,8 +608,12 @@ class TestTheOperationalClaims:
         than to wall-clock now, so a weekend or a pre-finalization request
         returns the tail instead of a 422."""
         today = date.today()
-        frame = provider.get_ohlcv(SYMBOL, (today - timedelta(days=12)).isoformat(),
-                                   today.isoformat(), interval="1d")
+        frame = provider.get_ohlcv(
+            SYMBOL,
+            (today - timedelta(days=12)).isoformat(),
+            today.isoformat(),
+            interval="1d",
+        )
         assert not frame.empty, (
             "a request ending today returned nothing; the end is being sent "
             "as wall-clock now rather than as the dataset's edge"
@@ -569,8 +629,10 @@ class TestTheOperationalClaims:
         future = date.today() + timedelta(days=365)
         with pytest.raises(Exception) as caught:
             provider.get_ohlcv(
-                SYMBOL, future.isoformat(),
-                (future + timedelta(days=5)).isoformat(), interval="1d",
+                SYMBOL,
+                future.isoformat(),
+                (future + timedelta(days=5)).isoformat(),
+                interval="1d",
             )
         assert caught.value is not None
 
@@ -603,7 +665,9 @@ class TestTheOperationalClaims:
         with pytest.raises(ValidationError):
             provider.get_order_book(SYMBOL, BOOK_START, BOOK_END, levels=0)
 
-    def test_an_interval_the_vendor_does_not_publish_is_named_not_resampled(self, provider):
+    def test_an_interval_the_vendor_does_not_publish_is_named_not_resampled(
+        self, provider
+    ):
         with pytest.raises(ValidationError) as caught:
             provider.get_ohlcv(SYMBOL, BAR_START, BAR_END, interval="1w")
         assert "1d" in str(caught.value)
@@ -624,7 +688,9 @@ class TestTheVendorFactsTheOfflineSuiteAssumes:
         pair is one venue and says nothing."""
         from standard_quant_tools.data.databento import cross_venue_warning
 
-        schemas = set(provider._get_client().metadata.list_schemas(dataset="XNAS.BASIC"))
+        schemas = set(
+            provider._get_client().metadata.list_schemas(dataset="XNAS.BASIC")
+        )
         assert "trades" in schemas
         start, end = f"{SESSION}T14:30:00", f"{SESSION}T14:30:05"
         trades = provider.get_trades(SYMBOL, start, end)
@@ -642,7 +708,9 @@ class TestTheVendorFactsTheOfflineSuiteAssumes:
         frame = provider.get_ohlcv("ES.c.0", *self.WEEK, interval="1d")
         assert [d.weekday() for d in frame.index] == [0, 1, 2, 3, 4]
         assert "CME trade date" in frame.attrs["session"]
-        assert ((frame["Low"] <= frame["Close"]) & (frame["Close"] <= frame["High"])).all()
+        assert (
+            (frame["Low"] <= frame["Close"]) & (frame["Close"] <= frame["High"])
+        ).all()
 
     def test_the_vendors_session_schema_agrees_when_it_is_published(self, provider):
         """The vendor-side alternative to aggregating hourly bars: a daily
@@ -769,8 +837,11 @@ class TestTheDefaultFeedsCloseIsNotTheOfficialClose:
 
         def close_on(dataset: str, day: str) -> float:
             frame = client.timeseries.get_range(
-                dataset=dataset, schema="ohlcv-1d", symbols=[SYMBOL],
-                start=day, end=(pd.Timestamp(day) + pd.Timedelta(days=1)).date().isoformat(),
+                dataset=dataset,
+                schema="ohlcv-1d",
+                symbols=[SYMBOL],
+                start=day,
+                end=(pd.Timestamp(day) + pd.Timedelta(days=1)).date().isoformat(),
                 stype_in="raw_symbol",
             ).to_df()
             return float(frame["close"].iloc[0])
@@ -810,8 +881,10 @@ class TestABacktestCompoundsASplitAsAReturn:
         assert worst > -0.5, f"a {worst:.1%} session is a split, not a return"
 
         out = run_strategy(
-            bars, pd.Series(1.0, index=bars.index),
-            commission_pct=0.0, slippage_pct=0.0,
+            bars,
+            pd.Series(1.0, index=bars.index),
+            commission_pct=0.0,
+            slippage_pct=0.0,
         )
         warned = " ".join(out.get("warnings") or [])
         assert "split" in warned.lower() or out["total_return"] > 0, (

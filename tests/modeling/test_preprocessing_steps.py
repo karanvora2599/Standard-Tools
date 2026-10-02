@@ -42,7 +42,9 @@ CTX = FoldContext(dates=np.array([]), entities=None)
 
 
 def _frame(**columns) -> pd.DataFrame:
-    return pd.DataFrame({k: np.asarray(v, dtype=np.float64) for k, v in columns.items()})
+    return pd.DataFrame(
+        {k: np.asarray(v, dtype=np.float64) for k, v in columns.items()}
+    )
 
 
 class TestRobustScale:
@@ -143,22 +145,29 @@ class TestImpute:
 
     def test_mean_and_constant(self):
         train = _frame(f=[1.0, 2.0, 6.0])
-        assert build_step("impute", {"strategy": "mean"}).fit(train, CTX)["fill"]["f"] == 3.0
         assert (
-            build_step("impute", {"strategy": "constant", "fill_value": -1.0}).fit(train, CTX)[
-                "fill"
-            ]["f"]
+            build_step("impute", {"strategy": "mean"}).fit(train, CTX)["fill"]["f"]
+            == 3.0
+        )
+        assert (
+            build_step("impute", {"strategy": "constant", "fill_value": -1.0}).fit(
+                train, CTX
+            )["fill"]["f"]
             == -1.0
         )
 
     def test_an_all_missing_training_column_falls_back_to_the_constant(self):
-        state = build_step("impute", {"fill_value": 7.0}).fit(_frame(f=[np.nan, np.nan]), CTX)
+        state = build_step("impute", {"fill_value": 7.0}).fit(
+            _frame(f=[np.nan, np.nan]), CTX
+        )
         assert state["fill"]["f"] == 7.0
 
     def test_a_complete_column_is_untouched(self):
         train = _frame(f=[1.0, 2.0, 3.0])
         step = build_step("impute", {})
-        pd.testing.assert_frame_equal(step.transform(train, step.fit(train, CTX), CTX), train)
+        pd.testing.assert_frame_equal(
+            step.transform(train, step.fit(train, CTX), CTX), train
+        )
 
 
 class TestMissingIndicator:
@@ -215,19 +224,29 @@ class TestPCAWhiten:
         train = self._correlated(seed=0)
         test = self._correlated(seed=1) * 10.0  # a very different test covariance
         state, _train_out, test_out = fit_and_apply_pipeline(
-            [StepSpec(type="pca_whiten", params={"n_components": 3})], train, test, CTX, CTX
+            [StepSpec(type="pca_whiten", params={"n_components": 3})],
+            train,
+            test,
+            CTX,
+            CTX,
         )
         # Same rotation and scale, so the test output is ten times as
         # dispersed as unit -- the training basis, not a test-fold one.
         assert test_out.to_numpy().std() == pytest.approx(10.0, rel=0.1)
         np.testing.assert_allclose(
             np.asarray(state["steps"][0]["state"]["components"]),
-            np.asarray(build_step("pca_whiten", {"n_components": 3}).fit(train, CTX)["components"]),
+            np.asarray(
+                build_step("pca_whiten", {"n_components": 3}).fit(train, CTX)[
+                    "components"
+                ]
+            ),
         )
 
     def test_signs_are_reproducible(self):
         train = self._correlated()
-        components = build_step("pca_whiten", {"n_components": 3}).fit(train, CTX)["components"]
+        components = build_step("pca_whiten", {"n_components": 3}).fit(train, CTX)[
+            "components"
+        ]
         for row in components:
             assert row[int(np.argmax(np.abs(row)))] > 0
 
@@ -262,7 +281,9 @@ class TestTheEngineLabelsByThePipelineOutput:
             random_seed=1,
         )
 
-    def test_a_pca_model_is_fitted_on_components_and_says_so(self, patched_multi_factory):
+    def test_a_pca_model_is_fitted_on_components_and_says_so(
+        self, patched_multi_factory
+    ):
         model_id, dataset = _register(
             _dataset_spec(),
             self._spec(
@@ -290,10 +311,16 @@ class TestTheEngineLabelsByThePipelineOutput:
         )
         manifest = load_manifest(model_id)
         features = dataset["feature_ids"]
-        assert manifest.model_input_columns == features + [f"{c}__missing" for c in features]
-        assert set(manifest.feature_importance_summary) == set(manifest.model_input_columns)
+        assert manifest.model_input_columns == features + [
+            f"{c}__missing" for c in features
+        ]
+        assert set(manifest.feature_importance_summary) == set(
+            manifest.model_input_columns
+        )
 
-    def test_a_column_preserving_model_records_the_same_columns(self, patched_multi_factory):
+    def test_a_column_preserving_model_records_the_same_columns(
+        self, patched_multi_factory
+    ):
         model_id, dataset = _register(
             _dataset_spec(),
             self._spec([StepSpec(type="robust_scale")]),
@@ -305,7 +332,9 @@ class TestTheEngineLabelsByThePipelineOutput:
 
 class TestTheCatalog:
     def test_all_eight_steps_are_registered_with_their_flags(self):
-        reported = {e["id"]: e for e in modeling_capabilities()["preprocessing"]["steps"]}
+        reported = {
+            e["id"]: e for e in modeling_capabilities()["preprocessing"]["steps"]
+        }
         assert set(reported) == {
             "winsorize",
             "zscore",

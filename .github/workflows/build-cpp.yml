@@ -103,7 +103,10 @@ jobs:
         run: python -c "from standard_quant_tools import _sqt_core; print('_sqt_core loaded:', _sqt_core.__file__)"
 
       - name: Run all tests with C++ path active
-        # Includes benchmark tests now that the extension is built
+        # Includes benchmark tests now that the extension is built. bash on
+        # every OS: Windows runners default to PowerShell, which reads the
+        # trailing backslash as text rather than a line continuation.
+        shell: bash
         run: |
           pytest -m "not integration and not slow" \
             --tb=short -q -s
