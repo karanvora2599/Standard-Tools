@@ -15,6 +15,8 @@
 - **The lint job pins black 26.5.1 and isort 9.0.2.** It installed the
   newest of each, so a formatter release failed CI on unchanged code; six
   files are re-sorted for isort 9.
+- **The README and the testing guide count these three tests**: 13,173
+  collected, 13,014 passing with the extension and `SQT_EXPECT_NATIVE=1`.
 
 ## CI is green again on Linux and Python 3.10, and a point-in-time join takes keys of any resolution
 
