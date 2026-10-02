@@ -241,6 +241,10 @@ def cases():
         False,
         lambda: c.parabolic_sar(h, lo_, 0.02, 0.02, 0.2),
     )
+    # the CUSUM scan of an AR(1) null: serial, 200 paths of 2,105 steps.
+    # Drawn last so the inputs of every case above are unchanged.
+    zc = rng.normal(0, 1, (200, 2_105))
+    case("cusum_peaks 200 x 2105", False, lambda: c.cusum_peaks(zc, 631, 0.5))
     return out
 
 

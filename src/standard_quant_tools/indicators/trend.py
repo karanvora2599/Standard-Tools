@@ -84,14 +84,17 @@ def macd(
             "Histogram": macd_line - signal_line,
         }
     )
-    valid = result.dropna()
-    if not valid.empty:
-        logger.debug(
-            "[macd] last MACD=%.4f  Signal=%.4f  Hist=%.4f",
-            float(valid["MACD"].iloc[-1]),
-            float(valid["Signal"].iloc[-1]),
-            float(valid["Histogram"].iloc[-1]),
-        )
+    # Guarded: the dropna and the arguments are computed before logger.debug
+    # can see the level.
+    if logger.isEnabledFor(logging.DEBUG):
+        valid = result.dropna()
+        if not valid.empty:
+            logger.debug(
+                "[macd] last MACD=%.4f  Signal=%.4f  Hist=%.4f",
+                float(valid["MACD"].iloc[-1]),
+                float(valid["Signal"].iloc[-1]),
+                float(valid["Histogram"].iloc[-1]),
+            )
     return result
 
 
@@ -250,15 +253,18 @@ def adx(
         {"DI_Plus": raw[:, 0], "DI_Minus": raw[:, 1], "ADX": raw[:, 2]},
         index=close.index,
     )
-    valid = result.dropna()
-    if not valid.empty:
-        logger.debug(
-            "[adx] last DI+=%.2f  DI-=%.2f  ADX=%.2f  trend=%s",
-            float(valid["DI_Plus"].iloc[-1]),
-            float(valid["DI_Minus"].iloc[-1]),
-            float(valid["ADX"].iloc[-1]),
-            "strong" if float(valid["ADX"].iloc[-1]) > 25 else "weak",
-        )
+    # Guarded: the dropna and the arguments are computed before logger.debug
+    # can see the level.
+    if logger.isEnabledFor(logging.DEBUG):
+        valid = result.dropna()
+        if not valid.empty:
+            logger.debug(
+                "[adx] last DI+=%.2f  DI-=%.2f  ADX=%.2f  trend=%s",
+                float(valid["DI_Plus"].iloc[-1]),
+                float(valid["DI_Minus"].iloc[-1]),
+                float(valid["ADX"].iloc[-1]),
+                "strong" if float(valid["ADX"].iloc[-1]) > 25 else "weak",
+            )
     return result
 
 

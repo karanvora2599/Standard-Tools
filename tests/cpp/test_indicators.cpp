@@ -16,11 +16,14 @@
  */
 
 #include "sqt/indicators.hpp"
+#include "sqt/numerics.hpp"
 
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <limits>
 #include <vector>
 
@@ -1154,7 +1157,110 @@ static void test_technical_indicators_empty_config_returns_all_empty() {
 
 // ── main ─────────────────────────────────────────────────────────────────────
 
+// ── Per-bar spellings of the Wilder loops ─────────────────────────────────────
+//
+// The Wilder kernels test finiteness with numerics::is_finite and take the
+// true range and directional moves without a call or a branch (CHANGELOG,
+// 2026-10-01). These pin what those spellings must still mean.
+
+static std::uint64_t bits_of(double x) {
+    std::uint64_t b;
+    std::memcpy(&b, &x, sizeof b);
+    return b;
+}
+
+static double from_bits(std::uint64_t b) {
+    double x;
+    std::memcpy(&x, &b, sizeof x);
+    return x;
+}
+
+static void test_is_finite_agrees_with_std_isfinite() {
+    const double inf = std::numeric_limits<double>::infinity();
+    const double special[] = {
+        0.0, -0.0, 1.0, -1.0,
+        std::numeric_limits<double>::denorm_min(),
+        -std::numeric_limits<double>::denorm_min(),
+        std::numeric_limits<double>::min(),
+        std::numeric_limits<double>::max(),
+        std::numeric_limits<double>::lowest(),
+        inf, -inf,
+        std::numeric_limits<double>::quiet_NaN(),
+        -std::numeric_limits<double>::quiet_NaN(),
+        std::numeric_limits<double>::signaling_NaN(),
+        from_bits(0x7FF0000000000001ULL),  // the smallest NaN payload
+        from_bits(0xFFFFFFFFFFFFFFFFULL),  // a negative NaN, every payload bit
+        from_bits(0x7FEFFFFFFFFFFFFFULL),  // the largest finite value
+    };
+    for (double x : special) CHECK_EQ(sqt::numerics::is_finite(x), std::isfinite(x));
+
+    // Random bit patterns, a quarter of them forced into the all-ones
+    // exponent so NaN and inf are well represented.
+    std::uint64_t state = 0x9E3779B97F4A7C15ULL;
+    int disagreements = 0;
+    for (int k = 0; k < 200000; ++k) {
+        state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+        std::uint64_t b = state ^ (state >> 29);
+        if ((k & 3) == 0) b |= 0x7FF0000000000000ULL;
+        const double x = from_bits(b);
+        if (sqt::numerics::is_finite(x) != static_cast<bool>(std::isfinite(x))) ++disagreements;
+    }
+    CHECK_EQ(disagreements, 0);
+}
+
+// (high, low, close) per bar, chosen so that each candidate of the true
+// range wins once and each branch of the directional move is taken.
+static const double kPlantedBars[7][3] = {
+    {10.0,  8.0,  9.0},
+    {12.0,  9.0, 11.0},  // up 2 > down -1: +DM 2; TR = H-L = 3 (ties |H-C|)
+    {11.0,  7.0,  8.0},  // down 2 > up -1: -DM 2; TR = H-L = 4 (ties |L-C|)
+    {13.0,  5.0,  6.0},  // up 2 == down 2: no DM; TR = H-L = 8
+    {12.0,  6.0,  9.0},  // inside bar, both moves negative: no DM; TR = 6
+    {20.0, 18.0, 19.0},  // gap up: +DM 8; TR = |H-C| = 11
+    {10.0,  9.0,  9.5},  // gap down: -DM 9; TR = |L-C| = 10
+};
+static const double kPlantedTR[7]      = {2.0, 3.0, 4.0, 8.0, 6.0, 11.0, 10.0};
+static const double kPlantedPlusDM[7]  = {0.0, 2.0, 0.0, 0.0, 0.0, 8.0, 0.0};
+static const double kPlantedMinusDM[7] = {0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 9.0};
+
+static void planted_columns(std::vector<double>& h, std::vector<double>& l,
+                            std::vector<double>& c) {
+    for (const auto& bar : kPlantedBars) {
+        h.push_back(bar[0]);
+        l.push_back(bar[1]);
+        c.push_back(bar[2]);
+    }
+}
+
+static void test_wilder_atr_period_one_is_the_true_range() {
+    std::vector<double> h, l, c;
+    planted_columns(h, l, c);
+    const auto atr = sqt::wilder_atr(h.data(), l.data(), c.data(), h.size(), 1);
+    for (std::size_t i = 0; i < h.size(); ++i)
+        CHECK_EQ(bits_of(atr[i]), bits_of(kPlantedTR[i]));
+}
+
+static void test_adx_period_one_reads_each_bars_directional_move() {
+    // With period 1 each smoothed sum is this bar's TR or DM exactly
+    // (s - s/1 is +0.0), so DI+ and DI- are 100 * DM / TR, bar by bar, and
+    // an all-zero DM must come out as +0.0, not -0.0.
+    std::vector<double> h, l, c;
+    planted_columns(h, l, c);
+    const auto adx = sqt::adx(h.data(), l.data(), c.data(), h.size(), 1);
+    CHECK_NAN(adx[0]);
+    CHECK_NAN(adx[1]);
+    for (std::size_t i = 1; i < h.size(); ++i) {
+        CHECK_EQ(bits_of(adx[i * 3 + 0]), bits_of(100.0 * kPlantedPlusDM[i] / kPlantedTR[i]));
+        CHECK_EQ(bits_of(adx[i * 3 + 1]), bits_of(100.0 * kPlantedMinusDM[i] / kPlantedTR[i]));
+    }
+}
+
 int main() {
+    // Per-bar spellings
+    test_is_finite_agrees_with_std_isfinite();
+    test_wilder_atr_period_one_is_the_true_range();
+    test_adx_period_one_reads_each_bars_directional_move();
+
     // RSI
     test_rsi_nan_prefix();
     test_rsi_all_rising_equals_100();

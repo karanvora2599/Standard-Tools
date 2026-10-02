@@ -242,15 +242,18 @@ void rolling_beta_into(
             // 5-accumulator reduction the compiler may already auto-vectorize
             // at -O3/-march=native without it -- and on x86 only a CPU
             // without AVX2+FMA reaches this loop; every other one takes the
-            // intrinsics path above. Scoped to non-MSVC compilers because no
+            // intrinsics path above. Withheld from MSVC itself because no
             // MSVC OpenMP mode honours it as written (checked on MSVC
             // 19.44): `omp simd` is a hard C7660 under /openmp (OpenMP 2.0)
             // and equally under /openmp:llvm (SQT_OPENMP_LLVM), which changes
             // the runtime and admits unsigned loop counters but not this
             // directive; the one mode that compiles it, /openmp:experimental,
             // drops the reduction clause with C4849. See the CHANGELOG entry
-            // of 2026-09-28.
-#if defined(_OPENMP) && !defined(_MSC_VER)
+            // of 2026-09-28. clang-cl defines _MSC_VER too, but its OpenMP is
+            // clang's, which accepts the directive, so `__clang__` admits it
+            // back: testing _MSC_VER alone kept the hint from clang-cl along
+            // with MSVC.
+#if defined(_OPENMP) && (!defined(_MSC_VER) || defined(__clang__))
             #pragma omp simd reduction(+:Sx,Sy,Sxy,Sxx,Syy)
 #endif
             for (std::size_t j = start; j < end; ++j) {

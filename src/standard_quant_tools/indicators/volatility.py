@@ -211,9 +211,11 @@ def atr(
         index=close.index,
     )
     result = tr.rolling(window=period).mean()
-    valid = result.dropna()
-    if not valid.empty:
-        logger.debug("[atr] last=%.4f", float(valid.iloc[-1]))
+    # Guarded: the dropna is computed before logger.debug can see the level.
+    if logger.isEnabledFor(logging.DEBUG):
+        valid = result.dropna()
+        if not valid.empty:
+            logger.debug("[atr] last=%.4f", float(valid.iloc[-1]))
     return result
 
 

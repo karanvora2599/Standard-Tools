@@ -303,6 +303,33 @@ endif()
 
 add_test(NAME cpp_options COMMAND test_options)
 
+add_library(sqt_cusum_impl STATIC
+    ${CMAKE_SOURCE_DIR}/src/standard_quant_tools/_cpp/src/cusum.cpp
+)
+target_include_directories(sqt_cusum_impl PUBLIC
+    ${CMAKE_SOURCE_DIR}/src/standard_quant_tools/_cpp/include
+)
+target_compile_features(sqt_cusum_impl PUBLIC cxx_std_17)
+# The extension's no-contraction rule for cusum.cpp: the tests below hold
+# the kernel to a reference loop bit for bit.
+if(MSVC)
+    target_compile_options(sqt_cusum_impl PRIVATE /O2 /W3 /fp:precise)
+else()
+    target_compile_options(sqt_cusum_impl PRIVATE -O2 -Wall -Wextra -ffp-contract=off)
+endif()
+
+add_executable(test_cusum test_cusum.cpp)
+target_link_libraries(test_cusum PRIVATE sqt_cusum_impl)
+target_compile_features(test_cusum PRIVATE cxx_std_17)
+# The reference loop in the test is held to the same rule as the kernel.
+if(MSVC)
+    target_compile_options(test_cusum PRIVATE /O2 /W3 /fp:precise)
+else()
+    target_compile_options(test_cusum PRIVATE -O2 -Wall -Wextra -ffp-contract=off)
+endif()
+
+add_test(NAME cpp_cusum COMMAND test_cusum)
+
 # ── Fuzz/property harness (correctness/portability pass item 20a) ────────────
 # Randomized-input stress test for cointegration.cpp's gauss_elim (via
 # ols2/adf_test/engle_granger) and rolling_regression.cpp's cholesky_solve

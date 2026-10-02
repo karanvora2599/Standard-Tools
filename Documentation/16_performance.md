@@ -27,10 +27,10 @@ the size named:
 | `hurst_exponent` DFA (n = 500) | **83×** (4.57ms → 0.05ms) | — | No numba path exists for Hurst — this is C++ vs. the pure-Python fallback directly. |
 | `hurst_exponent` DFA (n = 2 000) | **131×** (12.3ms → 0.09ms) | — | Same. |
 | `rolling_hurst` (n = 2 000, window = 200, step = 1) | **274×** (4.64s → 17ms) | — | Same — the standout number in this table, and it holds up under real measurement. |
-| `rsi` (n = 2 000) | **5.3×** (0.47ms → 0.09ms) | 1109ms → 1.2ms first call | |
-| `adx` (n = 2 000) | **0.9×** (essentially tied) | 1110ms → 1.2ms first call | Numba's *warm* ADX is already about as fast as C++ on this machine — see the note below. |
+| `rsi` (n = 2 115, raw kernel) | **0.97–1.05×** (tied) | 1109ms → 1.2ms first call | Re-measured at the raw kernel, without the wrapper. 0.78–0.99× before the per-bar loop was rewritten; see the fourth finding below. |
+| `adx` (n = 2 115, raw kernel) | **0.94–0.99×** (tied) | 1110ms → 1.2ms first call | Was **0.25–0.33×** — a quarter to a third of numba's speed at every size from 2k to 2M bars — until the per-bar loop was rewritten; see the fourth finding below. |
 | `parabolic_sar` (n = 2 000) | **1.1×** (essentially tied) | ~similar order to ADX | |
-| `wilder_atr` (n = 2 000) | **28×** (4.40ms → 0.15ms) | | |
+| `wilder_atr` (n = 2 115, raw kernel) | **0.92–1.00×** (tied) | | Was **0.24–0.29×** before the same rewrite. |
 | `bollinger_bands` (n = 2 000) | **1.6×** | | |
 | `stochastic_oscillator` (n = 2 000) | **2.6×** | | |
 | `cointegration_test` (n = 500, vs. statsmodels) | **23×** (8.3ms → 0.37ms) | — | Compares against statsmodels, not numba — statsmodels has no JIT path at all. |
@@ -54,6 +54,7 @@ the size named:
 | `permutation_null_ic` (whole permutation loop) | **68–88×** | — | The loop crosses the boundary entire, not the correlation alone: a third of the cost was constructing per-draw pandas Series nobody reads. Ranks once, since shuffling values inside a date permutes their ranks. Two numpy attempts at the same idea measured 0.14× and 0.6×. Seeded reproducibly WITHIN a backend only, the contract `simulate_forward_paths` states. |
 | `rolling_hurst` (n = 2 000, window = 200) | **274×** vs. Python, plus a further ~10.5× from OpenMP + a one-pass DFA reformulation on top of the *original* C++ implementation (measured independently, at the same n/window) | — | Combining the two independently-measured ratios gives roughly ~2 900× vs. the pure-Python fallback at this size — not itself a single direct measurement, but both factors are real. |
 | `simulate_forward_paths` (n_simulations = 5 000, horizon = 60) | **2.0×** (74.8ms → 37.7ms) | — | No numba path ever existed for this one — was pure uncompiled Python. See OpenMP note below for the parallel path's own measured speedup. |
+| `cusum_peaks` (200 AR(1) null paths × 2 105 steps) | **20×** (14.4ms → 0.71ms) | — | Against the numpy loop it replaces; there is no numba path. `cusum` gains 2.5× and `detect_basis_dislocation` 1.7× end to end. Bit-identical. The recursion clips at zero, so it has no filter or scan form, and every vectorized closed form measured slower than the loop. Serial on purpose: on 16 threads the kernel ran in a sixth of the time and its callers got 1.7× slower, because OpenMP's idle workers keep spinning beside the Python that runs next. |
 | `garch11_variance_recursion` (n = 2 000, warm steady-state) | **0.8×** (10.8ms → 12.9ms, i.e. slightly *slower*) | 219ms → 4.8ms first call | The whole point of this port is the cold-start column, not this one — see below. |
 | `kalman_filter_*`, `donchian_state_machine`, `vwap_reversion_state_machine` | not separately re-measured | same cold-start pattern as GARCH/ADX above | |
 
@@ -81,6 +82,19 @@ after the first kernel landed), and two kernels were initially *slower* than
 the Python they replaced at small sizes — fixed with a cheaper argument
 conversion and an explicit size gate, because a fast path that is slower is
 a bug rather than a trade-off.
+
+**A fourth honest finding: three kernels were slower than the numba code
+they replace.** Timed at the raw kernel, `adx` ran at 0.25–0.33× of numba
+and `wilder_atr` at 0.24–0.29×, linear in n from 2k to 2M bars, so the cost
+was per element. The arithmetic was not the cause: MSVC compiled three ways
+of writing the per-bar loop into calls or unpredictable branches.
+`std::max({a, b, c})` for the true range became an out-of-line call into the
+standard library's `max_element`, whose loop branches on which candidate is
+largest; `c ? x : 0.0` on doubles became a conditional jump mispredicted on
+about every other bar; and `std::isfinite` became a call into the C runtime
+DLL, three per bar. Rewritten without any of them, the kernels are level
+with numba and every output is bit-identical to the previous build. The
+build guide's section on adding a C++ feature lists the three patterns.
 
 Raw C++-only (no Python involved) numbers from `tests/cpp/bench_hurst.cpp` and `tests/cpp/bench_backtest.cpp`, run via `ctest`:
 

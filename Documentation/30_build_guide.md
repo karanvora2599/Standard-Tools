@@ -901,6 +901,25 @@ Rebuild:
 cmake --build build --config Release
 ```
 
+### Per-element loops under MSVC
+
+Three ways of writing a hot loop compile to a call or an unpredictable
+branch under MSVC (not under GCC, Clang or clang-cl), and together they cost
+the Wilder kernels up to 4×:
+
+- `std::isfinite` is a call to `_dclass` in the C runtime DLL. Use
+  `sqt::numerics::is_finite`.
+- `std::max({a, b, c})` is an out-of-line `max_element` that branches per
+  comparison. Nest a by-value two-argument max, as `true_range()` in
+  `indicators.cpp` does.
+- `c ? x : 0.0` on doubles with a data-dependent `c` is a conditional jump.
+  Write `x > 0.0 ? x : 0.0`, which compiles to `maxsd`, or a mask select
+  like `zero_unless()`.
+
+Check with `dumpbin /disasm` on the built module. Where a numba fallback
+exists, time the raw kernel against it: a native kernel slower than its
+fallback points to a code-generation problem before an algorithmic one.
+
 ---
 
 ## 9. Notes
@@ -985,7 +1004,9 @@ that were each checked rather than assumed:
   admits unsigned loop counters; `#pragma omp simd` is still error C7660
   under it. Only `/openmp:experimental` compiles that directive, and it
   drops the `reduction` clause (warning C4849), so the vectorization hint in
-  `rolling_regression.cpp` stays scoped to GCC and Clang. On x86 that loop
+  `rolling_regression.cpp` stays scoped to compilers whose OpenMP accepts
+  the directive: GCC, Clang and clang-cl. The guard tests `__clang__` as
+  well as `_MSC_VER`, because clang-cl defines both. On x86 that loop
   only runs on a CPU without AVX2 and FMA anyway; every other one takes the
   intrinsics path.
 
@@ -1129,7 +1150,9 @@ all three — so the version number is a floor, not a description.
 
 **Why no action is needed.** The code uses one directive past what `/openmp`
 compiles: the `omp simd reduction` on the scalar fallback of `rolling_beta`'s
-window reduction in `rolling_regression.cpp`, scoped to non-MSVC compilers.
+window reduction in `rolling_regression.cpp`, scoped to compilers whose
+OpenMP accepts it: GCC, Clang and clang-cl (the guard tests `__clang__` as
+well as `_MSC_VER`, because clang-cl defines both).
 On x86 that loop only runs on a CPU without AVX2 and FMA; every other CPU
 takes the hand-written AVX2 intrinsics instead, so on AVX2 hardware the
 ceiling costs nothing. GCC and Clang builds compile the same pragmas against

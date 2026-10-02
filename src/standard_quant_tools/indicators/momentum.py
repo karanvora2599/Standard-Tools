@@ -147,14 +147,17 @@ def rsi(series: pd.Series, period: int = 14) -> pd.Series:
         rsi_vals = _rsi_numba(values, period)
 
     result = pd.Series(rsi_vals, index=series.index)
-    valid = result.dropna()
-    if not valid.empty:
-        logger.debug(
-            "[rsi] last=%.2f  min=%.2f  max=%.2f",
-            float(valid.iloc[-1]),
-            float(valid.min()),
-            float(valid.max()),
-        )
+    # Guarded: the dropna and the arguments are computed before logger.debug
+    # can see the level.
+    if logger.isEnabledFor(logging.DEBUG):
+        valid = result.dropna()
+        if not valid.empty:
+            logger.debug(
+                "[rsi] last=%.2f  min=%.2f  max=%.2f",
+                float(valid.iloc[-1]),
+                float(valid.min()),
+                float(valid.max()),
+            )
     return result
 
 

@@ -20,6 +20,7 @@ set(SQT_SOURCES
     src/rolling_beta_avx2.cpp
     src/panel_stats.cpp
     src/options.cpp
+    src/cusum.cpp
     src/build_info.cpp
     bindings/bindings.cpp
 )
@@ -30,7 +31,7 @@ pybind11_add_module(_sqt_core MODULE ${SQT_SOURCES})
 # directories at the end of this file).
 set(_pkg_dir "${CMAKE_SOURCE_DIR}/src/standard_quant_tools")
 
-# ── Options: the scalar formulas' arithmetic, operation for operation ────────
+# ── Options and CUSUM: the Python arithmetic, operation for operation ────────
 # options.cpp is held to the Python option formulas result for result -- a
 # converged flag and an iteration count are only comparable between the two
 # if every price along the way is the same double. That rules out fusing
@@ -38,10 +39,14 @@ set(_pkg_dir "${CMAKE_SOURCE_DIR}/src/standard_quant_tools")
 # and GCC does under -std=gnu++*, and either would do so under
 # -march=native. MSVC's /fp:precise does not contract since VS 2022; it is
 # stated here so a change of default cannot quietly alter it.
+#
+# cusum.cpp is held to the Python CUSUM loop bit for bit under the same
+# rule. Its recursion has no multiply to fuse, so the flag guards against a
+# later edit rather than against today's code.
 if(MSVC)
-    set_source_files_properties(src/options.cpp PROPERTIES COMPILE_OPTIONS "/fp:precise")
+    set_source_files_properties(src/options.cpp src/cusum.cpp PROPERTIES COMPILE_OPTIONS "/fp:precise")
 else()
-    set_source_files_properties(src/options.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+    set_source_files_properties(src/options.cpp src/cusum.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 endif()
 
 # ── AVX2+FMA translation unit (item L: runtime ISA dispatch demo) ────────────

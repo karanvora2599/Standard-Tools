@@ -8,10 +8,11 @@ SQT_PGO_USE configure folds them into the profile.
 It calls the raw bindings of every kernel family -- indicators, single and
 batched backtests, the signal state machines, the portfolio bar loop,
 rolling regression, Hurst, cointegration, Monte Carlo, GARCH, the Kalman
-filters, the panel statistics and the option chains -- over a spread of
-sizes and parameters, with inputs drawn from their own seeds rather than
-from the benchmark's. A profile only knows the paths it was shown, so a
-kernel this script leaves out is optimized as if it were cold.
+filters, the CUSUM scan, the panel statistics and the option chains --
+over a spread of sizes and parameters, with inputs drawn from their own
+seeds rather than from the benchmark's. A profile only knows the paths it
+was shown, so a kernel this script leaves out is optimized as if it were
+cold.
 
     python tests/bench/pgo_training.py     # ~5 s instrumented; PGO_ROUNDS=5
 
@@ -182,6 +183,11 @@ def regression_and_series(c, rng):
         c.garch11_variance_recursion(sq, *params)
         c.garch11_neg_loglik(sq, *params, True)
         c.garch11_neg_loglik_grad(sq, *params, True)
+    # the CUSUM scan of an AR(1) null, at the shapes liquidity_events and
+    # the basis detector run it: 200 paths, reference window 30%
+    for n in (120, 2_105):
+        c.cusum_peaks(rng.normal(0, 1, (200, n)), int(n * 0.3), 0.5)
+    c.cusum_peaks(rng.normal(0, 1, (37, 500)), 0, 0.0)
 
 
 def panel_stats(c, rng):

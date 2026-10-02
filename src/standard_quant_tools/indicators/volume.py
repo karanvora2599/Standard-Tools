@@ -24,11 +24,14 @@ def obv(close: pd.Series, volume: pd.Series) -> pd.Series:
         index=close.index,
     )
     result = (direction * volume).cumsum().rename("OBV")
-    logger.debug(
-        "[obv] final=%.0f  trend=%s",
-        float(result.iloc[-1]),
-        "up" if float(result.iloc[-1]) > float(result.iloc[0]) else "down",
-    )
+    # Guarded: the arguments are computed before logger.debug can see the
+    # level.
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "[obv] final=%.0f  trend=%s",
+            float(result.iloc[-1]),
+            "up" if float(result.iloc[-1]) > float(result.iloc[0]) else "down",
+        )
     return result
 
 
@@ -67,9 +70,11 @@ def vwap(
             tp_vol.rolling(window=period, min_periods=period).sum()
             / volume.rolling(window=period, min_periods=period).sum()
         ).rename("VWAP")
-    valid = result.dropna()
-    if not valid.empty:
-        logger.debug("[vwap] last=%.4f", float(valid.iloc[-1]))
+    # Guarded: the dropna is computed before logger.debug can see the level.
+    if logger.isEnabledFor(logging.DEBUG):
+        valid = result.dropna()
+        if not valid.empty:
+            logger.debug("[vwap] last=%.4f", float(valid.iloc[-1]))
     return result
 
 

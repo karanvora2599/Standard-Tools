@@ -5,6 +5,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <deque>
 #include <limits>
 #include <stdexcept>
@@ -19,6 +21,32 @@ namespace sqt {
 
 namespace {
 constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
+
+// `keep ? x : 0.0`, without a branch. The result is x's own bits or all-zero
+// bits, and all-zero bits are +0.0, the literal the ternary returns, so the
+// two agree bit for bit (x = -0.0 and +/-inf included). See the note on the
+// Wilder loops below for why the ternary is not written as one.
+inline double zero_unless(bool keep, double x) noexcept {
+    std::uint64_t bits;
+    std::memcpy(&bits, &x, sizeof bits);
+    bits &= std::uint64_t{0} - static_cast<std::uint64_t>(keep);
+    double r;
+    std::memcpy(&r, &bits, sizeof r);
+    return r;
+}
+
+// std::max(a, b) for doubles, by value: `(a < b) ? b : a`, the same
+// expression, so ties and signed zeros resolve as std::max resolves them.
+// std::max returns a reference, and nesting it made MSVC store both operands
+// to the stack and read the larger back through a pointer on every bar.
+inline double max_of(double a, double b) noexcept { return (a < b) ? b : a; }
+
+// Wilder's true range against the previous present close. max_of nests left
+// to right, so it returns the first of the largest, as std::max({...}) did.
+inline double true_range(double high, double low, double prev_close) noexcept {
+    return max_of(max_of(high - low, std::abs(high - prev_close)),
+                  std::abs(low - prev_close));
+}
 }  // namespace
 
 // ── Missing bars in the Wilder recursions ─────────────────────────────────────
@@ -43,6 +71,33 @@ constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
 // what a direct kernel caller sees. The Python fallback kernels
 // (momentum._rsi_numba, trend._adx_numba, volatility._wilder_atr_kernel)
 // implement the same rule, operation for operation.
+//
+// Three things in these per-bar loops are spelled for MSVC, and none of
+// them changes a result bit (CHANGELOG, 2026-10-01). Spelled the obvious
+// way, MSVC made wilder_atr_into and adx_into 3 to 4 times slower than the
+// same recursions compiled by Numba, and rsi_into up to 1.3 times. In order
+// of what each cost:
+//
+//   * The true range is true_range() above, not std::max({a, b, c}). MSVC's
+//     STL sends the initializer-list overload to its vectorised max_element
+//     routine, out of line, whose scalar loop branches on every comparison:
+//     which of the three candidates is largest changes from bar to bar, so
+//     those branches are mispredicted, on top of the call and three doubles
+//     stored and read back through memory. This was most of the gap in
+//     wilder_atr_into and adx_into. Both spellings return the first of the
+//     largest, and a true range is never NaN (it is only computed for a bar
+//     whose inputs are all finite).
+//   * A select between a price move and zero is written so that MSVC emits
+//     no branch: `x > 0.0 ? x : 0.0`, which it compiles to maxsd, or
+//     zero_unless() above where the condition involves another value. MSVC
+//     compiles `c ? x : 0.0` on doubles to a conditional jump, and on a
+//     random walk that jump goes each way about half the time, so it is
+//     mispredicted on about every other bar (ADX's directional moves, the
+//     RSI loss).
+//   * The present-bar test is numerics::is_finite, not std::isfinite, which
+//     MSVC compiles to a call into the CRT DLL (see numerics.hpp). About a
+//     tenth of the time in wilder_atr_into and adx_into, more of it in
+//     rsi_into, which has nothing else per bar to spend it on.
 
 
 // ── RSI ───────────────────────────────────────────────────────────────────────
@@ -76,7 +131,7 @@ void rsi_into(const double* SQT_RESTRICT prices, std::size_t n, int period,
 
     for (std::size_t i = 0; i < n; ++i) {
         const double price = prices[i];
-        if (!std::isfinite(price)) continue;  // a missing bar: state unchanged
+        if (!numerics::is_finite(price)) continue;  // a missing bar: state unchanged
         if (!have_prev) {
             prev = price;
             have_prev = true;
@@ -87,8 +142,12 @@ void rsi_into(const double* SQT_RESTRICT prices, std::size_t n, int period,
         // Adding the zero half of the split keeps the seed bit-identical to
         // the former `if (change > 0) gain += change; else loss -= change;`
         // (x + 0.0 == x, and x - c == x + (-c) exactly in IEEE 754).
+        // `fall > 0.0 ? fall : 0.0` is `change < 0.0 ? -change : 0.0` for
+        // every change that is not NaN, and a change between two finite
+        // prices never is; written this way it is a maxsd, not a branch.
+        const double fall = -change;
         const double gain = (change > 0.0) ? change : 0.0;
-        const double loss = (change < 0.0) ? -change : 0.0;
+        const double loss = (fall > 0.0) ? fall : 0.0;
         ++n_changes;
 
         if (n_changes <= period_sz) {
@@ -173,8 +232,9 @@ void adx_into(
     double prev_high = 0.0, prev_low = 0.0, prev_close = 0.0;
 
     for (std::size_t i = 0; i < n; ++i) {
-        if (!std::isfinite(high[i]) || !std::isfinite(low[i]) ||
-            !std::isfinite(close[i])) {
+        // `&`, not `&&`: three independent tests and one branch.
+        if (!(numerics::is_finite(high[i]) & numerics::is_finite(low[i]) &
+              numerics::is_finite(close[i]))) {
             continue;  // a missing bar: every Wilder state carried across
         }
         if (!have_prev) {
@@ -188,13 +248,11 @@ void adx_into(
 
         const double up_move   = high[i] - prev_high;
         const double down_move = prev_low - low[i];
-        const double dm_plus_i  = (up_move > down_move && up_move > 0.0)   ? up_move   : 0.0;
-        const double dm_minus_i = (down_move > up_move && down_move > 0.0) ? down_move : 0.0;
-        const double tr_i = std::max({
-            high[i] - low[i],
-            std::abs(high[i] - prev_close),
-            std::abs(low[i]  - prev_close),
-        });
+        const double dm_plus_i  = zero_unless((up_move > down_move) & (up_move > 0.0),
+                                              up_move);
+        const double dm_minus_i = zero_unless((down_move > up_move) & (down_move > 0.0),
+                                              down_move);
+        const double tr_i = true_range(high[i], low[i], prev_close);
         prev_high  = high[i];
         prev_low   = low[i];
         prev_close = close[i];
@@ -379,16 +437,13 @@ void wilder_atr_into(
     std::size_t n_tr = 0;  // true ranges folded in so far
 
     for (std::size_t i = 0; i < n; ++i) {
-        if (!std::isfinite(high[i]) || !std::isfinite(low[i]) ||
-            !std::isfinite(close[i])) {
+        // `&`, not `&&`: three independent tests and one branch.
+        if (!(numerics::is_finite(high[i]) & numerics::is_finite(low[i]) &
+              numerics::is_finite(close[i]))) {
             continue;  // a missing bar: the average is carried across
         }
         const double tr_i = have_prev
-            ? std::max({
-                  high[i] - low[i],
-                  std::abs(high[i] - prev_close),
-                  std::abs(low[i]  - prev_close),
-              })
+            ? true_range(high[i], low[i], prev_close)
             : (high[i] - low[i]);
         prev_close = close[i];
         have_prev = true;

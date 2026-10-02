@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
+#include <cstring>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -11,6 +13,30 @@
 // replace ad-hoc fixed thresholds (e.g. `< 1e-14`) and unchecked
 // size_t<->int narrowing with a single, documented convention.
 namespace sqt::numerics {
+
+// True when `x` is neither NaN nor +/-inf: exactly std::isfinite(x), for a
+// per-element loop.
+//
+// WHY NOT std::isfinite. Under MSVC (cl, not clang-cl) the UCRT implements
+// std::isfinite(double) as fpclassify(x) <= 0, and fpclassify as a call to
+// _dclass, which is exported from the CRT DLL and is never inlined: every
+// test is an indirect call across a DLL boundary, and the Windows x64 ABI
+// lets the callee clobber xmm0-xmm5, so a loop keeps its state out of those
+// registers around it. In the Wilder kernels, which test three inputs per
+// bar, those calls were about a tenth of the kernel's time (CHANGELOG,
+// 2026-10-01). clang, GCC and clang-cl already inline std::isfinite; this
+// is the same few instructions on all of them.
+//
+// A bit test, not `(x - x) == 0.0` or `std::abs(x) <= DBL_MAX`: those are
+// floating-point identities a -ffast-math or -ffinite-math-only build may
+// fold to `true`, and an integer comparison of the exponent field cannot be
+// folded by any floating-point mode. The exponent is all ones exactly for
+// +/-inf and every NaN, which is the definition of not finite.
+inline bool is_finite(double x) noexcept {
+    std::uint64_t bits;
+    std::memcpy(&bits, &x, sizeof bits);
+    return (bits & 0x7FF0000000000000ULL) != 0x7FF0000000000000ULL;
+}
 
 // Relative-epsilon singularity/pivot test, replacing fixed absolute
 // thresholds like `< 1e-14` that don't scale with the input's magnitude.

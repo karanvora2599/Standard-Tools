@@ -1,7 +1,7 @@
 """
 The configuration this package could not run, and the surveys it broke.
 
-Eighteen modules each decide `HAS_CPP` for themselves by probing
+Nineteen modules each decide `HAS_CPP` for themselves by probing
 `_sqt_core`. That per-symbol design is right -- a kernel added later falls
 back on its own rather than all-or-nothing -- but it meant the NO-EXTENSION
 configuration could not be executed. Every fallback was reachable only by
@@ -35,6 +35,7 @@ NATIVE_AWARE_MODULES = (
     "analysis.cointegration",
     "analysis.garch",
     "analysis.hurst",
+    "analysis.liquidity_events",
     "analysis.multi_factor",
     "analysis.options_batch",
     "analysis.regression",
@@ -86,7 +87,7 @@ _FLAGS = """
 
 class TestTheSwitchReachesEveryModule:
     def test_all_of_them_fall_back_together(self):
-        """One name made unimportable flips all eighteen, because they all
+        """One name made unimportable flips all nineteen, because they all
         import the same one. No module needed changing."""
         import json
 
@@ -201,6 +202,24 @@ class TestTheFallbackActuallyComputes:
             assert native["path"] == "C++"
         assert fallback["iterations"] == native["iterations"]
         assert fallback["vols"] == pytest.approx(native["vols"], rel=1e-12)
+
+    def test_the_cusum_null_is_the_same_bits_on_both_paths(self):
+        """The CUSUM scan of the AR(1) null is held to the numpy loop bit
+        for bit, so the two paths are compared on the bytes of the peaks,
+        not to a tolerance. See the CHANGELOG entry of 2026-10-01."""
+        script = """
+            import hashlib, json
+            from standard_quant_tools.analysis import liquidity_events as le
+            peaks = le._ar1_null_peaks(0.45, 400, 120, 0.5, 200, 0)
+            print(json.dumps({"has_cpp": le.HAS_CPP,
+                              "sha256": hashlib.sha256(peaks.tobytes()).hexdigest()}))
+        """
+        import json
+
+        fallback = json.loads(_run(script, disable=True))
+        native = json.loads(_run(script, disable=False))
+        assert fallback["has_cpp"] is False
+        assert fallback["sha256"] == native["sha256"]
 
 
 class TestTheSwitchIsReadableFromCode:

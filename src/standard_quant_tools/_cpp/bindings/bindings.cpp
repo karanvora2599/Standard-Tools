@@ -22,6 +22,7 @@
 #include "sqt/signal_state_machines.hpp"
 #include "sqt/numerics.hpp"
 #include "sqt/options.hpp"
+#include "sqt/cusum.hpp"
 #include "sqt/panel_stats.hpp"
 #include "sqt/build_info.hpp"
 #include "sqt/isa_dispatch.hpp"
@@ -2509,4 +2510,58 @@ PYBIND11_MODULE(_sqt_core, m) {
         "gives NaN in its cells. Returns a dict: price, delta, gamma, vega,\n"
         "theta, rho, vanna, volga, charm, speed, d1, d2. Every array is 1-D;\n"
         "anything else raises ValueError.");
+
+    // ── CUSUM over simulated paths ────────────────────────────────────────────
+    //
+    // The input DATA is not validated: a NaN or an infinity in z, or a
+    // non-finite slack, follows IEEE arithmetic through the recursion exactly
+    // as the numpy loop it replaces does, so the two paths answer the same
+    // for every input either accepts. Only the shape and the reference
+    // length are checked.
+
+    m.def(
+        "cusum_peaks",
+        [](py::array_t<double, py::array::c_style | py::array::forcecast> z,
+           py::ssize_t n_reference,
+           double slack) -> py::array_t<double>
+        {
+            constexpr const char* fn = "cusum_peaks";
+            if (z.ndim() != 2)
+                throw std::invalid_argument(
+                    std::string(fn) + ": z must be a 2-D array (n_paths, n_steps), "
+                    "got ndim=" + std::to_string(z.ndim()));
+            if (n_reference < 0)
+                throw std::invalid_argument(
+                    std::string(fn) + ": n_reference must be >= 0, got " +
+                    std::to_string(n_reference));
+            const auto n_rows = static_cast<std::size_t>(z.shape(0));
+            const auto n_cols = static_cast<std::size_t>(z.shape(1));
+            py::array_t<double> peaks(z.shape(0));
+            const double* z_ptr = z.data();
+            double* out_ptr = peaks.mutable_data();
+            {
+                py::gil_scoped_release release;
+                sqt::cusum_peaks_into(z_ptr, n_rows, n_cols,
+                                      static_cast<std::size_t>(n_reference), slack,
+                                      out_ptr);
+            }
+            return peaks;
+        },
+        py::arg("z"),
+        py::arg("n_reference"),
+        py::arg("slack"),
+        "Peak two-sided CUSUM statistic of every row of a 2-D panel.\n\n"
+        "Row r is one path and column t one step. Per row, from t = 1 (column\n"
+        "0 is never read), with up, down and peak starting at 0.0:\n\n"
+        "    up   = maximum(0.0, up + z[r, t] - slack)\n"
+        "    down = maximum(0.0, down - z[r, t] - slack)\n"
+        "    if t >= n_reference: peak = maximum(peak, maximum(up, down))\n\n"
+        "with numpy's maximum, so a NaN propagates. This is the loop\n"
+        "analysis.liquidity_events scans its AR(1) null paths with, and the\n"
+        "result is that loop's bit for bit: the same operations in the same\n"
+        "order, nothing fused. The one exception is a NaN's payload in a row\n"
+        "that mixes NaNs from two sources: the peak is NaN on both paths, but\n"
+        "which NaN it carries can differ.\n\n"
+        "Returns a 1-D float64 array with one peak per row. z must be 2-D and\n"
+        "n_reference >= 0; anything else raises ValueError.");
 }

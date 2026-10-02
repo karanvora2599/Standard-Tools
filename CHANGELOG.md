@@ -1,5 +1,46 @@
 # Changelog
 
+## ADX and Wilder's ATR no longer lose to their own fallback, and the CUSUM null is scanned natively
+
+- **The ADX and Wilder's ATR kernels were slower than the Numba code they
+  replace.** Timed at the raw kernel, `adx` ran at 0.25–0.33× of Numba and
+  `wilder_atr` at 0.24–0.29× from 2k to 2M bars, and `rsi` at 0.78–0.99×.
+  The arithmetic was not the cause: MSVC compiled three ways of writing the
+  per-bar loop into calls or unpredictable branches. `std::max({a, b, c})`
+  for the true range became an out-of-line call into the standard
+  library's `max_element`, whose loop branches on which candidate is
+  largest — most of the gap; `c ? x : 0.0` on doubles became a conditional
+  jump mispredicted on about every other bar (ADX's directional moves,
+  RSI's loss); and `std::isfinite` became a call into the C runtime DLL,
+  three per bar. Rewritten without them, the kernels are 2.8–3.9× (`adx`),
+  3.2–4.0× (`wilder_atr`) and 1.04–1.23× (`rsi`) faster and level with
+  Numba, so the wrappers keep the native path. Every output is
+  bit-identical to the previous build over 322 random, gapped, infinite,
+  constant, tied and too-short series, and the native kernels now equal the
+  Numba reference bit for bit, which a test holds.
+- **Six indicators no longer build a debug line at the default level.**
+  `rsi`, `adx`, `macd`, `atr`, `vwap` and `obv` computed `result.dropna()`
+  and their last values as arguments to `logger.debug`, which Python
+  evaluates before the level is checked. They are now built only under
+  `logger.isEnabledFor(logging.DEBUG)`: per call on 2,115 bars `adx` is 79%
+  cheaper, `rsi` 68%, `macd` 44%, `atr` 27%, `vwap` 16%.
+- **The CUSUM threshold's AR(1) null runs off the Python loop, with the
+  same numbers.** `cusum` — and through it `detect_liquidity_events`,
+  `detect_basis_dislocation` and `basis_scan` — simulates 200 AR(1) paths
+  and scans each with the CUSUM recursion to calibrate its threshold. The
+  paths now come from `scipy.signal.lfilter`, bit-identical to the column
+  loop, and the scan from a new native kernel, `cusum_peaks`, which
+  evaluates the loop's operations in its order without fusing. Every peak,
+  threshold and false-alarm rate is the same double as before. The scan is
+  20× faster, `cusum` 2.5× and `detect_basis_dislocation` 1.7×. The kernel
+  is serial on purpose: on 16 threads it ran in a sixth of the time and
+  made its callers 1.7× slower, because the OpenMP runtime's idle workers
+  keep spinning beside the Python that runs next. The extension now
+  exports 40 kernels.
+- **clang-cl gets the `omp simd` hint.** The guard was
+  `!defined(_MSC_VER)`, and clang-cl defines `_MSC_VER`; it is now
+  `!defined(_MSC_VER) || defined(__clang__)`. MSVC builds are unchanged.
+
 ## A ragged universe keeps the fast path, and walk-forward folds share the budget
 
 - **One ragged history no longer sends every entity to the per-entity

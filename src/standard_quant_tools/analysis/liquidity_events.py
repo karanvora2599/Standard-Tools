@@ -49,6 +49,21 @@ from standard_quant_tools.metrics.risk_metrics import has_no_dispersion
 
 logger = logging.getLogger(__name__)
 
+# Optional native fast path for the CUSUM scan of the AR(1) null paths,
+# which was 40% of a basis-scan workload: 421,200 sequential updates at
+# about 20 ns each in Python. The numpy loop below stays as the fallback
+# and as the reference the kernel is held to, bit for bit.
+_cpp_core: Any = None
+HAS_CPP = False
+try:
+    from standard_quant_tools import (
+        _sqt_core as _cpp_core,  # type: ignore[attr-defined]
+    )
+
+    HAS_CPP = hasattr(_cpp_core, "cusum_peaks")
+except ImportError:
+    pass
+
 #: CUSUM slack, in standard deviations of the reference window. Drifts
 #: smaller than this accumulate nothing, which is what stops the statistic
 #: wandering off on noise alone. 0.5 is the textbook default and is a
@@ -589,19 +604,56 @@ def _ar1_null_peaks(
     The peak CUSUM statistic of `n_simulations` AR(1) paths with
     autocorrelation `rho`, each standardized against its own reference
     window and scanned outside it exactly as `cusum` scans the data.
+
+    Both halves run off the Python loop now, with the same numbers. See the
+    CHANGELOG entry of 2026-10-01.
+
+    THE PATHS are `lfilter` over the innovations, which is the recursion
+    `path[t] = phi * path[t-1] + innovation[t]` along each row. With a
+    numerator of [1.0] and a denominator of [1.0, -phi], each step rounds
+    the product and the sum exactly as the column loop did, and its other
+    products are by 1.0 and 0.0, which are exact -- so not even a fused
+    multiply-add in scipy's build could move a bit. The two part only once
+    an innovation is infinite (lfilter multiplies it by 0.0 and gets NaN),
+    which standard normal draws never are.
+
+    THE SCAN is the compiled `cusum_peaks` when the extension carries it,
+    and the numpy loop in `_cusum_peaks_loop` otherwise. The kernel
+    evaluates the loop's operations in the loop's order, so every peak --
+    and with it the calibrated threshold and the false-alarm rate -- is the
+    same double either way.
     """
+    from scipy.signal import lfilter
+
     phi = float(np.clip(rho if np.isfinite(rho) else 0.0, -0.95, 0.95))
     rng = np.random.default_rng(seed)
     n_simulations = max(int(n_simulations), 20)
     innovations = rng.standard_normal((n_simulations, n))
-    paths = np.empty_like(innovations)
-    paths[:, 0] = innovations[:, 0] / math.sqrt(max(1.0 - phi * phi, 1e-6))
-    for t in range(1, n):
-        paths[:, t] = phi * paths[:, t - 1] + innovations[:, t]
+    # The stationary start, then the recursion along each row in one call.
+    # In place: the innovations are not read again.
+    innovations[:, 0] = innovations[:, 0] / math.sqrt(max(1.0 - phi * phi, 1e-6))
+    paths = lfilter([1.0], [1.0, -phi], innovations, axis=1)
     reference = paths[:, :n_reference]
     scale = reference.std(axis=1, ddof=1, keepdims=True)
     scale = np.where(scale > 0, scale, 1.0)
     z = (paths - reference.mean(axis=1, keepdims=True)) / scale
+    if HAS_CPP:
+        return _cpp_core.cusum_peaks(z, n_reference, slack)
+    return _cusum_peaks_loop(z, n_reference, slack)
+
+
+def _cusum_peaks_loop(z: np.ndarray, n_reference: int, slack: float) -> np.ndarray:
+    """
+    The peak two-sided CUSUM of every row of `z`, scanned from column
+    `n_reference`: the fallback for `_sqt_core.cusum_peaks`, and the
+    reference that kernel is held to bit for bit.
+
+    The recursion is nonlinear -- each step clips at zero -- so it has no
+    filter or prefix-scan form, and the exact closed form measured slower
+    than this loop. The loop runs over columns with every path advanced at
+    once.
+    """
+    n_simulations, n = z.shape
     up = np.zeros(n_simulations)
     down = np.zeros(n_simulations)
     peaks = np.zeros(n_simulations)
