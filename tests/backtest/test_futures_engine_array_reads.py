@@ -1,53 +1,37 @@
 """
-A futures account, which is not a smaller version of a cash account.
+The futures account reads its prices, targets and day counts from arrays.
 
-WHY THE PORTFOLIO ENGINE CANNOT DO THIS. `portfolio_engine.py` rests on one
-identity -- `position value == shares x price == the cash you paid` -- and a
-futures position breaks all three parts of it:
+`run_futures_simulation` used to read `series.iloc[i]` and compute
+`(dates[i] - dates[i - 1]).days` on every bar, boxing a scalar or two
+Timestamps each time, and that boxing was most of the loop's cost. It now
+reads the same float64 values from ndarrays and the same whole-day counts
+from one precomputed list (see the CHANGELOG entry of 2026-10-01).
 
-  * Buying ten ES at 6200 does not cost 10 x 6200 x 50 of cash. It costs
-    initial margin, which might be 6% of that.
-  * The position then has no market VALUE. Its profit arrives as daily
-    variation margin, credited to cash, and once that is credited the
-    contract is worth zero again. Counting both would double-count.
-  * A short future pays no borrow. Sign alone cannot select the financing
-    model any more.
-
-So equity here is `cash + margin posted`, and the contracts contribute
-nothing to it directly. That is not a modelling shortcut; it is what a
-futures account statement says.
-
-LEVERAGE IS THE NUMBER THAT LOOKS WRONG. Under the cash engine's definition
--- gross market value over equity -- a futures book is at zero leverage and
-simultaneously carries many times its equity in economic exposure. Both are
-reported here, separately and by different names, because a risk limit
-written against one and measured against the other is how a book that looks
-flat turns out not to be.
-
-MARGIN CALLS ARE MODELLED, AND THE CASH ENGINE SAYS IT DOES NOT MODEL THEM.
-When equity falls below maintenance margin the account must post more or
-reduce. This reduces, because that is what a broker does when nobody posts,
-and it records the event -- a backtest that quietly financed an infinite
-call is a backtest of a strategy nobody could have run.
+The pre-change loop is kept below as `_reference`, and every output of the
+two -- every curve, every record, every total and every warning -- is
+required to be EXACTLY equal: no tolerance, because nothing about the
+arithmetic changed.
 """
 
 from __future__ import annotations
 
-import logging
 import math
 from typing import Any, Dict, List, Mapping, Optional
 
 import numpy as np
 import pandas as pd
+import pytest
 
+from standard_quant_tools.backtest.futures_engine import (
+    _non_negative,
+    _positive,
+    _series,
+    run_futures_simulation,
+)
 from standard_quant_tools.error import ValidationError
 
-logger = logging.getLogger(__name__)
 
-__all__ = ["run_futures_simulation"]
-
-
-def run_futures_simulation(
+def _reference(
     *,
     prices: Mapping[Any, float],
     target_contracts: Mapping[Any, float],
@@ -62,33 +46,7 @@ def run_futures_simulation(
     allow_fractional: bool = False,
     roll_day_prior_prices: Optional[Mapping[Any, float]] = None,
 ) -> Dict[str, Any]:
-    """
-    Simulate a futures account bar by bar.
-
-    `prices` are the TRADEABLE prices of the contract actually held -- not a
-    back-adjusted continuous series, which is not a price and would size
-    every position against a level nobody could transact at.
-    `target_contracts` is the signed position wanted on each date; dates
-    between targets hold the last one.
-
-    `initial_margin` and `maintenance_margin` are per contract, in currency.
-    Leaving initial margin at zero models an unmargined account, which is a
-    useful idealization and is not a futures account -- the result says so.
-
-    `contract_map` names which contract each date belongs to. When it
-    changes, the position is rolled: closed in the old and reopened in the
-    new, paying commission and slippage on both legs. Without it, no roll
-    is modelled and the series is assumed to be one contract throughout.
-
-    `roll_day_prior_prices` is the OLD contract's close on each roll day,
-    keyed like `prices`. A single series cannot carry it, so without it
-    the roll day's variation margin is skipped and the roll record says
-    so -- $7,025 per contract per year on a live ES year, 5.5 points of
-    return. With it the old contract's move is booked before the roll.
-    A target the account cannot margin is filled to what it can, and
-    the shortfall is recorded, rather than filled and liquidated in the
-    same bar with both legs charged.
-    """
+    """`run_futures_simulation` as it stood before the arrays, comments cut."""
     m = _positive(multiplier, "multiplier")
     capital = _positive(initial_capital, "initial_capital")
     im = _non_negative(initial_margin, "initial_margin")
@@ -109,16 +67,8 @@ def run_futures_simulation(
     if (price_series <= 0).any():
         raise ValidationError("prices contains a non-positive value.")
     targets = _series(target_contracts, "target_contracts").reindex(price_series.index)
-    # Held forward: a date with no new target keeps the last one, which is
-    # what a position does. Before the first target the account is flat.
     targets = targets.ffill().fillna(0.0)
 
-    # Keyed by Timestamp, because `prices` was. A caller who passes ISO
-    # strings for both -- which is what a JSON payload carries -- would
-    # otherwise get every `contract_map.get(date)` returning None against a
-    # Timestamp key, and NO ROLL WOULD EVER FIRE. Silently: the simulation
-    # runs, the numbers look plausible, and the largest recurring cost of
-    # holding a future is simply absent.
     rolls_by_date: Dict[Any, str] = {}
     if contract_map is not None:
         if not contract_map:
@@ -165,29 +115,11 @@ def run_futures_simulation(
     margin_calls: List[Dict[str, Any]] = []
     rolls: List[Dict[str, Any]] = []
 
-    # Read per bar from plain arrays, not through the Series and the index.
-    # `series.iloc[i]` and `(dates[i] - dates[i - 1]).days` box a scalar
-    # or two Timestamps on every bar, and that boxing -- not the margin
-    # arithmetic -- was most of the loop's cost. The values are the same
-    # float64s and the same whole-day counts; see the CHANGELOG entry of
-    # 2026-10-01.
-    price_values = price_series.to_numpy(dtype="float64")
-    target_values = targets.to_numpy(dtype="float64")
-    day_counts = [max(days, 0) for days in (dates[1:] - dates[:-1]).days.tolist()]
-
-    previous_price = float(price_values[0])
+    previous_price = float(price_series.iloc[0])
     previous_contract = rolls_by_date.get(dates[0])
 
     for i, date in enumerate(dates):
-        price = float(price_values[i])
-
-        # 0. Did the contract change since the last bar? This has to be
-        #    answered BEFORE variation margin, not after. `price` is the
-        #    NEW contract and `previous_price` is the OLD one, so on a roll
-        #    day their difference is the calendar spread, not a market move
-        #    -- and booking it as profit invented returns out of nothing.
-        #    A dead-flat market rolling 39 times up a contango curve
-        #    reported +5.85% with a maximum drawdown of 0.00%.
+        price = float(price_series.iloc[i])
         current_contract = rolls_by_date.get(date)
         rolled = (
             i > 0
@@ -197,40 +129,23 @@ def run_futures_simulation(
             and current_contract != previous_contract
             and contracts != 0.0
         )
-
-        # 1. Variation margin on the position carried IN, before any trade.
-        #    This is where a futures position's profit actually arrives.
-        #
-        #    Skipped on a roll day. The correct figure is the OLD contract's
-        #    move over that day, and a single price series does not contain
-        #    it -- the old contract's last print here is yesterday's. Zero
-        #    understates by at most one day's move on one bar; the spread
-        #    was overstating by the whole width of the roll, with the wrong
-        #    sign for a long in contango. Pass a back-adjusted series if you
-        #    need that day, or supply the roll days as their own bars.
         roll_day_booked = False
         if i > 0 and contracts != 0.0 and not rolled:
             variation = (price - previous_price) * contracts * m
             cash += variation
             total_variation += variation
         elif rolled and date in prior_by_date:
-            # The old contract's own move on the roll day, when the caller
-            # supplied its close: the figure a single series cannot hold.
             variation = (prior_by_date[date] - previous_price) * contracts * m
             cash += variation
             total_variation += variation
             roll_day_booked = True
 
-        # 2. Interest on collateral. Paid on cash, which for a futures
-        #    account is most of the balance -- unlike a cash equity book,
-        #    where the money is in the positions.
         if i > 0 and collateral_rate and cash > 0:
-            days = day_counts[i - 1]
+            days = max((dates[i] - dates[i - 1]).days, 0)
             interest = cash * collateral_rate * days / 365.0
             cash += interest
             total_interest += interest
 
-        # 3. Roll costs, for the roll detected in step 0.
         if rolled:
             legs = 2.0 * abs(contracts)
             cost = legs * commission + legs * slippage * m
@@ -252,20 +167,10 @@ def run_futures_simulation(
                 }
             )
 
-        # 4. Trade to target.
-        target = float(target_values[i])
+        target = float(targets.iloc[i])
         if not allow_fractional:
             target = float(round(target))
-        # A target the account cannot margin is filled to what it can
-        # carry, not filled and then liquidated in the same bar with both
-        # legs charged (239 margin calls and 52.6% of starting capital in
-        # fees on a live ES year). Equity before the trade is what the
-        # initial margin is posted from.
         if im > 0 and target != 0.0:
-            # Initial margin binds at trade time, on the contracts ADDED:
-            # what is already held on the same side stays (maintenance,
-            # step 5, is what reduces it), and new contracts are limited
-            # to the equity left after the held margin.
             same_side = contracts * target > 0
             base = abs(contracts) if same_side else 0.0
             equity_before = cash + margin_posted
@@ -295,9 +200,6 @@ def run_futures_simulation(
             total_commission += abs(delta) * commission
             total_slippage += abs(delta) * slippage * m
             contracts = target
-            # Margin is posted against the position now held, released
-            # against what was closed. It moves between cash and margin
-            # rather than leaving the account.
             required = abs(contracts) * im
             cash -= required - margin_posted
             margin_posted = required
@@ -305,11 +207,8 @@ def run_futures_simulation(
         equity = cash + margin_posted
         exposure = abs(contracts) * price * m
 
-        # 5. Maintenance. Equity below the maintenance requirement is a call.
         required_maintenance = abs(contracts) * mm
         if mm > 0 and contracts != 0.0 and equity < required_maintenance:
-            # Reduce to what the account can actually carry, which is what a
-            # broker does when nobody answers the call.
             affordable = math.floor(equity / mm) if mm > 0 else 0.0
             affordable = max(affordable, 0.0)
             reduced_to = math.copysign(min(abs(contracts), affordable), contracts)
@@ -420,9 +319,6 @@ def run_futures_simulation(
         "initial_capital": capital,
         "final_equity": float(equity.iloc[-1]),
         "total_return_pct": float((equity.iloc[-1] / capital - 1.0) * 100.0),
-        # PERCENT here (x100), unlike the identically-named field in
-        # `stress_test`, which returns a fraction. Same name, 100x apart,
-        # both agent-reachable, and neither used to say which.
         "max_drawdown_pct": float(drawdown.min() * 100.0),
         "max_leverage": float(np.nanmax(leverage.to_numpy())),
         "peak_exposure": float(exposure.max()),
@@ -439,39 +335,202 @@ def run_futures_simulation(
     }
 
 
-# ── internals ───────────────────────────────────────────────────────────
+# ── exact comparison ─────────────────────────────────────────────────────
 
 
-def _series(mapping: Mapping[Any, float], name: str) -> pd.Series:
-    if not mapping:
-        raise ValidationError(f"{name} is empty.")
-    try:
-        series = pd.Series(dict(mapping), dtype="float64")
-    except (TypeError, ValueError) as exc:
-        raise ValidationError(f"{name} must map dates to numbers; {exc}") from None
-    series.index = pd.to_datetime(series.index)
-    return series.sort_index()
+def _same_float(a: float, b: float) -> bool:
+    """Bit-for-bit, with NaN equal to NaN and the sign of zero kept."""
+    return np.float64(a).tobytes() == np.float64(b).tobytes()
 
 
-def _positive(value: Any, name: str) -> float:
-    out = _finite(value, name)
-    if out <= 0:
-        raise ValidationError(f"{name} must be positive, got {value!r}")
-    return out
+def _assert_identical(old: Dict[str, Any], new: Dict[str, Any]) -> None:
+    assert list(old) == list(new)
+    for key, want in old.items():
+        got = new[key]
+        if isinstance(want, pd.Series):
+            assert isinstance(got, pd.Series), key
+            assert want.name == got.name, key
+            assert want.index.equals(got.index), key
+            assert want.dtype == got.dtype, key
+            assert want.to_numpy().tobytes() == got.to_numpy().tobytes(), key
+        elif isinstance(want, float):
+            assert type(got) is float, key
+            assert _same_float(want, got), (key, want, got)
+        else:
+            assert type(got) is type(want), key
+            assert got == want, key
 
 
-def _non_negative(value: Any, name: str) -> float:
-    out = _finite(value, name)
-    if out < 0:
-        raise ValidationError(f"{name} must not be negative, got {value!r}")
-    return out
+def _both(**kwargs: Any) -> Dict[str, Any]:
+    old = _reference(**kwargs)
+    new = run_futures_simulation(**kwargs)
+    _assert_identical(old, new)
+    return new
 
 
-def _finite(value: Any, name: str) -> float:
-    try:
-        out = float(value)
-    except (TypeError, ValueError):
-        raise ValidationError(f"{name} must be a number, got {value!r}") from None
-    if not math.isfinite(out):
-        raise ValidationError(f"{name} must be finite, got {value!r}")
-    return out
+# ── planted answers ──────────────────────────────────────────────────────
+
+
+class TestPlantedDayCounts:
+    """Interest accrues on the calendar days between bars, so a weekend
+    earns three days and a same-day pair of bars earns none."""
+
+    def test_a_weekend_earns_three_days_of_interest(self):
+        prices = {"2024-01-05": 100.0, "2024-01-08": 100.0}  # Friday, Monday
+        out = _both(
+            prices=prices,
+            target_contracts={"2024-01-05": 0.0},
+            multiplier=1.0,
+            initial_capital=365_000.0,
+            collateral_rate=0.10,
+        )
+        # 365,000 x 10% x 3 / 365 = 300 exactly.
+        assert out["total_collateral_interest"] == 300.0
+        assert out["final_equity"] == 365_300.0
+
+    def test_no_rate_is_no_interest(self):
+        out = _both(
+            prices={"2024-01-05": 100.0, "2024-01-08": 100.0},
+            target_contracts={"2024-01-05": 0.0},
+            multiplier=1.0,
+            initial_capital=365_000.0,
+            collateral_rate=0.0,
+        )
+        assert out["total_collateral_interest"] == 0.0
+        assert out["final_equity"] == 365_000.0
+
+    def test_two_bars_on_one_day_earn_nothing(self):
+        out = _both(
+            prices={"2024-01-05 09:30": 100.0, "2024-01-05 15:30": 100.0},
+            target_contracts={"2024-01-05 09:30": 0.0},
+            multiplier=1.0,
+            initial_capital=365_000.0,
+            collateral_rate=0.10,
+        )
+        assert out["total_collateral_interest"] == 0.0
+
+    def test_a_long_gap_earns_every_day_of_it(self):
+        out = _both(
+            prices={"2024-01-01": 100.0, "2024-01-31": 100.0},
+            target_contracts={"2024-01-01": 0.0},
+            multiplier=1.0,
+            initial_capital=365_000.0,
+            collateral_rate=0.10,
+        )
+        assert out["total_collateral_interest"] == 3_000.0
+
+    def test_targets_are_read_on_their_own_bar(self):
+        """The array read is positional: the target on bar i sizes bar i."""
+        dates = pd.bdate_range("2024-01-01", periods=4)
+        out = _both(
+            prices=dict(zip(dates, [100.0, 101.0, 103.0, 102.0])),
+            target_contracts={dates[1]: 2.0, dates[3]: 0.0},
+            multiplier=10.0,
+            initial_capital=1_000.0,
+        )
+        assert out["position_curve"].tolist() == [0.0, 2.0, 2.0, 0.0]
+        # Held from 101 to 102 (via 103): 2 x 10 x (102 - 101) = 20.
+        assert out["total_variation_margin"] == 20.0
+
+
+# ── random and edge inputs against the reference ─────────────────────────
+
+
+def _scenario(seed: int) -> Dict[str, Any]:
+    rng = np.random.default_rng(seed)
+    n = int(rng.integers(2, 400))
+    kind = seed % 4
+    if kind == 0:
+        dates = pd.bdate_range("2019-01-01", periods=n)
+    elif kind == 1:
+        # Ragged calendar gaps of 1 to 6 days.
+        offsets = np.cumsum(rng.integers(1, 7, n))
+        dates = pd.Timestamp("2019-01-01") + pd.to_timedelta(offsets, unit="D")
+    elif kind == 2:
+        # Intraday bars, several per day, tz-aware.
+        dates = pd.date_range("2019-01-01 14:30", periods=n, freq="97min", tz="UTC")
+    else:
+        dates = pd.date_range("2019-01-01", periods=n, freq="D")
+    vol = float(rng.choice([0.002, 0.01, 0.05]))
+    price = 4000.0 * np.exp(np.cumsum(rng.normal(0.0, vol, n)))
+    targets = np.round(rng.normal(0.0, 6.0, n), 1)
+    keep = rng.random(n) < 0.3
+    keep[0] = True
+    target_map = {d: float(t) for d, t, k in zip(dates, targets, keep) if k}
+    kwargs: Dict[str, Any] = dict(
+        prices={d: float(p) for d, p in zip(dates, price)},
+        target_contracts=target_map,
+        multiplier=float(rng.choice([5.0, 50.0])),
+        initial_capital=float(rng.choice([50_000.0, 250_000.0, 5_000_000.0])),
+        commission_per_contract=float(rng.choice([0.0, 2.25])),
+        slippage_points=float(rng.choice([0.0, 0.25])),
+        collateral_rate=float(rng.choice([0.0, 0.0425])),
+        allow_fractional=bool(rng.random() < 0.3),
+    )
+    if rng.random() < 0.7:
+        im = float(rng.choice([6_000.0, 12_000.0, 40_000.0]))
+        kwargs["initial_margin"] = im
+        kwargs["maintenance_margin"] = im * float(rng.choice([0.8, 1.0]))
+    if rng.random() < 0.6:
+        width = int(rng.integers(5, 60))
+        kwargs["contract_map"] = {d: f"C{i // width}" for i, d in enumerate(dates)}
+        if rng.random() < 0.5:
+            kwargs["roll_day_prior_prices"] = {
+                d: float(p * (1 + rng.normal(0, 0.003)))
+                for i, (d, p) in enumerate(zip(dates, price))
+                if i and i % width == 0
+            }
+    return kwargs
+
+
+@pytest.mark.parametrize("seed", range(60))
+def test_random_accounts_match_the_reference_exactly(seed):
+    _both(**_scenario(seed))
+
+
+def test_the_scenarios_reach_every_branch():
+    """The comparison above is only as good as what it exercises."""
+    outs = [run_futures_simulation(**_scenario(seed)) for seed in range(60)]
+    assert any(o["n_margin_calls"] for o in outs), "no margin call fired"
+    assert any(o["margin_limited_fills"] for o in outs), "no fill was sized down"
+    assert any(o["n_rolls"] for o in outs), "no roll fired"
+    assert any(
+        any(not r["variation_margin_skipped"] for r in o["rolls"]) for o in outs
+    ), "no roll booked the old contract's move"
+    assert any(o["total_collateral_interest"] > 0 for o in outs), "no interest"
+
+
+def test_an_account_wiped_out_matches_the_reference():
+    dates = pd.bdate_range("2024-01-01", periods=6)
+    _both(
+        prices=dict(zip(dates, [100.0, 100.0, 40.0, 10.0, 5.0, 5.0])),
+        target_contracts={dates[0]: 10.0},
+        multiplier=100.0,
+        initial_capital=10_000.0,
+        collateral_rate=0.05,
+    )
+
+
+def test_two_bars_and_one_row_inputs_match_the_reference():
+    _both(
+        prices={"2024-01-02": 10.0, "2024-01-03": 11.0},
+        target_contracts={"2024-01-02": 1.0},
+        multiplier=1.0,
+    )
+    for impl in (_reference, run_futures_simulation):
+        with pytest.raises(ValidationError, match="at least two bars"):
+            impl(
+                prices={"2024-01-02": 10.0},
+                target_contracts={"2024-01-02": 1.0},
+                multiplier=1.0,
+            )
+
+
+def test_unsorted_keys_match_the_reference():
+    """`_series` sorts the dates, so the day counts are taken in order."""
+    _both(
+        prices={"2024-01-10": 12.0, "2024-01-02": 10.0, "2024-01-05": 11.0},
+        target_contracts={"2024-01-02": 3.0},
+        multiplier=1.0,
+        collateral_rate=0.03,
+    )

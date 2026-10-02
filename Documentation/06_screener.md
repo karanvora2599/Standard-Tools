@@ -166,7 +166,7 @@ result = screen_stocks(
 
 ## Large Universe Screening
 
-For 100+ tickers, pass `n_workers` to control the process pool. Combined with the Parquet cache, the second run of the same universe is dramatically faster.
+A large universe screens in one process by default: the fetches run side by side on up to 64 threads, and the Parquet cache makes the second run of the same universe much faster. Worker processes are available with `n_workers`, but they rarely pay: each one re-imports the library, rebuilds the exchange calendar and re-reads its bars from disk, so on a cached 235-ticker universe the old multi-process default took 9.7 s against 0.70 s in one process, and on a cold one with 250 ms of latency per request 11.8 s against 2.6 s. Results are identical whichever you choose.
 
 ```python
 # S&P 500 screen — first run fetches from yfinance, writes Parquet cache
@@ -183,16 +183,14 @@ result = screen_stocks(
     },
     sort_by="rsi_14",
     ascending=True,
-    n_workers=8,    # 8 parallel processes, each running asyncio.gather on their batch
 )
 print(f"Passed: {len(result)} / {len(sp500)}")
 ```
 
 | `n_workers` | Behaviour |
 |---|---|
-| `None` (default) | Auto: 1 for ≤ 20 tickers; otherwise `min(cpu_count, max(n // 10, 2))` — approaches `cpu_count` as the universe grows, but is capped lower for universes just over the 20-ticker threshold |
-| `1` | Single process (asyncio only) — best for small lists and notebooks |
-| `> 1` | ProcessPoolExecutor — best for 50+ tickers |
+| `None` (default) or `1` | One process. Fetches run on up to 64 threads (never more than the universe) |
+| `> 1` | A `ProcessPoolExecutor` with that many workers, each screening its batch. Declined, with a logged warning, while a decision record is open or a Databento request gate is registered for `source="databento"`: a worker process could neither report its reads to the record nor be governed by the gate |
 
 ## Which provider the bars come from
 

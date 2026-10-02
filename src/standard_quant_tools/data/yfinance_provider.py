@@ -179,9 +179,10 @@ class YFinanceProvider(DataProvider):
         """
         Public entry point. Checks the in-memory session cache itself
         (rather than via a @cached decorator wrapping this whole method) so
-        that audit.record_data_access() always runs — including on a
-        session-cache hit — instead of being skipped whenever the decorator
-        short-circuits before the function body executes. Always returns a
+        that an open decision record hears of every access — including a
+        session-cache hit — instead of missing it whenever the decorator
+        short-circuits before the function body executes. Outside a record
+        nothing is reported, and the frame is not hashed. Always returns a
         fresh .copy() so a caller mutating the result in place can't corrupt
         the cached object shared with every other caller.
         """
@@ -223,14 +224,15 @@ class YFinanceProvider(DataProvider):
         clock = _session_clock(symbol)
         cached_df = _session_cache_get(cache_key)
         if cached_df is not None:
-            audit.record_data_access(
-                symbol,
-                start_str,
-                end_str,
-                interval,
-                source="session_cache",
-                content_hash=audit.hash_dataframe(cached_df),
-            )
+            if audit.recording_data_access():
+                audit.record_data_access(
+                    symbol,
+                    start_str,
+                    end_str,
+                    interval,
+                    source="session_cache",
+                    content_hash=audit.hash_dataframe(cached_df),
+                )
             return disclose_served(cached_df.copy(), symbol, interval, clock)
 
         result = self._fetch_ohlcv_uncached(
@@ -272,14 +274,15 @@ class YFinanceProvider(DataProvider):
                     end_str,
                     pq_path.name,
                 )
-                audit.record_data_access(
-                    symbol,
-                    start_str,
-                    end_str,
-                    interval,
-                    source="disk_cache",
-                    content_hash=audit.hash_dataframe(cached_df),
-                )
+                if audit.recording_data_access():
+                    audit.record_data_access(
+                        symbol,
+                        start_str,
+                        end_str,
+                        interval,
+                        source="disk_cache",
+                        content_hash=audit.hash_dataframe(cached_df),
+                    )
                 return cached_df
 
         # ── Fetch from yfinance ────────────────────────────────────────────
@@ -355,14 +358,15 @@ class YFinanceProvider(DataProvider):
 
         elapsed_ms = (time.perf_counter() - t0) * 1000
         logger.debug("[fetch] ✓ %s  %d rows  %.0fms", symbol, len(result), elapsed_ms)
-        audit.record_data_access(
-            symbol,
-            start_str,
-            end_str,
-            interval,
-            source="live_fetch",
-            content_hash=audit.hash_dataframe(result),
-        )
+        if audit.recording_data_access():
+            audit.record_data_access(
+                symbol,
+                start_str,
+                end_str,
+                interval,
+                source="live_fetch",
+                content_hash=audit.hash_dataframe(result),
+            )
 
         # ── Persist to Parquet for future sessions ─────────────────────────
         if pq_path is not None and _is_historical(end_date):

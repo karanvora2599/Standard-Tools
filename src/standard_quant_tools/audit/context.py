@@ -108,6 +108,18 @@ def configure_logging(
     return handler
 
 
+def recording_data_access() -> bool:
+    """
+    Whether a data access reported now would be kept: True inside a
+    `dispatch()` call (or a replay of one), False otherwise.
+
+    A provider asks this before it digests a frame for `record_data_access`,
+    because outside a decision record the digest is computed only to be
+    thrown away -- and it is the expensive half of the report.
+    """
+    return _data_sources_var.get() is not None
+
+
 def record_data_access(
     symbol: str,
     start: str,

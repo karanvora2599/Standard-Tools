@@ -43,6 +43,27 @@ CREDENTIALS COME FROM THE ENVIRONMENT. `DATABENTO_API_KEY`, never from a
 spec or a tool argument: a `DatasetSpec` is persisted to disk, hashed into
 a model's lineage and written into decision records, so a key passed
 through one would land in all three.
+
+A REQUEST GATE, FOR A CALLER THAT BUDGETS THE VENDOR. Databento bills by
+the byte, and an application that keeps a spend ledger needs every billable
+request to pass through it -- including the ones made here.
+`set_request_gate(gate)` registers one for the process; there is no
+default and no environment variable, and with none registered nothing
+changes. Before every `timeseries.get_range` the provider calls
+`gate.before(BillableRequest(...))` with the dataset, schema, symbols,
+stype and the start and end exactly as they are about to be sent. It
+returns None to allow, or a verdict with a boolean `allowed` and a `reason`;
+a refusal is raised as `RequestRefusedError`, a `NonRetryableAPIError`
+naming the reason, before anything is sent, and no other dataset is tried
+in its place. (One exception: a refusal whose reason is the daily feed's
+unfinalized-tail error walks the end back a day, as that error from the
+vendor does.) After a request that returned, `gate.after(request, verdict,
+BillableFetch(records, nbytes))` reports what came back, with the verdict
+`before` gave. A gate that raises in `before` refuses the request -- a
+brake that fails open is not one -- and one that raises in `after` is
+logged and ignored, because the bytes are already billed. The gate is
+called on whichever thread makes the request, possibly several at once,
+and must be thread-safe. Cache hits reach no gate: they are not requests.
 """
 
 from __future__ import annotations
@@ -51,6 +72,7 @@ import logging
 import re
 import threading
 import uuid
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import (
     Any,
@@ -60,6 +82,7 @@ from typing import (
     Mapping,
     NamedTuple,
     Optional,
+    Protocol,
     Sequence,
     Set,
     Tuple,
@@ -312,6 +335,141 @@ _CME_SESSION_LABEL = (
 )
 
 
+# ── the request gate (see the module docstring) ──────────────────────────
+
+
+@dataclass(frozen=True)
+class BillableRequest:
+    """One billable request, as it is about to be sent.
+
+    `start` and `end` are the strings the request carries, so a gate that
+    prices it with the vendor's free `metadata.get_cost` prices this exact
+    request. `client` is the vendor client it will be sent on.
+    """
+
+    dataset: str
+    schema: str
+    symbols: Tuple[str, ...]
+    stype_in: str
+    start: str
+    end: str
+    client: Any = field(default=None, repr=False, compare=False)
+
+
+@dataclass(frozen=True)
+class BillableFetch:
+    """What an allowed request brought back: the records decoded from it
+    (None when decoding failed) and the bytes the vendor's store reports
+    (None when it reports none)."""
+
+    records: Optional[int]
+    nbytes: Optional[int]
+
+
+class RequestGate(Protocol):
+    """What `set_request_gate` takes. See the module docstring."""
+
+    def before(self, request: BillableRequest) -> Any: ...
+
+    def after(
+        self, request: BillableRequest, verdict: Any, fetched: BillableFetch
+    ) -> None: ...
+
+
+class RequestRefusedError(NonRetryableAPIError):
+    """A billable request the registered gate refused, before it was sent.
+
+    Not retried: the gate answers the same request the same way, and the
+    retry layer never retries a `NonRetryableAPIError`.
+    """
+
+    def __init__(self, message: str, *, reason: str, request: BillableRequest):
+        super().__init__(message)
+        self.reason = reason
+        self.request = request
+
+
+_request_gate: Optional[RequestGate] = None
+_request_gate_lock = threading.Lock()
+
+
+def set_request_gate(gate: Optional[RequestGate]) -> Optional[RequestGate]:
+    """Register `gate` for every Databento request this process makes, or
+    clear it with None. Returns the gate it replaced."""
+    global _request_gate
+    if gate is not None and not (
+        callable(getattr(gate, "before", None))
+        and callable(getattr(gate, "after", None))
+    ):
+        raise ValidationError(
+            f"a request gate needs callable `before` and `after` methods; got "
+            f"{type(gate).__name__}."
+        )
+    with _request_gate_lock:
+        previous, _request_gate = _request_gate, gate
+    return previous
+
+
+def request_gate() -> Optional[RequestGate]:
+    """The registered request gate, or None."""
+    with _request_gate_lock:
+        return _request_gate
+
+
+def _gate_verdict(gate: RequestGate, request: BillableRequest) -> Any:
+    """Ask the gate; raise `RequestRefusedError` on a refusal."""
+    try:
+        verdict = gate.before(request)
+    except Exception as exc:  # noqa: BLE001 - a failed brake refuses
+        reason = f"the gate failed ({type(exc).__name__}: {exc})"
+    else:
+        if verdict is None:
+            return None
+        allowed = getattr(verdict, "allowed", None)
+        if allowed is None:
+            reason = (
+                f"the gate returned {type(verdict).__name__}, which has no "
+                "`allowed` to read"
+            )
+        elif allowed:
+            return verdict
+        else:
+            reason = str(getattr(verdict, "reason", "") or "no reason given")
+    symbols = ",".join(request.symbols)
+    raise RequestRefusedError(
+        f"Databento request refused by the request gate before it was sent: "
+        f"{request.dataset} {request.schema} for {symbols} from {request.start} "
+        f"to {request.end}: {reason}. Not retried -- the gate answers the same "
+        "request the same way; narrow the request or raise the limit it names.",
+        reason=reason,
+        request=request,
+    )
+
+
+def _gate_settle(
+    gate: RequestGate,
+    request: BillableRequest,
+    verdict: Any,
+    store: Any,
+    frame: Optional[pd.DataFrame],
+) -> None:
+    """Tell the gate what an allowed request brought back. Never raises."""
+    nbytes = getattr(store, "nbytes", None)
+    fetched = BillableFetch(
+        records=None if frame is None else int(len(frame)),
+        nbytes=nbytes if isinstance(nbytes, int) else None,
+    )
+    try:
+        gate.after(request, verdict, fetched)
+    except Exception as exc:  # noqa: BLE001 - the bytes are already billed
+        logger.warning(
+            "databento request gate failed to record %s %s: %s",
+            request.dataset,
+            request.schema,
+            exc,
+        )
+
+
 def _failure_kind(exc: BaseException) -> str:
     """
     'auth', 'denied' or 'other' for a failed vendor call.
@@ -417,7 +575,13 @@ def _record(
 ) -> None:
     """One line per fetch into the open decision record, if there is one:
     which dataset answered and a digest of what it said, so a replay can
-    tell a restated feed from a changed tool."""
+    tell a restated feed from a changed tool.
+
+    The digest is taken only when a record is open. Outside one the line is
+    discarded, and hashing the frame to throw the hash away cost as much as
+    the rest of a cached fetch (see the CHANGELOG entry of 2026-10-01)."""
+    if not audit.recording_data_access():
+        return
     audit.record_data_access(
         symbol,
         str(start_date),
@@ -997,17 +1161,30 @@ class DatabentoProvider(DataProvider):
         client = self._get_client()
 
         def _call(request_end: datetime, fmt: str) -> pd.DataFrame:
+            begin, finish = start.strftime(fmt), request_end.strftime(fmt)
+            gate = request_gate()
+            if gate is not None:
+                request = BillableRequest(
+                    dataset, schema, (raw,), stype_in, begin, finish, client
+                )
+                verdict = _gate_verdict(gate, request)
             store = client.timeseries.get_range(
                 dataset=dataset,
                 schema=schema,
                 symbols=[raw],
                 stype_in=stype_in,
-                start=start.strftime(fmt),
-                end=request_end.strftime(fmt),
+                start=begin,
+                end=finish,
             )
-            if not_found is not None:
-                not_found.update(_not_found_symbols(store))
-            return store.to_df()
+            frame: Optional[pd.DataFrame] = None
+            try:
+                if not_found is not None:
+                    not_found.update(_not_found_symbols(store))
+                frame = store.to_df()
+            finally:
+                if gate is not None:
+                    _gate_settle(gate, request, verdict, store, frame)
+            return frame
 
         if schema == "ohlcv-1d":
             # Databento finalizes daily bars a day or two behind the live
@@ -1030,6 +1207,10 @@ class DatabentoProvider(DataProvider):
                 try:
                     return _call(attempt, "%Y-%m-%d")
                 except Exception as exc:  # noqa: BLE001
+                    # A gate's refusal walks back too when its reason is
+                    # this error: its preflight asked the vendor about this
+                    # exact end and was told what the request would have
+                    # been. Any other refusal is raised.
                     text = str(exc).lower()
                     if any(marker in text for marker in _UNFINALIZED_MARKERS):
                         attempt -= timedelta(days=1)
@@ -1109,6 +1290,10 @@ class DatabentoProvider(DataProvider):
                     stype_in=route.stype_in,
                     not_found=unresolved,
                 )
+            except RequestRefusedError:
+                # The caller's budget said no. Asking the next dataset would
+                # answer from a lesser feed and spend anyway.
+                raise
             except Exception as exc:  # noqa: BLE001
                 kind = _failure_kind(exc)
                 if kind == "auth":
@@ -2059,4 +2244,13 @@ class DatabentoProvider(DataProvider):
         )
 
 
-__all__ = ["BAR_SCHEMAS", "DatabentoProvider"]
+__all__ = [
+    "BAR_SCHEMAS",
+    "BillableFetch",
+    "BillableRequest",
+    "DatabentoProvider",
+    "RequestGate",
+    "RequestRefusedError",
+    "request_gate",
+    "set_request_gate",
+]

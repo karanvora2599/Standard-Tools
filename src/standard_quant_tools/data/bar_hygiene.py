@@ -46,9 +46,9 @@ import contextlib
 import contextvars
 import logging
 import re
+import threading
 from dataclasses import dataclass
 from datetime import datetime, time, timezone
-from functools import lru_cache
 from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
@@ -172,11 +172,34 @@ def drop_unusable_closes(
 # ── When a session closes ─────────────────────────────────────────────────────
 
 
-@lru_cache(maxsize=None)
+#: Calendars built so far, by code, and the lock that makes "once" true.
+_CALENDARS: Dict[str, Any] = {}
+_CALENDAR_LOCK = threading.Lock()
+
+
 def _exchange_calendar(code: str) -> Any:
     """The `exchange_calendars` calendar for `code`, or None when the
     package is absent or does not know the code. Built once per process:
-    building one takes a fifth of a second."""
+    building one takes a fifth of a second.
+
+    ONCE, UNDER A LOCK. The cache used to be a bare `lru_cache`, which does
+    not stop concurrent first callers from each building the calendar: a
+    screen's first fetches arrive together on the executor's twenty
+    threads, and twenty calendars were built at once under the GIL -- 48 s
+    of a first screen that took 14 s with the calendar already built (see
+    the CHANGELOG entry of 2026-10-01).
+    """
+    try:
+        return _CALENDARS[code]
+    except KeyError:
+        pass
+    with _CALENDAR_LOCK:
+        if code not in _CALENDARS:
+            _CALENDARS[code] = _build_exchange_calendar(code)
+        return _CALENDARS[code]
+
+
+def _build_exchange_calendar(code: str) -> Any:
     try:
         import exchange_calendars as xcals
     except ImportError:

@@ -630,6 +630,37 @@ happened to contain "403" used to retire a healthy feed for the life of the
 provider. When no dataset is asked, the refusal names why each was passed
 over (declined, its coverage, or a lookup that failed).
 
+**Every billable request can be governed.** `set_request_gate(gate)`
+registers an object asked before every `timeseries.get_range` the provider
+sends — bars, ticks, quotes, depth, order events, and each step of a
+walk-back — with a `BillableRequest` naming the dataset, schema, symbols,
+stype and the exact start and end about to be sent. `gate.before(request)`
+returns None to allow, or a verdict whose `allowed` is false to refuse; a
+refusal raises `RequestRefusedError`, a `NonRetryableAPIError` carrying the
+gate's `reason`, before anything is sent, and is neither retried nor passed
+to another dataset. `gate.after(request, verdict, fetched)` is told what came
+back (`records`, `nbytes`) so a ledger can book it. A gate that raises in
+`before` refuses the request; one that raises in `after` is logged and the
+fetch still succeeds. There is no default gate and no environment variable,
+so nothing changes until one is registered; `set_request_gate(None)` removes
+it and the call returns the previous gate. Cache hits never reach it.
+
+```python
+from types import SimpleNamespace
+from standard_quant_tools.data import databento_provider as dbp
+
+class Budget:
+    def before(self, request):
+        if request.schema == "mbo":
+            return SimpleNamespace(allowed=False, reason="order-by-order data is not in this budget")
+        return None                      # allowed
+
+    def after(self, request, verdict, fetched):
+        print(request.dataset, request.schema, fetched.records, fetched.nbytes)
+
+dbp.set_request_gate(Budget())
+```
+
 **Which feed answers a daily request, and why it matters.** Databento
 publishes several equity datasets and they are not the same tape:
 

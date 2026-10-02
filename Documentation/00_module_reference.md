@@ -397,9 +397,9 @@ result = screen_stocks(
 
 **Failure reporting:** A ticker that raised an exception (bad symbol, fetch error) is never indistinguishable from one that simply failed a filter — both used to collapse to being silently dropped. The returned `DataFrame` now carries this on `.attrs`: `failed_filters` maps ticker → the specific filter key it failed (genuine rejection), `failed_tickers` maps ticker → the exception message (fetch/computation error), and `failed_batches` (multi-worker runs only) lists any worker batch that failed outright.
 
-**Large universes:** Pass `n_workers` to split screening across CPU cores. ≤ 20 tickers run in a single async event loop; larger universes automatically use `ProcessPoolExecutor`.
+**Large universes:** One process by default, whatever the size: fetches run on up to 64 threads. `n_workers > 1` splits the universe across a `ProcessPoolExecutor`, which is usually slower (each worker re-imports the library and re-reads its bars) and is declined while a decision record is open or a Databento request gate is registered.
 
-**Beta filter optimisation:** When `beta_max` / `beta_min` filters are active, SPY data is pre-fetched once per batch instead of once per ticker — a single HTTP round-trip for the whole universe when `n_workers <= 1` (the default for ≤ 20 tickers), or once per worker process for larger multi-worker universes (still eliminating the N−1 redundant per-ticker fetches within each worker's batch).
+**Beta filter optimisation:** When `beta_max` / `beta_min` filters are active, SPY data is pre-fetched once per batch instead of once per ticker — a single HTTP round-trip for the whole universe in the default single-process run, or once per worker process when `n_workers > 1` (still eliminating the N−1 redundant per-ticker fetches within each worker's batch).
 
 ```python
 result = screen_stocks(sp500_tickers, filters={...}, n_workers=8)

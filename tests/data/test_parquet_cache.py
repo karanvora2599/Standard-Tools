@@ -422,6 +422,9 @@ class TestCacheHardening:
     def test_session_cache_hit_still_records_audit(self, minimal_ohlcv: pd.DataFrame):
         with (
             patch("yfinance.Ticker") as mock_ticker,
+            patch.object(
+                provider_module.audit, "recording_data_access", return_value=True
+            ),
             patch.object(provider_module.audit, "record_data_access") as mock_record,
         ):
             mock_ticker.return_value.history.return_value = minimal_ohlcv.rename(
@@ -548,6 +551,9 @@ class TestCacheHardening:
         """
         with (
             patch("yfinance.Ticker") as mock_ticker,
+            patch.object(
+                provider_module.audit, "recording_data_access", return_value=True
+            ),
             patch.object(provider_module.audit, "record_data_access") as mock_record,
         ):
             mock_ticker.return_value.history.return_value = minimal_ohlcv.rename(

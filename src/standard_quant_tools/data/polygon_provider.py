@@ -628,14 +628,15 @@ class PolygonProvider(DataProvider):
         clock = _session_clock(symbol)
         cached_df = _session_cache_get(cache_key)
         if cached_df is not None:
-            audit.record_data_access(
-                symbol,
-                start_str,
-                end_str,
-                interval,
-                source="session_cache",
-                content_hash=audit.hash_dataframe(cached_df),
-            )
+            if audit.recording_data_access():
+                audit.record_data_access(
+                    symbol,
+                    start_str,
+                    end_str,
+                    interval,
+                    source="session_cache",
+                    content_hash=audit.hash_dataframe(cached_df),
+                )
             return disclose_served(cached_df.copy(), symbol, interval, clock)
 
         result = self._get_ohlcv_uncached(symbol, start_str, end_str, interval)
@@ -666,14 +667,15 @@ class PolygonProvider(DataProvider):
                     end_str,
                     pq_path.name,
                 )
-                audit.record_data_access(
-                    symbol,
-                    start_str,
-                    end_str,
-                    interval,
-                    source="disk_cache",
-                    content_hash=audit.hash_dataframe(cached_df),
-                )
+                if audit.recording_data_access():
+                    audit.record_data_access(
+                        symbol,
+                        start_str,
+                        end_str,
+                        interval,
+                        source="disk_cache",
+                        content_hash=audit.hash_dataframe(cached_df),
+                    )
                 return cached_df
 
         multiplier, timespan = _TIMESPAN_MAP[interval]
@@ -708,14 +710,15 @@ class PolygonProvider(DataProvider):
         # A bar with no close is dropped and disclosed, by the rule every
         # provider follows, so the frame cached below is the one served.
         result = drop_unusable_closes(result, symbol, provider="polygon")
-        audit.record_data_access(
-            symbol,
-            start_str,
-            end_str,
-            interval,
-            source="live_fetch",
-            content_hash=audit.hash_dataframe(result),
-        )
+        if audit.recording_data_access():
+            audit.record_data_access(
+                symbol,
+                start_str,
+                end_str,
+                interval,
+                source="live_fetch",
+                content_hash=audit.hash_dataframe(result),
+            )
 
         if pq_path is not None and _is_historical(end_str):
             _write_cached_ohlcv(pq_path, result, interval, start_str, end_str)
@@ -823,14 +826,15 @@ class PolygonProvider(DataProvider):
         out = out.sort_values([_PIT_AVAILABLE_TIME, _PIT_ENTITY], kind="stable")
         out = out.reset_index(drop=True)
         out.attrs["n_dropped_without_available_time"] = int(dropped)
-        audit.record_data_access(
-            ",".join(str(s) for s in symbols),
-            str(start_date),
-            str(end_date),
-            f"pit:{frame_kind}",
-            source="polygon",
-            content_hash=audit.hash_dataframe(out),
-        )
+        if audit.recording_data_access():
+            audit.record_data_access(
+                ",".join(str(s) for s in symbols),
+                str(start_date),
+                str(end_date),
+                f"pit:{frame_kind}",
+                source="polygon",
+                content_hash=audit.hash_dataframe(out),
+            )
         return out
 
     def get_temporal_contract(self, frame_kind: str = "bars"):
@@ -939,14 +943,15 @@ class PolygonProvider(DataProvider):
         )
         # Ticks reach the decision record like bars do; they did not, so a
         # microstructure call's record could never replay as data_changed.
-        audit.record_data_access(
-            symbol,
-            str(start_date),
-            str(end_date),
-            "trades",
-            source="polygon",
-            content_hash=audit.hash_dataframe(frame),
-        )
+        if audit.recording_data_access():
+            audit.record_data_access(
+                symbol,
+                str(start_date),
+                str(end_date),
+                "trades",
+                source="polygon",
+                content_hash=audit.hash_dataframe(frame),
+            )
         return frame
 
     def get_quotes(
@@ -992,12 +997,13 @@ class PolygonProvider(DataProvider):
             symbol,
             "quotes",
         )
-        audit.record_data_access(
-            symbol,
-            str(start_date),
-            str(end_date),
-            "quotes",
-            source="polygon",
-            content_hash=audit.hash_dataframe(frame),
-        )
+        if audit.recording_data_access():
+            audit.record_data_access(
+                symbol,
+                str(start_date),
+                str(end_date),
+                "quotes",
+                source="polygon",
+                content_hash=audit.hash_dataframe(frame),
+            )
         return frame

@@ -442,14 +442,15 @@ class BloombergProvider(DataProvider):
         # A bar with no PX_LAST is dropped and disclosed, by the rule every
         # provider follows.
         result = drop_unusable_closes(result, symbol, provider="bloomberg")
-        audit.record_data_access(
-            symbol,
-            start_str,
-            end_str,
-            interval,
-            source="live_fetch",
-            content_hash=audit.hash_dataframe(result),
-        )
+        if audit.recording_data_access():
+            audit.record_data_access(
+                symbol,
+                start_str,
+                end_str,
+                interval,
+                source="live_fetch",
+                content_hash=audit.hash_dataframe(result),
+            )
         return result
 
     async def get_ohlcv_async(

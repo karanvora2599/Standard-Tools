@@ -35,6 +35,7 @@ entry of 2026-09-22.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -278,6 +279,66 @@ class TestTheCapabilitiesThatDecideTheChoice:
             if dispatch("describe_data_capabilities", {"source": s})["order_book"]
         ]
         assert depth == ["databento"]
+
+    def test_a_provider_that_delegates_reports_what_its_delegate_serves(
+        self, monkeypatch
+    ):
+        """An adapter that serves bars itself and forwards everything else
+        to the provider it wraps -- a consumer's bridge does exactly this --
+        defines none of the four on its class. Reading the class alone
+        counted every missing method as served, so it claimed point-in-time
+        records its delegate does not have (see the CHANGELOG entry of
+        2026-10-01)."""
+        from standard_quant_tools.agent.runtimes.meta import tools as meta
+        from standard_quant_tools.data.databento_provider import DatabentoProvider
+
+        class _Bridge:
+            SUPPORTED_INTERVALS = ("1d",)
+
+            def __init__(self, inner):
+                self._inner = inner
+
+            def get_ohlcv(self, *args, **kwargs):  # pragma: no cover - unused
+                raise AssertionError("not fetched")
+
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+
+        monkeypatch.delenv("DATABENTO_API_KEY", raising=False)
+        bridge = _Bridge(DatabentoProvider())
+        monkeypatch.setattr(meta.DataFactory, "get_provider", lambda source: bridge)
+        result = dispatch("describe_data_capabilities", {"source": "databento"})
+        got = (
+            result["order_book"],
+            result["order_events"],
+            result["point_in_time_records"],
+            result["temporal_contract"],
+        )
+        assert got == self.EXPECTED["databento"]
+
+    def test_a_provider_without_a_method_does_not_serve_it(self, monkeypatch):
+        """The null case: a provider object that has only bars reports none
+        of the four, rather than all of them."""
+        from standard_quant_tools.agent.runtimes.meta import tools as meta
+
+        class _BarsOnly:
+            def get_ohlcv(self, *args, **kwargs):  # pragma: no cover - unused
+                raise AssertionError("not fetched")
+
+            def get_metadata(self, symbol):
+                return SimpleNamespace(
+                    adjusted=True, survivorship_free=False, point_in_time=False
+                )
+
+        monkeypatch.setattr(
+            meta.DataFactory, "get_provider", lambda source: _BarsOnly()
+        )
+        result = dispatch("describe_data_capabilities", {"source": "databento"})
+        assert not result["order_book"]
+        assert not result["order_events"]
+        assert not result["point_in_time_records"]
+        assert not result["temporal_contract"]
+        assert not result["trades"] and not result["quotes"]
 
     def test_the_class_answer_does_not_depend_on_a_credential(self, monkeypatch):
         """

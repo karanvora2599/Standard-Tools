@@ -1,5 +1,51 @@
 # Changelog
 
+## A frame nobody records is not hashed, a Databento request can be refused before it is sent, and a screen stays in one process
+
+Three costs in the data layer were paid for nothing. Every provider hashed
+every frame it returned and then handed the hash to an audit call that
+discarded it when no decision record was open. A consumer that budgets its
+Databento spend had no way to see, let alone refuse, a request this library
+sent. And the screener's default split a universe across worker processes
+that each re-imported the library and re-read their bars, which made it
+slower than not splitting at all.
+
+- **A provider hashes a frame only when a decision record is open.**
+  `audit.recording_data_access()` says whether one is, and the Databento,
+  yfinance, Polygon and Bloomberg providers ask it before digesting.
+  Outside a record a 100-name pass served from the session cache is 4.8×
+  faster on Databento and 5.3× on yfinance; inside one the data-source entry
+  is byte-identical.
+- **Every billable Databento request can be governed.**
+  `set_request_gate(gate)` registers an object asked before each
+  `timeseries.get_range` — bars, ticks, quotes, depth, order events and
+  every walk-back attempt — with the dataset, schema, symbols, stype and
+  the exact start and end about to be sent, and told afterwards what came
+  back (records, bytes) so a ledger can book it. A refusal raises
+  `RequestRefusedError`, a `NonRetryableAPIError` carrying the gate's
+  reason, before anything is sent, and is neither retried nor passed to
+  another dataset. A gate that fails refuses; one that fails afterwards is
+  logged. There is no default gate and no environment variable.
+- **`screen_stocks` screens in one process by default.** Worker processes
+  re-imported the library, rebuilt the exchange calendar and re-read their
+  bars from disk: on a cached 235-ticker universe the old default took
+  9.7 s against 0.70 s now, and cold, with 250 ms of latency per request,
+  11.8 s against 2.6 s. Fetches run on up to 64 threads so a slow network
+  still gains. `n_workers > 1` still splits the universe, except while a
+  decision record is open or a Databento gate is registered, which a worker
+  would escape; it is then declined with a warning. Results are identical
+  either way.
+- **The exchange calendar is built once.** Its cache had no lock, so twenty
+  threads starting a first screen built it twenty times at once.
+- **The futures account reads prices, targets and day counts from arrays**,
+  2.3–4.1× faster on 50,000 bars, with every output bit-identical.
+- **`describe_data_capabilities` reads a provider's capabilities through
+  the instance.** It compared the provider's class with the base class, so a
+  provider that serves by delegation — an adapter forwarding to another
+  provider — defined none of the methods and was reported to serve every
+  one, including point-in-time records its delegate does not have. A method
+  a provider lacks altogether now reads as not served.
+
 ## The loops around vectorized maths are vectorized too, and give the same doubles
 
 Profiled with the data already in memory, the largest share of several

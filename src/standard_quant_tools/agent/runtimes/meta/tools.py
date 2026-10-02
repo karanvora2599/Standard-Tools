@@ -1169,9 +1169,18 @@ def describe_data_capabilities(
     provider_cls = type(provider) if provider is not None else _PROVIDER_CLASSES[source]
 
     def _overrides(method: str) -> bool:
-        return getattr(provider_cls, method, None) is not getattr(
-            DataProvider, method, None
-        )
+        # Read through the instance when there is one: a provider that
+        # serves by delegation (an adapter whose __getattr__ forwards to
+        # another provider) answers for what its delegate implements, and
+        # a method it lacks altogether is not served -- reading the class
+        # alone counted every missing method as an override.
+        base = getattr(DataProvider, method, None)
+        if provider is not None:
+            found = getattr(provider, method, None)
+            found = getattr(found, "__func__", found)
+        else:
+            found = getattr(provider_cls, method, None)
+        return found is not None and found is not base
 
     trades = _overrides("get_trades")
     quotes = _overrides("get_quotes")

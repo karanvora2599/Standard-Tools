@@ -190,6 +190,13 @@ its own fetch can pass `fetch_ms=` to `record_data_access`, and that figure
 is used instead; concurrent fetches timed that way can sum past
 `duration_ms`, which is why `compute_ms` is floored at 0.
 
+`audit.recording_data_access()` says whether a decision record is open in
+the current context. Every provider asks it before hashing a frame, so a
+fetch made outside a dispatched call no longer digests a frame nobody
+records: on a 100-name pass served from the session cache that was most of
+the time, and the providers are 4.8× (Databento) and 5.3× (yfinance) faster
+there. Inside a record the data-source entry is byte-identical.
+
 A **failed** call records `fetch_ms` (its completed accesses) and
 `compute_ms: null`. A fetch that fails — a vendor timing out, a refused
 frame retried until it gave up — never reports itself, so the time after

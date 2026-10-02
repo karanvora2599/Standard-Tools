@@ -45,6 +45,7 @@ from .context import (
     configure_logging,
     new_request_id,
     record_data_access,
+    recording_data_access,
 )
 from .dispatch import _run_and_record, last_request_id
 from .export import ExportedBundle, export_bundle
@@ -112,6 +113,7 @@ __all__ = [
     "last_request_id",
     "new_request_id",
     "record_data_access",
+    "recording_data_access",
     "release_hold",
     "repair_torn_tail",
     "round_floats",

@@ -3,9 +3,10 @@ Stock Screener — filter a universe of tickers by fundamental and technical cri
 
 Design:
   - Async-first: all data fetching is concurrent via asyncio.gather.
-  - For large universes (> 20 tickers), a ProcessPoolExecutor splits the ticker
-    list into batches so multiple CPU cores drive independent event loops in
-    parallel, bypassing the GIL for the full pipeline (fetch + compute).
+  - One process by default, whatever the universe size. `n_workers > 1`
+    splits the ticker list across a ProcessPoolExecutor, one event loop per
+    process; it is a choice for a caller who has measured it, not a default.
+    See `screen_stocks` for why.
   - Returns a ranked pd.DataFrame so agents get clean structured output.
 
 Supported filter keys
@@ -32,8 +33,8 @@ import asyncio
 import datetime
 import logging
 import math
-import os
-from concurrent.futures import ProcessPoolExecutor
+import sys
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -348,6 +349,26 @@ async def _fetch_ticker_data(
     return ("passed", ticker, row)
 
 
+#: Requests a screen in this process keeps in flight at once. Its fetches
+#: are waits on a vendor, not computation, so this is a concurrency limit
+#: rather than a core count; asyncio's default executor would have allowed
+#: min(32, cpu_count + 4), which held a cold 235-ticker screen behind 20
+#: threads (22.8 s at one second a request, against 13.6 s for the worker
+#: processes it replaced, each of which brought its own 20). Capped so a
+#: large universe does not open a thousand connections to one vendor.
+_FETCH_THREADS = 64
+
+
+async def _on_fetch_threads(work: Any, threads: int) -> Any:
+    """Run `work` with the running loop's default executor -- the one every
+    provider's async fetch uses -- sized to `threads`. Only for a loop this
+    module created: `asyncio.run` shuts the executor down with the loop."""
+    asyncio.get_running_loop().set_default_executor(
+        ThreadPoolExecutor(max_workers=max(threads, 1), thread_name_prefix="screener")
+    )
+    return await work
+
+
 # ── Async screener (single process) ──────────────────────────────────────────
 
 
@@ -483,6 +504,34 @@ def _screen_batch(args: tuple) -> pd.DataFrame:
     )
 
 
+def _process_state_a_worker_would_drop(source: Optional[str]) -> Optional[str]:
+    """
+    Why this screen must not leave the process, or None.
+
+    A worker process starts from nothing: the caller's open decision record
+    and a request gate registered with the Databento provider are objects
+    in THIS process, so a worker's fetches would be missing from the one
+    and ungoverned by the other.
+    """
+    from standard_quant_tools import audit
+
+    if audit.recording_data_access():
+        return (
+            "a decision record is open, and a worker process could not report "
+            "the data it reads to it"
+        )
+    if str(source or "").strip().lower() == "databento":
+        # Read without importing: a provider module that was never imported
+        # has no gate registered.
+        provider = sys.modules.get("standard_quant_tools.data.databento_provider")
+        if provider is not None and provider.request_gate() is not None:
+            return (
+                "a Databento request gate is registered, and a worker process "
+                "would fetch without it"
+            )
+    return None
+
+
 # ── Public sync entry point ───────────────────────────────────────────────────
 
 
@@ -500,11 +549,26 @@ def screen_stocks(
     """
     Screen a universe of tickers against fundamental and technical filters.
 
-    For universes with more than 20 tickers, the ticker list is split across
-    multiple worker processes (one asyncio event loop per process) to bypass
-    the GIL and saturate available CPU cores.  For small universes the
-    overhead of spawning processes outweighs the benefit, so a single
-    asyncio.gather call is used instead.
+    ONE PROCESS BY DEFAULT. The ticker list used to be split across up to
+    cpu_count worker processes above 20 tickers, and that was the slow
+    path, measured on 235 tickers: 9.7 s across sixteen workers against
+    0.70 s in one process with the bars on disk, and 11.8 s against 2.6 s
+    cold with every request waiting a quarter of a second on the network
+    (13.5 s against 7.8 s at a full second). A worker is a fresh
+    interpreter -- on Windows always, since there is no fork -- so each
+    one imports the library again, builds the exchange calendar again and
+    re-reads its tickers' bars, none of which the parent's warm session
+    cache can hand it. What the workers did buy was more requests in
+    flight, each bringing its own threads, and that is kept in one
+    process: the fetches run on `_FETCH_THREADS` threads rather than the
+    event loop's default twenty. The work between fetches is too small for
+    a second core to matter. A worker also starts without the caller's
+    process state: an open decision record never hears of the data it
+    reads, and a request gate registered with a provider does not exist
+    there. So the pool is used only when asked for, and not even then
+    while a decision record is open or a Databento request gate would be
+    bypassed -- the result is the same either way, and only that run's
+    speed is given up. See the CHANGELOG entry of 2026-10-01.
 
     Args:
         tickers:   Universe of tickers to screen.
@@ -512,8 +576,10 @@ def screen_stocks(
         start_date, end_date: Date range for technical filters.
         sort_by:   Column to rank results by.
         ascending: Sort direction.
-        n_workers: Override process count. Pass 1 to force single-process mode.
-                   Defaults to cpu_count for large universes, 1 for small ones.
+        n_workers: Worker processes. None or 1 screens in this process (the
+                   default); more splits the universe across that many
+                   processes, unless a decision record is open or a
+                   Databento request gate is registered for this source.
         min_beta_obs: Minimum bars a ticker must share with the benchmark
                    before a beta filter acts on its estimate (default
                    DEFAULT_MIN_BETA_OBS = 20, minimum 2). Applied identically
@@ -540,7 +606,6 @@ def screen_stocks(
             tickers=sp500_list,   # 500 tickers
             filters={"pe_ratio_max": 25, "rsi_max": 50},
             sort_by="rsi_14",
-            n_workers=8,
         )
     """
     _validate_filter_keys(filters)
@@ -553,10 +618,18 @@ def screen_stocks(
 
     n = len(tickers)
 
-    # Determine effective worker count
     if n_workers is None:
-        # Single process is faster for small universes (no spawn overhead)
-        n_workers = 1 if n <= 20 else min(os.cpu_count() or 4, max(n // 10, 2))
+        n_workers = 1
+    if n_workers > 1:
+        held = _process_state_a_worker_would_drop(source)
+        if held is not None:
+            logger.warning(
+                "[screener:screen_stocks] n_workers=%d declined, screening in "
+                "this process: %s. The result is the same either way.",
+                n_workers,
+                held,
+            )
+            n_workers = 1
     logger.debug(
         "[screener:screen_stocks] universe=%d  workers=%d  filters=%s",
         n,
@@ -566,15 +639,18 @@ def screen_stocks(
 
     if n_workers <= 1:
         result = asyncio.run(
-            screen_stocks_async(
-                tickers,
-                filters,
-                start,
-                end,
-                sort_by,
-                ascending,
-                min_beta_obs,
-                source=source,
+            _on_fetch_threads(
+                screen_stocks_async(
+                    tickers,
+                    filters,
+                    start,
+                    end,
+                    sort_by,
+                    ascending,
+                    min_beta_obs,
+                    source=source,
+                ),
+                min(n, _FETCH_THREADS),
             )
         )
         result.attrs.setdefault("failed_batches", [])
