@@ -252,6 +252,17 @@ def trade_excursions(trade_log: pd.DataFrame, price_data: pd.DataFrame) -> pd.Da
         result["mfe_pct"] = pd.Series(dtype=float)
         return result
 
+    windows = _window_bounds(trade_log, price_data)
+    if windows is not None:
+        fast_mae, fast_mfe = _excursions_from_bounds(trade_log, price_data, *windows)
+        result = trade_log.copy()
+        result["mae_pct"] = fast_mae
+        result["mfe_pct"] = fast_mfe
+        return result
+
+    # The general path, for anything the bounds above cannot locate exactly
+    # (an unsorted price index, string dates, a date dtype other than the
+    # index's own). Same arithmetic, one label slice per trade.
     mae_list: List[float] = []
     mfe_list: List[float] = []
     for _, row in trade_log.iterrows():
@@ -283,6 +294,129 @@ def trade_excursions(trade_log: pd.DataFrame, price_data: pd.DataFrame) -> pd.Da
     result["mae_pct"] = mae_list
     result["mfe_pct"] = mfe_list
     return result
+
+
+def _same_dates(column: Any, index: pd.Index) -> bool:
+    """True when `column` holds dates of exactly `index`'s dtype (unit and
+    timezone included), so a position lookup means what a label lookup does."""
+    return (
+        isinstance(column, pd.Series)
+        and isinstance(index, pd.DatetimeIndex)
+        and column.dtype == index.dtype
+    )
+
+
+def _window_bounds(
+    trade_log: pd.DataFrame, price_data: pd.DataFrame
+) -> Optional["tuple[np.ndarray, np.ndarray]"]:
+    """
+    Each trade's `price_data.loc[entry_date : exit_date]` as positions
+    `[start, stop)`, found for every trade at once -- or None when that
+    equivalence is not guaranteed and the per-trade slice must be used.
+
+    On a sorted DatetimeIndex a label slice IS a binary search: pandas
+    resolves the left label with `searchsorted(side="left")` and the right
+    one with `side="right"`, whether or not either date is present and
+    however many times it repeats. One vectorized search per side gives the
+    same rows that 805 separate `.loc` slices did, at a fraction of the
+    cost. Anything else (an unsorted index, string or mismatched-dtype
+    dates, a missing date) keeps the slice, because there `.loc` follows
+    other rules.
+    """
+    index = price_data.index
+    if not trade_log.columns.is_unique or not {
+        "entry_date",
+        "exit_date",
+        "entry_price",
+        "direction",
+    }.issubset(trade_log.columns):
+        return None
+    entries = trade_log["entry_date"]
+    exits = trade_log["exit_date"]
+    if not (_same_dates(entries, index) and _same_dates(exits, index)):
+        return None
+    if not index.is_monotonic_increasing or entries.isna().any() or exits.isna().any():
+        return None
+    for name in ("High", "Low"):
+        # A plain numeric column reduces to the same number either way; an
+        # object or extension column keeps pandas' own max/min rules.
+        if name in price_data.columns:
+            column = price_data[name]
+            if not (
+                isinstance(column, pd.Series)
+                and isinstance(column.dtype, np.dtype)
+                and column.dtype.kind in "fiu"
+            ):
+                return None
+    starts = index.searchsorted(entries.array, side="left")
+    stops = index.searchsorted(exits.array, side="right")
+    return np.asarray(starts, dtype=np.intp), np.asarray(stops, dtype=np.intp)
+
+
+def _column_extremes(
+    price_data: pd.DataFrame, starts: np.ndarray, stops: np.ndarray
+) -> "tuple[np.ndarray, np.ndarray]":
+    """
+    max(High) and min(Low) over each `[start, stop)`, skipping NaN the way
+    `Series.max()` / `Series.min()` do (all-NaN gives NaN).
+
+    `fmax`/`fmin` ignore a NaN operand, and a maximum is exact -- no
+    rounding happens in choosing one value from a set -- so this is the
+    same number pandas returns, in one `reduceat` per column instead of two
+    reductions per trade. Entries for empty windows are meaningless and
+    never read.
+    """
+    high = price_data["High"].to_numpy(dtype=float)
+    low = price_data["Low"].to_numpy(dtype=float)
+    # reduceat needs every boundary to be a valid position, and a stop may
+    # be one past the last bar; a trailing NaN is a no-op under fmax/fmin.
+    high = np.append(high, np.nan)
+    low = np.append(low, np.nan)
+    bounds = np.empty(2 * len(starts), dtype=np.intp)
+    bounds[0::2] = starts
+    bounds[1::2] = stops
+    return (
+        np.fmax.reduceat(high, bounds)[0::2],
+        np.fmin.reduceat(low, bounds)[0::2],
+    )
+
+
+def _excursions_from_bounds(
+    trade_log: pd.DataFrame,
+    price_data: pd.DataFrame,
+    starts: np.ndarray,
+    stops: np.ndarray,
+) -> "tuple[List[float], List[float]]":
+    """The per-trade loop of `trade_excursions`, reading located windows."""
+    entry_prices = [float(p) for p in trade_log["entry_price"]]
+    nonempty = (stops > starts) & (price_data.shape[1] > 0)
+    measurable = [
+        bool(ok) and np.isfinite(p) and p > 0 for ok, p in zip(nonempty, entry_prices)
+    ]
+    # Only read High/Low when some trade will use them, as the slice did.
+    if any(measurable):
+        highs, lows = _column_extremes(price_data, starts, stops)
+    else:
+        highs = lows = np.full(len(starts), np.nan)
+
+    mae_list: List[float] = []
+    mfe_list: List[float] = []
+    for ok, entry_price, direction, high, low in zip(
+        measurable, entry_prices, trade_log["direction"], highs.tolist(), lows.tolist()
+    ):
+        if not ok:
+            mae_list.append(float("nan"))
+            mfe_list.append(float("nan"))
+            continue
+        if direction == "long":
+            mfe = (high - entry_price) / entry_price
+            mae = (low - entry_price) / entry_price
+        else:
+            mfe = (entry_price - low) / entry_price
+            mae = (entry_price - high) / entry_price
+        mfe_list.append(round(mfe * 100, 4))
+        mae_list.append(round(mae * 100, 4))
+    return mae_list, mfe_list
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -325,29 +459,8 @@ def exposure_stats(
 
     avg_holding_period_bars: Optional[float] = None
     if trade_log is not None and not trade_log.empty:
-        idx = executed_signal.index
-        holding_bars: List[int] = []
-        for _, row in trade_log.iterrows():
-            try:
-                entry_pos = idx.get_loc(row["entry_date"])
-                exit_pos = idx.get_loc(row["exit_date"])
-            except KeyError:
-                continue
-            # On a non-unique index get_loc returns a slice or boolean mask
-            # instead of an int, and int() on either raises TypeError — which
-            # the KeyError-only guard above did not catch, turning a duplicate
-            # timestamp into a crash instead of a skipped trade.
-            if not isinstance(entry_pos, int) or not isinstance(exit_pos, int):
-                logger.warning(
-                    "[exposure_stats] ambiguous index position for trade "
-                    "%s -> %s (duplicate timestamps?) — excluded from "
-                    "avg_holding_period_bars",
-                    row["entry_date"],
-                    row["exit_date"],
-                )
-                continue
-            holding_bars.append(exit_pos - entry_pos)
-        if holding_bars:
+        holding_bars = _holding_bars(executed_signal.index, trade_log)
+        if len(holding_bars):
             avg_holding_period_bars = round(float(np.mean(holding_bars)), 2)
 
     return {
@@ -358,3 +471,52 @@ def exposure_stats(
         "pct_short": round(float((values < 0).mean()), 4),
         "avg_holding_period_bars": avg_holding_period_bars,
     }
+
+
+def _holding_bars(idx: pd.Index, trade_log: pd.DataFrame) -> Any:
+    """
+    Bars held by each trade whose entry and exit dates are both on `idx`,
+    in trade-log order; a trade with either date missing is skipped.
+
+    On a unique DatetimeIndex, with dates of the index's own dtype, one
+    `get_indexer` per column finds every position at once, and it agrees
+    with `get_loc` key for key: the same position where the date is
+    present, and -1 exactly where `get_loc` raises KeyError. Anything else
+    -- a repeated timestamp above all, where `get_loc` answers with a slice
+    and the trade is excluded with a warning -- is located one trade at a
+    time.
+    """
+    if (
+        idx.is_unique
+        and "entry_date" in trade_log.columns
+        and "exit_date" in trade_log.columns
+        and _same_dates(trade_log["entry_date"], idx)
+        and _same_dates(trade_log["exit_date"], idx)
+    ):
+        entries = idx.get_indexer(pd.Index(trade_log["entry_date"]))
+        exits = idx.get_indexer(pd.Index(trade_log["exit_date"]))
+        found = (entries >= 0) & (exits >= 0)
+        return exits[found] - entries[found]
+
+    holding_bars: List[int] = []
+    for _, row in trade_log.iterrows():
+        try:
+            entry_pos = idx.get_loc(row["entry_date"])
+            exit_pos = idx.get_loc(row["exit_date"])
+        except KeyError:
+            continue
+        # On a non-unique index get_loc returns a slice or boolean mask
+        # instead of an int, and int() on either raises TypeError — which
+        # the KeyError-only guard above did not catch, turning a duplicate
+        # timestamp into a crash instead of a skipped trade.
+        if not isinstance(entry_pos, int) or not isinstance(exit_pos, int):
+            logger.warning(
+                "[exposure_stats] ambiguous index position for trade "
+                "%s -> %s (duplicate timestamps?) — excluded from "
+                "avg_holding_period_bars",
+                row["entry_date"],
+                row["exit_date"],
+            )
+            continue
+        holding_bars.append(exit_pos - entry_pos)
+    return holding_bars

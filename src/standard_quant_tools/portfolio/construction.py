@@ -304,6 +304,15 @@ def risk_parity(
     weights = 1.0 / np.sqrt(np.diag(matrix))
     weights = weights / weights.sum()
 
+    # Row i of this is column i of the matrix, contiguous. The matrix is
+    # validated symmetric only to a tolerance, so its rows are not used in
+    # place of its columns: (Sigma w) moves by Sigma[:, i] when w_i moves.
+    columns = np.ascontiguousarray(matrix.T)
+    # Scalars as Python floats: the same IEEE arithmetic as numpy's float64
+    # scalars, without their per-operation overhead.
+    diagonal = np.diag(matrix).tolist()
+    budget_shares = targets.tolist()
+
     converged = False
     iterations = 0
     for iterations in range(1, int(max_iterations) + 1):
@@ -314,12 +323,19 @@ def risk_parity(
         marginal = matrix @ weights
         for i in range(n):
             # The coordinate update that solves w_i * (Sigma w)_i = b_i * sigma^2
-            others = marginal[i] - matrix[i, i] * weights[i]
-            discriminant = others**2 + 4.0 * matrix[i, i] * targets[i] * volatility**2
-            weights[i] = (-others + math.sqrt(max(discriminant, 0.0))) / (
-                2.0 * matrix[i, i]
+            variance_i = diagonal[i]
+            current = weights.item(i)
+            others = marginal.item(i) - variance_i * current
+            discriminant = (
+                others**2 + 4.0 * variance_i * budget_shares[i] * volatility**2
             )
-            marginal = matrix @ weights
+            updated = (-others + math.sqrt(max(discriminant, 0.0))) / (2.0 * variance_i)
+            # Only w_i moved, so Sigma w moves by one column times the step:
+            # O(n) here instead of a fresh O(n^2) product, which made each
+            # sweep O(n^3). The product is rebuilt exactly at the top of
+            # every sweep, so rounding cannot accumulate beyond one sweep.
+            marginal += columns[i] * (updated - current)
+            weights[i] = updated
         weights = weights / weights.sum()
         if np.max(np.abs(weights - previous)) < tolerance:
             converged = True
@@ -582,6 +598,13 @@ def _quasi_diagonal_order(distance: np.ndarray) -> List[int]:
     Tie-breaking is preserved: `argmin` returns the first minimum in
     row-major order over the active block, which is the order the nested
     scan visited pairs in.
+
+    THE ACTIVE BLOCK IS MASKED, NOT COPIED. A merged-away cluster's row and
+    column are set to +inf, so a flat argmin over the whole matrix sees the
+    active block and nothing else. `active` stays sorted, so the first
+    minimum in the full matrix's row-major order is the first minimum in the
+    block's, and the leaf order is identical to gathering the block with
+    `np.ix_` each merge -- which was the cost, a fancy-indexed copy per merge.
     """
     n = distance.shape[0]
     members = {i: [i] for i in range(n)}
@@ -591,18 +614,23 @@ def _quasi_diagonal_order(distance: np.ndarray) -> List[int]:
     np.fill_diagonal(working, np.inf)
 
     while len(active) > 1:
-        block = working[np.ix_(active, active)]
-        first = int(np.argmin(block))
-        a_i, b_i = divmod(first, len(active))
-        if a_i > b_i:  # take the upper-triangle representative of the pair
-            a_i, b_i = b_i, a_i
-        a, b = active[a_i], active[b_i]
+        a, b = divmod(int(np.argmin(working)), n)
+        if a == b:
+            # Only reachable when every remaining pair is +inf: the argmin
+            # then lands on the first diagonal cell. The block's argmin in
+            # that case is its first cell, the first active cluster with
+            # itself, and that is kept so the order cannot depend on this.
+            a = b = active[0]
+        elif a > b:  # take the upper-triangle representative of the pair
+            a, b = b, a
 
         members[a] = members[a] + members[b]
         merged = np.minimum(working[a, :], working[b, :])
         working[a, :] = merged
         working[:, a] = merged
         working[a, a] = np.inf
+        working[b, :] = np.inf
+        working[:, b] = np.inf
         active.remove(b)
 
     clusters = {active[0]: members[active[0]]}

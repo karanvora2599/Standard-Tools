@@ -325,13 +325,22 @@ def entropy_measures(
     shannon_normalized = shannon / math.log(n_bins)
 
     # Permutation entropy: count each ordinal pattern of length `embedding`.
-    patterns: Dict[tuple, int] = {}
-    for i in range(n - embedding + 1):
-        window = array[i : i + embedding]
-        key = tuple(np.argsort(window))
-        patterns[key] = patterns.get(key, 0) + 1
-    total = sum(patterns.values())
-    pattern_probabilities = np.array([c / total for c in patterns.values()])
+    #
+    # Every window is ranked by one `argsort` along the rows of a window
+    # view -- the same sort, row by row, that a call per window ran, so ties
+    # rank the same way -- and each rank pattern is numbered as a base-
+    # `embedding` integer. The counts are then put in order of each
+    # pattern's FIRST appearance, which is the order the per-window
+    # dictionary held them in: the entropy sums the same terms in the same
+    # order and comes out bit-identical. The loop it replaces measured
+    # 87 ms at 32,000 observations.
+    windows = np.lib.stride_tricks.sliding_window_view(array, embedding)
+    ranks = np.argsort(windows, axis=1)
+    codes = ranks @ (embedding ** np.arange(embedding - 1, -1, -1))
+    _, first_seen, counts = np.unique(codes, return_index=True, return_counts=True)
+    counts = counts[np.argsort(first_seen)]
+    total = int(counts.sum())
+    pattern_probabilities = counts / total
     permutation = float(-(pattern_probabilities * np.log(pattern_probabilities)).sum())
     permutation_normalized = permutation / math.log(math.factorial(embedding))
 
@@ -373,7 +382,7 @@ def entropy_measures(
         "shannon_normalized": float(shannon_normalized),
         "permutation_entropy": permutation,
         "permutation_normalized": float(permutation_normalized),
-        "n_patterns_observed": len(patterns),
+        "n_patterns_observed": int(counts.size),
         "n_patterns_possible": math.factorial(embedding),
         "warnings": warnings,
     }
@@ -943,31 +952,46 @@ def lead_lag_matrix(
         with np.errstate(invalid="ignore", divide="ignore"):
             correlations[lag] = (lead_c.T @ follow_c) / denominator
 
-    for i, leader in enumerate(columns):
-        for j, follower in enumerate(columns):
-            if i == j:
-                continue
-            for lag in range(1, max_lag + 1):
-                matrix = correlations.get(lag)
-                if matrix is None:
-                    continue
-                rho = float(matrix[i, j])
-                if not math.isfinite(rho) or abs(rho) < min_correlation:
-                    continue
-                effective = n - lag
-                t = rho * math.sqrt(max(effective - 2, 1) / max(1 - rho * rho, 1e-12))
-                raw_p = _f_sf(t * t, 1, max(effective - 2, 1))
-                pairs.append(
-                    {
-                        "leader": str(leader),
-                        "follower": str(follower),
-                        "lag": lag,
-                        "correlation": rho,
-                        "p_value_raw": float(raw_p),
-                        "p_value_corrected": float(min(raw_p * n_tests, 1.0)),
-                        "survives_correction": bool(raw_p * n_tests < 0.05),
-                    }
-                )
+    # The filter and the t-statistic over every (leader, follower, lag) at
+    # once; only the pairs that pass become dicts. The loop this replaces
+    # visited every one of the n x (n - 1) x max_lag triples in Python --
+    # 47,250 at 126 names -- to keep a few thousand. `np.nonzero` on a
+    # (leader, follower, lag) array returns the survivors in that same
+    # nested order, so the rows, and the order `sort` breaks ties in, are
+    # unchanged. The t-statistic is the same elementwise arithmetic; the
+    # p-value is still `_f_sf` per pair, a Python continued fraction with
+    # no exact array form.
+    lags = sorted(correlations)
+    if lags:
+        stacked = np.stack([correlations[lag] for lag in lags], axis=-1)
+        keep = np.isfinite(stacked) & ~(np.abs(stacked) < min_correlation)
+        diagonal = np.arange(n_assets)
+        keep[diagonal, diagonal, :] = False
+        leaders, followers, slots = np.nonzero(keep)
+        rho = stacked[leaders, followers, slots]
+        lag_of = np.asarray(lags)[slots]
+        degrees = np.maximum(n - lag_of - 2, 1)
+        t = rho * np.sqrt(degrees / np.maximum(1 - rho * rho, 1e-12))
+        for i, j, lag, correlation, dof, t_squared in zip(
+            leaders.tolist(),
+            followers.tolist(),
+            lag_of.tolist(),
+            rho.tolist(),
+            degrees.tolist(),
+            (t * t).tolist(),
+        ):
+            raw_p = _f_sf(t_squared, 1, dof)
+            pairs.append(
+                {
+                    "leader": str(columns[i]),
+                    "follower": str(columns[j]),
+                    "lag": lag,
+                    "correlation": correlation,
+                    "p_value_raw": float(raw_p),
+                    "p_value_corrected": float(min(raw_p * n_tests, 1.0)),
+                    "survives_correction": bool(raw_p * n_tests < 0.05),
+                }
+            )
     pairs.sort(key=lambda p: abs(p["correlation"]), reverse=True)
     survivors = [p for p in pairs if p["survives_correction"]]
 

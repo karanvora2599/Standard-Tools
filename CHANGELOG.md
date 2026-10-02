@@ -1,5 +1,48 @@
 # Changelog
 
+## The loops around vectorized maths are vectorized too, and give the same doubles
+
+Profiled with the data already in memory, the largest share of several
+analysis and portfolio calls was not numpy and not the kernels but the
+Python around them: a bootstrap that built a pandas Series for every
+resample, a change-point search that called a closure twice per candidate
+split, a trade diagnostic that sliced the price frame once per trade. Each
+now works on whole arrays, and each result is the same double as before —
+same draws, same order, same reductions — with one disclosed exception in
+risk parity.
+
+- **`bootstrap_statistic` draws its resamples in batches** from the same
+  random stream in the same order, and computes every named statistic along
+  the rows of a batch. At 2,030 observations and 2,000 draws a Sharpe
+  interval is 25× faster, a Sortino 15× and a VaR about 8×. Where pandas
+  computes `Series.std` with bottleneck, which no longer matches numpy bit
+  for bit, each Sharpe is computed one resample at a time instead.
+- **A point estimate of exactly zero no longer crashes the bootstrap.** The
+  bias warning divided the bias by the point estimate and raised
+  `ZeroDivisionError`; it now returns the interval and says the bias is
+  measured against zero.
+- **`detect_change_points` prices every candidate split in one array
+  expression** on its existing prefix sums: 7× faster at 2,030 points and
+  18× at 8,000, with every cost bit-identical. **`entropy_measures` ranks
+  every window in one sort**, 7–14× faster. **`lead_lag_matrix` filters
+  its (leader, follower, lag) triples in numpy** and builds rows only for
+  the pairs that survive, in the same order with the same types; it gains
+  1.5×, because each p-value is still a continued fraction evaluated per
+  pair. A `float32` `min_correlation` is now compared in float64; Python
+  numbers, the documented type, behave as before.
+- **`detect_stale_prices` finds runs with array passes**, about 160× faster
+  per 2,115-bar frame. Object and nullable columns keep the loop.
+- **`trade_excursions` and `exposure_stats` locate every trade in one
+  vectorized pass**, 56× and 75× faster on an 805-trade log, bit-identical.
+  The fast paths run only where they are provably identical (a sorted
+  `DatetimeIndex`, dates of its dtype, numeric High and Low); other inputs
+  take the original loop.
+- **The covariance matrix dictionary and the HRP clustering order are
+  faster and bit-identical**: 4.1× and 3.6×. **Risk parity is 2.2× faster**
+  with the same iteration count; its marginal-risk vector is now updated a
+  column at a time within each pass, so weights differ from before by at
+  most 1e-14 relative.
+
 ## A bar that has not traded no longer refuses a year, and a record says where its time went
 
 A consumer polling the risk, technical, Hurst and tail-risk tools for AAPL

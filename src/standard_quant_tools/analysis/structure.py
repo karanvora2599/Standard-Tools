@@ -228,18 +228,23 @@ def _best_split(segment: np.ndarray, min_segment: int, penalty: float):
     cumulative = np.concatenate([[0.0], np.cumsum(segment)])
     cumulative_sq = np.concatenate([[0.0], np.cumsum(segment**2)])
 
-    def rss(lo: int, hi: int) -> float:
+    def rss(lo, hi):
+        """Residual sum of squares of [lo, hi) for every candidate at once,
+        by the same operations in the same order as one split at a time --
+        so every cost, and the chosen split, is bit-identical to the scalar
+        closure this replaced, which was called twice per candidate: 3,982
+        Python calls to search 2,030 observations once, and again for every
+        segment in every later round. An empty side costs 0.0."""
         count = hi - lo
-        if count <= 0:
-            return 0.0
-        total_ = cumulative[hi] - cumulative[lo]
-        total_sq = cumulative_sq[hi] - cumulative_sq[lo]
-        return float(total_sq - total_ * total_ / count)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            total_ = cumulative[hi] - cumulative[lo]
+            total_sq = cumulative_sq[hi] - cumulative_sq[lo]
+            return np.where(count <= 0, 0.0, total_sq - total_ * total_ / count)
 
     positions = np.arange(min_segment, n - min_segment + 1)
     if positions.size == 0:
         return None
-    costs = np.array([rss(0, p) + rss(p, n) for p in positions])
+    costs = rss(0, positions) + rss(positions, n)
     best = int(np.argmin(costs))
     gain = total - costs[best]
     # A gain that is a rounding-sized fraction of the segment's own

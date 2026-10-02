@@ -123,13 +123,18 @@ def estimate_covariance(
     smallest = float(eigenvalues.min())
     condition = float(eigenvalues.max() / smallest) if smallest > 0 else float("inf")
 
+    # The names once and the rows as Python floats once. Iterating the
+    # column Index inside the comprehension and boxing `annual[i, j]` cell
+    # by cell was nearly half of a sample-covariance call at 235 assets,
+    # for the same dict: `tolist()` yields the same floats `float()` did.
+    assets = list(frame.columns)
     return {
         "method": method,
         "matrix": {
-            row: {col: float(annual[i, j]) for j, col in enumerate(frame.columns)}
-            for i, row in enumerate(frame.columns)
+            row: dict(zip(assets, values))
+            for row, values in zip(assets, annual.tolist())
         },
-        "assets": list(frame.columns),
+        "assets": assets,
         "n_observations": int(n_obs),
         "n_assets": int(n_assets),
         "effective_observations": effective,
