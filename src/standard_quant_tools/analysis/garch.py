@@ -99,6 +99,10 @@ _OPTIONS = {"ftol": 1e-12, "gtol": 1e-8, "maxiter": 2000}
 #: the maximum measured 1e-8 to 1e-6, so the threshold is not a knife edge.
 _GRADIENT_TOL = 1e-4
 
+#: L-BFGS-B's status for a stop in the line search ("ABNORMAL"), as distinct
+#: from 1, the iteration or evaluation limit.
+_LINE_SEARCH_STALL = 2
+
 #: How close to a bound (on the rescaled problem) counts as on it.
 #: L-BFGS-B projects onto the box, so a parameter pushed against a bound
 #: lands on it exactly; this only absorbs the last rounding.
@@ -397,10 +401,12 @@ def garch_volatility_forecast(
     ljung_box_p, ljung_box_squared_p, standardized_skew,
     standardized_kurtosis (EXCESS) and misspecified, and warnings.
 
-    `converged` is True only when L-BFGS-B reported success, persistence
-    is below 1, AND `gradient_norm` -- the largest projected-gradient
-    component of the negative log-likelihood per observation, on returns
-    rescaled to unit mean square -- is below 1e-4. `at_bound` names the
+    `converged` is True only when persistence is below 1 AND
+    `gradient_norm` -- the largest projected-gradient component of the
+    negative log-likelihood per observation, on returns rescaled to unit
+    mean square -- is below 1e-4, AND L-BFGS-B either reported success or
+    stopped in its line search there (at a maximum, rounding can leave it no
+    step it can verify). An iteration limit is never converged. `at_bound` names the
     parameters sitting on a bound; 'alpha' there means no ARCH effect,
     with beta not identified, and a warning says so.
 
@@ -463,9 +469,15 @@ def garch_volatility_forecast(
     # success while stopped far from the maximum, a maximum can sit on the
     # non-stationary side where the soft penalty only discourages it, and
     # an iteration limit leaves the gradient large with success False.
-    converged = (
-        bool(opt.success) and persistence < 1.0 and gradient_norm < _GRADIENT_TOL
+    # The one stop without success that still counts is status 2, a line
+    # search that could not improve: L-BFGS-B ends that way AT a maximum
+    # when the last few evaluations agree to rounding, and some SciPy
+    # builds do so where others report success. The gradient decides it.
+    at_maximum = gradient_norm < _GRADIENT_TOL
+    stopped_cleanly = bool(opt.success) or (
+        opt.status == _LINE_SEARCH_STALL and at_maximum
     )
+    converged = stopped_cleanly and persistence < 1.0 and at_maximum
 
     warnings: List[str] = []
     if "alpha" in at_bound:
@@ -479,7 +491,7 @@ def garch_volatility_forecast(
         )
     if not converged:
         reasons = []
-        if not opt.success:
+        if not stopped_cleanly:
             reasons.append(f"the optimizer stopped without success ({opt.message})")
         if persistence >= 1.0:
             reasons.append(

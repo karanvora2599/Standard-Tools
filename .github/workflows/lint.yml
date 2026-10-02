@@ -21,7 +21,9 @@ jobs:
           cache: pip
 
       - name: Install linters
-        run: pip install black isort
+        # Pinned: an unpinned formatter fails CI on unchanged code the day a
+        # release changes its style. Bump both deliberately, and reformat.
+        run: pip install black==26.5.1 isort==9.0.2
 
       - name: Check formatting (black)
         run: black --check src/ tests/

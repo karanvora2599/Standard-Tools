@@ -35,11 +35,9 @@ os.environ.setdefault("SQT_RUNS_DIR", os.path.join(_TMP, "runs"))
 os.environ.setdefault("SQT_AUDIT_DIR", os.path.join(_TMP, "audit"))
 os.environ.setdefault("SQT_AUDIT_ENABLED", "0")
 
+import standard_quant_tools.modeling.dataset.builder as builder_module  # noqa: E402
 from standard_quant_tools.data.factory import DataFactory  # noqa: E402
 from standard_quant_tools.data.metadata import DataSetMetadata  # noqa: E402
-from standard_quant_tools.modeling.dataset import (  # noqa: E402
-    builder as builder_module,
-)
 from standard_quant_tools.modeling.dataset.builder import build_dataset  # noqa: E402
 from standard_quant_tools.modeling.engine import run_experiment  # noqa: E402
 from standard_quant_tools.modeling.specs import (  # noqa: E402

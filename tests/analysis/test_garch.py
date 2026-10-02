@@ -353,3 +353,55 @@ class TestScale:
         elapsed = time.time() - t0
         assert elapsed < 15.0, f"2M-point GARCH fit took {elapsed:.2f}s"
         assert result["n_obs"] == 2_000_000
+
+
+class TestALineSearchStallAtTheMaximumIsConverged:
+    """L-BFGS-B ends with status 2 -- a line search that could not improve --
+    when it is AT the maximum and its last evaluations agree to rounding.
+    Some SciPy builds stop that way on fits others report as successful,
+    and `converged` used to read the stop alone, so the same fit was
+    converged on one machine and not on another (see the CHANGELOG entry
+    of 2026-10-02). The projected gradient now decides: negligible there,
+    the fit converged; an iteration limit never does."""
+
+    RETURNS = _simulate_garch11(2000, 5e-6, 0.25, 0.65, seed=3)
+
+    def _forecast_with_stop(self, monkeypatch, status, success, *, move=0.0):
+        import standard_quant_tools.analysis.garch as garch_module
+
+        real = garch_module._fit_rescaled
+
+        def stopped(z2):
+            opt, params, grad = real(z2)
+            params = params.copy()
+            params[1] += move  # off the maximum by `move` in alpha
+            if move:
+                grad = garch_module._finite_difference_gradient(params, z2)
+            opt.success, opt.status, opt.message = success, status, "ABNORMAL: "
+            opt.x = params
+            return opt, params, grad
+
+        monkeypatch.setattr(garch_module, "_fit_rescaled", stopped)
+        return garch_volatility_forecast(self.RETURNS)
+
+    def test_a_stall_at_the_maximum_is_converged(self, monkeypatch):
+        result = self._forecast_with_stop(monkeypatch, status=2, success=False)
+        assert result["gradient_norm"] < 1e-4
+        assert result["converged"] is True
+        assert not any("NOT CONVERGED" in w for w in result["warnings"])
+
+    def test_a_stall_away_from_the_maximum_is_not(self, monkeypatch):
+        """The null case: the same stop with a gradient that is not
+        negligible is still a failure, and says both why."""
+        result = self._forecast_with_stop(
+            monkeypatch, status=2, success=False, move=0.05
+        )
+        assert result["gradient_norm"] >= 1e-4
+        assert result["converged"] is False
+        (line,) = [w for w in result["warnings"] if "NOT CONVERGED" in w]
+        assert "without success" in line and "projected gradient" in line
+
+    def test_an_iteration_limit_is_never_converged(self, monkeypatch):
+        result = self._forecast_with_stop(monkeypatch, status=1, success=False)
+        assert result["gradient_norm"] < 1e-4
+        assert result["converged"] is False

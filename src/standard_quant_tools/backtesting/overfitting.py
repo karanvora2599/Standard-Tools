@@ -57,9 +57,7 @@ from standard_quant_tools.backtest.robustness import (
     sharpe_standard_error_factor,
 )
 from standard_quant_tools.constants import EULER_MASCHERONI as _EULER_MASCHERONI
-from standard_quant_tools.constants import (
-    TRADING_DAYS_PER_YEAR,
-)
+from standard_quant_tools.constants import TRADING_DAYS_PER_YEAR
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.metrics.risk_metrics import annualized_sharpe
 

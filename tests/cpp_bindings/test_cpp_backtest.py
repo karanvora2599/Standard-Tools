@@ -29,9 +29,7 @@ except ImportError:
 requires_cpp = pytest.mark.skipif(not HAS_CPP, reason="_sqt_core not built")
 
 from standard_quant_tools.backtest.engine import HAS_CPP as ENGINE_HAS_CPP
-from standard_quant_tools.backtest.engine import (
-    run_strategy,
-)
+from standard_quant_tools.backtest.engine import run_strategy
 
 # ── Fixtures and helpers ──────────────────────────────────────────────────────
 

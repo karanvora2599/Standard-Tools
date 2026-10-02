@@ -38,9 +38,7 @@ from standard_quant_tools.analysis.cointegration import (
     kalman_hedge_ratio,
 )
 from standard_quant_tools.analysis.regression import HAS_CPP as REG_HAS_CPP
-from standard_quant_tools.analysis.regression import (
-    calculate_beta,
-)
+from standard_quant_tools.analysis.regression import calculate_beta
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 

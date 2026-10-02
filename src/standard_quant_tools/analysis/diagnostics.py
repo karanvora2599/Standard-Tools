@@ -54,9 +54,7 @@ from standard_quant_tools.error import ValidationError
 from standard_quant_tools.metrics.risk_metrics import (
     annualized_sharpe as _annualized_sharpe,
 )
-from standard_quant_tools.metrics.risk_metrics import (
-    has_no_dispersion,
-)
+from standard_quant_tools.metrics.risk_metrics import has_no_dispersion
 
 logger = logging.getLogger(__name__)
 

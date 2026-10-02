@@ -1,5 +1,21 @@
 # Changelog
 
+## A GARCH fit at its maximum is converged on every SciPy, and the formatters are pinned
+
+- **`converged` no longer depends on how the optimizer phrased its stop.**
+  L-BFGS-B ends with status 2, a line search that could not improve, when
+  it is at the maximum and its last evaluations agree to rounding. Some
+  SciPy builds stop that way on fits that others report as successful, so
+  the same GARCH fit was converged on one machine and "NOT CONVERGED: the
+  optimizer stopped without success" on another, with a negligible
+  gradient and identical parameters. A stop in the line search now counts
+  when the projected gradient is below the tolerance; an iteration limit
+  still never does, and a stall away from the maximum still names both
+  reasons.
+- **The lint job pins black 26.5.1 and isort 9.0.2.** It installed the
+  newest of each, so a formatter release failed CI on unchanged code; six
+  files are re-sorted for isort 9.
+
 ## CI is green again on Linux and Python 3.10, and a point-in-time join takes keys of any resolution
 
 The continuous-integration runs had failed since 2026-09-28, on Linux and
