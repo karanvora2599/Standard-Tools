@@ -471,11 +471,11 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
     # The scope keeps the checks (an object still has to pass once) and
     # drops the N-1 repeats -- measured at 12% of the build at 50 entities
     # and 18% at 100.
-    # Technical indicators for the whole universe in one native call, when
-    # every entity shares an index (see panel_features for why that guard
-    # is required rather than merely convenient). Returns {} when it does
-    # not apply, and the loop below then computes those features per entity
-    # exactly as before.
+    # Technical indicators in one native call per group of entities that
+    # share an index (see panel_features for why that guard is required
+    # rather than merely convenient). An entity no call served -- or every
+    # entity, when it returns {} -- is computed per entity by the loop
+    # below exactly as before.
     panel_outputs = compute_panel_features(
         spec.features, feature_defs, resolved_params, ohlcv_by_entity
     )
@@ -486,9 +486,10 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
             for fs, definition, params in zip(
                 spec.features, feature_defs, resolved_params
             ):
-                if fs.output_name in panel_outputs:
+                served = panel_outputs.get(fs.output_name)
+                if served is not None and symbol in served:
                     columns[fs.output_name] = _check_entity_output(
-                        panel_outputs[fs.output_name][symbol],
+                        served[symbol],
                         fs.output_name,
                         definition.id,
                         ohlcv,

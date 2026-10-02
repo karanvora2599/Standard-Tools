@@ -13,10 +13,17 @@ leakage discipline.
 """
 
 import inspect
-from typing import Any, Dict, List, Optional
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
+from sklearn.ensemble import (
+    GradientBoostingClassifier,
+    GradientBoostingRegressor,
+    RandomForestClassifier,
+    RandomForestRegressor,
+)
 
 from standard_quant_tools.error import ValidationError
 
@@ -288,6 +295,58 @@ def _calibration_importance_warning(
     ]
 
 
+#: Panel rows from which a `gradient_boosting` run is pointed at
+#: `hist_gradient_boosting`. See `_gradient_boosting_advice` for why here.
+_GRADIENT_BOOSTING_ADVICE_ROWS = 10_000
+
+
+def _gradient_boosting_advice(model_spec: ModelSpec, n_rows: int) -> List[str]:
+    """
+    Said once, at the top of a `gradient_boosting` run on a panel large
+    enough that the booster is where the run's time goes.
+
+    scikit-learn's GradientBoosting sorts every feature at every node of
+    every tree, on one core; HistGradientBoosting bins each feature once,
+    splits on the bins, uses every core, and from 10,000 rows stops early
+    by default. Measured on a 71,070-row, 12-feature synthetic panel on 16
+    logical cores (see the CHANGELOG entry of 2026-10-01): the walk-forward
+    experiment took 124 s under gradient_boosting (n_estimators=150,
+    max_depth=3) and 2.5 s under hist_gradient_boosting at its defaults,
+    about 50x; a single like-for-like fit, 150 trees of depth 3 with early
+    stopping off, was 128x. On live data of the same shape it measured
+    16x; the gap depends on the cores and on how soon early stopping ends
+    the fit, which is why the sentence says where its number came from.
+
+    WHY 10,000 ROWS. One gradient_boosting(150, depth 3) fit, against
+    hist_gradient_boosting at its defaults, by rows: 1,000 rows 0.34 s vs
+    0.21 s (1.6x); 3,000 rows 1.1 s vs 0.23 s (4.8x); 10,000 rows 4.1 s vs
+    0.26 s (15x); 20,000 rows 8.5 s vs 0.07 s, early stopping now on
+    (118x). Below 10,000 rows both fit in about a second and the gap is a
+    few times, so the sentence would be noise; from 10,000 rows a fit costs
+    seconds, an experiment makes one per fold plus the refit, and the gap
+    is an order of magnitude and widening.
+
+    Guidance, never a substitution: the two are different models -- binned
+    splits, a different default depth and stopping rule -- so which one to
+    fit is the caller's decision, and this run fits the one it was asked to.
+    """
+    if model_spec.estimator.type != "gradient_boosting":
+        return []
+    if n_rows < _GRADIENT_BOOSTING_ADVICE_ROWS:
+        return []
+    return [
+        f"gradient_boosting on a {n_rows:,}-row panel: scikit-learn's "
+        "exact-split booster sorts every feature at every node on one core, "
+        "and at this size it is where the run's time goes. "
+        "hist_gradient_boosting is its histogram-binned equivalent: on a "
+        "71,070-row synthetic panel the same walk-forward experiment ran "
+        "about 50x faster with it at its defaults than with gradient_boosting "
+        "(n_estimators=150, max_depth=3), on 16 logical cores. It is a "
+        "different model, so it was not substituted: this run fitted "
+        "gradient_boosting as specified."
+    ]
+
+
 def _instantiate(
     cls: Any, params: Dict[str, Any], random_seed: int, n_jobs: Optional[int] = None
 ) -> Any:
@@ -309,6 +368,108 @@ def _instantiate(
     ):
         kwargs["n_jobs"] = int(n_jobs)
     return cls(**kwargs)
+
+
+#: Estimators whose walk-forward folds may be fitted side by side. For
+#: these nothing a run records depends on what runs beside a fit:
+#: scikit-learn's gradient boosting is single-threaded and seeded per
+#: estimator, and a random forest builds its trees from seeds drawn up
+#: front. Their tree builder releases the GIL, which is what lets threads
+#: overlap at all (measured: threads 2.6x over one fold at a time for
+#: gradient boosting where processes managed 1.4x, the difference being
+#: process start-up and copying each fold's matrices).
+#:
+#: Every other estimator keeps its folds one at a time. Histogram
+#: boosting, LightGBM and XGBoost already spread one fit over every core,
+#: and some of their sums depend on the thread count; the linear models fit
+#: a fold in a fraction of a second through BLAS, whose reductions are not
+#: promised to be independent of the threads running beside them.
+_FOLD_PARALLEL_ESTIMATORS = frozenset(
+    {
+        GradientBoostingClassifier,
+        GradientBoostingRegressor,
+        RandomForestClassifier,
+        RandomForestRegressor,
+    }
+)
+
+
+def _fold_workers(model_spec: ModelSpec, estimator_cls: Any, n_folds: int) -> int:
+    """
+    How many walk-forward folds run side by side: up to
+    `budget.max_parallelism` for an estimator in `_FOLD_PARALLEL_ESTIMATORS`,
+    else 1, which is the sequential loop exactly as it always ran.
+
+    Folds beside each other share the budget: each fold's estimators get
+    n_jobs = max_parallelism // workers, so the threads in use never exceed
+    it, and with at least as many folds as the budget that is n_jobs=1.
+    Before, the budget reached only an estimator's own n_jobs, which a
+    gradient booster does not have: its folds ran one at a time on one
+    core whatever the budget said.
+
+    A random forest above n_jobs=1 adds its trees' predictions in whatever
+    order its own threads finish, so the last bits of its predictions were
+    never reproducible at a budget above 1 (measured: n_jobs=8 against
+    n_jobs=1, not bit-identical). Folds at n_jobs=1 add them in order, so
+    with at least as many folds as the budget a forest's numbers are now
+    exactly its max_parallelism=1 numbers. The full-panel refit still runs
+    alone, after the folds, at the whole budget.
+
+    Also 1 when the spec sets the estimator's `n_jobs` itself (the caller
+    chose that parallelism, and it would multiply with this one), and when
+    a hyperparameter search runs: the search already spends the budget
+    scoring its candidates side by side inside each fold.
+    """
+    budget = int(model_spec.budget.max_parallelism)
+    if budget <= 1 or n_folds < 2:
+        return 1
+    if estimator_cls not in _FOLD_PARALLEL_ESTIMATORS:
+        return 1
+    if "n_jobs" in model_spec.estimator.params or model_spec.search is not None:
+        return 1
+    return min(budget, n_folds)
+
+
+def _run_folds_side_by_side(
+    folds: List[Any],
+    prepare: Callable[[Any], "Dict[str, Any] | None"],
+    fit: Callable[[Dict[str, Any], int], Dict[str, Any]],
+    record: Callable[[Dict[str, Any], Dict[str, Any]], None],
+    workers: int,
+    n_jobs: int,
+) -> None:
+    """
+    The fold loop on `workers` threads, with the sequential loop's outcome.
+
+    Every fold is prepared first, in order, on this thread -- so the skips,
+    the purge count, the fold cache and every refusal before a fit happen
+    exactly as they do one fold at a time -- stopping at the first that
+    raises. The prepared folds are then fitted on the pool and recorded in
+    fold order, whatever order they finish in. The error raised is the one
+    the loop would have met first: a fit's, when a fold before the failed
+    preparation failed to fit, and otherwise the preparation's.
+    """
+    prepared: List[Dict[str, Any]] = []
+    failure: "Exception | None" = None
+    for fold in folds:
+        try:
+            ready = prepare(fold)
+        except Exception as exc:  # noqa: BLE001 - re-raised below, in fold order
+            failure = exc
+            break
+        if ready is not None:
+            prepared.append(ready)
+    pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="sqt-fold")
+    try:
+        futures = [pool.submit(fit, ready, n_jobs) for ready in prepared]
+        for ready, future in zip(prepared, futures):
+            record(ready, future.result())
+    finally:
+        # A fit that failed leaves the folds after it unrecorded, as the
+        # loop would; the ones not yet started are not started.
+        pool.shutdown(wait=True, cancel_futures=True)
+    if failure is not None:
+        raise failure
 
 
 def _validate_classification_target(panel: pd.DataFrame) -> None:
@@ -619,13 +780,15 @@ def _fit_quantile_models(
     params: Dict[str, Any],
     model_spec: ModelSpec,
     arrays: Any,
+    n_jobs: Optional[int] = None,
 ) -> Dict[float, Any]:
     """
     One estimator per requested quantile, fitted on the same rows and
     weights as the point estimator, with the registry's quantile parameter
     set and its fixed objective switched on. The point estimator is left
     exactly as it was: `prediction` is the base fit, and the quantiles
-    stand beside it.
+    stand beside it. `n_jobs` defaults to the budget's parallelism; a fold
+    fitted beside others passes its own share.
     """
     models: Dict[float, Any] = {}
     for q in model_spec.quantiles:
@@ -634,7 +797,7 @@ def _fit_quantile_models(
             estimator_cls,
             quantile_params,
             model_spec.random_seed,
-            n_jobs=model_spec.budget.max_parallelism,
+            n_jobs=model_spec.budget.max_parallelism if n_jobs is None else n_jobs,
         )
         _fit(model, arrays.X, arrays.y, arrays.sample_weight)
         models[float(q)] = model
@@ -646,6 +809,7 @@ def _conformal_radius(
     params: Dict[str, Any],
     model_spec: ModelSpec,
     arrays: Any,
+    n_jobs: Optional[int] = None,
 ) -> "tuple[float, int]":
     """
     The split-conformal radius for one training window: absolute
@@ -653,7 +817,8 @@ def _conformal_radius(
     under the embargo and the label purge, and their (1 - alpha) quantile.
     Returns (radius, number of residuals it was read from). The blocks are
     cut on the sample index the arrays carry, so they are the rows of `X`
-    whatever order the adapter put them in.
+    whatever order the adapter put them in. `n_jobs` as for
+    `_fit_quantile_models`.
     """
     intervals = model_spec.intervals
     assert intervals is not None
@@ -663,13 +828,15 @@ def _conformal_radius(
             "the adapter did not carry it."
         )
     weights = arrays.sample_weight
+    if n_jobs is None:
+        n_jobs = model_spec.budget.max_parallelism
 
     def fit_predict(train_mask, test_mask):
         model = _instantiate(
             estimator_cls,
             params,
             model_spec.random_seed,
-            n_jobs=model_spec.budget.max_parallelism,
+            n_jobs=n_jobs,
         )
         _fit(
             model,
@@ -804,6 +971,7 @@ def run_experiment(
         panel, dataset.get("target_id"), "run_model_experiment"
     )
     run_warnings.extend(purge_warnings)
+    run_warnings.extend(_gradient_boosting_advice(model_spec, len(panel)))
     feature_ids = dataset["feature_ids"]
     dates = pd.Index(sorted(panel["date"].unique()))
 
@@ -973,7 +1141,27 @@ def run_experiment(
             max_parallelism=model_spec.budget.max_parallelism,
         )
 
-    for fold in plan.folds:
+    # How many folds may be fitted side by side, and the n_jobs each fold's
+    # estimators then get -- see `_fold_workers`. One worker is the loop as
+    # it always ran, with the budget's n_jobs.
+    fold_workers = _fold_workers(model_spec, estimator_cls, len(plan.folds))
+    fold_n_jobs = int(model_spec.budget.max_parallelism) // fold_workers
+    # Folds prepared and not skipped: the number the next completed fold
+    # will carry. One at a time it is `len(fold_records)`; it is counted
+    # separately so that it is the same number when the fits run later.
+    n_ready = 0
+
+    # A fold runs in three steps. `_prepare_fold` takes it up to its fit on
+    # the calling thread, in fold order, so the skips, the purge count, the
+    # fold cache and the refusals happen exactly as they did in one loop.
+    # `_fit_fold` is the fit and everything read off it; it touches no
+    # state shared between folds, so it is the part that can run beside
+    # other folds. `_record_fold` appends the outcome, again in fold order,
+    # so nothing recorded depends on which fit finished first.
+    def _prepare_fold(fold: Any) -> "Dict[str, Any] | None":
+        """One fold up to its fit, or None when the fold is skipped (and
+        recorded in `skipped`)."""
+        nonlocal n_purged_total, model_columns, n_ready
         train_dates = dates[fold.train_positions]
         test_dates = dates[fold.test_positions]
         in_train = np.zeros(len(dates), dtype=bool)
@@ -1018,7 +1206,7 @@ def run_experiment(
                     ),
                 }
             )
-            continue
+            return None
 
         # ── What each feature IS in this fold, before anything imputes ────
         # A column that is missing in EVERY training row of a fold has no
@@ -1033,9 +1221,7 @@ def run_experiment(
             fold_missing = _training_missing_rates(
                 feature_matrix[train_mask], feature_ids
             )
-            _refuse_absent_features(
-                fold_missing, len(fold_records), test_dates, model_spec
-            )
+            _refuse_absent_features(fold_missing, n_ready, test_dates, model_spec)
 
         train_y = _labels(model_spec, train_df)
         test_y = _labels(model_spec, test_df)
@@ -1051,7 +1237,7 @@ def run_experiment(
                     "reason": "training window contained only one class",
                 }
             )
-            continue
+            return None
         # The survival analogue: a window in which every row was censored
         # has no observed event and therefore no ordering to learn.
         if model_spec.task == "survival" and train_y[:, 1].sum() == 0:
@@ -1061,7 +1247,7 @@ def run_experiment(
                     "reason": "training window contained no observed event",
                 }
             )
-            continue
+            return None
 
         # From the cache when a run over the same dataset and fold has
         # fitted this pipeline already -- exactly, for a column-wise
@@ -1114,8 +1300,32 @@ def run_experiment(
                 "summarized across folds; every registered step emits a "
                 "column set that depends only on its input columns."
             )
+        n_ready += 1
+        return {
+            "fold": fold,
+            "train_dates": train_dates,
+            "test_dates": test_dates,
+            "train_df": train_df,
+            "test_df": test_df,
+            "fold_missing": fold_missing,
+            "train_y": train_y,
+            "test_y": test_y,
+            "train_X": train_X,
+            "test_X": test_X,
+            "train_index": train_index,
+            "sample_weight": sample_weight,
+            "fold_columns": fold_columns,
+        }
+
+    def _fit_fold(prepared: Dict[str, Any], n_jobs: int) -> Dict[str, Any]:
+        """The fit of one prepared fold and everything read off it."""
+        fold = prepared["fold"]
+        train_df, test_df = prepared["train_df"], prepared["test_df"]
+        train_X, test_X = prepared["train_X"], prepared["test_X"]
+        train_y, test_y = prepared["train_y"], prepared["test_y"]
 
         fold_params = model_spec.estimator.params
+        search_report = None
         if model_spec.search is not None:
             # The inner folds are a function of this outer fold and the
             # search's shape, not of the candidate, so their matrices are
@@ -1125,16 +1335,19 @@ def run_experiment(
                 train_df,
                 prefix=f"{fold.preprocessing_hash}/inner/{model_spec.search.inner_splits}/",
             )
-            search_reports.append(search_report)
 
         estimator = _instantiate(
             estimator_cls,
             fold_params,
             model_spec.random_seed,
-            n_jobs=model_spec.budget.max_parallelism,
+            n_jobs=n_jobs,
         )
         arrays = adapter.prepare(
-            model_spec, train_index, train_X, train_y, sample_weight
+            model_spec,
+            prepared["train_index"],
+            train_X,
+            train_y,
+            prepared["sample_weight"],
         )
         # Calibration is fitted INSIDE the training window, on folds held out
         # from it, so the map never sees a label the estimator memorized --
@@ -1161,14 +1374,14 @@ def run_experiment(
         quantile_values: Dict[float, np.ndarray] = {}
         if quantile is not None:
             for q, model in _fit_quantile_models(
-                estimator_cls, quantile, fold_params, model_spec, arrays
+                estimator_cls, quantile, fold_params, model_spec, arrays, n_jobs=n_jobs
             ).items():
                 quantile_values[q] = np.asarray(model.predict(test_X.to_numpy()))
                 distribution_columns[quantile_column(q)] = quantile_values[q]
         lower = upper = None
         if model_spec.intervals is not None:
             radius, _n_calibration = _conformal_radius(
-                estimator_cls, fold_params, model_spec, arrays
+                estimator_cls, fold_params, model_spec, arrays, n_jobs=n_jobs
             )
             lower = np.asarray(prediction_values, dtype=float) - radius
             upper = np.asarray(prediction_values, dtype=float) + radius
@@ -1188,11 +1401,28 @@ def run_experiment(
                     ),
                 )
             )
+        return {
+            "search_report": search_report,
+            "metrics": metrics,
+            "prediction_values": prediction_values,
+            "fold_ic": fold_ic,
+            "distribution_columns": distribution_columns,
+            "importance": fold_feature_importance(estimator, prepared["fold_columns"]),
+        }
+
+    def _record_fold(prepared: Dict[str, Any], outcome: Dict[str, Any]) -> None:
+        """Append one fitted fold's outcome to the run's records."""
+        fold = prepared["fold"]
+        train_dates, test_dates = prepared["train_dates"], prepared["test_dates"]
+        train_df, test_df = prepared["train_df"], prepared["test_df"]
+        metrics = outcome["metrics"]
+        if outcome["search_report"] is not None:
+            search_reports.append(outcome["search_report"])
         # Every fold's per-date IC dates are kept so the OOS dispersion
         # statistics can be computed once over the pooled series -- see
         # aggregate_cross_sectional_ic for why averaging per-fold std/ICIR
         # is a different quantity.
-        for ic_key, ic_values in fold_ic.items():
+        for ic_key, ic_values in outcome["fold_ic"].items():
             pooled_ic.setdefault(ic_key, []).append(ic_values)
         # Per-fold detail is retained, not only its contribution to the
         # average: one averaged number cannot show performance decay over
@@ -1230,7 +1460,7 @@ def run_experiment(
                 "metrics": metrics,
                 # Each feature's missing rate in the rows this fold trained
                 # on; None when the panel carries no holes at all.
-                "missing_rate_train": fold_missing,
+                "missing_rate_train": prepared["fold_missing"],
                 # What determined this fold's estimator: dataset, rows,
                 # pipeline, estimator, parameters, seed. Two runs that
                 # agree here fitted the same thing.
@@ -1243,13 +1473,13 @@ def run_experiment(
         fold_weights.append(float(len(test_df)))
         tested_dates[fold.test_positions] = True
         fold_metrics.append(metrics)
-        fold_importance.append(fold_feature_importance(estimator, fold_columns))
+        fold_importance.append(outcome["importance"])
         oos_frame = pd.DataFrame(
             {
                 "date": test_df["date"].to_numpy(),
                 "entity": test_df["entity"].to_numpy(),
-                "prediction": prediction_values,
-                **distribution_columns,
+                "prediction": outcome["prediction_values"],
+                **outcome["distribution_columns"],
             }
         )
         if is_cpcv:
@@ -1260,6 +1490,21 @@ def run_experiment(
             # prediction per row refuse a cpcv model by name.
             oos_frame["path"] = len(fold_records) - 1
         oos_prediction_frames.append(oos_frame)
+
+    if fold_workers == 1:
+        for fold in plan.folds:
+            prepared = _prepare_fold(fold)
+            if prepared is not None:
+                _record_fold(prepared, _fit_fold(prepared, fold_n_jobs))
+    else:
+        _run_folds_side_by_side(
+            plan.folds,
+            _prepare_fold,
+            _fit_fold,
+            _record_fold,
+            fold_workers,
+            fold_n_jobs,
+        )
 
     if not fold_metrics:
         raise ValidationError(

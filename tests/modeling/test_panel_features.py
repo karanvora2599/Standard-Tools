@@ -11,14 +11,18 @@ invalidate every prior record for no reason.
 The guard is the interesting half. technical_indicators_panel stacks the
 universe onto the INTERSECTION of every ticker's bars, and the indicators
 involved are path-dependent (Wilder smoothing, EMAs), so a truncated
-history changes values rather than merely coverage. On a ragged universe
-the fast path must therefore decline to engage at all.
+history changes values rather than merely coverage. A panel call may
+therefore only ever stack entities whose bar indices are identical. On a
+ragged universe the entities that share an index are still served, group
+by group, and an entity whose history matches no other is left to the
+per-entity loop -- one ragged entity used to send the whole universe there.
 """
 
 import numpy as np
 import pandas as pd
 import pytest
 
+from standard_quant_tools.indicators.panel import HAS_CPP
 from standard_quant_tools.modeling.dataset import builder as builder_module
 from standard_quant_tools.modeling.dataset.builder import build_dataset
 from standard_quant_tools.modeling.dataset.panel_features import (
@@ -158,12 +162,13 @@ class TestPanelFastPathIsExact:
 
 
 class TestPanelFastPathGuard:
-    def test_declines_on_a_ragged_universe(self, monkeypatch):
+    def test_never_stacks_a_ragged_entity(self, monkeypatch):
         """
         A late-listing entity makes the panel intersection shorter than
         some entities' own history. Because the indicators are
         path-dependent, computing on the truncated index would change
-        values — so the fast path must decline entirely.
+        values -- so the late entity must not be stacked, while the two
+        entities that share an index still are.
         """
 
         def fetch(symbol):
@@ -182,12 +187,17 @@ class TestPanelFastPathGuard:
 
         def spy(*args, **kwargs):
             out = real(*args, **kwargs)
-            calls["n_features"] = len(out)
+            calls["served"] = {name: sorted(by) for name, by in out.items()}
             return out
 
         monkeypatch.setattr(builder_module, "compute_panel_features", spy)
-        build_dataset(spec)
-        assert calls["n_features"] == 0
+        fast = build_dataset(spec)
+        if HAS_CPP:
+            assert len(calls["served"]) == len(PANEL_FEATURE_IDS)
+            assert all(s == ["AAA", "BBB"] for s in calls["served"].values())
+        else:
+            assert calls["served"] == {}
+        _assert_identical(fast, _build_without_fast_path(spec, monkeypatch))
 
     def test_declines_for_a_single_entity(self, patched_multi_factory):
         """Stacking a one-ticker 'panel' costs more than it saves."""

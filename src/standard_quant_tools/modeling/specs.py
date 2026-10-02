@@ -1338,11 +1338,15 @@ class ComputeBudgetSpec(BaseModel):
         description=(
             "Threads that score grid and random search candidates side by "
             "side, and the n_jobs handed to any estimator whose constructor "
-            "accepts it and whose params do not set it. 1 keeps every fit "
-            "sequential. The result does not depend on it: candidates keep "
-            "their spec order whatever order they finish in, and the TPE "
-            "search stays sequential because a parallel study changes which "
-            "trials the sampler has seen."
+            "accepts it and whose params do not set it. Without a search, "
+            "gradient_boosting and random_forest also fit their walk-forward "
+            "folds side by side on up to this many threads, each fold's "
+            "estimator then getting this value divided by the folds in "
+            "flight, so the total stays within it. 1 keeps every fit "
+            "sequential. The result does not depend on it: candidates and "
+            "folds keep their spec order whatever order they finish in, and "
+            "the TPE search stays sequential because a parallel study "
+            "changes which trials the sampler has seen."
         ),
     )
 

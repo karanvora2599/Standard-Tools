@@ -2336,7 +2336,7 @@ library.
 `budget.max_parallelism` was not built with the rest of the budget,
 because nothing in the engine ran in parallel and no registered
 estimator read `n_jobs`: the knob would have controlled nothing. It
-controls two things now:
+controls three things now:
 
 - **Grid and random search candidates are scored on threads.** The first
   candidate runs alone, so each inner fold's preprocessing is fitted once
@@ -2346,6 +2346,16 @@ controls two things now:
 - **Estimators that accept `n_jobs` receive it** — a random forest, a
   booster — unless the spec's params set it themselves. An estimator
   whose constructor has no `n_jobs` is built as before.
+- **Walk-forward folds fit side by side.** Without a search,
+  `gradient_boosting` and `random_forest` fit their folds on up to
+  `max_parallelism` threads, each fold's estimator getting
+  `max_parallelism // folds-in-flight` jobs so the total never exceeds the
+  budget. Folds are prepared and recorded in fold order whatever order the
+  fits finish in, and the full-panel refit runs alone at the whole budget.
+  A 71,070-row `gradient_boosting(150, depth 3)` experiment with 14 folds
+  ran 2.1× faster at 4 or 8 than at 1, with every recorded output
+  identical. Other estimators already use every core, or have sums that
+  depend on the thread count, and keep the sequential loop.
 
 The result does not depend on it: the same spec at 1 and at 4 threads
 selects the same parameters with the same candidate scores, which is the

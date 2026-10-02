@@ -42,6 +42,8 @@ from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
 import pandas as pd
+from scipy.sparse import csr_matrix
+from scipy.sparse.csgraph import connected_components
 
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.modeling.validation.metrics import (
@@ -467,9 +469,10 @@ def redundancy_report(
                         the design is degenerate at all
 
     Clusters are formed by transitive closure over |correlation| above the
-    threshold, which is deliberately the crude choice: it needs no scipy, it
-    is easy to explain, and at a threshold this high the "chaining" that would
-    make single-linkage clustering misleading is not a practical concern.
+    threshold, which is deliberately the crude choice: it needs no linkage
+    or distance model, it is easy to explain, and at a threshold this high
+    the "chaining" that would make single-linkage clustering misleading is
+    not a practical concern.
     """
     _named_once(panel, feature_ids, "redundancy_report")
     if len(feature_ids) < 2:
@@ -527,9 +530,29 @@ def redundancy_report(
 
 
 def _frame_to_nested(frame: pd.DataFrame) -> Dict[str, Dict[str, float]]:
+    """
+    {row: {column: value}} for a JSON reader.
+
+    Read off one `to_numpy().tolist()` rather than one `.loc` per cell,
+    which was quadratic in label lookups (see the CHANGELOG entry of
+    2026-10-01). Same keys in the same order, and the same values: a float
+    out of `tolist()` is the float `.loc` returned, and `_safe` maps both
+    alike. Labels are unique here -- `redundancy_report` refuses a repeated
+    feature before the matrix exists.
+    """
+    columns = [str(col) for col in frame.columns]
+    matrix = frame.to_numpy()
+    if matrix.dtype.kind == "f":
+        # `_safe` on every cell at once: a finite float is itself, anything
+        # else is NaN. A correlation matrix always takes this path.
+        rows = np.where(np.isfinite(matrix), matrix, np.nan).tolist()
+        return {
+            str(row): dict(zip(columns, values))
+            for row, values in zip(frame.index, rows)
+        }
     return {
-        str(row): {str(col): _safe(frame.loc[row, col]) for col in frame.columns}
-        for row in frame.index
+        str(row): {col: _safe(value) for col, value in zip(columns, values)}
+        for row, values in zip(frame.index, matrix.tolist())
     }
 
 
@@ -537,13 +560,19 @@ def _correlation_clusters(
     correlation: pd.DataFrame, threshold: float
 ) -> List[List[str]]:
     """
-    Transitive closure over |corr| >= threshold, via union-find.
+    Transitive closure over |corr| >= threshold: the connected components
+    of the graph whose edges are the above-threshold pairs.
 
-    The union-find is keyed by name, so every name must pick out one row
-    and one column. `redundancy_report` refuses a repeat before building
-    the matrix; this guard keeps the rule for any other caller, rather
-    than letting `correlation.loc[a, b]` return a frame where a number is
-    compared.
+    Each pair (i, j) with i before j in column order is read once, off the
+    upper triangle, exactly the pairs the per-pair union-find this replaced
+    visited -- it made one `.loc` lookup per pair, which was quadratic in
+    pandas calls (see the CHANGELOG entry of 2026-10-01). A missing (NaN)
+    correlation is no edge. Each cluster lists its members in column order,
+    and clusters are ordered largest first, ties by first member's name.
+
+    Names must pick out one row and one column each. `redundancy_report`
+    refuses a repeat before building the matrix; this guard keeps the rule
+    for any other caller.
     """
     if correlation.columns.has_duplicates or correlation.index.has_duplicates:
         repeated = sorted(
@@ -555,28 +584,18 @@ def _correlation_clusters(
             "than once. Each feature is one column of the panel; list it once."
         )
     names = list(correlation.columns)
-    parent = {name: name for name in names}
+    if len(names) < 2:
+        return [[name] for name in names]
+    # Rows in column order, so entry (i, j) is the pair (names[i], names[j])
+    # whatever order the index is in. NaN compares False, so it is no edge.
+    matrix = correlation.loc[names, names].to_numpy(dtype=float)
+    with np.errstate(invalid="ignore"):
+        edges = np.triu(np.abs(matrix) >= threshold, k=1)
+    _, labels = connected_components(csr_matrix(edges), directed=False)
 
-    def find(name: str) -> str:
-        while parent[name] != name:
-            parent[name] = parent[parent[name]]
-            name = parent[name]
-        return name
-
-    def union(a: str, b: str) -> None:
-        root_a, root_b = find(a), find(b)
-        if root_a != root_b:
-            parent[root_b] = root_a
-
-    for i, left in enumerate(names):
-        for right in names[i + 1 :]:
-            value = correlation.loc[left, right]
-            if pd.notna(value) and abs(float(value)) >= threshold:
-                union(left, right)
-
-    groups: Dict[str, List[str]] = {}
-    for name in names:
-        groups.setdefault(find(name), []).append(name)
+    groups: Dict[int, List[str]] = {}
+    for name, label in zip(names, labels.tolist()):
+        groups.setdefault(label, []).append(name)
     # Largest first, so the thing an agent should look at is on top.
     return sorted(groups.values(), key=lambda g: (-len(g), g[0]))
 

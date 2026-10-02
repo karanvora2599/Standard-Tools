@@ -24,11 +24,21 @@ entity over its own full history:
     not merely its coverage
 
 Both of those would move numbers, quietly, on a change whose entire purpose
-is speed. So the fast path is taken only when every entity's index is
+is speed. So a panel call only ever stacks entities whose indices are
 IDENTICAL, which makes the intersection a no-op and the two paths exactly
-equivalent. A universe with mid-sample IPOs, delistings, or entities on
-different holiday calendars simply falls back to the per-entity loop, which
-is correct there and always was.
+equivalent.
+
+The universe is therefore split into groups of entities that share one
+index, and each group of two or more is served by its own panel call. An
+entity whose history matches no other -- a mid-sample IPO, a delisting, a
+different holiday calendar -- is left to the per-entity loop, which is
+correct for it and always was. One such entity used to send the WHOLE
+universe to that loop (see the CHANGELOG entry of 2026-10-01); now it costs
+only its own share. Padding a different history with NaN to join a larger
+panel is not done: the kernels treat a NaN inside a window as a gap, so an
+entity on another holiday calendar would come out different from its own
+loop, and grouping is exact by construction without having to prove the
+leading- and trailing-pad cases indicator by indicator.
 
 The transforms for the derived features (atr_pct, bollinger_pct_b) are
 imported from features/risk.py rather than reimplemented here, so there is
@@ -42,6 +52,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import pandas as pd
 
+from standard_quant_tools.error import ValidationError
 from standard_quant_tools.indicators.panel import HAS_CPP, technical_indicators_panel
 
 from ..features.risk import atr_pct_from_atr, pct_b_from_bands
@@ -72,15 +83,31 @@ _PANEL_FEATURES: Dict[str, Tuple[str, Dict[str, str], Optional[str]]] = {
 _REQUIRED_COLUMNS = ("High", "Low", "Close")
 
 
-def _indices_identical(ohlcv_by_entity: Mapping[str, pd.DataFrame]) -> bool:
-    """True when every entity carries exactly the same bar index."""
-    reference: Optional[pd.Index] = None
-    for frame in ohlcv_by_entity.values():
-        if reference is None:
-            reference = frame.index
-        elif not reference.equals(frame.index):
-            return False
-    return reference is not None
+def _aligned_groups(ohlcv_by_entity: Mapping[str, pd.DataFrame]) -> List[List[str]]:
+    """
+    The entities, grouped by identical bar index.
+
+    Groups come in order of first appearance and members in universe order,
+    so the result is a function of the mapping alone. Candidates are
+    bucketed on (length, first bar, last bar) before the full `equals`
+    comparison, which keeps a universe of all-different histories linear
+    rather than comparing every pair.
+    """
+    buckets: Dict[Tuple[Any, ...], List[Tuple[pd.Index, List[str]]]] = {}
+    groups: List[List[str]] = []
+    for symbol, frame in ohlcv_by_entity.items():
+        index = frame.index
+        key = (len(index), index[0], index[-1]) if len(index) else ()
+        candidates = buckets.setdefault(key, [])
+        for reference, members in candidates:
+            if reference.equals(index):
+                members.append(symbol)
+                break
+        else:
+            members = [symbol]
+            candidates.append((index, members))
+            groups.append(members)
+    return groups
 
 
 def _extract(
@@ -126,6 +153,35 @@ def _batch(requests: List[Tuple[str, str, Dict[str, Any], Optional[str]]]):
     return batches
 
 
+def _serve_group(
+    group: Mapping[str, pd.DataFrame],
+    batches: List[List[Tuple[str, str, Dict[str, Any], Optional[str]]]],
+    feature_ids: Mapping[str, str],
+) -> Dict[str, Dict[str, pd.Series]]:
+    """Every batch of requests for one group of identically indexed
+    entities: {output_name: {symbol: Series}}."""
+    out: Dict[str, Dict[str, pd.Series]] = {}
+    for batch in batches:
+        kwargs: Dict[str, Any] = {}
+        for _, _, batch_kwargs, _ in batch:
+            kwargs.update(batch_kwargs)
+        indicators = [indicator for _, indicator, _, _ in batch]
+        panel = technical_indicators_panel(group, indicators=indicators, **kwargs)
+        for output_name, indicator, _, field in batch:
+            frame = panel[indicator]
+            out[output_name] = {
+                symbol: _extract(
+                    feature_ids[output_name],
+                    field,
+                    frame,
+                    symbol,
+                    entity["Close"],
+                )
+                for symbol, entity in group.items()
+            }
+    return out
+
+
 def compute_panel_features(
     feature_specs: Sequence[Any],
     feature_defs: Sequence[Any],
@@ -136,9 +192,15 @@ def compute_panel_features(
     Compute every panel-eligible feature for the whole universe at once.
 
     Returns {output_name: {symbol: Series}} covering only the features that
-    were eligible; the caller computes the rest per entity as before. An
-    empty dict means the fast path did not apply, which is a normal outcome
-    and not an error.
+    were eligible, and within each only the entities a panel call served;
+    the caller computes everything else per entity as before. An empty dict
+    means the fast path did not apply, which is a normal outcome and not an
+    error.
+
+    Entities are served in groups that share an identical bar index (see
+    the module docstring for why nothing looser is exact). An entity in no
+    group of two or more, or one missing a column the stacker needs, is
+    absent from the result and falls to the per-entity loop.
     """
     if not HAS_CPP:
         # The pure-Python panel fallback loops per ticker anyway, so there
@@ -163,52 +225,60 @@ def compute_panel_features(
 
     if not requests:
         return {}
-    if not _indices_identical(ohlcv_by_entity):
+    # The panel stacker needs High/Low/Close for every ticker it is handed,
+    # even when the requested indicator only reads Close, so an entity
+    # without them is not stacked at all; nor is one with no bars, which
+    # the stacker refuses (build_dataset never gets that far with one).
+    stackable = {
+        symbol: frame
+        for symbol, frame in ohlcv_by_entity.items()
+        if len(frame.index)
+        and all(column in frame.columns for column in _REQUIRED_COLUMNS)
+    }
+    groups = [members for members in _aligned_groups(stackable) if len(members) >= 2]
+    if not groups:
         logger.debug(
-            "[modeling] panel feature path skipped: entity indices differ "
-            "(ragged history), falling back to the per-entity loop"
+            "[modeling] panel feature path skipped: no two entities share a "
+            "bar index, falling back to the per-entity loop"
         )
-        return {}
-    if any(
-        column not in frame.columns
-        for frame in ohlcv_by_entity.values()
-        for column in _REQUIRED_COLUMNS
-    ):
-        # The panel stacker needs High/Low/Close for every ticker even when
-        # the requested indicator only reads Close.
         return {}
 
     feature_ids = {
         fs.output_name: definition.id
         for fs, definition in zip(feature_specs, feature_defs)
     }
-    symbols = list(ohlcv_by_entity)
+    batches = _batch(requests)
     out: Dict[str, Dict[str, pd.Series]] = {}
-    for batch in _batch(requests):
-        kwargs: Dict[str, Any] = {}
-        for _, _, batch_kwargs, _ in batch:
-            kwargs.update(batch_kwargs)
-        indicators = [indicator for _, indicator, _, _ in batch]
-        panel = technical_indicators_panel(
-            ohlcv_by_entity, indicators=indicators, **kwargs
-        )
-        for output_name, indicator, _, field in batch:
-            frame = panel[indicator]
-            out[output_name] = {
-                symbol: _extract(
-                    feature_ids[output_name],
-                    field,
-                    frame,
-                    symbol,
-                    ohlcv_by_entity[symbol]["Close"],
-                )
-                for symbol in symbols
-            }
+    n_served = 0
+    for members in groups:
+        group = {symbol: stackable[symbol] for symbol in members}
+        try:
+            served = _serve_group(group, batches, feature_ids)
+        except ValidationError:
+            # A refusal from the panel -- an infinity in a stacked column,
+            # say -- is what a universe stacked WHOLE has always met, so it
+            # stands. A group that is only part of the universe used to be
+            # computed by the per-entity loop, so it is handed back to it,
+            # and the loop answers or refuses exactly as it did before.
+            if len(members) == len(ohlcv_by_entity):
+                raise
+            logger.debug(
+                "[modeling] panel feature path declined a group of %d "
+                "entities; computing them per entity",
+                len(members),
+            )
+            continue
+        for output_name, by_symbol in served.items():
+            out.setdefault(output_name, {}).update(by_symbol)
+        n_served += len(members)
     logger.debug(
-        "[modeling] panel feature path: %d feature(s) over %d entities in "
-        "%d native call(s)",
+        "[modeling] panel feature path: %d feature(s) over %d of %d entities "
+        "in %d group(s), %d native call(s); the other %d computed per entity",
         len(out),
-        len(symbols),
-        len(_batch(requests)),
+        n_served,
+        len(ohlcv_by_entity),
+        len(groups),
+        len(groups) * len(batches),
+        len(ohlcv_by_entity) - n_served,
     )
     return out

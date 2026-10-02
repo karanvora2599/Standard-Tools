@@ -1,5 +1,33 @@
 # Changelog
 
+## A ragged universe keeps the fast path, and walk-forward folds share the budget
+
+- **One ragged history no longer sends every entity to the per-entity
+  loop.** `build_dataset` groups the universe by identical bar index and
+  serves each group of two or more with one panel call; only an entity
+  whose index no other shares (a late listing, a delisting, another
+  calendar) is computed alone. On 140 symbols with 18 ragged the feature
+  step is 1.28× faster. Features and the dataset hash are bit-identical,
+  and an input the loop refused is refused with the same error.
+- **Walk-forward folds fit side by side within `budget.max_parallelism`.**
+  Without a search, `gradient_boosting` and `random_forest` fit their folds
+  on up to `max_parallelism` threads, each fold's estimator getting
+  `max_parallelism // folds-in-flight` jobs so the total never exceeds the
+  budget, and record them in fold order whatever order they finish in. A
+  71,070-row `gradient_boosting(150, depth 3)` experiment with 14 folds
+  runs 2.1× faster at 4 or 8, with every recorded output identical to the
+  run at 1. A random forest with at least as many folds as its budget now
+  reproduces its `max_parallelism=1` numbers exactly; at `n_jobs` above 1
+  its last bits used to vary from run to run. The default of 1 is unchanged.
+- **`gradient_boosting` on a panel of 10,000 rows or more says so in
+  `warnings`,** naming `hist_gradient_boosting`, the histogram-binned
+  equivalent, which ran the same 71,070-row experiment about 50× faster at
+  its defaults. The estimator is never substituted.
+- **The redundancy report's clusters and matrices are read in one pass.**
+  Clustering uses connected components and the nested matrices one
+  `tolist()`: 198× and 132× faster at 256 features, with the clusters,
+  their order and every value unchanged.
+
 ## A frame nobody records is not hashed, a Databento request can be refused before it is sent, and a screen stays in one process
 
 Three costs in the data layer were paid for nothing. Every provider hashed
