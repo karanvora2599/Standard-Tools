@@ -1,5 +1,54 @@
 # Changelog
 
+## The convex mean-variance portfolios are solved exactly, and say so
+
+- **`mean_variance_optimize` solves min_volatility, target_return and
+  long-only max_sharpe exactly.** These are convex quadratic programmes;
+  max_sharpe becomes one with y = w / ((μ − rf)'w) and w = y / 1'y. SLSQP
+  stopped short of their optima: against the certified answers on 240
+  random problems its weights were off by up to 1.6e-5 (min_volatility),
+  7e-6 (target_return) and 4e-6 (max_sharpe), and on 235 zero-drift noise
+  series max_sharpe ran 9 s and ended with status 8 within 2e-9 of the
+  optimum. An active-set method now solves them. Each pass fixes the
+  weights it judges to be at a bound, solves the KKT system on the rest with
+  one linear solve, and corrects the guess; when a pass changes nothing, the
+  answer is the optimum to rounding. At 235 assets the solve takes 2–6 ms
+  where SLSQP took 0.9–14 s. Weights move once, by at most 1.6e-5, toward
+  the optimum. Once SLSQP's own constraint residuals are charged at the
+  shadow prices, no objective got worse by more than 4e-15 relative.
+- **Each answer carries its optimality certificate.**
+  `solver["certificate"]` holds the KKT residuals of the returned weights
+  (stationarity, dual infeasibility, equality residual, bound violation),
+  estimated from the weights alone. `solver["certified"]` is true when all
+  four are at or under 1e-12, and `solver["method"]` is `"active_set"`. The
+  agent tool's `SolverReport` carries both, plus `fallback`.
+- **Capped and shorting max_sharpe still run SLSQP, then are solved exactly
+  on its active set.** That certified 150 of 150 random problems.
+  target_volatility is SLSQP's alone. An infeasible target_return still
+  comes back `converged=False` from SLSQP, now with the attainable range
+  named in the warning.
+- **When the fast method fails, a fallback chain takes over, and the result
+  says so.** The fast method can cycle, or reach a singular system, on
+  capped or shorting targets near the top of the attainable range (112 of
+  3,600 random problems). A primal active-set method from a feasible point
+  then solves it: all 112, in a median 0.7 ms. Beyond that, SLSQP runs as
+  before and the fast method restarts from its answer. As a last resort,
+  SLSQP's own answer comes back with `certified: false` and a warning
+  carrying its residuals. `solver["fallback"]` says which stage stopped and
+  why. Stages that reach the same active set return the same bits.
+- **A solver that stops early says what happened.** SLSQP's status 8 was
+  logged as weights that "may violate the sum-to-1 constraint"; they met it
+  to 2e-11. Nothing reached `warnings`, and the agent tool added
+  "constraints may be infeasible". `warnings` now names the solver, its
+  status and message, the residual against each requested constraint, and
+  the KKT residuals where they apply.
+- **The same covariance reports the same `condition_number` on every
+  machine.** The exact solver's linear algebra, the rank check, and the
+  condition number the portfolio tools report for mean-variance, risk parity
+  and Black-Litterman alike run on one BLAS thread. At 235 assets the
+  condition number used to change in the last bits with the number of
+  threads, and the two decompositions now take about half as long.
+
 ## The parallel kernels decide on serial time, a selection of greeks computes only itself, and no native unit fuses a multiply-add
 
 - **A region goes parallel when its work would take 150 µs on one thread.**

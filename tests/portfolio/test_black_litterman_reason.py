@@ -304,17 +304,26 @@ class TestSolverReport:
     def test_a_feasible_long_only_target_return_reports_a_successful_solve(
         self, provider
     ):
+        """A long-only target_return is a convex quadratic programme, solved
+        exactly by the active-set method rather than by SLSQP since the
+        CHANGELOG entry of 2026-10-02. The report names that method and
+        carries the KKT certificate. No objective is evaluated, so there is
+        no evaluation count."""
         target = self._feasible_target()
         result = _optimize(
             method="target_return", target_return=target, allow_short=False
         )
         assert result.converged is True
         assert result.solver is not None
-        assert result.solver.method == "SLSQP"
+        assert result.solver.method == "active_set"
         assert result.solver.iterations >= 1
         assert result.solver.status == 0
         assert math.isfinite(result.solver.objective)
-        assert result.solver.n_function_evals >= 1
+        assert result.solver.n_function_evals is None
+        assert result.solver.certified is True
+        certificate = result.solver.certificate
+        assert certificate["stationarity"] <= certificate["tolerance"]
+        assert result.solver.fallback is None
         assert result.expected_return == pytest.approx(target, abs=1e-4)
 
     def test_the_reported_objective_is_the_variance_at_the_returned_weights(

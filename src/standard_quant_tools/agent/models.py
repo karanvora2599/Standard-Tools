@@ -630,15 +630,23 @@ class SolverReport(BaseModel):
 
     method: str = Field(
         ...,
-        description="'SLSQP' for the constrained path, or 'closed_form' for "
-        "the unconstrained analytic solution, which runs no iterations.",
+        description="'active_set' for an exact, certified solve: "
+        "min_volatility, target_return and long-only max_sharpe without a "
+        "binding cap from a cold start, and capped or shorting max_sharpe "
+        "from SLSQP's answer. 'SLSQP' for target_volatility, an infeasible "
+        "target, and an answer the exact solve could not certify. "
+        "'closed_form' for the unconstrained analytic solution, which runs "
+        "no iterations.",
     )
     iterations: int = Field(
-        0, description="Major iterations. 0 on the closed-form path."
+        0,
+        description="Major iterations; active-set passes (one linear solve "
+        "each) for 'active_set'. 0 on the closed-form path.",
     )
     status: Optional[int] = Field(
         None,
-        description="The solver's own exit code: 0 is success. Null on the "
+        description="The solver's own exit code: 0 is success (always 0 for "
+        "'active_set', which only reports a certified answer). Null on the "
         "closed-form path and on an older scipy that does not report one.",
     )
     message: Optional[str] = Field(None, description="The solver's exit message.")
@@ -658,6 +666,32 @@ class SolverReport(BaseModel):
         "reports them: the shadow price of each constraint, so a binding "
         "one is visible instead of being inferred from the weights. Null on "
         "the closed-form path and on a scipy too old to return them.",
+    )
+    certified: Optional[bool] = Field(
+        None,
+        description="True when `certificate` shows the weights are the "
+        "optimum of the problem asked, to its tolerance. False when a "
+        "certificate was computed and does not show that: an SLSQP answer "
+        "the exact solve could not certify, whose residuals say how near the "
+        "optimum it is. Null where no certificate applies: the closed form, "
+        "target_volatility, and an infeasible target.",
+    )
+    certificate: Optional[Dict[str, float]] = Field(
+        None,
+        description="The KKT residuals behind `certified`, estimated from the "
+        "weights alone: 'stationarity' (largest gradient residual over the "
+        "weights strictly inside their bounds) and 'dual_infeasibility' "
+        "(largest wrong-signed multiplier on a weight at a bound), both "
+        "relative to the size of the terms they are residuals of; "
+        "'equality_residual' (largest relative miss of sum-to-1 and of a "
+        "target_return); 'bound_violation' (largest distance outside the "
+        "bounds); and 'tolerance', which all four must be at or under.",
+    )
+    fallback: Optional[str] = Field(
+        None,
+        description="Why the exact solve's cold start did not produce the "
+        "answer, when it did not: SLSQP then supplied a starting point, and "
+        "`certified` says whether the exact solve from it succeeded.",
     )
 
 

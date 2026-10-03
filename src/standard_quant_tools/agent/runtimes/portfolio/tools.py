@@ -114,6 +114,7 @@ from standard_quant_tools.metrics.risk_metrics import (
 )
 from standard_quant_tools.portfolio.optimize import (
     _check_covariance_estimable,
+    _condition_number,
     _conditioning_warnings,
     _small_sample_warnings,
     annualized_mean_cov,
@@ -190,7 +191,9 @@ def run_portfolio_optimization(
             if input_data.risk_budget is not None
             else None
         )
-        condition_number = float(np.linalg.cond(cov))
+        # On one BLAS thread, like mean-variance's, so it is the same number
+        # on any machine.
+        condition_number = _condition_number(cov)
         rp = risk_parity_weights(cov, risk_budget=budget)
         if not rp["converged"]:
             warnings.append(
@@ -283,7 +286,7 @@ def run_portfolio_optimization(
             expected_volatility=round(exp_vol, 6),
             sharpe_ratio=round(sharpe, 4),
             converged=True,
-            condition_number=float(np.linalg.cond(cov)),
+            condition_number=_condition_number(cov),
             implied_equilibrium_returns={
                 t: round(float(v), 6) for t, v in zip(solved_tickers, pi)
             },
@@ -314,9 +317,17 @@ def run_portfolio_optimization(
     # exactly what an agent consuming this needs told.
     warnings.extend(result.get("warnings", []))
     if not result["converged"]:
+        # This used to say "constraints may be infeasible", a guess. The
+        # commonest stop, SLSQP's status 8 (a line search that stalled), was
+        # measured within 2e-9 of the optimum with every constraint met. The
+        # library's warnings above say what happened and give the constraint
+        # residuals; this line says which solver it was and how it ended.
+        solver = result["solver"]
         warnings.append(
-            "optimizer did not converge — constraints may be infeasible; "
-            "treat weights as approximate"
+            f"optimizer did not converge: {solver['method']} ended with "
+            f"status {solver['status']} ({solver['message']}). The warnings "
+            "above give the cause and the constraint residuals; treat the "
+            "weights as approximate."
         )
     return PortfolioOptimizationResult(
         tickers=result["tickers"],

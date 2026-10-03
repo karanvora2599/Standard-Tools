@@ -8,9 +8,14 @@ an existing alpha score into weights (backtest/sizing.py). Three families:
   The unconstrained case (allow_short=True, max_weight=None) is solved in
   closed form via the standard two-fund efficient-frontier parametrization
   (Merton 1972) — numpy only, no solver dependency. Long-only and/or
-  bounded-weight requests fall back to scipy.optimize (SLSQP), matching
-  this codebase's existing "scipy optional, clear error if needed and
-  missing" convention (see metrics.risk_metrics.var_parametric).
+  bounded-weight requests need scipy, matching this codebase's existing
+  "scipy optional, clear error if needed and missing" convention (see
+  metrics.risk_metrics.var_parametric). The convex ones (min_volatility,
+  target_return, and long-only max_sharpe without a binding cap) are solved
+  exactly by the active-set methods in `_active_set` and certified against
+  their KKT conditions, with SLSQP as the last fallback. Capped or shorting
+  max_sharpe runs SLSQP and is then solved exactly on SLSQP's active set;
+  target_volatility is SLSQP's alone.
 - `risk_parity_weights` — equalizes each asset's fractional contribution to
   total portfolio variance (or a custom risk budget). It validates the
   request and delegates to `construction.risk_parity`'s cyclical coordinate
@@ -28,11 +33,13 @@ and analysis/*.py already make.
 """
 
 import logging
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools._blas import single_threaded_blas
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.numeric_contract import (
     require_finite_covariance,
@@ -40,6 +47,7 @@ from standard_quant_tools.numeric_contract import (
     require_finite_series,
     require_positive_int,
 )
+from standard_quant_tools.portfolio import _active_set
 
 logger = logging.getLogger(__name__)
 
@@ -137,7 +145,10 @@ def _check_covariance_estimable(n_obs: int, n_assets: int, cov: np.ndarray) -> N
             f"assets (>{n_assets}); prefer many more — see the small-sample "
             "warning this function returns."
         )
-    rank = int(np.linalg.matrix_rank(cov))
+    # One BLAS thread: an SVD of a few hundred assets is faster on one, and
+    # its rank decision cannot then depend on the caller's core count.
+    with single_threaded_blas():
+        rank = int(np.linalg.matrix_rank(cov))
     if rank < n_assets:
         raise ValidationError(
             f"covariance matrix is rank-deficient (rank {rank} < {n_assets} "
@@ -155,6 +166,20 @@ def _check_covariance_estimable(n_obs: int, n_assets: int, cov: np.ndarray) -> N
 # amplifies the smallest direction ten billion times — and mean-variance
 # inverts the covariance, so that amplification lands directly in the weights.
 _MAX_CONDITION_NUMBER = 1e10
+
+
+def _condition_number(cov: np.ndarray) -> float:
+    """
+    np.linalg.cond of `cov`, on one BLAS thread.
+
+    Measured at 235 assets, the SVD behind it changed in the last bits with
+    the BLAS thread count, so the same covariance reported a different
+    number on machines with different core counts. On one thread it does
+    not, and it takes about half as long. Every condition number the
+    portfolio tools report comes from here.
+    """
+    with single_threaded_blas():
+        return float(np.linalg.cond(cov))
 
 
 def _conditioning_warnings(
@@ -183,10 +208,12 @@ def _conditioning_warnings(
     The condition number is RETURNED as well as warned about. It was
     computed on every call and mentioned only above the threshold, so a
     caller could not compare two universes that both sat under it, or see
-    a matrix drifting toward the line before it crossed.
+    a matrix drifting toward the line before it crossed. It is computed on
+    one BLAS thread (`_condition_number`), so it is the same number on any
+    machine.
     """
     warnings: List[str] = []
-    condition = float(np.linalg.cond(cov))
+    condition = _condition_number(cov)
     if not np.isfinite(condition) or condition > _MAX_CONDITION_NUMBER:
         warnings.append(
             f"covariance is ill-conditioned (condition number {condition:.3e}, "
@@ -587,6 +614,607 @@ def _solve_constrained(
     return result.x, bool(result.success), report
 
 
+@dataclass
+class _SlsqpRun:
+    """One SLSQP answer as this module has always produced it."""
+
+    weights: np.ndarray
+    #: SLSQP's own success flag.
+    success: bool
+    report: Dict[str, Any]
+    #: Set when max_sharpe still ended at a non-positive excess return.
+    warnings: List[str]
+
+    @property
+    def converged(self) -> bool:
+        return self.success and not self.warnings
+
+
+def _solve_slsqp(
+    mu: np.ndarray,
+    cov: np.ndarray,
+    objective: str,
+    risk_free_rate: float,
+    target_return: Optional[float],
+    target_volatility: Optional[float],
+    allow_short: bool,
+    max_weight: Optional[float],
+    best_w: Optional[np.ndarray],
+) -> _SlsqpRun:
+    """
+    SLSQP with the settings and the max_sharpe restart it has always had.
+
+    When a positive-excess portfolio exists (`best_w`, the highest-return
+    one) and the solve from equal weights ends in the negative-excess region,
+    where the gradient points at volatility, it restarts from `best_w` and
+    keeps the better answer.
+    """
+    w, success, report = _solve_constrained(
+        mu,
+        cov,
+        objective,
+        risk_free_rate,
+        target_return,
+        target_volatility,
+        allow_short,
+        max_weight,
+    )
+    notes: List[str] = []
+    if best_w is not None and float(w @ mu) - risk_free_rate <= 0:
+        retry = _solve_constrained(
+            mu,
+            cov,
+            objective,
+            risk_free_rate,
+            target_return,
+            target_volatility,
+            allow_short,
+            max_weight,
+            x0=best_w,
+        )
+        if _objective_value(
+            objective, retry[0], mu, cov, risk_free_rate
+        ) < _objective_value(objective, w, mu, cov, risk_free_rate):
+            w, success, report = retry
+        if float(w @ mu) - risk_free_rate <= 0:
+            notes.append(
+                "The solver ended on a portfolio with a non-positive "
+                "excess return although one earning more than the "
+                "risk-free rate exists inside these bounds. Treat the "
+                "weights as an iterate, not the maximum-Sharpe portfolio."
+            )
+    return _SlsqpRun(w, success, report, notes)
+
+
+def _effective_bounds(
+    n: int, allow_short: bool, max_weight: Optional[float]
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    The per-asset bounds as the exact method and the certificate see them.
+
+    The box of `_weight_bounds`, except that a long-only cap of 1 or more is
+    dropped: weights that are nonnegative and sum to 1 cannot exceed 1, so
+    that cap never binds. Kept, it would make a portfolio held entirely in
+    one asset a vertex with every weight at a bound, where the KKT system on
+    the free weights is empty and the sum's multiplier is not determined.
+    """
+    lower, upper = _weight_bounds(n, allow_short, max_weight)
+    if not allow_short and upper >= 1.0:
+        upper = np.inf
+    return np.full(n, float(lower)), np.full(n, float(upper))
+
+
+@dataclass(frozen=True)
+class _ConvexProgramme:
+    """An objective as the quadratic programme `_active_set.solve` takes:
+    minimize 1/2 x'Qx subject to A x = b, lower <= x <= upper."""
+
+    Q: np.ndarray
+    A: np.ndarray
+    b: np.ndarray
+    lower: np.ndarray
+    upper: np.ndarray
+    #: max_sharpe: x is y = w / k, and w = y / 1'y.
+    homogeneous: bool
+    #: A point satisfying every constraint, for the primal method.
+    feasible: np.ndarray
+
+    def weights(self, x: np.ndarray) -> np.ndarray:
+        return x / np.sum(x) if self.homogeneous else x
+
+    def start(self, w: np.ndarray) -> Optional[np.ndarray]:
+        """Another solver's weights as a starting point in x."""
+        if not np.all(np.isfinite(w)):
+            return None
+        if not self.homogeneous:
+            return w
+        scale = float(self.A[0] @ w)
+        return w / scale if scale > 0 else None
+
+    def solve(
+        self, start: Optional[np.ndarray] = None
+    ) -> _active_set.ActiveSetSolution:
+        return _active_set.solve(
+            self.Q,
+            np.zeros(self.Q.shape[0]),
+            self.A,
+            self.b,
+            self.lower,
+            self.upper,
+            start=start,
+        )
+
+    def solve_primal(self) -> _active_set.ActiveSetSolution:
+        return _active_set.solve_primal(
+            self.Q,
+            np.zeros(self.Q.shape[0]),
+            self.A,
+            self.b,
+            self.lower,
+            self.upper,
+            self.feasible,
+        )
+
+
+def _convex_programme(
+    objective: str,
+    mu: np.ndarray,
+    cov: np.ndarray,
+    risk_free_rate: float,
+    target_return: Optional[float],
+    allow_short: bool,
+    max_weight: Optional[float],
+) -> Optional[_ConvexProgramme]:
+    """
+    The objective as a strictly convex quadratic programme over a box, or
+    None where it is not one.
+
+    min_volatility and target_return are such programmes in the weights.
+    Long-only max_sharpe with no binding cap is one after homogenisation:
+    on fully-invested weights the Sharpe ratio is (mu - rf)'w / sqrt(w'Sw),
+    which a positive scaling of w does not change, so with
+    y = w / ((mu - rf)'w) the maximum is the minimum of y'Sy over
+    (mu - rf)'y = 1, y >= 0, and w = y / 1'y. A binding cap w_i <= c becomes y_i <= c * 1'y, a general
+    inequality rather than a bound, and a short floor does the same; those
+    stay with SLSQP, and `_polish_max_sharpe` then solves exactly on SLSQP's
+    active set. target_volatility constrains a quadratic and stays with
+    SLSQP alone.
+    """
+    n = len(mu)
+    lower, upper = _effective_bounds(n, allow_short, max_weight)
+    Q = 2.0 * cov
+    ones = np.ones((1, n))
+    if objective == "min_volatility":
+        # Equal weights are inside any box the max_weight check accepts.
+        return _ConvexProgramme(
+            Q, ones, np.array([1.0]), lower, upper, False, np.full(n, 1.0 / n)
+        )
+    if objective == "target_return":
+        assert target_return is not None
+        # The lowest- and highest-return portfolios are both inside the box
+        # and fully invested, so the mix of them that earns the target is a
+        # feasible point (the caller has checked the target lies between).
+        highest, w_high = _max_attainable_return(mu, allow_short, max_weight)
+        negated, w_low = _max_attainable_return(-mu, allow_short, max_weight)
+        spread = highest + negated
+        share = (float(target_return) + negated) / spread if spread > 0 else 0.0
+        return _ConvexProgramme(
+            Q,
+            np.vstack([ones, mu[None, :]]),
+            np.array([1.0, float(target_return)]),
+            lower,
+            upper,
+            False,
+            (1.0 - share) * w_low + share * w_high,
+        )
+    if objective == "max_sharpe" and not allow_short and np.isinf(upper[0]):
+        excess = mu - risk_free_rate
+        best = int(np.argmax(excess))
+        feasible = np.zeros(n)
+        feasible[best] = 1.0 / excess[best]
+        return _ConvexProgramme(
+            Q,
+            excess[None, :],
+            np.array([1.0]),
+            np.zeros(n),
+            np.full(n, np.inf),
+            True,
+            feasible,
+        )
+    return None
+
+
+def _attainable_return_range(
+    mu: np.ndarray, allow_short: bool, max_weight: Optional[float]
+) -> Tuple[float, float]:
+    """The lowest and highest expected return a fully-invested portfolio
+    inside the bounds can earn, each an exact linear programme."""
+    highest, _ = _max_attainable_return(mu, allow_short, max_weight)
+    negated, _ = _max_attainable_return(-mu, allow_short, max_weight)
+    return -negated, highest
+
+
+def _certificate(
+    objective: str,
+    w: np.ndarray,
+    mu: np.ndarray,
+    cov: np.ndarray,
+    risk_free_rate: float,
+    target_return: Optional[float],
+    allow_short: bool,
+    max_weight: Optional[float],
+) -> Optional[_active_set.Certificate]:
+    """
+    The KKT residuals of `w` for the problem that was asked, in the weights.
+
+    max_sharpe's are those of minimizing -Sharpe, which is pseudoconvex
+    wherever the excess return is positive (the caller has established that
+    a positive-excess portfolio exists), so its KKT points are its maxima.
+    None for target_volatility: its constraint is a quadratic equality, and
+    KKT conditions on it do not establish a maximum.
+    """
+    n = len(mu)
+    lower, upper = _effective_bounds(n, allow_short, max_weight)
+    s = cov @ w
+    magnitude = np.abs(cov) @ np.abs(w)
+    if objective in ("min_volatility", "target_return"):
+        gradient = 2.0 * s
+        scale = 2.0 * magnitude
+    elif objective == "max_sharpe":
+        var = float(w @ s)
+        excess = float(w @ mu) - risk_free_rate
+        if not var > 0.0 or not excess > 0.0:
+            return None
+        vol = float(np.sqrt(var))
+        gradient = -mu / vol + excess * s / (vol * var)
+        scale = np.abs(mu) / vol + excess * magnitude / (vol * var)
+    else:
+        return None
+    A = np.ones((1, n))
+    b = np.array([1.0])
+    if objective == "target_return":
+        assert target_return is not None
+        A = np.vstack([A, mu[None, :]])
+        b = np.array([1.0, float(target_return)])
+    return _active_set.kkt_certificate(w, gradient, scale, A, b, lower, upper)
+
+
+def _constraint_residuals(
+    w: np.ndarray,
+    mu: np.ndarray,
+    cov: np.ndarray,
+    objective: str,
+    target_return: Optional[float],
+    target_volatility: Optional[float],
+    allow_short: bool,
+    max_weight: Optional[float],
+) -> str:
+    """How far `w` is from each constraint that was requested, in words."""
+    lower, upper = _weight_bounds(len(w), allow_short, max_weight)
+    outside = max(float(np.max(lower - w)), float(np.max(w - upper)), 0.0)
+    parts = [
+        f"sum-to-1 residual {abs(float(np.sum(w)) - 1.0):.1e}",
+        f"largest bound violation {outside:.1e}",
+    ]
+    if objective == "target_return" and target_return is not None:
+        parts.append(f"target_return residual {abs(float(w @ mu) - target_return):.1e}")
+    if objective == "target_volatility" and target_volatility is not None:
+        achieved = float(np.sqrt(max(float(w @ cov @ w), 0.0)))
+        parts.append(
+            f"target_volatility residual {abs(achieved - target_volatility):.1e}"
+        )
+    return ", ".join(parts)
+
+
+def _slsqp_stop(report: Dict[str, Any]) -> str:
+    return (
+        f"SLSQP ended with status {report.get('status')} "
+        f"({report.get('message')!r}) after {report.get('iterations')} iterations"
+    )
+
+
+def _slsqp_stop_warning(
+    run: _SlsqpRun,
+    residuals: str,
+    certificate: Optional[_active_set.Certificate],
+) -> str:
+    """What an unsuccessful SLSQP run did, without guessing why."""
+    text = (
+        f"{_slsqp_stop(run.report)}, so it did not confirm that these weights "
+        f"are optimal. Against the constraints: {residuals}."
+    )
+    if certificate is not None:
+        text += (
+            f" KKT stationarity residual {certificate.stationarity:.1e} and "
+            f"dual infeasibility {certificate.dual_infeasibility:.1e}, where a "
+            f"certified optimum's are at most "
+            f"{_active_set.CERTIFICATE_TOLERANCE:.0e}."
+        )
+    status = run.report.get("status")
+    if status == 8:
+        text += (
+            " Status 8 is a line search that could not lower the objective at "
+            "the precision requested (ftol=1e-12); it does not by itself mean "
+            "the constraints are infeasible, which the residuals above show."
+        )
+    elif status == 9:
+        text += " Status 9 is the 500-iteration limit."
+    return text
+
+
+def _exact_report(
+    programme: _ConvexProgramme,
+    solution: _active_set.ActiveSetSolution,
+    certificate: _active_set.Certificate,
+    objective_value: float,
+    passes: int,
+    how: str,
+    fallback: Optional[str] = None,
+    slsqp: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    n = programme.Q.shape[0]
+    free = n - solution.n_lower - solution.n_upper
+    what = (
+        "the KKT system of min y'Sy subject to (mu - rf)'y = 1, y >= 0 (w = y / 1'y)"
+        if programme.homogeneous
+        else "the KKT system"
+    )
+    message = (
+        f"solved exactly: {what} on the final active set ({free} free, "
+        f"{solution.n_lower} at the lower bound, {solution.n_upper} at the "
+        f"upper), {how}. Largest KKT residual {certificate.worst:.1e}, "
+        f"certified to {_active_set.CERTIFICATE_TOLERANCE:.0e}"
+    )
+    if solution.degenerate:
+        message += (
+            "; a bound whose multiplier is zero to rounding was settled at the "
+            "end of a cycle"
+        )
+    return {
+        "method": "active_set",
+        "iterations": passes,
+        "status": 0,
+        "message": message,
+        "objective": objective_value,
+        "n_function_evals": None if slsqp is None else slsqp["n_function_evals"],
+        "multipliers": [float(v) for v in certificate.multipliers],
+        "certified": True,
+        "certificate": certificate.as_dict(),
+        "fallback": fallback,
+    }
+
+
+def _polish_max_sharpe(
+    run: _SlsqpRun,
+    mu: np.ndarray,
+    cov: np.ndarray,
+    risk_free_rate: float,
+    allow_short: bool,
+    max_weight: Optional[float],
+) -> Optional[Tuple[np.ndarray, Dict[str, Any]]]:
+    """
+    Capped or shorting max_sharpe, solved exactly on SLSQP's active set.
+
+    Homogenised, the cap and the short floor are lo_i 1'y <= y_i <= hi_i 1'y.
+    Those are general inequalities, so the cold active-set start does not
+    cover this objective and SLSQP still runs. On SLSQP's active set they are
+    equalities, and `_active_set.solve_homogeneous` solves the KKT system
+    there exactly, correcting the set if SLSQP's was not quite right. The
+    answer is kept only if the Sharpe KKT certificate passes. -Sharpe is
+    pseudoconvex where the excess return is positive, so a KKT point there
+    is the maximum. Returns (weights, report), or None when the polish does
+    not certify, in which case SLSQP's own answer stands.
+    """
+    lower, upper = _effective_bounds(len(mu), allow_short, max_weight)
+    with single_threaded_blas():
+        try:
+            solution = _active_set.solve_homogeneous(
+                cov, mu - risk_free_rate, lower, upper, start=run.weights
+            )
+        except (_active_set.ActiveSetFailure, np.linalg.LinAlgError):
+            return None
+        w = solution.x
+        certificate = _certificate(
+            "max_sharpe", w, mu, cov, risk_free_rate, None, allow_short, max_weight
+        )
+    if certificate is None or not certificate.certified:
+        return None
+    free = len(w) - solution.n_lower - solution.n_upper
+    message = (
+        "solved exactly: the KKT system of min y'Sy subject to "
+        "(mu - rf)'y = 1, lo * 1'y <= y <= hi * 1'y (w = y / 1'y) on the "
+        f"final active set ({free} free, {solution.n_lower} at the lower "
+        f"bound, {solution.n_upper} at the upper), in {solution.passes} "
+        f"pass(es) from SLSQP's answer ({_slsqp_stop(run.report)}). Largest "
+        f"KKT residual {certificate.worst:.1e}, certified to "
+        f"{_active_set.CERTIFICATE_TOLERANCE:.0e}"
+    )
+    report = {
+        "method": "active_set",
+        "iterations": solution.passes,
+        "status": 0,
+        "message": message,
+        "objective": _objective_value("max_sharpe", w, mu, cov, risk_free_rate),
+        "n_function_evals": run.report["n_function_evals"],
+        "multipliers": [float(v) for v in certificate.multipliers],
+        "certified": True,
+        "certificate": certificate.as_dict(),
+        "fallback": None,
+    }
+    return w, report
+
+
+def _solve_exactly(
+    programme: _ConvexProgramme,
+    mu: np.ndarray,
+    cov: np.ndarray,
+    objective: str,
+    risk_free_rate: float,
+    target_return: Optional[float],
+    allow_short: bool,
+    max_weight: Optional[float],
+    best_w: Optional[np.ndarray],
+) -> Tuple[np.ndarray, bool, Dict[str, Any], List[str]]:
+    """
+    The certified optimum, or the best the fallback chain reaches.
+
+    1. The primal-dual active-set method from a cold start: a handful of
+       passes, but it can cycle, or guess a free set too small for the
+       equality rows. Both happen on capped or shorting targets near the top
+       of the attainable range: 112 of 3,600 target_return problems in one
+       sweep. No min_volatility or long-only max_sharpe problem measured
+       has failed.
+    2. The primal active-set method from a feasible point: one bound per
+       pass, so slower, but it neither cycles on a strictly convex objective
+       (short of degenerate zero-length moves, which it detects) nor reaches
+       a singular system. It certified all 112.
+    3. SLSQP with the settings it has always had, then the primal-dual
+       method started from SLSQP's answer. SLSQP's only job there is to find
+       the active set.
+    4. SLSQP's own answer, reported with certified=False and a warning that
+       carries its residuals.
+
+    Each exact stage ends with the KKT solve on its final active set, so
+    any two that reach the same set give the same bits, and each is
+    accepted only when the certificate, computed from the weights alone,
+    passes. Returns (weights, converged, solver report, warnings).
+    """
+
+    def certify(
+        solve: Any,
+    ) -> Tuple[_active_set.ActiveSetSolution, np.ndarray, _active_set.Certificate]:
+        with single_threaded_blas():
+            try:
+                solution = solve()
+            except np.linalg.LinAlgError as e:  # pragma: no cover - lstsq/SVD
+                raise _active_set.ActiveSetFailure(
+                    f"linear algebra failed: {e}", 0
+                ) from e
+            w = programme.weights(solution.x)
+            certificate = _certificate(
+                objective,
+                w,
+                mu,
+                cov,
+                risk_free_rate,
+                target_return,
+                allow_short,
+                max_weight,
+            )
+        if certificate is None or not certificate.certified:
+            worst = float("nan") if certificate is None else certificate.worst
+            raise _active_set.ActiveSetFailure(
+                f"its answer's largest KKT residual, {worst:.1e}, is over "
+                f"{_active_set.CERTIFICATE_TOLERANCE:.0e}",
+                solution.passes,
+            )
+        return solution, w, certificate
+
+    def report(
+        solution: _active_set.ActiveSetSolution,
+        w: np.ndarray,
+        certificate: _active_set.Certificate,
+        passes: int,
+        how: str,
+        fallback: Optional[str] = None,
+        slsqp: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        value = _objective_value(objective, w, mu, cov, risk_free_rate)
+        return _exact_report(
+            programme, solution, certificate, value, passes, how, fallback, slsqp
+        )
+
+    try:
+        solution, w, certificate = certify(programme.solve)
+    except _active_set.ActiveSetFailure as failure:
+        cold = failure
+    else:
+        how = f"from a cold start in {solution.passes} pass(es)"
+        return w, True, report(solution, w, certificate, solution.passes, how), []
+
+    fallback = f"the cold start stopped: {cold.reason}"
+    try:
+        solution, w, certificate = certify(programme.solve_primal)
+    except _active_set.ActiveSetFailure as failure:
+        primal = failure
+    else:
+        how = (
+            f"by the primal active-set method in {solution.passes} pass(es) "
+            "from a feasible point"
+        )
+        passes = cold.passes + solution.passes
+        return w, True, report(solution, w, certificate, passes, how, fallback), []
+
+    fallback += f"; the primal method stopped: {primal.reason}"
+    run = _solve_slsqp(
+        mu,
+        cov,
+        objective,
+        risk_free_rate,
+        target_return,
+        None,
+        allow_short,
+        max_weight,
+        best_w,
+    )
+    start = programme.start(run.weights)
+    if start is None:
+        polish = "SLSQP's answer gave no starting point (no positive excess return)"
+    else:
+        try:
+            solution, w, certificate = certify(lambda: programme.solve(start))
+        except _active_set.ActiveSetFailure as failure:
+            polish = failure.reason
+        else:
+            how = (
+                f"in {solution.passes} pass(es) from SLSQP's answer "
+                f"({_slsqp_stop(run.report)})"
+            )
+            passes = cold.passes + primal.passes + solution.passes
+            result = report(solution, w, certificate, passes, how, fallback, run.report)
+            return w, True, result, []
+
+    with single_threaded_blas():
+        certificate = _certificate(
+            objective,
+            run.weights,
+            mu,
+            cov,
+            risk_free_rate,
+            target_return,
+            allow_short,
+            max_weight,
+        )
+    fallback += f"; started from SLSQP's answer it stopped: {polish}"
+    slsqp = dict(run.report)
+    slsqp["certified"] = False
+    slsqp["certificate"] = None if certificate is None else certificate.as_dict()
+    slsqp["fallback"] = fallback
+    residuals = _constraint_residuals(
+        run.weights,
+        mu,
+        cov,
+        objective,
+        target_return,
+        None,
+        allow_short,
+        max_weight,
+    )
+    warning = (
+        f"The exact solve did not reach a certified optimum ({fallback}). These "
+        f"are SLSQP's weights ({_slsqp_stop(run.report)}), not a certified "
+        "optimum"
+    )
+    if certificate is not None:
+        warning += (
+            f": KKT stationarity residual {certificate.stationarity:.1e} and "
+            f"dual infeasibility {certificate.dual_infeasibility:.1e}, against "
+            f"{_active_set.CERTIFICATE_TOLERANCE:.0e}"
+        )
+    warning += f". Against the constraints: {residuals}."
+    return run.weights, run.converged, slsqp, run.warnings + [warning]
+
+
 def mean_variance_optimize(
     returns_df: pd.DataFrame,
     objective: str = "max_sharpe",
@@ -620,14 +1248,19 @@ def mean_variance_optimize(
     Returns:
         Dict with tickers, weights (dict ticker->float), expected_return,
         expected_volatility, sharpe_ratio, objective, converged (bool —
-        always True for the closed-form path; reflects the solver's own
-        success flag for the scipy path), warnings (list of str —
-        currently the small-sample caveat; empty when the window is long
-        enough relative to the asset count), solver (what the optimizer
-        reported about its own run: method, iterations, status, message,
-        objective, n_function_evals, multipliers) and condition_number (of
-        the annualized covariance, reported at every level rather than only
-        warned about above the threshold).
+        always True for the closed-form path; True for a certified exact
+        solve; otherwise SLSQP's own success flag — and in every case False
+        when the weights miss a constraint), warnings (list of str — the
+        small-sample and conditioning caveats, any constraint the weights
+        miss, and what a solve that did not converge or certify actually
+        did), solver (the run: method — "closed_form", "active_set" or
+        "SLSQP" — iterations, status, message, objective,
+        n_function_evals, multipliers; certified and certificate, the KKT
+        residuals of the returned weights where a certificate applies; and
+        fallback, why the exact solve's cold start did not produce the
+        answer when it did not) and condition_number (of the annualized
+        covariance, reported at every level rather than only warned about
+        above the threshold).
 
     Raises:
         ValidationError: unknown objective, fewer than 2 assets, fewer than
@@ -747,6 +1380,7 @@ def mean_variance_optimize(
         max_weight,
     )
 
+    solved_from = len(warnings)
     if allow_short and max_weight is None:
         w = _solve_unconstrained(
             mu, cov, objective, risk_free_rate, target_return, target_volatility
@@ -769,6 +1403,9 @@ def mean_variance_optimize(
             "objective": _objective_value(objective, w, mu, cov, risk_free_rate),
             "n_function_evals": None,
             "multipliers": None,
+            "certified": None,
+            "certificate": None,
+            "fallback": None,
         }
     else:
         _require_scipy(
@@ -796,22 +1433,43 @@ def mean_variance_optimize(
                     f"risk_free_rate below {best_return:.6f}, or "
                     "objective='min_volatility'."
                 )
-        w, converged, solver = _solve_constrained(
-            mu,
-            cov,
-            objective,
-            risk_free_rate,
-            target_return,
-            target_volatility,
-            allow_short,
-            max_weight,
+        # A target outside the returns the bounds allow has no feasible
+        # portfolio, so there is no optimum to certify. It goes to SLSQP as
+        # it always has, and the verification below reports the miss.
+        attainable: Optional[Tuple[float, float]] = None
+        if objective == "target_return":
+            assert target_return is not None
+            attainable = _attainable_return_range(mu, allow_short, max_weight)
+            if attainable[0] <= target_return <= attainable[1]:
+                attainable = None
+        programme = (
+            _convex_programme(
+                objective,
+                mu,
+                cov,
+                risk_free_rate,
+                target_return,
+                allow_short,
+                max_weight,
+            )
+            if attainable is None
+            else None
         )
-        if best_w is not None and float(w @ mu) - risk_free_rate <= 0:
-            # A positive-excess portfolio exists, and equal weights can sit
-            # in the negative region where the gradient points at
-            # volatility. Restart from the highest-return portfolio, which
-            # is inside the positive region, and keep the better answer.
-            retry = _solve_constrained(
+        if programme is not None:
+            w, converged, solver, notes = _solve_exactly(
+                programme,
+                mu,
+                cov,
+                objective,
+                risk_free_rate,
+                target_return,
+                allow_short,
+                max_weight,
+                best_w,
+            )
+            warnings.extend(notes)
+        else:
+            run = _solve_slsqp(
                 mu,
                 cov,
                 objective,
@@ -820,19 +1478,71 @@ def mean_variance_optimize(
                 target_volatility,
                 allow_short,
                 max_weight,
-                x0=best_w,
+                best_w,
             )
-            if _objective_value(
-                objective, retry[0], mu, cov, risk_free_rate
-            ) < _objective_value(objective, w, mu, cov, risk_free_rate):
-                w, converged, solver = retry
-            if float(w @ mu) - risk_free_rate <= 0:
-                converged = False
+            polished = (
+                _polish_max_sharpe(
+                    run, mu, cov, risk_free_rate, allow_short, max_weight
+                )
+                if objective == "max_sharpe"
+                else None
+            )
+            certificate = None
+            if polished is not None:
+                (w, solver), converged = polished, True
+            else:
+                w, converged, solver = run.weights, run.converged, run.report
+                warnings.extend(run.warnings)
+                # A max_sharpe answer the polish could not certify still has
+                # KKT residuals that say how far it is from the maximum.
+                if objective == "max_sharpe":
+                    with single_threaded_blas():
+                        certificate = _certificate(
+                            objective,
+                            w,
+                            mu,
+                            cov,
+                            risk_free_rate,
+                            target_return,
+                            allow_short,
+                            max_weight,
+                        )
+                solver["certified"] = (
+                    None if certificate is None else certificate.certified
+                )
+                solver["certificate"] = (
+                    None if certificate is None else certificate.as_dict()
+                )
+                solver["fallback"] = None
+                # An answer that certifies is the maximum, whatever status
+                # SLSQP stopped with.
+                if solver["certified"] and not run.warnings:
+                    converged = True
+            if attainable is not None:
                 warnings.append(
-                    "The solver ended on a portfolio with a non-positive "
-                    "excess return although one earning more than the "
-                    "risk-free rate exists inside these bounds. Treat the "
-                    "weights as an iterate, not the maximum-Sharpe portfolio."
+                    f"target_return={target_return:.6f} is outside "
+                    f"[{attainable[0]:.6f}, {attainable[1]:.6f}], the range of "
+                    "expected returns a fully-invested portfolio inside these "
+                    "bounds can earn, so no portfolio satisfies the "
+                    "constraints. The weights are SLSQP's last iterate "
+                    f"({_slsqp_stop(solver)})."
+                )
+            elif not run.success and not solver["certified"]:
+                warnings.append(
+                    _slsqp_stop_warning(
+                        run,
+                        _constraint_residuals(
+                            w,
+                            mu,
+                            cov,
+                            objective,
+                            target_return,
+                            target_volatility,
+                            allow_short,
+                            max_weight,
+                        ),
+                        certificate,
+                    )
                 )
 
     # Independent of what the solver said about itself. A reported success is
@@ -852,17 +1562,18 @@ def mean_variance_optimize(
             + ". Treat them as a solver iterate, not a solution."
         )
 
-    if not converged:
-        # The solver's iterate is still returned (callers who only want a
-        # starting point can use it), but it is NOT guaranteed to satisfy
-        # sum(w)==1 or the bounds — say so loudly rather than leaving that
-        # buried in a boolean the caller may not read.
+    if not converged or (solver["fallback"] and not solver["certified"]):
+        # The iterate is still returned (callers who only want a starting
+        # point can use it). The log repeats what the warnings say happened:
+        # it used to say the weights "may violate the sum-to-1 constraint",
+        # a guess, logged for SLSQP stops whose weights met it to 2e-11.
         logger.warning(
-            "[portfolio_optimize] SLSQP did not converge for objective=%s — "
-            "returned weights may violate the sum-to-1 constraint (actual "
-            "sum: %.6f) and/or the weight bounds. Check result['converged'].",
+            "[portfolio_optimize] objective=%s %s (%s, status %s). %s",
             objective,
-            float(np.sum(w)),
+            "did not converge" if not converged else "is not certified optimal",
+            solver["method"],
+            solver["status"],
+            " ".join(warnings[solved_from:]),
         )
 
     exp_ret = float(w @ mu)
