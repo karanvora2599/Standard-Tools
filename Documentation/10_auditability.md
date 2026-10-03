@@ -91,6 +91,9 @@ produces a record like:
   "cpp_available": false,
   "native_build": "absent",
   "native_isa": "none",
+  "native_detail": null,
+  "platform": {"os": "Windows 10.0.26300", "machine": "AMD64",
+               "crt": "ucrtbase 10.0.26100.9444", "crt_fma3": true},
   "n_workers": null,
   "duration_ms": 6765.8,
   "fetch_ms": 6421.337,
@@ -130,6 +133,55 @@ of the machine, not of the build — one binary takes either path depending on
 the CPU it lands on — so it is asked at runtime and is no part of the build
 stamp or the source digest. It is recorded because the two paths round
 differently; see [the reproducibility contract](#the-reproducibility-contract).
+
+`native_detail` and `platform` say what the label cannot. Builds of the same
+sources by different toolchains share one `native_build` label — MSVC with
+`/arch:AVX2`, MSVC with SSE2, clang-cl and a PGO build of one commit all
+recorded `match:d938ad9d2eae` — and the same binary can round differently
+on another C runtime or CPU. So a record also carries:
+
+- `native_detail`: every key of the extension's build stamp
+  (`_sqt_core.__build_info__`) except the source digest `native_build`
+  already names — `compiler` with its version, `build_type`, `native_arch`
+  (host-CPU code generation was requested), `openmp`, `openmp_runtime` and
+  `pgo` — plus `crt_linkage`, read from the binary's own import table
+  because the stamp does not say it: `dynamic` when the binary imports the
+  Universal CRT (`/MD`), `static` when it does not (`/MT`), `null` when it
+  cannot be told. The field is `null` when no extension ran: the Python path
+  has no build.
+- `platform`:
+  - `os`: `Windows 10.0.26300`, `macOS 14.5`, or `Linux` and the kernel
+    release.
+  - `machine`.
+  - `crt`: the C runtime the process calls for `exp`, `log` and `erf`. On
+    Windows it is the loaded `ucrtbase.dll`'s file version
+    (`ucrtbase 10.0.26100.9444`), an OS component that Windows Update
+    replaces; on Linux the glibc version (`glibc 2.35`); on macOS the OS
+    version.
+  - `crt_fma3`: whether that runtime's math takes its FMA3 code path here.
+    On Windows it is the UCRT's own answer (`_get_FMA3_enable()`), read for
+    every record because a program can switch it; on x86 Linux, whether the
+    CPU reports both `fma` and `avx2`, glibc's condition for its FMA
+    variants; elsewhere `null`.
+
+  These matter on the Python path too: `math.exp` and `math.erf` are the C
+  runtime's.
+
+A record from a Windows development machine with the extension built:
+
+```json
+"native_detail": {"build_type": "Release", "compiler": "MSVC 19.44.35228.0",
+                  "crt_linkage": "dynamic", "native_arch": true, "openmp": "2.0",
+                  "openmp_runtime": "vcomp", "pgo": "off"},
+"platform": {"os": "Windows 10.0.26300", "machine": "AMD64",
+             "crt": "ucrtbase 10.0.26100.9444", "crt_fma3": true}
+```
+
+Each fact is best-effort: a value that cannot be determined is `null`, never
+a failed call. The facts are resolved once per process, except `crt_fma3`.
+`explain_decision` shows both fields. Records written before these fields
+have no such keys and still verify: a record is hashed as it was stored.
+See [the reproducibility contract](#the-reproducibility-contract).
 
 `data_sources` has one entry per OHLCV pull, tagged `disk_cache`,
 `live_fetch`, or `session_cache`, with a content hash of the DataFrame
@@ -621,9 +673,9 @@ hashes:
 - **Data matches, output mismatch** — the code/logic changed since the
   record was written.
 - **Output mismatch bit for bit, match to twelve significant digits, on a
-  different native build or instruction-set path** — reproduced to twelve
-  digits, which is all an output hash promises across builds; not a code
-  change. See [the reproducibility contract](#the-reproducibility-contract).
+  different native build, instruction-set path or platform** — reproduced to
+  twelve digits, which is all an output hash promises across them; not a
+  code change. See [the reproducibility contract](#the-reproducibility-contract).
 
 `data_source_matches` also reports a data source that was in the original
 record but **disappeared** from the replay (e.g. the tool changed which
@@ -678,37 +730,46 @@ make someone distrust a replay result that was actually correct.
 
 ## The reproducibility contract
 
-**An output hash is bit-exact for the same native build on the same
-instruction-set path. Across builds or instruction-set paths, outputs agree
-to twelve significant digits — and replay says which of the two it saw.**
+**An output hash is bit-exact only when the run that replays a record
+matches the run that wrote it in every condition below. Across any of them,
+outputs agree to twelve significant digits, and replay says which of the two
+it saw.**
 
-Why bits are not promised across them:
+### What bit-exactness is conditional on
 
-- **The AVX2 path fuses and reorders.** `rolling_beta`'s window reduction
-  has two implementations, chosen at runtime by the CPU's own feature
-  flags: hand-written AVX2 intrinsics that accumulate in four lanes and
-  fuse each multiply-add into one rounding instead of two, and a portable
-  scalar loop. The same binary, on the same inputs, gives different last
-  bits on a machine without AVX2 and FMA. Measured, not assumed: the C++
-  suite (`cpp_rolling_regression`) runs both paths on ten years of daily
-  return-scale data at windows of 20, 60 and 252 bars. Between 75% and 94%
-  of the betas differ in their last bits, the worst by 6.2e-15 relative;
-  every one agrees to twelve significant digits; and none of the 7,231
-  rounds differently when both are printed to twelve digits. The scalar
-  path can only be forced from that suite: the Python binding reports the
-  path, it does not choose it.
-- **Compilers and OpenMP runtimes.** A different compiler may contract a
-  multiply-add where another rounds twice, and on GCC and Clang the scalar
-  fallback's `omp simd reduction` licenses reassociating its sums, which no
-  MSVC mode compiles (see
-  [the build guide](30_build_guide.md#why-the-msvc-build-uses-openmp-20)).
-  A different compiler, its flags or the OpenMP runtime may therefore
-  differ in the last bits.
-- **What the build label cannot see.** `native_build` names the C++
-  sources the extension was built from, not the compiler, its flags, a PGO
-  profile or the Python-side libraries (NumPy, pandas) whose own reductions
-  round too. Two builds of the same sources by different toolchains share a
-  label; the bit-exact promise is about the binary.
+| Condition | What it changes | Recorded as | Replay compares |
+|---|---|---|---|
+| The C++ sources the extension was built from | the code | `native_build` (verdict and source digest) | yes |
+| The compiler, its version and its flags, floating-point contraction above all | A compiler that fuses a multiply-add rounds once where another rounds twice. clang-cl with contraction allowed differs from MSVC on 27 of 44 kernel calls; with it off (`/clang:-ffp-contract=off`, as the build now sets it) it matches bit for bit. On GCC and Clang the scalar fallback's `omp simd reduction` also licenses reassociating its sums, which no MSVC mode compiles (see [the build guide](30_build_guide.md#why-the-msvc-build-uses-openmp-20)). | `native_detail`: `compiler`, `build_type`, `native_arch`, `pgo`. Flags set in the build files are covered by the source digest; flags given only on the command line are **not** recorded. | yes |
+| The OpenMP runtime | A runtime may combine a reduction's partial results in its own order. Measured: LLVM's runtime matched MSVC's on all 44 calls. | `native_detail`: `openmp`, `openmp_runtime` | yes |
+| How the extension links the C runtime | `/MD` calls the system's `ucrtbase.dll`; `/MT` carries a copy of the CRT's math inside the binary. Measured: 5 of 476 implied volatilities differ in the last bits. | `native_detail.crt_linkage` | yes |
+| The C runtime's version | `exp`, `log`, `erf` and the rest are the C runtime's. On Windows that is `ucrtbase.dll`, an OS component Windows Update replaces, so an OS update can move the last bits of an unchanged build. | `platform.crt`, with `platform.os` and `platform.machine` | yes |
+| The C runtime's FMA3 path | The UCRT has FMA3 implementations of its transcendental functions and takes them on a CPU that supports them. Measured: 0.146% of `exp` and 0.112% of `erf` inputs give different bits on the two paths. This reaches the **pure-Python path** too, through `math.exp` and `math.erf`. | `platform.crt_fma3` | yes |
+| The extension's instruction-set path | The AVX2+FMA kernels fuse and reorder (below). | `native_isa` | yes |
+| The BLAS thread count, for outputs computed through LAPACK | OpenBLAS's factorizations change in the last bits with its thread count. The library's own covariance-sized factorizations run on one BLAS thread (see [16_performance.md](16_performance.md#runtime-defaults-openmp-wait-policy-and-blas-threads)), so for those the result no longer depends on the machine's core count; a LAPACK call the library does not wrap still does. | not recorded | no |
+| NumPy, SciPy and pandas, and the BLAS they load | Their own reductions and SIMD kernels round too, and change between releases. | not recorded (`package_version` is this library's) | no |
+
+Every recorded condition is compared, even ones where measurement found no
+movement: MSVC with and without `/arch:AVX2`, and a PGO build, agree on all
+44 calls. The promise is about the binary and the machine, not about one
+measurement. Comparing them costs nothing when the bits match: the facts are
+consulted only after the exact hash misses, so an exact match is
+`reproduced` whatever they say.
+
+### The instruction-set path
+
+`rolling_beta`'s window reduction has two implementations, chosen at
+runtime by the CPU's own feature flags: hand-written AVX2 intrinsics that
+accumulate in four lanes and fuse each multiply-add into one rounding
+instead of two, and a portable scalar loop. The same binary, on the same
+inputs, gives different last bits on a machine without AVX2 and FMA.
+Measured, not assumed: the C++ suite (`cpp_rolling_regression`) runs both
+paths on ten years of daily return-scale data at windows of 20, 60 and 252
+bars. Between 75% and 94% of the betas differ in their last bits, the worst
+by 6.2e-15 relative; every one agrees to twelve significant digits; and none
+of the 7,231 rounds differently when both are printed to twelve digits. The
+scalar path can only be forced from that suite: the Python binding reports
+the path, it does not choose it.
 
 ### The rounded hash
 
@@ -742,25 +803,56 @@ proof, of a real difference.
 ### What replay says
 
 When the exact hash (or, for a modeling record, the normalized one) misses,
-replay compares the rounded hash and the build and path the record names:
+replay compares the rounded hash and every condition the record names:
+`native_build`, `native_isa`, and each key of `native_detail` and
+`platform`.
 
-| Record against replay | Exact | Rounded | `replay_decision` verdict |
-|---|---|---|---|
-| any | match | — | `reproduced` |
-| different `native_build` or `native_isa` | miss | match | `reproduced_to_12_digits` — not a code change |
-| same build, same path | miss | match or miss | unchanged: `code_changed`, or `data_changed` if an input moved; a note says when twelve digits agree |
-| different build or path | miss | miss | unchanged, with a note that the build alone does not account for it |
-| record predates the rounded hash | miss | — | unchanged, with a note |
+| Record against replay | Exact | Rounded | `replay_decision` verdict | `sqt replay` |
+|---|---|---|---|---|
+| any | match | — | `reproduced` | 0 |
+| a recorded condition differs | miss | match | `reproduced_to_12_digits` — not a code change | 3 |
+| every recorded condition the same | miss | match or miss | unchanged: `code_changed`, or `data_changed` if an input moved; a note says when twelve digits agree and names what the record cannot see | 1 |
+| a recorded condition differs | miss | miss | unchanged, with a note that the difference does not account for it on its own | 1 |
+| record predates the rounded hash | miss | — | unchanged, with a note | 1 |
 
-A record that predates `native_build` or `native_isa` counts as a different
-build or path: it cannot vouch for having run where the replay runs.
+How a missing fact counts:
+
+- A record without `native_build` or `native_isa` counts as a different
+  build or path: it cannot vouch for having run where the replay runs.
+- A record without `native_detail` and `platform`, written before they
+  existed, is judged on `native_build` and `native_isa` alone, exactly as
+  before. Its verdicts and notes do not change.
+- Within `native_detail` and `platform`, the record is the authority on what
+  it vouched for: each fact it carries is compared, and a fact it lacks (one
+  a later release began recording) is not.
+- A record with `native_detail: null` (no extension ran) is compared on
+  `platform`. If the replay has an extension, `native_build` already
+  differs.
+
 `ReplayResult` carries `rounded_output_match`, both rounded hashes and
-`build_differences` (`"native_isa: recorded 'scalar', now 'avx2+fma'"`);
+`build_differences`, one line per condition that differs:
+
+```
+native_isa: recorded 'scalar', now 'avx2+fma'
+native_detail.compiler: recorded 'Clang 23.1.2', now 'MSVC 19.44.35228.0'
+native_detail.crt_linkage: recorded 'static', now 'dynamic'
+platform.crt: recorded 'ucrtbase 10.0.22621.3672', now 'ucrtbase 10.0.26100.9444'
+platform.crt_fma3: recorded False, now True
+```
+
 `output_match` stays the bit-level answer, so on `reproduced_to_12_digits`
 it is `false`. `sqt replay` prints the same notes and exits 3 on
 `reproduced_to_12_digits` — neither a bit-exact reproduction (0) nor a
-confirmed mismatch (1) — so automation can tell a different build from a
-regression.
+confirmed mismatch (1) — so automation can tell a different build or
+platform from a regression.
+
+The record still cannot see three things: compiler flags given only on the
+command line, the BLAS thread count for LAPACK calls the library does not
+wrap, and the NumPy, SciPy and pandas versions. When a miss on the same
+recorded conditions agrees to twelve digits, its note says so and names
+what the record does not cover: compiler flags given outside the build
+files, the Python-side libraries, and the BLAS they load. A record written
+before `native_detail` and `platform` keeps its old note word for word.
 
 Records written before these fields have no such keys and still verify:
 a record is hashed as it was stored.
@@ -863,7 +955,10 @@ terminal instead of a `ReplayResult` object.
 output reproduced exactly); `1` — `output_match` is `False` (a confirmed
 mismatch — code or data changed the result); `2` — `output_match` is `None`
 (the stored record has no `output_hash` to compare against, so replay
-success is indeterminate, not confirmed). Check the exit code rather than
+success is indeterminate, not confirmed); `3` — the exact hash missed, but
+the output agrees to twelve significant digits and the record names a
+different build, instruction-set path or platform (`reproduced_to_12_digits`;
+see [What replay says](#what-replay-says)). Check the exit code rather than
 scraping stdout when scripting `sqt replay` in CI — a prior version of this
 CLI always exited `0` regardless of match status, so treat any script
 written against that behavior as stale. `sqt report` and `sqt compare` exit

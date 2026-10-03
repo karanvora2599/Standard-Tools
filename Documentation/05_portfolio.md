@@ -165,11 +165,37 @@ print(result["expected_volatility"])  # annualized
 print(result["converged"])
 ```
 
-`allow_short=True` with `max_weight=None` (the fully unconstrained case) is solved in **closed form** via the standard two-fund efficient-frontier parametrization (Merton 1972) — numpy only, no solver dependency, and `converged` is always `True`. Any other combination (`allow_short=False` and/or a `max_weight` cap) requires **scipy** (SLSQP) and reports the solver's own success flag as `converged` — a request that's actually infeasible (e.g. a `target_return` no long-only portfolio can reach) comes back with `converged=False` rather than a silently wrong answer.
+`allow_short=True` with `max_weight=None` (the fully unconstrained case) is solved in **closed form** via the standard two-fund efficient-frontier parametrization (Merton 1972) — numpy only, no solver dependency, and `converged` is always `True`. Every other combination (`allow_short=False` and/or a `max_weight` cap) requires **scipy**, and how it is solved depends on the objective:
+
+- **`min_volatility`, `target_return`, and long-only `max_sharpe` with no binding cap** are convex quadratic programmes; `max_sharpe` becomes one after y = w / ((μ − rf)'w): minimize y'Σy subject to (μ − rf)'y = 1 and y ≥ 0, then w = y / 1'y. They are solved **exactly** by a primal-dual active-set method. Each pass fixes the weights it judges to be at a bound and solves the KKT system on the rest with one linear solve; when a pass changes nothing, the KKT conditions hold to rounding, which for a convex problem makes the answer the optimum. At 235 assets this takes 2–6 ms, where SLSQP took 0.9–14 s and stopped up to 1.6e-5 short of the optimum in the weights (on 235 zero-drift noise series, `max_sharpe` ran 9 s and ended with status 8, 2e-9 from it). Measured on 240 random problems, every answer certified, and once SLSQP's own constraint residuals are charged at the shadow prices no objective got worse by more than 4e-15 relative.
+- **Capped or shorting `max_sharpe`** runs SLSQP, then is solved exactly on SLSQP's active set (150 of 150 random problems certified).
+- **`target_volatility`** is SLSQP's alone.
+
+A request that's actually infeasible (e.g. a `target_return` no long-only portfolio can reach) comes back with `converged=False` rather than a silently wrong answer, with the attainable range named in the warning.
 
 `objective="target_return"`/`"target_volatility"` need the matching `target_return`/`target_volatility` argument (annualized). A `target_volatility` below the global minimum-variance portfolio's own volatility is infeasible and raises `ValidationError` immediately.
 
-`result["warnings"]` carries the optimizer's own caveats: the small-sample covariance warning, the ill-conditioning warning below, and anything the independent weight check found. `result["condition_number"]` is reported as a number at every level, not only above a threshold, and `result["solver"]` carries the run — `method`, `iterations`, `status`, `message`, `objective` and the multipliers, with `method="closed_form"` and no iterations on the unconstrained path.
+`result["warnings"]` carries the optimizer's own caveats: the small-sample covariance warning, the ill-conditioning warning below, and anything the independent weight check found. `result["condition_number"]` is reported as a number at every level, not only above a threshold. It is computed on one BLAS thread — here, and for the portfolio optimization tool's risk parity and Black-Litterman alike — so the same covariance reports the same `condition_number` on any machine, where at 235 assets it used to change in the last bits with the number of threads.
+
+`result["solver"]` holds:
+
+- `method` (`"closed_form"`, `"active_set"` or `"SLSQP"`) and `iterations` (for the active-set method, passes of one linear solve each; none on the closed-form path).
+- `status`, `message`, `objective`, `n_function_evals` and the equality `multipliers`.
+- `certificate`: the KKT residuals of the returned weights, estimated from the weights alone — `stationarity`, `dual_infeasibility`, `equality_residual` and `bound_violation`, each relative to the size of its terms, and the `tolerance` (1e-12).
+- `certified`: `True` when all four are within the tolerance; `False` for an SLSQP answer the exact solve could not certify; `None` where no certificate applies (the closed form, `target_volatility`, an infeasible target).
+- `fallback`: why the fast method's cold start did not produce the answer, when it did not.
+
+The agent tool's `SolverReport` carries `certificate`, `certified` and `fallback` too.
+
+**When the fast method fails.** It can revisit a guess, or guess too few free weights for the equality constraints. Measured, that happened on capped or shorting `target_return` near the top of the attainable range (112 of 3,600 random problems), and never on `min_volatility` or long-only `max_sharpe`. The chain is then:
+
+1. The primal active-set method from a feasible point: one bound per pass, no cycling, no singular systems. It solved all 112, in a median 0.7 ms.
+2. SLSQP as before, then the fast method started from its answer.
+3. SLSQP's own answer, with `certified=False` and a warning carrying its residuals.
+
+Every exact stage ends with the same KKT solve on its final active set, so stages reaching the same active set give the same bits. The exact solve and its certificate run on one BLAS thread, so the same input gives the same bits on any core count.
+
+**A stopped solver says what happened.** `warnings` names SLSQP's status and message and the residual against each requested constraint (sum to 1, bounds, target), plus the KKT residuals where they apply. Status 8 is a line search that could not improve at the requested precision; measured, its weights met sum-to-1 to 2e-11 and sat within 2e-9 of the optimum — it does not mean the constraints are infeasible. It used to be logged as weights that "may violate the sum-to-1 constraint", and the agent tool added "constraints may be infeasible"; neither was true.
 
 #### What the optimizer refuses to answer
 
@@ -455,6 +481,15 @@ different numbers, with nothing to say which permutation was the answer.
 Columns are now sorted by name before anything reads them, so the weights
 are a function of the universe and its returns alone.
 
+**The correlation matrix is compiled, to the bit.** `frame.corr()` was
+78–86% of the call. With the extension built, HRP takes its correlation
+matrix from the `pearson_correlation` kernel — pandas' own per-pair
+arithmetic, clipped to [-1, 1] exactly when the installed pandas clips — and
+is 4.5× faster at 235 assets (341 → 77 ms on pandas 2.3, 295 → 63 ms on
+pandas 3.0), with weights, cluster order and risk contributions identical to
+the `frame.corr()` path. If the installed pandas answers a probe differently
+from the kernel, `frame.corr()` computes the matrix itself.
+
 **A zero-variance asset is refused by name.** HRP splits capital in inverse
 proportion to variance, and it had no guard: an exactly constant column (a
 cash sleeve, a halted name) divided by zero and every weight came back NaN —
@@ -502,6 +537,19 @@ clipping, re-symmetrized) and warns with the eigenvalue that was floored;
 the weights returned are for the repaired matrix. The warning is the thing
 to act on: estimate the covariance on complete rows (`estimate_covariance`,
 below) and the repair never runs.
+
+Deciding that no repair is needed costs a Cholesky factorization, not an
+eigendecomposition. A factorization that completes on a matrix of up to 670
+assets proves the eigenvalue test would pass — its backward error is within
+half the 1e-10 tolerance there — and the matrix is used untouched; only when
+it fails, or the matrix is larger, do the eigenvalues decide, as before. The
+answer is the same: on 1,500 matrices built across the threshold the
+factorization never completed where the eigenvalues repaired, and every
+output matched. The check takes 0.4 ms at 235 assets instead of 18–25 ms.
+These factorizations, and `optimize_max_diversification`'s pseudo-inverse
+and condition number, run on one BLAS thread, so their bits do not depend on
+the machine's core count; against the earlier multi-threaded default they
+moved once, in the last bits — weights by at most 2e-12 relative.
 
 Each of them also needs every asset named once. The results are keyed by
 name, so a repeated name collapsed two rows of the matrix into one key
@@ -737,6 +785,13 @@ below about 0.63 — is refused before the estimate: below about 0.019 the
 unbiasing denominator `1 − Σw²` was exactly zero and a raw numpy
 `LinAlgError` escaped, and between 0.019 and 0.05 a matrix with a condition
 number of 1e12–1e17 came back without a warning.
+
+The condition number and smallest eigenvalue are computed on one BLAS
+thread, so they are the same bits on any machine. The EWMA matrix's own
+product keeps its threads, so its last bits still follow the core count. A
+Ledoit-Wolf estimate no longer has scikit-learn compute the precision matrix
+it stores by default, which nothing read: that was 15–27 ms of a 23–33 ms
+fit at 235 assets, and skipping it leaves the bits identical.
 
 ## Planning the transition
 

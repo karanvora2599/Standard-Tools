@@ -287,6 +287,7 @@ wrong number that every downstream screen silently inherits.
 
 - **TTL cache**: identical calls within 1 hour return a `.copy()` of the cached DataFrame (no network round-trip); holds up to 100 entries, LRU-evicted beyond that. A window whose end is not yet historical (its last bar is still forming) is kept for **60 seconds** only — the hour-long TTL used to serve an unsettled bar as final for up to an hour, and a minute still turns three identical requests in one run into one metered fetch. yfinance, Polygon and Databento all go through this cache; Databento used to bypass both caches and the retry layer, so three identical live requests were three metered fetches. Bloomberg is the one provider with no cache at all (see its section below)
 - **Retry**: up to 3 attempts, waiting 1s then 2s between attempts (exponential backoff, factor 2) on transient failures
+- **A vendor's failure is named as one.** A yfinance request that never reached Yahoo — a dropped connection, a timeout, Yahoo's maintenance page, a rate limit — is retried those 3 times and then raised as `VendorUnavailableError`, not as "No data found … Verify symbol and date range"; only Yahoo's own empty answer is a `DataNotFoundError` (see [Error Handling](#error-handling)). Databento's bars are not repeated by the 3-attempt layer: a vendor-side failure (408, 429, 5xx, a timeout, a dropped connection) is asked once more on the same dataset and then raised as `VendorUnavailableError`, and an empty walk is a `DataNotFoundError` (see the [Databento section](#databento-provider))
 - **Cache key**: `(provider_name, instance_token, symbol, start_date, end_date, interval)` — `get_ohlcv` checks the session cache itself rather than via a `@cached()` decorator wrapping the whole method, so an audit record is written on every call, including a session-cache hit, not just on a live fetch. The per-instance token (a UUID, not `id(self)` — CPython can reuse a freed object's `id()`) keeps a fresh provider instance from transparently reusing another instance's cached result. The cache dict itself is guarded by a module-level lock (`data/_cache.py`), so concurrent threads hitting the same or different instances/args at once are safe — the lock only wraps the get/set, not the network fetch, so calls to different keys still run concurrently
 - **Copy-on-return**: every `get_ohlcv` call — session-cache hit, disk-cache hit, or live fetch — returns a fresh copy, so a caller mutating the result in place can't corrupt the cached object shared with the next caller
 
@@ -331,6 +332,32 @@ df = provider.get_ohlcv("NVDA", "2020-01-01", "2024-01-01")
 print(f"Cached call: {time.perf_counter() - t0:.3f}s")
 ```
 
+**A Databento window is written only once the vendor has served all of
+it.** A daily window ending yesterday, fetched before the vendor finalized
+yesterday's bar, used to be walked back to the day before and cached without
+its last day for good; an intraday end clamped to the dataset's published
+edge was cached short the same way. A short answer is now returned to the
+caller but not written (logged at INFO), and it is kept in the session cache
+for 60 seconds rather than the hour, so the next call — from this provider or
+a new one — asks again and writes the window once it is complete.
+
+**A Databento window ending today keeps its settled part.** A window that
+ends today is not historical and is not cached whole. Its bars dated two or
+more UTC days ago are, once the vendor has served past them: they are
+stored, marked settled, under the window they answer, and a later call —
+from any provider instance or process — reads that part and asks the
+preferred feed only for the bars after it. The answer is the one a single
+request for the whole window returns: rows, dtypes, index frequency, the
+dropped-bar disclosures (recomputed for the whole window) and the coverage
+notes. When a later day stores a newer part, the older one is removed, so
+disk use stays at one copy of the window's history. Only an entry marked
+settled is used this way; an ordinary entry for the same window is served
+only for that window. If the request for the rest meets anything unusual —
+a 422, a denial, a change of routing — the call falls back to one request
+for the whole window, and a vendor-side failure on it is raised, never
+served short. The audit trail labels such an answer
+`<dataset>:disk_cache+live`.
+
 **A cache entry is checked like a live answer before it is served.** Every provider reads the disk tier through one shared read, and it applies the checks the live paths make: the five `Open`/`High`/`Low`/`Close`/`Volume` columns, numeric; at least one bar; no null `Close`; and every bar inside the requested window (widened by one bar period for weekly and monthly bars, which are labelled by the start of their period, and by a day for intraday windows, whose bounds are in the caller's zone). A file that fails — truncated, garbage, or a readable Parquet file that is not a plausible answer, such as one holding only a `Close` column or another window's bars — is logged, deleted, and the data is refetched from the provider and rewritten; callers never see it or an exception because of it. A live answer the read would refuse is not written in the first place; a bar with no `Close` never reaches the write, because every provider drops it first and records the dates in `attrs`, which the Parquet file keeps (see [above](#a-bar-with-no-close-is-dropped-and-a-bar-still-trading-is-flagged)). Duplicate or out-of-order bar labels are logged rather than evicted: no writer here produces them, so a refetch would bring them back — `get_data_quality_report` reports them.
 
 **A Windows sharing violation is not corruption.** Opening an entry that another process is renaming a new version over, or has open, raises `PermissionError` on Windows. Each provider used to treat that as a corrupt file and delete a valid entry (a metered refetch), and yfinance and Polygon could turn a second refusal on the delete into an `APIError` with no request made. The read is now retried briefly; if it still cannot open, the call is served live and the entry is kept.
@@ -360,6 +387,7 @@ from standard_quant_tools.error import (
     DataNotFoundError,
     InvalidSymbolError,
     NonRetryableAPIError,
+    VendorUnavailableError,
 )
 
 try:
@@ -368,6 +396,8 @@ except DataNotFoundError:
     print("Symbol not found or no data in date range.")
 except InvalidSymbolError:
     print("Symbol string is malformed or empty.")
+except VendorUnavailableError as e:
+    print(f"The vendor failed on its side ({e.dataset}, HTTP {e.status}); ask again later: {e}")
 except NonRetryableAPIError as e:
     print(f"Permanent API failure (e.g. a bad key) — won't succeed on retry: {e}")
 except APIError as e:
@@ -378,6 +408,10 @@ Errors are designed to be descriptive enough for LLM self-correction — the mes
 
 `NonRetryableAPIError` is a subclass of `APIError` (so an existing `except APIError` still catches it — it's a narrowing, not a new branch you have to add), used for failures the shared `retry` decorator knows will never succeed no matter how many times it's retried: a rejected credential (Polygon's and Databento's HTTP 401/403), and a vendor answer whose **shape** a re-fetch reproduces — a window in which no bar has a Close, a frame missing an OHLCV column, a Polygon or Bloomberg bar with a close but no high, low, open or date. Those used to be plain `APIError`s and were asked three times. Everything else `APIError`-shaped (429 rate limits, 5xx, network errors) is retried with the usual exponential backoff; `DataNotFoundError`/`InvalidSymbolError` are also never retried, for the same reason (retrying "the symbol doesn't exist" can't change the answer).
 
+`VendorUnavailableError` is a `NonRetryableAPIError` for a vendor that failed on its side — a 5xx, a 408 or 429, a timeout, a dropped connection — and kept failing after the provider's own retry. It is **not an answer about the data**: it does not mean the window is empty, that no dataset covers it, or that the subscription declines it, and asking again later may succeed. It carries `.status` (`None` for a connection failure), `.dataset` and `.retry_after` (the wait the vendor asked for, when it said).
+
+**yfinance: a request that never reached Yahoo is not "No data found".** yfinance swallows transport errors and returns an empty frame, and its timezone lookup reports a symbol it could not reach as "possibly delisted; no timezone found", so a dropped connection used to read as "No data found for 'AAPL'. Verify symbol and date range." The history call is now made with `raise_errors=True` where the installed yfinance takes it. A transport failure — a connection error or timeout, a non-JSON reply, Yahoo's "currently down" page, a rate limit (429), a 5xx folded into "no price data", or the timezone lookup's swallowed error — is retried by the 3-attempt layer and then raised as `VendorUnavailableError`, saying it is a network or service failure, not an answer about the symbol or the window. Yahoo's own answers — possibly delisted, no prices for the window, an empty frame — stay `DataNotFoundError` with the old wording (plus yfinance's reason when it gives one) and are not retried. One side effect: yfinance's "auto_adjust failed" now raises where it used to return unadjusted prices silently, and the caller gets an `APIError` after the 3 attempts. `get_ticker_info` and `get_financial_ratios` read `ticker.info`, which has no such switch, and can still report a transport failure as missing data.
+
 ### What `retry` retries, precisely
 
 | Exception | Retried? | Final type seen by the caller |
@@ -386,6 +420,7 @@ Errors are designed to be descriptive enough for LLM self-correction — the mes
 | `ValueError` | yes | `APIError` |
 | Raw network/stdlib errors (`ConnectionError`, `TimeoutError`, `socket.gaierror`, `aiohttp`/`requests` client errors) | yes | `APIError`, chained from the original |
 | `NonRetryableAPIError` (401/403; a window with no Close; missing columns or bar fields) | no | `NonRetryableAPIError` |
+| `VendorUnavailableError` (the vendor failed on its side and has already been retried: Databento once on the same dataset, yfinance three times) | no | `VendorUnavailableError` |
 | `InvalidSymbolError`, `DataNotFoundError` | no | unchanged |
 | `ValidationError` and every other non-`APIError` `QuantError` | no | **unchanged** |
 
@@ -624,11 +659,37 @@ the message, remembered as an entitlement denial on each dataset in turn, and
 reported as "No dataset covers that range". A 403 is the subscription
 declining one dataset: it is remembered, the next dataset is asked, and when
 every dataset that could answer has been declined the refusal is a
-`NonRetryableAPIError` that says so and names the datasets. Anything else —
-a 5xx, a timeout — is transient and never remembered; a 500 whose request id
-happened to contain "403" used to retire a healthy feed for the life of the
-provider. When no dataset is asked, the refusal names why each was passed
-over (declined, its coverage, or a lookup that failed).
+`NonRetryableAPIError` that says so and names the datasets. Anything else is
+not remembered; a 500 whose request id happened to contain "403" used to
+retire a healthy feed for the life of the provider.
+
+**A vendor's failure is named as one, after one more try.** A 408, a 429, a
+5xx, a timeout, a dropped connection or a stream cut off mid-body is the
+vendor's failure, not an answer about the data. The same request is sent
+once more on the same dataset after a short jittered pause (0.25–0.75 s, or
+the vendor's `Retry-After` when it gives one, up to five seconds; a longer
+one is not waited for) and, failing again, raised as
+`VendorUnavailableError`, a `NonRetryableAPIError` with `.status`,
+`.dataset` and `.retry_after`. No other dataset is asked in its place,
+because a lesser feed's answer would be served as the preferred one's, and
+the retry passes through the request gate like the first request. The
+3-attempt retry layer no longer repeats the walk on top of that: a 504 used
+to cost six requests and three seconds of sleeps and be reported as
+"Databento returned no bars … Datasets tried"; it is now two requests on one
+dataset and named, for example "the request for bars for AAPL (ohlcv-1d)
+between 2025-09-01 and 2025-09-11 on EQUS.SUMMARY answered HTTP 504 … twice
+… Asking again later may succeed." The free lookups behave the same way: a
+coverage lookup that fails on the vendor's side is retried once and raised
+rather than read as "no dataset covers that range", `get_dataset_coverage`
+raises rather than leaving the dataset out (which read as "unentitled,
+unknown, or declined"), and `get_billable_size` raises rather than pricing
+the next dataset's request in its place. A walk in which every dataset
+answered with no records raises `DataNotFoundError` (it was an `APIError`);
+one that failed for a reason about the request itself — a 400, a 422 — names
+each failure rather than calling it an empty answer. A rejected key keeps
+its message and is now raised as `databento_provider.RejectedKeyError`, a
+`NonRetryableAPIError`. When no dataset could be asked, the refusal names
+why each was passed over (declined, its coverage, or a lookup that failed).
 
 **Every billable request can be governed.** `set_request_gate(gate)`
 registers an object asked before every `timeseries.get_range` the provider
@@ -725,6 +786,17 @@ three metered fetches. The frame carries `attrs["adjusted"] = False`
 (the venue publishes unadjusted, which the backtest split screen reads), and
 `get_temporal_contract("bars")` reports `revisions="unknown"` to agree with
 `point_in_time=False`.
+
+**The daily publication edge is learned once an hour.** `ohlcv-1d`
+finalizes a day or two behind the live edge, so a daily request near today
+is refused once or twice before the walk-back reaches an end the vendor
+accepts. Every tool call builds a new provider, so every call used to pay
+those refusals again. The refused end is now remembered for the process, per
+dataset and schema, until the top of the next UTC hour
+(`databento_provider.forget_publication_edges()` clears it); a later walk
+starts below it, and the days it skips count against the walk's attempts,
+so it ends where the full walk would. A day the vendor finalizes within the
+hour is asked for once the hour turns.
 
 **A futures root is not an equity.** `ES`, `CL` and `GC` are equity tickers
 as well as roots, and the provider used to resolve them to the equity —

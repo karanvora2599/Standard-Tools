@@ -83,6 +83,17 @@ returned nothing. They are named in `warnings`, because a complete-case join
 downstream will not see they were ever requested — the panel simply looks
 like a smaller universe that someone chose.
 
+**A failed fetch fails the panel, and says whose failure it was.**
+`fetch_ohlcv_panel` builds no partial panel: the first symbol whose fetch
+raises fails the batch. A failure about one symbol is refused as a
+`ValidationError` that names the universe and advises dropping the symbol
+that cannot be fetched. A failure on the vendor's side — a 5xx or a timeout
+that outlasted the provider's own retries, raised or chained as
+`VendorUnavailableError` — is refused as `VendorUnavailableError`, naming
+the dataset and status it knows and saying that dropping a symbol will not
+help and the batch should be run again later. It used to carry the same
+advice to drop a symbol.
+
 **A bar the provider dropped, or one still trading, is named per symbol.**
 Every provider drops a bar with no Close — the row a vendor lists for the
 next session before it trades, or a hole — and flags a last daily bar whose

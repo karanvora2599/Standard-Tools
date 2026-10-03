@@ -221,12 +221,23 @@ automatically.
 Native kernels used to parallelize whenever there was more than one task,
 which oversubscribes badly when Standard Tools is itself running inside a
 `ProcessPoolExecutor`, several agents, or replicated containers. The decision
-is now based on total work, and two environment variables govern it:
+is now based on how long the work would take on one thread — each kernel
+states its units and the measured cost of one, and a region goes parallel at
+150 µs of estimated serial work (thresholds per kernel in
+[16_performance.md](16_performance.md#when-a-kernel-goes-parallel)) — and
+these environment variables govern it:
 
 | variable | default | meaning |
 |---|---|---|
-| `SQT_NUM_THREADS` | unset | Ceiling on threads any kernel may use. **Set to `1` inside a process pool.** |
-| `SQT_OMP_MIN_WORK` | `50000` | Minimum tasks × elements before a region goes parallel at all. |
+| `SQT_NUM_THREADS` | unset | Ceiling on threads any kernel may use, and the total that pooled rank correlations running at once share. **Set to `1` inside a process pool.** |
+| `SQT_OMP_MIN_WORK` | unset | Unset, a region goes parallel at 150 µs of estimated serial work. Set to a unit count, it restores the earlier rule exactly: a region goes parallel at tasks × elements ≥ that count, and the measured costs are ignored (`50000` was the old default). |
+| `SQT_BLAS_THREADS` | `1` | BLAS threads for the library's own covariance-sized factorizations (the PSD repair, PCA's SVD, the covariance's eigenvalues, the exact mean-variance solve, every fit on a modeling pool). One is faster at these sizes and gives the same bits on any machine; `0` leaves BLAS at the process's setting. |
+
+`import standard_quant_tools` also sets `OMP_WAIT_POLICY=PASSIVE` unless it is
+already set, so the OpenMP workers sleep after a region instead of spinning
+beside the Python that follows; set `OMP_WAIT_POLICY=ACTIVE` before starting
+Python to keep them spinning. See
+[16_performance.md](16_performance.md#runtime-defaults-openmp-wait-policy-and-blas-threads).
 
 ## Annualization is a parameter, not an assumption
 

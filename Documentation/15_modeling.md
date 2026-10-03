@@ -2365,6 +2365,19 @@ proposes the next one, and a search whose winner depends on thread timing
 is not a search anyone can reproduce. The search report and the
 `fits` block of the validation report carry the value that ran.
 
+Every fit on a pool — folds side by side or search candidates side by side,
+the first candidate included — runs on one BLAS thread. Before, each worker
+started one BLAS thread per logical CPU, so W workers ran W × 16 threads;
+one thread each was 2.4–2.8× faster for a 235-asset solve and
+eigendecomposition on four to eight workers, and those fits no longer depend
+on the machine's core count. End to end at a budget of 8 with 235 features,
+ridge is 1.0–1.2× faster and linear regression 1.15–1.25×. A budget of 1, a
+search that does not pool (TPE, or a single candidate), and the full-panel
+refit keep the process's BLAS setting. The numbers are identical at 1 and at
+4, checked bit for bit on a 150-feature ridge search. `SQT_BLAS_THREADS`
+sets another count, or 0 to leave BLAS alone (see
+[16_performance.md](16_performance.md#runtime-defaults-openmp-wait-policy-and-blas-threads)).
+
 ---
 
 ## Analyzing features before choosing them

@@ -1,5 +1,21 @@
 # Changelog
 
+## The guides say when a kernel goes parallel, how a portfolio answer is certified and what a replay compares
+
+- **The performance guide** has the serial-time rule with each kernel's
+  measured cost and the size it goes parallel from, the runtime defaults
+  (`OMP_WAIT_POLICY=PASSIVE`, its cost and the `ACTIVE` override, one BLAS
+  thread, `SQT_BLAS_THREADS`), the one-pass Python steps, and the clang-cl
+  build measured against cl.
+- **The portfolio guide** describes the exact solver, its certificate and
+  the fallback chain; **the auditability guide** sets out the conditions
+  bit-exactness rests on as a table, and what replay says under each; the
+  options, data, analysis, modeling, backtesting, build and meta guides
+  carry the changes in their own areas.
+- **The README and the testing guide count the tests**: 14,054 collected,
+  13,894 passing with the extension and `SQT_EXPECT_NATIVE=1`, and 14 C++
+  test executables with 92,160 checks between them.
+
 ## A vendor's failure is named as one, the daily edge is learned once, and a window ending today keeps its history
 
 - **A 504 is no longer "no bars".** The retry layer re-ran a Databento walk

@@ -92,6 +92,17 @@ except ValidationError as e:
                # the lower bound is the discounted intrinsic, not zero
 ```
 
+**The volatility is squared as `v * v`**, the correctly rounded square, as
+in `option_greeks` and `price_option`. Before 2026-10-02 this module, the
+batch kernel and its numpy fallback squared through `pow(v, 2.0)`, which the
+Windows C runtime rounds differently for about 1 volatility in 2,000.
+`black_scholes_price` and `price_option` now agree to the bit. About
+0.01–0.03% of implied volatilities moved, by at most 1.2e-14 relative
+(one deep out-of-the-money quote moved 1.6e-10, inside the solver's
+`tol_sigma`); about 0.01% of `black_scholes_price` and `black_scholes_greeks`
+values moved, by at most 1.3e-14. Across 3 million contracts no reason,
+iteration count, method, `converged` or `at_bound` flag changed.
+
 ---
 
 ## Whole Chains in One Call
@@ -123,6 +134,20 @@ grid = black_scholes_greeks_batch(np.linspace(80, 120, 61), strikes[:4], 0.25, 0
 grid["gamma"].shape        # (4, 61): every contract at every spot
 ```
 
+**Only the greeks you need.** `greeks=` names the outputs to compute: one
+name or several from `GREEKS` (`None`, the default, is all of them, as
+before). `black_scholes_greeks_batch(spots, strikes, t, vols, r, grid=True,
+greeks=("gamma",))["gamma"]` takes no erf and writes one array instead of
+twelve, and is 4–5× faster than the full set on a gamma profile;
+`greeks=("delta",)` takes one erf where the full set takes two. The result
+holds the selected names in `GREEKS` order, their `units`, and `path`; an
+unknown or empty selection raises `ValidationError`. Each array returned is
+the full call's array to the bit, and a selection refuses what the full call
+refuses, in the same words: a price that would come out non-finite is caught
+without computing the price. `zero_gamma_spot`, `simulate_delta_hedge` and
+`option_risk_scenarios` ask only for what they read — gamma, delta and the
+price.
+
 **The same numbers, contract for contract.** `implied_volatility_batch` is
 `implied_volatility`'s algorithm — the bound check with `BOUND_TOLERANCE`,
 Newton on vega converged on `tol_sigma`, the bisection over `[1e-6, 5.0]`,
@@ -135,7 +160,7 @@ calendar day, rho per rate point, speed, `d1`, `d2` — and `price_option`'s
 price. Both run as a compiled kernel with OpenMP across contracts (gated on
 total work, like every kernel here) and fall back to numpy under
 `SQT_DISABLE_NATIVE=1` or a stale extension; `path` says which ran. The
-fallback takes `exp`, `log`, `pow` and `erf` from `math` rather than numpy,
+fallback takes `exp`, `log` and `erf` from `math` rather than numpy,
 because numpy's vectorised transcendentals can round differently in the last
 bit on some CPUs and a last-bit difference in a price is enough to change an
 iteration count. The tests hold all three — kernel, fallback and scalar —

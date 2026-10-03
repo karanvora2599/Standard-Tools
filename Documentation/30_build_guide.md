@@ -559,10 +559,14 @@ cmake --build build --config Release
 ctest --test-dir build --config Release -V
 ```
 
-This runs ten test suites: `cpp_hurst`, `cpp_indicators`, `cpp_cointegration`,
-`cpp_backtest`, `cpp_monte_carlo`, `cpp_garch`, `cpp_signals`,
-`cpp_rolling_regression`, `cpp_panel_stats`, and `cpp_fuzz_cointegration`
-(a randomized-input harness, and the bulk of the assertion count).
+This runs fourteen test suites: `cpp_hurst`, `cpp_panel_stats`,
+`cpp_omp_policy`, `cpp_indicators`, `cpp_cointegration`, `cpp_backtest`,
+`cpp_monte_carlo`, `cpp_garch`, `cpp_signals`, `cpp_rolling_regression`,
+`cpp_options`, `cpp_cusum`, `cpp_correlation`, and `cpp_fuzz_cointegration`
+(a randomized-input harness, and the bulk of the assertion count). Every
+library and executable in the suite is compiled with the extension's own
+codegen — no contraction, the `SQT_NATIVE_ARCH` instruction set, LTO in
+Release — so a defect only the shipped codegen has can fail it.
 
 Or run each binary directly:
 
@@ -577,6 +581,10 @@ build\tests\cpp\Release\test_garch.exe
 build\tests\cpp\Release\test_signals.exe
 build\tests\cpp\Release\test_rolling_regression.exe
 build\tests\cpp\Release\test_panel_stats.exe
+build\tests\cpp\Release\test_omp_policy.exe
+build\tests\cpp\Release\test_options.exe
+build\tests\cpp\Release\test_cusum.exe
+build\tests\cpp\Release\test_correlation.exe
 build\tests\cpp\Release\fuzz_cointegration.exe
 
 # Windows (Ninja) / Linux / macOS
@@ -589,6 +597,10 @@ build\tests\cpp\Release\fuzz_cointegration.exe
 ./build/tests/cpp/test_signals
 ./build/tests/cpp/test_rolling_regression
 ./build/tests/cpp/test_panel_stats
+./build/tests/cpp/test_omp_policy
+./build/tests/cpp/test_options
+./build/tests/cpp/test_cusum
+./build/tests/cpp/test_correlation
 ./build/tests/cpp/fuzz_cointegration
 ```
 
@@ -755,7 +767,8 @@ Standard Tools/
 | Rolling factor loadings (per-window rank-revealing QR with column pivoting) | `rolling_regression.hpp` | `rolling_regression.cpp` | `analysis/multi_factor.py` |
 | Shared least-squares backend (`qr::lstsq` column-pivoted QR; `qr::lstsq_nested_rss` for nested-model sweeps) | `qr.hpp` (header-only) | — | used by `cointegration.cpp`, `rolling_regression.cpp` |
 | Shared numerical conventions (relative-epsilon pivot tests, checked narrowing) | `numerics.hpp` (header-only) | — | used across every kernel |
-| OpenMP policy (work threshold, thread cap, scheduling rationale) | `omp_policy.hpp` (header-only) | — | used by every parallel kernel |
+| OpenMP policy (serial-time threshold with per-kernel costs, thread share for the pooled sort, thread cap, scheduling rationale; see [When a kernel goes parallel](16_performance.md#when-a-kernel-goes-parallel)) | `omp_policy.hpp` (header-only) | — | used by every parallel kernel |
+| No floating-point contraction (`#pragma STDC FP_CONTRACT OFF` / `#pragma fp_contract(off)`, included first by every unit) | `fp_contract.hpp` (header-only) | — | every translation unit; see [§9](#9-notes) |
 | Batch pair cointegration (`batch_engle_granger` — `(n_pairs, 11)` array, parallel across pairs) | `cointegration.hpp` | `cointegration.cpp` | `analysis/cointegration.py`'s `scan_cointegrated_pairs`, used by `agent/tools.py`'s `scan_pairs` |
 | Panel indicators (`technical_indicators_panel` — whole universe in one call, parallel across tickers) | `indicators.hpp` | `indicators.cpp` | `indicators/panel.py` |
 | Feature preprocessing (`fit_preprocess_stats` / `apply_preprocess_stats` — per-column winsorize bounds and clipped moments, then a fused clip+standardize pass) | `panel_stats.hpp` | `panel_stats.cpp` | `modeling/features/transforms.py` |
@@ -766,6 +779,7 @@ Standard Tools/
 | GARCH(1,1) conditional variance recursion + fused NLL/analytic gradient | `garch.hpp` | `garch.cpp` | `analysis/garch.py` |
 | Kalman filter, 1-state and 2-state (time-varying hedge ratio) | `cointegration.hpp` | `cointegration.cpp` | `analysis/cointegration.py` |
 | Donchian breakout / VWAP-reversion signal hysteresis | `signal_state_machines.hpp` | `signal_state_machines.cpp` | `backtest/strategies.py` |
+| Pearson correlation matrix (`pearson_correlation(values, min_periods=1)` — pandas' `DataFrame.corr()` arithmetic per pair, bit for bit, before pandas 3's clip; each complete column's Welford recursion computed once, pairs in blocks across threads) | `correlation.hpp` | `correlation.cpp` | `portfolio/construction.py`'s `hierarchical_risk_parity`, with `frame.corr()` as the fallback |
 
 **`batch_run_strategy`'s return format changed** from a `py::list` of `py::dict` (one dict per grid combination) to a single `(num_tests, 11)` `py::array_t<double>` with a fixed column order (`_BATCH_METRIC_COLUMNS` in `engine.py`) — a direct C++-caller integration, not a public Python API most users touch directly (`backtest_grid` still returns a `pd.DataFrame` either way).
 
@@ -792,9 +806,14 @@ so this is safe by construction, not by careful scheduling. Verified by
 and — for it and every other parallel kernel — by
 `tests/cpp_bindings/test_thread_count_determinism.py`, which runs each at
 1, 2, 4 and 8 threads in separate interpreters and requires bit-identical
-output. Separate interpreters because OpenMP reads `OMP_NUM_THREADS` once,
-when its thread pool starts, and `SQT_NUM_THREADS` is cached on first use:
-changing either inside one process changes nothing.
+output. It also runs every kernel under each threshold setting — the
+serial-time rule, `SQT_OMP_MIN_WORK` at 50000 and at 0, and an unparsable,
+negative or empty value — and from four concurrent callers, in lock-step
+and rotated, each of which must answer the serial reference. Separate
+interpreters because OpenMP reads `OMP_NUM_THREADS` once,
+when its thread pool starts, and `SQT_NUM_THREADS` and `SQT_OMP_MIN_WORK`
+are cached on first use: changing any of them inside one process changes
+nothing.
 
 **Trade-stat parity (`run_strategy` vs. `batch_run_strategy`) — fix confirmed correct against a real compiled `_sqt_core`:**
 `sqt::run_strategy`'s own trade-log logic in `backtest.cpp` used to record entry
@@ -924,11 +943,17 @@ fallback points to a code-generation problem before an algorithmic one.
 
 ## 9. Notes
 
-**`-march=native` / `/arch:AVX2` (opt-in via `SQT_NATIVE_ARCH`)**  
-Both flags tune the binary for the exact CPU of the build machine — fine for
-local development, but the resulting binary can crash with an illegal-
-instruction fault on a different/older CPU lacking those ISA extensions. This
-is why the default build (`cmake -B build...` with no extra flags, including
+**`/arch:AVX2` / `-march=x86-64-v3` (opt-in via `SQT_NATIVE_ARCH`)**  
+Both let the compiler use AVX2, FMA and BMI2, so the resulting binary can
+crash with an illegal-instruction fault on an older CPU without them. Under
+GCC and Clang on x86-64 the flag is `-march=x86-64-v3`, not `-march=native`:
+the same instruction-set level as cl's `/arch:AVX2`, and the same code on
+every machine that builds it — `-march=native` on an AVX-512 build host
+turned on instructions no CI runner or second machine is guaranteed to have.
+A compiler that does not know the level name (older than GCC 11 or Clang 12)
+gets `-march=haswell`, the same instructions; non-x86 targets keep
+`-march=native`. The illegal-instruction risk is why the default build
+(`cmake -B build...` with no extra flags, including
 what CI uses) does **not** enable them: `SQT_NATIVE_ARCH` defaults to `OFF`,
 so a fresh clone always produces portable codegen. Opt in explicitly for
 local speed:
@@ -937,7 +962,11 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release -DSQT_NATIVE_ARCH=ON
 ```
 This session's own measured benchmarks in the CHANGELOG
 were built with `SQT_NATIVE_ARCH=ON`. For a distributable wheel (PyPI), leave
-it off (the default) rather than substituting a manual baseline flag.
+it off (the default) rather than substituting a manual baseline flag. The
+C++ unit-test libraries are compiled with the same instruction set, the
+same no-contraction rule and the same LTO as the extension, through one
+CMake function both use (and at `-O3` under GCC and Clang where the
+extension builds at `-O3`), so `ctest` exercises the code the build ships.
 
 **Extension suffix**  
 Python automatically picks up the correct suffix
@@ -960,8 +989,10 @@ breakdown in [Which copy are you importing?](#which-copy-are-you-importing).
 `_cpp/CMakeLists.txt` calls `find_package(OpenMP)` (not `REQUIRED`) to
 parallelize the batched kernels — `batch_run_strategy`,
 `batch_backtest_crossover`, `rolling_hurst`, `batch_engle_granger`,
-`technical_indicators_panel`, `simulate_forward_paths`, the panel statistics
-and the option-chain kernels. Linux (`libgomp`, ships with
+`technical_indicators_panel`, `simulate_forward_paths`, the panel statistics,
+the option-chain kernels and `pearson_correlation`. When a region goes
+parallel is decided by its estimated serial time
+([16_performance.md](16_performance.md#when-a-kernel-goes-parallel)). Linux (`libgomp`, ships with
 `build-essential`/`gcc`) and Windows (MSVC's `/openmp`: OpenMP 2.0 on
 `vcomp140.dll`, which the Visual C++ Redistributable installs) pick this up
 automatically with no extra install step. Default Apple Clang on macOS ships
@@ -973,7 +1004,7 @@ runtime a build linked (`openmp_runtime`). Why MSVC stays on 2.0, with
 what each of its modes compiles:
 [Why the MSVC build uses OpenMP 2.0](#why-the-msvc-build-uses-openmp-20).
 
-**`SQT_OPENMP_LLVM` (MSVC only, off by default)**  
+**`SQT_OPENMP_LLVM` (cl only, off by default)**  
 `-DSQT_OPENMP_LLVM=ON` compiles with `/openmp:llvm`, which links LLVM's
 OpenMP runtime, `libomp140.x86_64.dll`, in place of `vcomp140.dll`. The build
 facts say which one a binary carries — `openmp_runtime` reads `libomp`
@@ -999,7 +1030,7 @@ that were each checked rather than assumed:
   implied-volatility solve 0.76×); capped at 8 threads libomp was 1.04–1.29×
   faster; and every cold call — one made after the workers have gone to
   sleep, the usual case between stretches of Python — was slower,
-  0.58–0.98× ([16_performance.md](16_performance.md#build-variants-openmp-runtime-and-profile-guided-optimization)).
+  0.58–0.98× ([16_performance.md](16_performance.md#build-variants-openmp-runtime-profile-guided-optimization-and-clang-cl)).
 - **It does not enable `omp simd`.** `/openmp:llvm` changes the runtime and
   admits unsigned loop counters; `#pragma omp simd` is still error C7660
   under it. Only `/openmp:experimental` compiles that directive, and it
@@ -1009,6 +1040,65 @@ that were each checked rather than assumed:
   well as `_MSC_VER`, because clang-cl defines both. On x86 that loop
   only runs on a CPU without AVX2 and FMA anyway; every other one takes the
   intrinsics path.
+
+**No fused multiply-add, on any compiler**  
+Every kernel is held bit for bit to the Python or pandas arithmetic it
+replaces, which a fused multiply-add — one rounding where the source has two
+— breaks. Every translation unit compiles with contraction off in its
+compiler's own spelling: `/fp:precise` (cl), `/clang:-ffp-contract=off`
+(clang-cl; a plain `-ffp-contract=off` is silently ignored by that driver)
+and `-ffp-contract=off` (GCC, Clang). Each also includes
+`sqt/fp_contract.hpp` first, whose pragma holds even against a global
+`/fp:contract` that a later `/fp:precise` does not undo. A new `.cpp` must
+include it before anything else; `tests/cpp_bindings/test_build_options.py`
+fails otherwise. What none of this can stop is a later `-ffp-contract=fast`
+or `/fp:fast` on the command line: that is a build asking for different
+arithmetic. The only FMA instructions in a built module are the AVX2
+intrinsics in `rolling_beta_avx2.cpp` — three, checkable with
+`dumpbin /disasm`. The rule used to cover `options.cpp` and `cusum.cpp`
+only, and did not hold for clang-cl at all: clang-cl contracts within an
+expression by default even under `/fp:precise`, and a clang-cl build carried
+406 FMA instructions, moved 27 of 44 sampled kernel outputs and failed 41
+tests.
+
+**clang-cl (opt-in, local builds only)**  
+LLVM's `clang-cl` builds the extension bit-identical to cl (44 of 44 sampled
+kernel outputs at every thread setting; the full suite passes) and is
+1.2–2.2× faster on many kernels (`rolling_beta` 2.0–2.2×, Bollinger 1.7–2.0×,
+single backtests 1.7×, the state machines 1.2–1.7×) and 0.73–0.93× on a few
+(`implied_volatility_batch` at default threads, `kalman_filter_2state`,
+`rolling_factor_loadings`); see
+[16_performance.md](16_performance.md#clang-cl-against-cl). From a Visual
+Studio developer prompt, with LLVM installed (its `bin` holds
+`clang-cl.exe`, `lld-link.exe` and `libomp.dll`, its `lib` holds
+`libomp.lib`):
+```
+cmake -S . -B build-clang -G Ninja -DCMAKE_BUILD_TYPE=Release ^
+      -DCMAKE_CXX_COMPILER="C:/Program Files/LLVM/bin/clang-cl.exe" ^
+      -DPython3_EXECUTABLE=<python.exe> -DSQT_NATIVE_ARCH=ON
+cmake --build build-clang
+```
+The build links LLVM's own OpenMP runtime (`openmp_runtime` reads `libomp`,
+`compiler` reads `Clang <version>`) and copies `libomp.dll` beside the
+extension, because Python does not look for an extension's DLLs on `PATH`;
+the copy is git-ignored, installed with the extension, and removed by the
+next build that does not link it. Given the MSVC toolset's `libomp.lib`
+instead, the build names the runtime `libomp140` and configure warns, since
+`libomp140.x86_64.dll` is not in the VC++ redistributable. If `libomp.dll`
+goes missing, `native_build_status()` reports the extension `unloadable` and
+names each DLL it imports that Windows cannot find, with what it is and
+where it has to be. Like every build tree, this one writes
+`src/standard_quant_tools/_sqt_core.*.pyd`, replacing the cl build: to go
+back, delete that file and rebuild the cl tree (Ninja otherwise sees a newer
+output and does not relink). It is not for wheels or for a binary that
+leaves the machine — `libomp.dll` is not in any Microsoft redistributable,
+and vendoring it would carry LLVM's licence notice — and
+`SQT_PGO_GENERATE`/`SQT_PGO_USE` are refused under it (lld-link does not take
+cl's `/GENPROFILE` workflow); `SQT_OPENMP_LLVM` is cl's and is ignored with a
+warning, since clang-cl always links LLVM's runtime. Loading
+the extension directly by file path, rather than through the package, needs
+a backslash path: Windows searches the extension's own directory for
+`libomp.dll` only then.
 
 **PGO (Profile-Guided Optimization, opt-in, local-only, `SQT_PGO_GENERATE`/`SQT_PGO_USE`)**  
 Same "opt-in for local max speed, off by default" philosophy as
@@ -1025,7 +1115,7 @@ Measured, a trained profile made a single backtest 1.9× faster, the
 Donchian and VWAP-reversion state machines 1.5× and 1.2×, and the batch
 backtest grid 1.2–1.27×; the arithmetic kernels moved within their noise,
 and `batch_backtest_crossover` and `simulate_forward_paths` got 8% slower
-([16_performance.md](16_performance.md#build-variants-openmp-runtime-and-profile-guided-optimization)).
+([16_performance.md](16_performance.md#build-variants-openmp-runtime-profile-guided-optimization-and-clang-cl)).
 
 ⚠️ **Every CMake build directory in this repo writes `_sqt_core` to the
 same absolute package path** (`src/standard_quant_tools/`), regardless of
