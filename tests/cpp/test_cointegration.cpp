@@ -599,6 +599,93 @@ static void check_nested_matches_per_prefix(
     }
 }
 
+static void test_lstsq_layouts_are_bit_identical() {
+    // `adf_test`'s report pass builds its design column-major and solves it
+    // with qr::lstsq_colmajor; every other caller is row-major. The two are
+    // the same algorithm over the same elements in the same order, so they
+    // must agree to the BIT and not merely to a tolerance -- the whole reason
+    // the layout could be changed at all is that it moves addresses and
+    // nothing else. A tolerance here would pass a reassociation that silently
+    // moved the ADF statistic, which this kernel has twice been wrong about.
+    std::uint64_t state = 20261003;
+    for (int trial = 0; trial < 40; ++trial) {
+        const int T = 30 + static_cast<int>((pseudo_random(state) + 1.0) * 200.0);
+        const int k = 2 + static_cast<int>((pseudo_random(state) + 1.0) * 24.0);
+        if (T <= k) continue;
+        const std::size_t T_sz = static_cast<std::size_t>(T);
+        const std::size_t k_sz = static_cast<std::size_t>(k);
+
+        // One logical matrix, stored both ways, plus a scale spread wide
+        // enough to exercise the equilibration and the rank test.
+        std::vector<double> row_major(T_sz * k_sz), col_major(T_sz * k_sz);
+        std::vector<double> b_row(T_sz), b_col(T_sz);
+        for (int r = 0; r < T; ++r) {
+            for (int c = 0; c < k; ++c) {
+                const double scale = (c == k - 1) ? 1e7 : 1.0;
+                const double v = (c == 0) ? 1.0 : pseudo_random(state) * scale;
+                row_major[static_cast<std::size_t>(r) * k_sz + static_cast<std::size_t>(c)] = v;
+                col_major[static_cast<std::size_t>(c) * T_sz + static_cast<std::size_t>(r)] = v;
+            }
+            const double y = pseudo_random(state);
+            b_row[static_cast<std::size_t>(r)] = y;
+            b_col[static_cast<std::size_t>(r)] = y;
+        }
+
+        std::vector<int> perm_row(k_sz), perm_col(k_sz);
+        const auto a = sqt::qr::lstsq(row_major.data(), b_row.data(), T, k, perm_row.data());
+        const auto cm = sqt::qr::lstsq_colmajor(col_major.data(), b_col.data(), T, k, perm_col.data());
+
+        CHECK(a.full_rank == cm.full_rank);
+        CHECK(a.rank == cm.rank);
+        CHECK(a.rss == cm.rss);  // bit equality, deliberately not CHECK_NEAR
+        for (int j = 0; j < k; ++j) {
+            CHECK(perm_row[static_cast<std::size_t>(j)] ==
+                  perm_col[static_cast<std::size_t>(j)]);
+            const double ba = a.beta[static_cast<std::size_t>(j)];
+            const double bc = cm.beta[static_cast<std::size_t>(j)];
+            CHECK((ba == bc) || (std::isnan(ba) && std::isnan(bc)));
+        }
+        if (a.full_rank) {
+            for (int j = 0; j < k; ++j) {
+                const double xa =
+                    sqt::qr::xtx_inv_diag(row_major.data(), a, perm_row.data(), j);
+                const double xc =
+                    sqt::qr::xtx_inv_diag_colmajor(col_major.data(), cm, perm_col.data(), j);
+                CHECK((xa == xc) || (std::isnan(xa) && std::isnan(xc)));
+            }
+        }
+    }
+}
+
+static void test_lstsq_layouts_agree_on_a_rank_deficient_design() {
+    // The rank verdict is the one thing equilibration exists to get right, so
+    // the layouts have to reach the same verdict on a design that is actually
+    // deficient rather than only on well-conditioned ones.
+    const int T = 60, k = 4;
+    const std::size_t T_sz = static_cast<std::size_t>(T);
+    const std::size_t k_sz = static_cast<std::size_t>(k);
+    std::vector<double> row_major(T_sz * k_sz), col_major(T_sz * k_sz);
+    std::vector<double> b_row(T_sz), b_col(T_sz);
+    std::uint64_t state = 7;
+    for (int r = 0; r < T; ++r) {
+        const double x = pseudo_random(state);
+        const double vals[4] = {1.0, x, 2.0 * x, pseudo_random(state)};  // col2 = 2*col1
+        for (int c = 0; c < k; ++c) {
+            row_major[static_cast<std::size_t>(r) * k_sz + static_cast<std::size_t>(c)] = vals[c];
+            col_major[static_cast<std::size_t>(c) * T_sz + static_cast<std::size_t>(r)] = vals[c];
+        }
+        const double y = pseudo_random(state);
+        b_row[static_cast<std::size_t>(r)] = y;
+        b_col[static_cast<std::size_t>(r)] = y;
+    }
+    std::vector<int> perm_row(k_sz), perm_col(k_sz);
+    const auto a = sqt::qr::lstsq(row_major.data(), b_row.data(), T, k, perm_row.data());
+    const auto cm = sqt::qr::lstsq_colmajor(col_major.data(), b_col.data(), T, k, perm_col.data());
+    CHECK_FALSE(a.full_rank);
+    CHECK(a.full_rank == cm.full_rank);
+    CHECK(a.rank == cm.rank);
+}
+
 static void test_nested_rss_matches_independent_fits_random() {
     std::uint64_t state = 20260821;
     for (int trial = 0; trial < 20; ++trial) {
@@ -885,6 +972,10 @@ int main() {
     test_batch_coint_respects_pair_order();
     test_batch_coint_rejects_out_of_range_pair();
     test_batch_coint_empty_is_a_noop();
+
+    // qr::lstsq row-major vs column-major (the report pass's primitive)
+    test_lstsq_layouts_are_bit_identical();
+    test_lstsq_layouts_agree_on_a_rank_deficient_design();
 
     // qr::lstsq_nested_rss (the primitive behind the lag sweep)
     test_nested_rss_matches_independent_fits_random();

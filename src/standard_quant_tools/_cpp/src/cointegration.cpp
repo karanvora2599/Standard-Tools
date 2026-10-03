@@ -356,16 +356,39 @@ AdfResult adf_test(const double* y, std::size_t n, int max_lag, bool use_aic,
         std::vector<double> A(numerics::checked_mul(T_sz, k_sz,
             "adf_test: design matrix size"));
         std::vector<double> b(T_sz);
-        for (std::size_t row = 0; row < T_sz; ++row) {
-            const std::size_t t = start_t + row;
-            double* rp = A.data() + row * k_sz;
+        // COLUMN-major, one contiguous run per column, matching
+        // qr::lstsq_colmajor. This block used to write rows -- A[row*k + c] --
+        // and call the row-major qr::lstsq, which strides every one of that
+        // algorithm's column sweeps by k*8 bytes. It is the same arithmetic in
+        // the same order either way, so the t-statistic is unchanged to the
+        // bit; only the addresses move. It matters because this is the one
+        // least-squares call in the extension whose k grows with n: the
+        // selection sweep above already went column-major for exactly this
+        // reason, and the report pass was left behind. Measured at n=32000
+        // where Schwert's rule gives max_lag=51, cost tracked the WINNING lag
+        // rather than n -- 35.6ms when lag 0 won against 284.4ms when lag 50
+        // did, on the same 51-candidate sweep, because the refit is a second
+        // full solve at k=lag+1 and was paying seven times the sweep's rate
+        // per unit of work.
+        {
             int c = 0;
-            if (include_constant) rp[c++] = 1.0;
-            rp[c++] = y[t - 1];
-            // Δy_{t-j} = y[t-j] - y[t-j-1] = dy[t-j-1]
-            for (int j = 1; j <= p; ++j)
-                rp[c++] = dy[t - 1 - static_cast<std::size_t>(j)];
-            b[row] = dy[t - 1];  // Δy_t
+            if (include_constant) {
+                double* col = A.data() + static_cast<std::size_t>(c++) * T_sz;
+                for (std::size_t row = 0; row < T_sz; ++row) col[row] = 1.0;
+            }
+            {
+                double* col = A.data() + static_cast<std::size_t>(c++) * T_sz;
+                for (std::size_t row = 0; row < T_sz; ++row)
+                    col[row] = y[start_t + row - 1];
+            }
+            for (int j = 1; j <= p; ++j) {
+                double* col = A.data() + static_cast<std::size_t>(c++) * T_sz;
+                // Δy_{t-j} = y[t-j] - y[t-j-1] = dy[t-j-1]
+                for (std::size_t row = 0; row < T_sz; ++row)
+                    col[row] = dy[start_t + row - 1 - static_cast<std::size_t>(j)];
+            }
+            for (std::size_t row = 0; row < T_sz; ++row)
+                b[row] = dy[start_t + row - 1];  // Δy_t
         }
 
         // Rank-revealing QR, not normal equations. A is overwritten with its
@@ -373,7 +396,7 @@ AdfResult adf_test(const double* y, std::size_t n, int max_lag, bool use_aic,
         // -- coefficient and t-statistic come from ONE decomposition instead of
         // two independently-conditioned solves.
         std::vector<int> perm(k_sz);
-        const auto sol = qr::lstsq(A.data(), b.data(), T, k, perm.data());
+        const auto sol = qr::lstsq_colmajor(A.data(), b.data(), T, k, perm.data());
         if (!sol.full_rank) return f;
 
         f.ok  = true;
@@ -389,7 +412,7 @@ AdfResult adf_test(const double* y, std::size_t n, int max_lag, bool use_aic,
             } else {
                 const double sig2 = sol.rss / static_cast<double>(sol.df());
                 const double xx =
-                    qr::xtx_inv_diag(A.data(), sol, perm.data(), lvl_idx);
+                    qr::xtx_inv_diag_colmajor(A.data(), sol, perm.data(), lvl_idx);
                 const double se = std::sqrt(sig2 * xx);
                 f.t_stat = (se > 0.0)
                     ? sol.beta[static_cast<std::size_t>(lvl_idx)] / se : kNaN;

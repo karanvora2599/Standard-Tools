@@ -94,8 +94,28 @@ struct LstsqResult {
 // The `scratch` overload lets a rolling loop hoist the length-T reflector
 // buffer out of the per-window call, so sliding a window over a long series
 // does not allocate once per bar.
-inline LstsqResult lstsq(double* A, double* b, int T, int k, int* perm,
-                         std::vector<double>& scratch, double rel_tol = 1e-12)
+// `Layout` selects how `A` is stored and NOTHING else. Every loop below
+// visits the same elements in the same order and performs the same
+// arithmetic on them whichever is chosen, so the two instantiations are
+// bit-identical by construction: only the addresses differ, and with them
+// the cache behaviour.
+//
+// That matters because this is a column algorithm. Equilibration, the
+// reflector norms and the trailing-column updates all sweep `i` down a
+// fixed `j`. Row-major storage strides those loops by k*8 bytes, so by k=47
+// every element lands on its own cache line. Measured on `adf_test`'s
+// report pass -- the one caller whose k grows with n -- row-major cost
+// 0.099-0.118 ms per lag^2 against the column-major nested sweep's 0.0138
+// per k^2 on the same machine for the same order of work: a factor of about
+// seven, all of it layout.
+//
+// Row-major stays the default so every existing caller is untouched; a
+// caller that can build its design column-major asks for ColMajor.
+enum class Layout { RowMajor, ColMajor };
+
+template <Layout LAY>
+inline LstsqResult lstsq_as(double* A, double* b, int T, int k, int* perm,
+                            std::vector<double>& scratch, double rel_tol = 1e-12)
 {
     LstsqResult res;
     res.nobs  = T;
@@ -105,9 +125,15 @@ inline LstsqResult lstsq(double* A, double* b, int T, int k, int* perm,
     if (k < 1 || T < k) return res;
 
     const std::size_t k_sz = static_cast<std::size_t>(k);
-    auto at = [A, k_sz](int i, int j) -> double& {
-        return A[static_cast<std::size_t>(i) * k_sz + static_cast<std::size_t>(j)];
+    const std::size_t T_sz = static_cast<std::size_t>(T);
+    auto at = [A, k_sz, T_sz](int i, int j) -> double& {
+        if constexpr (LAY == Layout::ColMajor) {
+            return A[static_cast<std::size_t>(j) * T_sz + static_cast<std::size_t>(i)];
+        } else {
+            return A[static_cast<std::size_t>(i) * k_sz + static_cast<std::size_t>(j)];
+        }
     };
+    (void)k_sz; (void)T_sz;
 
     for (int j = 0; j < k; ++j) perm[j] = j;
     scratch.resize(static_cast<std::size_t>(T));
@@ -249,13 +275,36 @@ inline LstsqResult lstsq(double* A, double* b, int T, int k, int* perm,
     return res;
 }
 
-// Allocating convenience form, for one-shot solves where the extra length-T
+// Row-major: the default, and what every caller but `adf_test`'s report pass
+// passes. Kept as its own name so the existing call sites do not change.
+inline LstsqResult lstsq(double* A, double* b, int T, int k, int* perm,
+                         std::vector<double>& scratch, double rel_tol = 1e-12)
+{
+    return lstsq_as<Layout::RowMajor>(A, b, T, k, perm, scratch, rel_tol);
+}
+
+// Column-major: identical arithmetic, unit-stride inner loops.
+inline LstsqResult lstsq_colmajor(double* A, double* b, int T, int k, int* perm,
+                                  std::vector<double>& scratch,
+                                  double rel_tol = 1e-12)
+{
+    return lstsq_as<Layout::ColMajor>(A, b, T, k, perm, scratch, rel_tol);
+}
+
+// Allocating convenience forms, for one-shot solves where the extra length-T
 // buffer is not worth threading through the call site.
 inline LstsqResult lstsq(double* A, double* b, int T, int k, int* perm,
                          double rel_tol = 1e-12)
 {
     std::vector<double> scratch;
-    return lstsq(A, b, T, k, perm, scratch, rel_tol);
+    return lstsq_as<Layout::RowMajor>(A, b, T, k, perm, scratch, rel_tol);
+}
+
+inline LstsqResult lstsq_colmajor(double* A, double* b, int T, int k, int* perm,
+                                  double rel_tol = 1e-12)
+{
+    std::vector<double> scratch;
+    return lstsq_as<Layout::ColMajor>(A, b, T, k, perm, scratch, rel_tol);
 }
 
 // ── Nested-model RSS from ONE factorization ─────────────────────────────────
@@ -424,16 +473,26 @@ inline void lstsq_nested_rss(double* A, double* b, int T, int k,
 //
 // @param A     The factorized matrix lstsq wrote (leading k x k triangle = R).
 // @param res   That same call's result, for its rank and column scales.
-inline double xtx_inv_diag(const double* A, const LstsqResult& res,
-                           const int* perm, int idx)
+// Reads the same factorization `lstsq_as` wrote, so it takes the same
+// `Layout`. R lives in the leading k x k block either way; only the stride
+// to reach (i, j) changes, and the arithmetic below is untouched.
+template <Layout LAY>
+inline double xtx_inv_diag_as(const double* A, const LstsqResult& res,
+                              const int* perm, int idx)
 {
     constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
     const int k = res.ncoef;
     if (k < 1 || res.rank != k || idx < 0 || idx >= k) return kNaN;
     const std::size_t k_sz = static_cast<std::size_t>(k);
-    auto at = [A, k_sz](int i, int j) -> double {
-        return A[static_cast<std::size_t>(i) * k_sz + static_cast<std::size_t>(j)];
+    const std::size_t T_sz = static_cast<std::size_t>(res.nobs);
+    auto at = [A, k_sz, T_sz](int i, int j) -> double {
+        if constexpr (LAY == Layout::ColMajor) {
+            return A[static_cast<std::size_t>(j) * T_sz + static_cast<std::size_t>(i)];
+        } else {
+            return A[static_cast<std::size_t>(i) * k_sz + static_cast<std::size_t>(j)];
+        }
     };
+    (void)k_sz; (void)T_sz;
 
     // Where did original column `idx` end up after pivoting?
     int pos = -1;
@@ -457,6 +516,18 @@ inline double xtx_inv_diag(const double* A, const LstsqResult& res,
     }
     const double sc = res.col_scale[static_cast<std::size_t>(idx)];
     return s / (sc * sc);
+}
+
+inline double xtx_inv_diag(const double* A, const LstsqResult& res,
+                           const int* perm, int idx)
+{
+    return xtx_inv_diag_as<Layout::RowMajor>(A, res, perm, idx);
+}
+
+inline double xtx_inv_diag_colmajor(const double* A, const LstsqResult& res,
+                                    const int* perm, int idx)
+{
+    return xtx_inv_diag_as<Layout::ColMajor>(A, res, perm, idx);
 }
 
 }  // namespace sqt::qr
