@@ -42,7 +42,11 @@ from standard_quant_tools.data.bar_hygiene import (
     drop_unusable_closes,
 )
 from standard_quant_tools.data.yfinance_provider import YFinanceProvider
-from standard_quant_tools.error import APIError, NonRetryableAPIError
+from standard_quant_tools.error import (
+    APIError,
+    NonRetryableAPIError,
+    VendorUnavailableError,
+)
 
 # In nanoseconds, the unit the provider returns: pandas 3 builds a range in
 # microseconds, and the frames would then differ in their index dtype alone.
@@ -268,12 +272,16 @@ class TestADeterministicRefusalIsNotRetried:
         assert market.calls == ["AAPL"]
 
     def test_a_transient_failure_is_still_retried(self, monkeypatch):
+        """Three attempts, then named as the vendor's failure -- a
+        `VendorUnavailableError`, which no outer retry repeats (see the
+        CHANGELOG entry of 2026-10-02)."""
         market = _install(monkeypatch, {"AAPL": _bars(SESSIONS)})
         market.failure = ConnectionError("connection reset by peer")
 
         with pytest.raises(APIError) as caught:
             YFinanceProvider().get_ohlcv("AAPL", "2026-06-01", LAST)
-        assert not isinstance(caught.value, NonRetryableAPIError)
+        assert isinstance(caught.value, VendorUnavailableError)
+        assert "No data found" not in str(caught.value)
         assert market.calls == ["AAPL"] * 3
 
     def test_an_impossible_date_is_refused_before_any_request(self, monkeypatch):

@@ -32,11 +32,11 @@ from standard_quant_tools.data.databento import (
 from standard_quant_tools.data.databento_provider import DatabentoProvider
 from standard_quant_tools.data.factory import DataFactory
 from standard_quant_tools.error import (
-    APIError,
     DataNotFoundError,
     InvalidSymbolError,
     NonRetryableAPIError,
     ValidationError,
+    VendorUnavailableError,
 )
 
 from .test_databento_provider import (
@@ -357,6 +357,9 @@ class TestTheVendorsStatusDecidesWhatAFailureMeans:
         assert len(client.calls) == 1, "not retried, not passed to the next feed"
 
     def test_a_500_whose_request_id_contains_403_is_not_a_denial(self):
+        """Nor an empty answer: it is the vendor's failure, asked once more
+        on the same feed and then named, with no lesser feed asked in its
+        place (see the CHANGELOG entry of 2026-10-02)."""
         failing = [
             lambda kw: (
                 _HttpError(500, "internal error", request_id="f403e9")
@@ -364,10 +367,15 @@ class TestTheVendorsStatusDecidesWhatAFailureMeans:
                 else None
             )
         ]
-        provider = _provider(StubClient(ALL, rules=failing))
-        frame = provider.get_ohlcv("AAPL", "2025-03-03", "2025-03-07")
-        assert frame.attrs["dataset"] == CONSOLIDATED
+        client = StubClient(ALL, rules=failing)
+        provider = _provider(client)
+        with pytest.raises(VendorUnavailableError) as caught:
+            provider.get_ohlcv("AAPL", "2025-03-03", "2025-03-07")
         assert SUMMARY not in provider._denied
+        assert client.datasets_called() == [SUMMARY, SUMMARY]
+        assert caught.value.status == 500 and caught.value.dataset == SUMMARY
+        assert "failed on its side" in str(caught.value)
+        assert "returned no" not in str(caught.value)
 
     def test_the_word_author_is_not_an_entitlement(self):
         assert not DatabentoProvider._is_denial(
@@ -704,8 +712,10 @@ class TestAnUnknownSymbolFailsOnTheFirstAnswer:
         assert SUMMARY in str(caught.value)
 
     def test_null_an_empty_answer_that_resolved_is_the_old_refusal(self):
+        """Now a `DataNotFoundError`, which is never retried (see the
+        CHANGELOG entry of 2026-10-02)."""
         client = _vendor(lambda kw: _Store(pd.DataFrame(), not_found=[]))
-        with pytest.raises(APIError, match="Datasets tried") as caught:
+        with pytest.raises(DataNotFoundError, match="Datasets tried") as caught:
             _provider(client).get_ohlcv("AAPL", "2025-03-03", "2025-03-07")
         assert not isinstance(caught.value, InvalidSymbolError)
 

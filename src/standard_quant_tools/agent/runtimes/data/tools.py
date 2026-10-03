@@ -66,7 +66,7 @@ from standard_quant_tools.data.external_validation import validate_external
 from standard_quant_tools.data.factory import DataFactory
 from standard_quant_tools.data.ratios import implausible_value_warnings
 from standard_quant_tools.data.temporal import contract_for_frame
-from standard_quant_tools.error import ValidationError
+from standard_quant_tools.error import ValidationError, VendorUnavailableError
 from standard_quant_tools.portfolio.portfolio import (
     fetch_ohlcv_panel_sync,
     fetch_returns_sync,
@@ -415,6 +415,34 @@ def fetch_ohlcv(input_data: FetchOhlcvInput) -> FetchResult:
     )
 
 
+def _vendor_outage(exc: BaseException) -> Optional[VendorUnavailableError]:
+    """The `VendorUnavailableError` behind a failure, raised or chained, or
+    None: a gather re-raises the first failure as it is, but a wrapper on
+    the way may have chained it."""
+    seen: set = set()
+    current: Optional[BaseException] = exc
+    while current is not None and id(current) not in seen:
+        if isinstance(current, VendorUnavailableError):
+            return current
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return None
+
+
+def _outage_detail(outage: VendorUnavailableError) -> str:
+    """The dataset and the status, as in ` (EQUS.SUMMARY, HTTP 504)`, or as
+    much of that as the error knows."""
+    parts = [
+        part
+        for part in (
+            outage.dataset,
+            f"HTTP {outage.status}" if outage.status is not None else None,
+        )
+        if part
+    ]
+    return f" ({', '.join(parts)})" if parts else ""
+
+
 def fetch_ohlcv_panel(input_data: FetchOhlcvPanelInput) -> FetchResult:
     """A whole universe's OHLCV, stacked long and published once."""
     # ONE BAD TICKER FAILS THE BATCH, and that is the helper's behaviour
@@ -434,6 +462,21 @@ def fetch_ohlcv_panel(input_data: FetchOhlcvPanelInput) -> FetchResult:
     except (ValidationError, ValueError):
         raise
     except Exception as exc:  # noqa: BLE001 -- one refusal, not a traceback
+        outage = _vendor_outage(exc)
+        if outage is not None:
+            # The vendor failed, not a symbol: dropping one would not help,
+            # and the advice below used to say to.
+            raise VendorUnavailableError(
+                f"fetching {len(input_data.tickers)} ticker(s) failed because "
+                f"the data vendor failed on its side{_outage_detail(outage)}, "
+                f"not because of any symbol: {outage}. The whole batch fails "
+                "together -- there is no partial panel -- and dropping a symbol "
+                "will not help: run it again later.",
+                status=outage.status,
+                dataset=outage.dataset,
+                retry_after=outage.retry_after,
+                original_exception=outage,
+            ) from exc
         raise ValidationError(
             f"fetching {len(input_data.tickers)} ticker(s) failed on one of "
             f"them: {exc}. The whole batch fails together -- there is no "

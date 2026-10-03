@@ -1,12 +1,16 @@
 import asyncio
 import contextvars
 import functools
+import inspect
 import logging
 import re
+import sys
+import threading
 import time
 import uuid
+import warnings
 from datetime import datetime
-from typing import Union
+from typing import Optional, Union
 
 from standard_quant_tools.data.ratios import (
     implausible_value_warnings,
@@ -25,6 +29,7 @@ from standard_quant_tools.error import (
     InvalidSymbolError,
     NonRetryableAPIError,
     ValidationError,
+    VendorUnavailableError,
 )
 
 from ._cache import (
@@ -154,6 +159,153 @@ def _session_clock(symbol: str) -> SessionClock:
     return US_EQUITY
 
 
+# ── a failure to reach Yahoo is not "no data" ────────────────────────────
+#
+# yfinance swallows the error of a request that never got an answer -- a
+# dropped connection, a timeout, Yahoo's maintenance page -- and returns an
+# empty frame, which this provider reported as "No data found for 'X'.
+# Verify symbol and date range": a network failure, told as a fact about the
+# symbol. The history call is now made with `raise_errors=True`, so the
+# failure arrives as itself, and each one is sorted below. A transport
+# failure is retried by the shared retry layer and, when every attempt has
+# failed, raised as `VendorUnavailableError`. Yahoo's own empty answer stays
+# `DataNotFoundError`.
+
+# yfinance 1.x deprecates the argument in favour of a process-wide switch,
+# which would change what every other yfinance caller in the process sees.
+# The argument still works; only its warning is silenced, by its exact text.
+warnings.filterwarnings(
+    "ignore", message=r"'raise_errors' deprecated", category=DeprecationWarning
+)
+
+#: Yahoo's own words for a service outage, as yfinance raises them.
+_YAHOO_DOWN_RE = re.compile(r"yahoo! finance is currently down", re.IGNORECASE)
+#: A Yahoo error status yfinance folds into "no price data found".
+_YAHOO_STATUS_RE = re.compile(r"status_code\s*=\s*(\d{3})")
+
+
+@functools.lru_cache(maxsize=1)
+def _history_raises_errors() -> bool:
+    """Whether the installed yfinance's history call takes `raise_errors`."""
+    try:
+        from yfinance.scrapers.history import PriceHistory
+
+        return "raise_errors" in inspect.signature(PriceHistory.history).parameters
+    except Exception:  # noqa: BLE001 - an unknown layout: call it as before
+        return False
+
+
+def _transport_types() -> tuple:
+    """Exception types meaning the request got no usable answer: the standard
+    library's, and the HTTP clients yfinance may use, when installed."""
+    import http.client
+    import json
+
+    types: list = [
+        ConnectionError,
+        TimeoutError,
+        http.client.HTTPException,
+        json.JSONDecodeError,
+    ]
+    try:
+        import requests
+
+        types += [
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+            requests.exceptions.ChunkedEncodingError,
+        ]
+    except ImportError:  # pragma: no cover - yfinance depends on requests
+        pass
+    curl = sys.modules.get("curl_cffi")
+    if curl is not None:
+        for name in ("CurlError",):
+            if isinstance(getattr(curl, name, None), type):
+                types.append(getattr(curl, name))
+        exceptions = getattr(getattr(curl, "requests", None), "exceptions", None)
+        for name in ("ConnectionError", "Timeout", "ChunkedEncodingError"):
+            kind = getattr(exceptions, name, None)
+            if isinstance(kind, type):
+                types.append(kind)
+    return tuple(types)
+
+
+class _TzLookupFailures(logging.Handler):
+    """Records yfinance's "Failed to get ticker 'X' reason: ..." lines from
+    THIS thread. yfinance's timezone lookup swallows its own transport
+    error, logs that line, and then reports the symbol as possibly delisted
+    ("no timezone found"): the line is the only trace of the real cause."""
+
+    def __init__(self, symbol: str) -> None:
+        super().__init__(level=logging.ERROR)
+        self._thread = threading.get_ident()
+        self._needle = f"failed to get ticker '{symbol}' reason:".lower()
+        self.reasons: list = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if record.thread != self._thread:
+            return
+        try:
+            text = record.getMessage()
+        except Exception:  # noqa: BLE001 - an unformattable line says nothing
+            return
+        lowered = text.lower()
+        if self._needle in lowered:
+            self.reasons.append(text[lowered.index("reason:") + 7 :].strip())
+
+
+def _yahoo_failure(exc: BaseException, tz_failures: list) -> Optional[str]:
+    """
+    What went wrong, when a history call failed without Yahoo answering --
+    or None when the failure is Yahoo's answer about the symbol or window.
+    """
+    from yfinance import exceptions as yfe
+
+    if isinstance(exc, getattr(yfe, "YFRateLimitError", ())):
+        return "Yahoo rate-limited the request (HTTP 429)"
+    if isinstance(exc, getattr(yfe, "YFTzMissingError", ())) and tz_failures:
+        return f"the timezone lookup could not reach Yahoo ({tz_failures[-1]})"
+    if isinstance(exc, getattr(yfe, "YFTickerMissingError", ())):
+        status = _YAHOO_STATUS_RE.search(str(exc))
+        if status and (int(status.group(1)) >= 500 or status.group(1) == "429"):
+            return f"Yahoo answered HTTP {status.group(1)}"
+        return None
+    if _YAHOO_DOWN_RE.search(str(exc)):
+        return "Yahoo Finance reported that it is down"
+    if isinstance(exc, _transport_types()):
+        return f"{type(exc).__name__}: {exc}"
+    return None
+
+
+def _yahoo_answer_types() -> tuple:
+    """yfinance's errors for an answer Yahoo did give: no prices, no
+    timezone (possibly delisted), an invalid period."""
+    from yfinance import exceptions as yfe
+
+    return tuple(
+        kind
+        for kind in (
+            getattr(yfe, "YFTickerMissingError", None),
+            getattr(yfe, "YFInvalidPeriodError", None),
+        )
+        if isinstance(kind, type)
+    )
+
+
+class _YahooUnreachable(APIError):
+    """A history request that got no answer from Yahoo. An `APIError`, so
+    the shared retry layer asks again; `get_ohlcv` names the last one as
+    the vendor's failure once every attempt has failed."""
+
+    def __init__(self, message: str, *, status: Optional[int] = None) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+#: Attempts the retry layer makes on a Yahoo history request.
+_ATTEMPTS = 3
+
+
 class YFinanceProvider(DataProvider):
 
     SUPPORTED_INTERVALS = _VALID_INTERVALS
@@ -235,16 +387,31 @@ class YFinanceProvider(DataProvider):
                 )
             return disclose_served(cached_df.copy(), symbol, interval, clock)
 
-        result = self._fetch_ohlcv_uncached(
-            symbol, start_date, end_date, interval, start_str, end_str
-        )
+        try:
+            result = self._fetch_ohlcv_uncached(
+                symbol, start_date, end_date, interval, start_str, end_str
+            )
+        except _YahooUnreachable as exc:
+            # Every attempt failed without an answer from Yahoo: the
+            # vendor's failure, said as one, never "no data found".
+            raise VendorUnavailableError(
+                f"Yahoo Finance failed on its side for {symbol!r} ({interval}, "
+                f"{start_str} to {end_str}) on all {_ATTEMPTS} attempts: {exc} "
+                "This is a network or service failure, not an answer about the "
+                "symbol or the window -- it does not mean the symbol is wrong "
+                "or has no data. Asking again later may succeed, or ask another "
+                "provider (source=...).",
+                status=exc.status,
+                dataset=None,
+                original_exception=exc,
+            ) from exc
         _session_cache_set(cache_key, result, end=end_str)
         # Judged on the copy handed out, at the moment it is handed out: a
         # window served from the session cache a minute later may have
         # closed in between.
         return disclose_served(result.copy(), symbol, interval, clock)
 
-    @retry(times=3, delay=1)
+    @retry(times=_ATTEMPTS, delay=1)
     def _fetch_ohlcv_uncached(
         self,
         symbol: str,
@@ -312,12 +479,40 @@ class YFinanceProvider(DataProvider):
                 inclusive_end_timestamp(end_date, interval).normalize()
                 + pd.Timedelta(days=1)
             ).to_pydatetime()
-            df = ticker.history(
-                start=start_date,
-                end=request_end,
-                interval=interval,
-                auto_adjust=True,
-            )
+            # Errors raised, not swallowed into an empty frame (see
+            # `_yahoo_failure`); the timezone lookup's own swallowed error is
+            # read from yfinance's log.
+            extra = {"raise_errors": True} if _history_raises_errors() else {}
+            tz_lookup = _TzLookupFailures(symbol)
+            yf_logger = logging.getLogger("yfinance")
+            yf_logger.addHandler(tz_lookup)
+            try:
+                df = ticker.history(
+                    start=start_date,
+                    end=request_end,
+                    interval=interval,
+                    auto_adjust=True,
+                    **extra,
+                )
+            except Exception as exc:  # noqa: BLE001 - sorted below
+                cause = _yahoo_failure(exc, tz_lookup.reasons)
+                if cause is not None:
+                    status = re.search(r"HTTP (\d{3})", cause)
+                    raise _YahooUnreachable(
+                        f"yfinance could not get an answer from Yahoo for "
+                        f"'{symbol}': {cause}.",
+                        status=int(status.group(1)) if status else None,
+                    ) from exc
+                if isinstance(exc, _yahoo_answer_types()):
+                    # Yahoo answered, with no prices for this symbol and
+                    # window: the answer the empty frame below gives.
+                    raise DataNotFoundError(
+                        f"No data found for '{symbol}'. Verify symbol and date "
+                        f"range. (Yahoo: {exc})"
+                    ) from exc
+                raise
+            finally:
+                yf_logger.removeHandler(tz_lookup)
 
             if df.empty:
                 raise DataNotFoundError(

@@ -64,16 +64,36 @@ brake that fails open is not one -- and one that raises in `after` is
 logged and ignored, because the bytes are already billed. The gate is
 called on whichever thread makes the request, possibly several at once,
 and must be thread-safe. Cache hits reach no gate: they are not requests.
+
+A VENDOR-SIDE FAILURE IS NAMED, RETRIED ONCE, AND NEVER PASSED TO A LESSER
+FEED. A failure is read by its HTTP status: 408, 429 and 5xx, a timeout, a
+dropped connection or a stream cut off mid-body are TRANSIENT. The same
+request is sent once more after a short jittered pause (the vendor's
+`Retry-After` when it gives one, up to `_RETRY_AFTER_CAP_SECONDS`; a longer
+wait is not taken, and the failure is raised at once), and if it fails
+again `VendorUnavailableError` is raised, naming the status and the
+dataset. No other dataset is asked in its place, because a lesser feed's
+answer would be served as this one's. The retry is a billable request and
+passes through the gate like the first. A walk in which every dataset
+answered with no records raises `DataNotFoundError`. Neither is retried by
+the shared retry layer: a 504 used to be reported as "returned no bars",
+after six requests and three seconds of sleeps (see the CHANGELOG entry of
+2026-10-02).
 """
 
 from __future__ import annotations
 
 import logging
+import math
+import random
 import re
+import sys
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from typing import (
     Any,
     Callable,
@@ -94,6 +114,7 @@ import pandas as pd
 
 from standard_quant_tools import audit
 from standard_quant_tools._env import env_str
+from standard_quant_tools.data import _cache
 from standard_quant_tools.data._cache import (
     _is_historical,
     _norm_cache_bound,
@@ -103,14 +124,18 @@ from standard_quant_tools.data._cache import (
     _session_cache_get,
     _session_cache_set,
     _write_cached_ohlcv,
+    inclusive_end_timestamp,
     trim_to_inclusive_end,
 )
 from standard_quant_tools.data._retry import retry
 from standard_quant_tools.data.bar_hygiene import (
     CME_TRADE_DATE,
+    MISSING_KEY,
+    PLACEHOLDER_KEY,
     US_EQUITY,
     UTC_DAY,
     SessionClock,
+    _label,
     disclose_served,
     drop_unusable_closes,
 )
@@ -138,7 +163,9 @@ from standard_quant_tools.error import (
     DataNotFoundError,
     InvalidSymbolError,
     NonRetryableAPIError,
+    QuantError,
     ValidationError,
+    VendorUnavailableError,
 )
 
 logger = logging.getLogger(__name__)
@@ -310,6 +337,35 @@ _UNFINALIZED_MARKERS = ("available_end", "not_fully_available")
 #: How many days to walk the end back before giving up on the daily lag.
 _FINALIZATION_ATTEMPTS = 6
 
+#: A transient failure is retried this many times, on the SAME dataset.
+_TRANSIENT_RETRIES = 1
+#: The pause before that retry, jittered by a factor of 0.5 to 1.5 so that
+#: several threads that failed together do not ask again together.
+_TRANSIENT_BACKOFF_SECONDS = 0.5
+#: The longest `Retry-After` honoured. A vendor that asks for longer is not
+#: asked again: a retry before the wait it named would be refused again.
+_RETRY_AFTER_CAP_SECONDS = 5.0
+
+#: Failures that say nothing about the request, read from the text only
+#: when the error carries no HTTP status (a stub, or a client error raised
+#: before a response). Whole words, as for the two patterns above.
+_TRANSIENT_TEXT_RE = re.compile(
+    r"\b(?:408|429|5\d\d)\b|\btimed out\b|\btime-?out\b|\btoo many requests\b"
+    r"|\bservice unavailable\b|\bbad gateway\b|\btemporarily unavailable\b"
+    r"|\bconnection (?:reset|aborted|refused|broken|error)\b"
+    r"|\berror streaming response\b|\bremote end closed\b|\bincompleteread\b"
+)
+
+#: A window ending today keeps its SETTLED part on disk: the bars dated this
+#: many UTC days ago or earlier. Two, because every venue's session has
+#: closed by the end of the day after its date -- the rule
+#: `bar_hygiene.flag_partial_last_bar` settles a last bar by.
+_SETTLED_LAG_DAYS = 2
+#: How many days back an earlier settled part of the same window is looked
+#: for, so a window asked for again on a later day reads the part it stored
+#: then and fetches only what came after it.
+_SETTLED_LOOKBACK_DAYS = 14
+
 #: The width of one intraday bar. The vendor's range is half-open and this
 #: library's end is inclusive, so an explicit intraday end is extended by
 #: one bar before it is sent: a 14:00 to 14:10 request at one minute used
@@ -470,39 +526,303 @@ def _gate_settle(
         )
 
 
+def _http_status(exc: BaseException) -> Optional[int]:
+    """The HTTP status a client error carries, or None."""
+    status = getattr(exc, "http_status", None)
+    try:
+        return int(status) if status is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _transient_types() -> Tuple[type, ...]:
+    """The exception types that mean the connection failed, not the request:
+    the standard library's, and the HTTP clients' when they are installed.
+    The aiohttp types are read only when that package is already loaded."""
+    import http.client
+
+    types: List[type] = [ConnectionError, TimeoutError, http.client.IncompleteRead]
+    try:
+        import requests
+
+        types += [
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+            requests.exceptions.ChunkedEncodingError,
+        ]
+    except ImportError:  # pragma: no cover - requests ships with databento
+        pass
+    try:
+        import urllib3
+
+        types += [urllib3.exceptions.ProtocolError, urllib3.exceptions.TimeoutError]
+    except ImportError:  # pragma: no cover - requests depends on urllib3
+        pass
+    aiohttp = sys.modules.get("aiohttp")
+    if aiohttp is not None:
+        types += [
+            aiohttp.ClientConnectionError,
+            aiohttp.ClientPayloadError,
+            aiohttp.ServerTimeoutError,
+        ]
+    return tuple(types)
+
+
 def _failure_kind(exc: BaseException) -> str:
     """
-    'auth', 'denied' or 'other' for a failed vendor call.
+    'auth', 'denied', 'transient' or 'other' for a failed vendor call.
 
     A 401 is a bad credential and fails every dataset alike, so it is
     raised at once and named. A 403 is the subscription declining one
     dataset, which is worth remembering so the next request goes straight
-    to a feed that answers. Everything else -- a 5xx, a timeout, a 422 --
-    says nothing permanent, and remembering it as a denial would retire a
-    healthy feed for the life of the provider.
+    to a feed that answers. A 408, a 429, a 5xx, a timeout or a dropped
+    connection is TRANSIENT: it says nothing about the request, so the same
+    request is asked once more and, failing again, reported as the vendor's
+    failure -- never as an empty answer or a denial. Everything else -- a
+    422, a 400 -- is about this request on this dataset ('other'), and
+    remembering it as a denial would retire a healthy feed for the life of
+    the provider.
     """
-    status = getattr(exc, "http_status", None)
-    try:
-        code = int(status) if status is not None else None
-    except (TypeError, ValueError):
-        code = None
+    code = _http_status(exc)
     if code == 401:
         return "auth"
     if code == 403:
         return "denied"
     if code is not None:
-        return "other"
+        return "transient" if code in (408, 429) or 500 <= code <= 599 else "other"
+    if isinstance(exc, _transient_types()):
+        return "transient"
     text = str(exc).lower()
     if _AUTH_TEXT_RE.search(text):
         return "auth"
     if _DENIAL_TEXT_RE.search(text):
         return "denied"
+    if _TRANSIENT_TEXT_RE.search(text):
+        return "transient"
     return "other"
+
+
+def _is_unfinalized(exc: BaseException) -> bool:
+    """The daily feed's refusal of an end in its unfinalized tail -- from the
+    vendor, or from a gate whose preflight asked the vendor about this end."""
+    text = str(exc).lower()
+    return any(marker in text for marker in _UNFINALIZED_MARKERS)
+
+
+def _retry_after_seconds(exc: BaseException) -> Optional[float]:
+    """The wait the vendor asked for in a `Retry-After` header, in seconds,
+    or None when it gave none or one that cannot be read."""
+    headers = getattr(exc, "headers", None)
+    if not headers:
+        return None
+    value: Any = None
+    try:
+        for key in headers:
+            if str(key).lower() == "retry-after":
+                value = headers[key]
+                break
+    except Exception:  # noqa: BLE001 - an unreadable header is no header
+        return None
+    if value is None:
+        return None
+    text = str(value).strip()
+    try:
+        seconds = float(text)
+    except ValueError:
+        try:
+            when = parsedate_to_datetime(text)
+        except (TypeError, ValueError, IndexError):
+            return None
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        seconds = (when - datetime.now(timezone.utc)).total_seconds()
+    if not math.isfinite(seconds):
+        return None
+    return max(0.0, seconds)
+
+
+def _describe_failure(exc: BaseException) -> str:
+    """A failed call in a few words: its HTTP status and the vendor's text,
+    or the exception's type and text when there is no status."""
+    code = _http_status(exc)
+    detail = getattr(exc, "message", None) or str(exc) or "no detail"
+    detail = " ".join(str(detail).split())
+    if len(detail) > 200:
+        detail = detail[:197] + "..."
+    if code is not None:
+        return f"HTTP {code} ({detail})"
+    return f"{type(exc).__name__} ({detail})"
+
+
+class _TransientFailure(Exception):
+    """
+    A call that failed transiently and again after its retry, or that the
+    vendor asked to be retried later than this provider waits. Internal:
+    each public caller turns it into a `VendorUnavailableError` that names
+    what it was doing.
+    """
+
+    def __init__(
+        self,
+        failures: List[BaseException],
+        pause: Optional[float],
+        retry_after: Optional[float],
+    ) -> None:
+        super().__init__(_describe_failure(failures[-1]))
+        self.failures = failures
+        self.pause = pause
+        self.retry_after = retry_after
+
+    @property
+    def last(self) -> BaseException:
+        return self.failures[-1]
+
+    def account(self) -> str:
+        """What happened, as a clause: "answered HTTP 504 (...) twice ..."."""
+        first, last = self.failures[0], self.failures[-1]
+        if len(self.failures) == 1:
+            asked = self.retry_after if self.retry_after is not None else 0.0
+            return (
+                f"answered {_describe_failure(last)} and asked to be retried in "
+                f"{asked:.0f} s, longer than the {_RETRY_AFTER_CAP_SECONDS:.0f} s "
+                "this provider waits, so it was not asked again"
+            )
+        pause = f"{self.pause:.1f} s" if self.pause is not None else "a"
+        if _describe_failure(first) == _describe_failure(last):
+            return (
+                f"answered {_describe_failure(last)} twice, the second time "
+                f"after a {pause} pause"
+            )
+        return (
+            f"answered {_describe_failure(first)}, then "
+            f"{_describe_failure(last)} when asked again after a {pause} pause"
+        )
+
+
+def _retrying_transients(call: Callable[[], Any]) -> Any:
+    """
+    `call()`, sent once more after a short pause if it fails transiently.
+
+    The retry is the same request: a data request passes through the
+    request gate again, because it is billable again. A refusal, a denial,
+    a rejected key, the daily feed's unfinalized-tail error and every other
+    failure about the request itself are raised as they are, at once.
+    Raises `_TransientFailure` when the retry fails transiently too, or
+    when the vendor asks for a longer wait than `_RETRY_AFTER_CAP_SECONDS`.
+    """
+    failures: List[BaseException] = []
+    pause: Optional[float] = None
+    while True:
+        try:
+            return call()
+        except RequestRefusedError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - classified below
+            if _is_unfinalized(exc) or _failure_kind(exc) != "transient":
+                raise
+            failures.append(exc)
+            asked = _retry_after_seconds(exc)
+            if len(failures) > _TRANSIENT_RETRIES:
+                raise _TransientFailure(failures, pause, asked) from exc
+            if asked is not None and asked > _RETRY_AFTER_CAP_SECONDS:
+                raise _TransientFailure(failures, None, asked) from exc
+            pause = (
+                asked
+                if asked is not None
+                else _TRANSIENT_BACKOFF_SECONDS * random.uniform(0.5, 1.5)
+            )
+            logger.warning(
+                "databento: a vendor-side failure (%s); asking once more in %.2f s",
+                _describe_failure(exc),
+                pause,
+            )
+            time.sleep(pause)
+
+
+def _unavailable(
+    failure: _TransientFailure, *, doing: str, dataset: str
+) -> VendorUnavailableError:
+    """The public error for a transient failure that outlasted its retry.
+    `doing` names the call, as in "the request for bars for AAPL (ohlcv-1d)
+    between 2026-09-01 and 2026-09-11 on EQUS.SUMMARY"."""
+    return VendorUnavailableError(
+        f"Databento failed on its side: {doing} {failure.account()}. This is "
+        "a vendor-side failure, not an answer about the data -- it does not "
+        "mean the window is empty, that no dataset covers it, or that the "
+        "subscription declines it -- and no other dataset was asked in its "
+        f"place, because a lesser feed's answer would be served as {dataset}'s. "
+        "Asking again later may succeed.",
+        status=_http_status(failure.last),
+        dataset=dataset,
+        retry_after=failure.retry_after,
+        original_exception=(
+            failure.last if isinstance(failure.last, Exception) else None
+        ),
+    )
+
+
+# ── the daily feed's publication edge, remembered for the process ────────
+#
+# The daily feed finalizes a day or two behind the live edge the range
+# lookup reports, so a daily request ending near today is refused once or
+# twice before the walk-back reaches an end the vendor accepts. That edge is
+# a fact about the dataset, not about the request or the provider object,
+# and a caller that builds a new provider per call (the library's own tool
+# layer does) used to pay those refusals on every call. The smallest end
+# refused is kept per (dataset, schema) until the top of the next UTC hour,
+# so the edge advances with publication within the hour; a later request
+# starts its walk-back below it. While the memo is fresh, a day the vendor
+# finalizes in the meantime is not asked for until the hour turns.
+
+_PUBLICATION_EDGES: Dict[Tuple[str, str], Tuple[datetime, datetime]] = {}
+_PUBLICATION_LOCK = threading.Lock()
+
+
+def _utc_now() -> datetime:
+    """The current instant, UTC. A seam for the publication memo's expiry."""
+    return datetime.now(timezone.utc)
+
+
+def _refused_from(dataset: str, schema: str) -> Optional[datetime]:
+    """The smallest end the vendor refused as unfinalized, while fresh."""
+    now = _utc_now()
+    with _PUBLICATION_LOCK:
+        entry = _PUBLICATION_EDGES.get((dataset, schema))
+        if entry is None:
+            return None
+        refused, expires = entry
+        if now >= expires:
+            del _PUBLICATION_EDGES[(dataset, schema)]
+            return None
+        return refused
+
+
+def _remember_refusal(dataset: str, schema: str, end: datetime) -> None:
+    """Keep an end the vendor refused as unfinalized, until the next hour."""
+    now = _utc_now()
+    with _PUBLICATION_LOCK:
+        entry = _PUBLICATION_EDGES.get((dataset, schema))
+        if entry is not None and now < entry[1]:
+            if entry[0] <= end:
+                return
+            expires = entry[1]
+        else:
+            expires = now.replace(minute=0, second=0, microsecond=0) + timedelta(
+                hours=1
+            )
+        _PUBLICATION_EDGES[(dataset, schema)] = (end, expires)
+
+
+def forget_publication_edges() -> None:
+    """Drop every remembered publication edge, so the next daily request
+    learns its edge from the vendor again."""
+    with _PUBLICATION_LOCK:
+        _PUBLICATION_EDGES.clear()
 
 
 def _rejected_key(exc: BaseException, where: str) -> NonRetryableAPIError:
     """The refusal for a credential the vendor rejected, naming the variable."""
-    return NonRetryableAPIError(
+    return RejectedKeyError(
         f"Databento rejected DATABENTO_API_KEY (HTTP 401) on {where}: {exc}. "
         "The key is missing, mistyped, revoked or expired; set a valid one "
         "in the environment. This is not a coverage or entitlement answer "
@@ -705,6 +1025,161 @@ def _cme_trade_date_bars(hourly: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+# ── a window's settled part, and the window from it ───────────────────────
+#
+# A stored part is a frame `_shape_bars` returned: its bars with no Close are
+# gone, and their labels are in `attrs` as placeholders (after the last
+# priced bar) or missing bars (before it). Which of the two a label is
+# depends on the whole window -- a part's trailing placeholder is a missing
+# bar of a window that goes on to price a later bar -- so the two functions
+# below recompute both lists for the window they produce, from every label
+# dropped in it. Each returns what `_shape_bars` returns for its window, with
+# the attrs it sets: `adjusted`, then the two lists when not empty.
+
+
+def _dropped_labels(frame: pd.DataFrame) -> List[pd.Timestamp]:
+    """The labels of the bars `drop_unusable_closes` dropped from `frame`."""
+    labels = list(frame.attrs.get(MISSING_KEY) or []) + list(
+        frame.attrs.get(PLACEHOLDER_KEY) or []
+    )
+    return sorted(pd.Timestamp(label) for label in labels)
+
+
+def _with_drop_disclosures(
+    frame: pd.DataFrame, dropped: List[pd.Timestamp]
+) -> pd.DataFrame:
+    """`frame` (its bars all priced) with the attrs `_shape_bars` sets for a
+    window from which `dropped` were dropped."""
+    last_priced = pd.DatetimeIndex(frame.index).max()
+    placeholder = [_label(x) for x in dropped if x > last_priced]
+    missing = [_label(x) for x in dropped if not x > last_priced]
+    attrs: Dict[str, Any] = {"adjusted": False}
+    if placeholder:
+        attrs[PLACEHOLDER_KEY] = placeholder
+    if missing:
+        attrs[MISSING_KEY] = missing
+    frame.attrs = attrs
+    return frame
+
+
+def _window_freq(
+    listed: pd.DatetimeIndex,
+    shaped: pd.DatetimeIndex,
+    kept: pd.DatetimeIndex,
+    interval: str,
+) -> Any:
+    """
+    The index `freq` one request's answer carries, which a concatenation
+    does not reproduce. For daily bars `_normalize_ohlcv_index` infers it
+    over every bar the vendor listed (`listed`); the trim to the window's
+    end keeps it; dropping bars with no Close keeps it only when the bars
+    kept are one unbroken run of the trimmed ones (`shaped`). Intraday bars
+    carry the vendor index's, which is none.
+    """
+    if _cache.is_intraday_interval(interval):
+        return None
+    freq = pd.DatetimeIndex(listed.sort_values()).normalize().freq
+    if freq is None or len(kept) == len(shaped):
+        return freq
+    try:
+        positions = pd.DatetimeIndex(shaped.sort_values()).get_indexer(kept)
+    except Exception:  # noqa: BLE001 - duplicate labels: no single run
+        return None
+    if (positions < 0).any():
+        return None
+    return freq if positions[-1] - positions[0] + 1 == len(kept) else None
+
+
+def _join_settled(
+    stored: pd.DataFrame,
+    rest: Optional[pd.DataFrame],
+    symbol: str,
+    interval: str,
+    rest_listed: Optional[pd.DatetimeIndex] = None,
+) -> pd.DataFrame:
+    """
+    One window's bars from its stored settled part and the bars after it,
+    as `_shape_bars` returns them from one request for the whole window.
+
+    `rest` is shaped but still holds its bars with no Close
+    (`_shape_bars_undropped`), or None when nothing came after the part;
+    `rest_listed` is its labels before the trim. Volume is int64 only where
+    the whole window's was complete, as `_shape_bars` casts it; a part is
+    stored only with int64 Volume, so the rest decides.
+    """
+    dropped = _dropped_labels(stored)
+    volume_complete = True
+    shaped = list(stored.index) + list(dropped)
+    listed = list(shaped)
+    if rest is None or len(rest) == 0:
+        joined = stored.copy()
+    else:
+        null = rest["Close"].isna().to_numpy()
+        volume_complete = bool(rest["Volume"].notna().all())
+        shaped += list(rest.index)
+        if null.any():
+            labels = list(pd.DatetimeIndex(rest.index)[null])
+            dropped += labels
+            logger.warning(
+                "[databento] %s: dropped %d bar(s) with no Close after the "
+                "stored settled part (%s)",
+                symbol,
+                len(labels),
+                ", ".join(_label(x) for x in labels[:5]),
+            )
+        kept = rest.loc[~null]
+        joined = pd.concat([stored, kept]) if len(kept) else stored.copy()
+    listed += list(
+        rest_listed if rest_listed is not None else ([] if rest is None else rest.index)
+    )
+    if not volume_complete and joined["Volume"].dtype != "float64":
+        joined["Volume"] = joined["Volume"].astype("float64")
+    joined.index = pd.DatetimeIndex(
+        joined.index,
+        freq=_window_freq(
+            pd.DatetimeIndex(listed),
+            pd.DatetimeIndex(shaped),
+            pd.DatetimeIndex(joined.index),
+            interval,
+        ),
+    )
+    return _with_drop_disclosures(joined, dropped)
+
+
+def _settled_part(
+    frame: pd.DataFrame, through_str: str, interval: str
+) -> Optional[pd.DataFrame]:
+    """
+    The bars of `frame` (a `_shape_bars` answer) through the end of
+    `through_str`, as `_shape_bars` returns them for that shorter window --
+    or None when that answer cannot be known from this one: no priced bar
+    in it, or a Volume that is not int64 (whether the shorter window's was
+    complete cannot then be told).
+    """
+    if str(frame["Volume"].dtype) != "int64":
+        return None
+    bound = inclusive_end_timestamp(through_str, interval)
+    index = pd.DatetimeIndex(frame.index)
+    part = frame.loc[index <= bound].copy()
+    if part.empty:
+        return None
+    dropped = [x for x in _dropped_labels(frame) if x <= bound]
+    return _with_drop_disclosures(part, dropped)
+
+
+def _served_whole_window(reached: Mapping[str, Any]) -> bool:
+    """Whether a fetch's answer covers its whole window: the vendor served
+    the request to the window's end, neither clamped to the dataset's
+    published edge nor walked back past the daily feed's finalized one."""
+    served, wanted = reached.get("end"), reached.get("window_end")
+    return served is not None and wanted is not None and served >= wanted
+
+
+class RejectedKeyError(NonRetryableAPIError):
+    """The vendor rejected `DATABENTO_API_KEY` (HTTP 401). Every dataset
+    fails alike, so it is raised at once and never retried."""
+
+
 class DatabentoProvider(DataProvider):
     """Databento Historical, honouring this library's provider contract."""
 
@@ -822,13 +1297,25 @@ class DatabentoProvider(DataProvider):
         a 401 was remembered as an entitlement denial on each dataset in
         turn and the caller was told "No dataset covers that range" -- the
         commonest misconfiguration, reported as a date problem.
+
+        A TRANSIENT FAILURE IS ASKED ONCE MORE, THEN RAISED. A 5xx or a
+        timeout on this lookup used to pass the dataset over as if it did
+        not cover the window, so a lesser feed answered in its place or the
+        caller read "no dataset covers that range". It now raises
+        `_TransientFailure`, which each public caller names as the vendor's
+        failure. Nothing is remembered: the next call asks again.
         """
         with self._lock:
             if dataset in self._ranges:
                 return self._ranges[dataset]
         client = self._get_client()
         try:
-            meta = client.metadata.get_dataset_range(dataset=dataset)
+            meta = _retrying_transients(
+                lambda: client.metadata.get_dataset_range(dataset=dataset)
+            )
+        except _TransientFailure as failure:
+            logger.warning("databento range lookup failed for %s: %s", dataset, failure)
+            raise
         except Exception as exc:  # noqa: BLE001
             kind = _failure_kind(exc)
             if kind == "auth":
@@ -1119,7 +1606,9 @@ class DatabentoProvider(DataProvider):
         start: datetime,
         end: datetime,
     ) -> Optional[Tuple[datetime, datetime]]:
-        """Clamp a request to what the dataset published, or decline it."""
+        """Clamp a request to what the dataset published, or decline it.
+        Raises `_TransientFailure` when the lookup failed on the vendor's
+        side (see `_available_range`)."""
         span = self._available_range(dataset)
         if span is None:
             return None
@@ -1150,6 +1639,7 @@ class DatabentoProvider(DataProvider):
         end: datetime,
         stype_in: str = "raw_symbol",
         not_found: Optional[Set[str]] = None,
+        served_end: Optional[List[datetime]] = None,
     ) -> Optional[pd.DataFrame]:
         """One request, with the daily-finalization walk-back.
 
@@ -1157,6 +1647,14 @@ class DatabentoProvider(DataProvider):
         symbology reported it could not resolve for this request -- the
         one fact that tells an empty answer about a bad symbol from an
         empty answer about a quiet window.
+
+        `served_end`, when given, receives the (exclusive) end of the
+        request the vendor answered: everything before it is published.
+        The daily walk-back can make that earlier than `end`.
+
+        Each request is asked once more on a transient failure (see
+        `_retrying_transients`), and `_TransientFailure` is raised if the
+        retry fails too.
         """
         client = self._get_client()
 
@@ -1201,23 +1699,42 @@ class DatabentoProvider(DataProvider):
             attempt = datetime(end.year, end.month, end.day, tzinfo=timezone.utc)
             if attempt < end:
                 attempt += timedelta(days=1)
-            for _ in range(_FINALIZATION_ATTEMPTS):
+            budget = _FINALIZATION_ATTEMPTS
+            # An end this process has already seen refused is not asked
+            # again within the hour: start below it, and count the days
+            # skipped against the walk's budget, so the walk ends where it
+            # would have ended had it asked each of them (see
+            # `_PUBLICATION_EDGES`).
+            refused = _refused_from(dataset, schema)
+            if refused is not None and attempt >= refused:
+                below = refused - timedelta(days=1)
+                budget -= (attempt - below).days
+                attempt = below
+            for _ in range(max(budget, 0)):
                 if attempt <= start:
                     return None
                 try:
-                    return _call(attempt, "%Y-%m-%d")
+                    frame = _retrying_transients(
+                        lambda: _call(attempt, "%Y-%m-%d")  # noqa: B023
+                    )
                 except Exception as exc:  # noqa: BLE001
                     # A gate's refusal walks back too when its reason is
                     # this error: its preflight asked the vendor about this
                     # exact end and was told what the request would have
                     # been. Any other refusal is raised.
-                    text = str(exc).lower()
-                    if any(marker in text for marker in _UNFINALIZED_MARKERS):
+                    if _is_unfinalized(exc):
+                        _remember_refusal(dataset, schema, attempt)
                         attempt -= timedelta(days=1)
                         continue
                     raise
+                if served_end is not None:
+                    served_end.append(attempt)
+                return frame
             return None
-        return _call(end, "%Y-%m-%dT%H:%M:%S")
+        frame = _retrying_transients(lambda: _call(end, "%Y-%m-%dT%H:%M:%S"))
+        if served_end is not None:
+            served_end.append(end)
+        return frame
 
     def _fetch(
         self,
@@ -1229,6 +1746,7 @@ class DatabentoProvider(DataProvider):
         datasets: Optional[List[str]] = None,
         what: str = "data",
         stored: Optional[Callable[[str], Optional[pd.DataFrame]]] = None,
+        served: Optional[Dict[str, Any]] = None,
     ) -> Tuple[pd.DataFrame, str]:
         """
         Try each dataset in order; return the first that answers.
@@ -1239,6 +1757,24 @@ class DatabentoProvider(DataProvider):
         coverage -- and a frame it returns is served instead of a request.
         That is the only point at which a lesser feed's stored answer can
         be the right one: every better feed has just been passed over.
+
+        `served`, when given, receives under "end" the exclusive end of the
+        request the answering dataset served (see `_get_range`), and under
+        "window_end" the exclusive end the window asked for, before the
+        edge clamp; a stored answer leaves both unset. The vendor served
+        the whole window when the first is not before the second.
+
+        HOW THE WALK ENDS. A dataset that answers with records ends it. A
+        TRANSIENT failure -- on the coverage lookup or on the request,
+        after its one retry -- ends it with `VendorUnavailableError`, and
+        no lesser feed is asked. A 401 ends it with the rejected-key
+        refusal and a refused gate with `RequestRefusedError`. Otherwise
+        the next dataset is asked, and when none answers: every dataset
+        asked answered with no records -> `DataNotFoundError`; some failed
+        for a reason about the request (a 422, a 400) ->
+        `NonRetryableAPIError` naming each; every candidate declined by the
+        subscription -> the entitlement refusal; none could be asked -> an
+        `APIError` naming why each was passed over.
         """
         route = self.resolve_symbol(symbol)
         raw = route.raw
@@ -1258,7 +1794,9 @@ class DatabentoProvider(DataProvider):
             # it back to what the dataset has published.
             end = end + width
 
-        tried: List[str] = []
+        span = f"({schema}) between {start:%Y-%m-%d} and {end:%Y-%m-%d}"
+        empty: List[str] = []
+        failed: Dict[str, str] = {}
         passed: Dict[str, str] = {}
         candidates = (
             datasets
@@ -1271,7 +1809,17 @@ class DatabentoProvider(DataProvider):
                 continue
             if not self._window_admits(dataset, schema, start):
                 continue
-            window = self._range(dataset, start, end)
+            try:
+                window = self._range(dataset, start, end)
+            except _TransientFailure as failure:
+                raise _unavailable(
+                    failure,
+                    doing=(
+                        f"the coverage lookup for {dataset}, before a request "
+                        f"for {what} for {symbol} {span},"
+                    ),
+                    dataset=dataset,
+                ) from failure.last
             if window is None:
                 passed[dataset] = self._why_passed_over(dataset)
                 continue
@@ -1279,8 +1827,8 @@ class DatabentoProvider(DataProvider):
                 answer = stored(dataset)
                 if answer is not None:
                     return answer, dataset
-            tried.append(dataset)
             unresolved: Set[str] = set()
+            ends: List[datetime] = []
             try:
                 frame = self._get_range(
                     dataset,
@@ -1289,11 +1837,20 @@ class DatabentoProvider(DataProvider):
                     *window,
                     stype_in=route.stype_in,
                     not_found=unresolved,
+                    served_end=ends,
                 )
             except RequestRefusedError:
                 # The caller's budget said no. Asking the next dataset would
                 # answer from a lesser feed and spend anyway.
                 raise
+            except _TransientFailure as failure:
+                # The vendor failed, twice: that says nothing about the data,
+                # and the next feed's answer would be served as this one's.
+                raise _unavailable(
+                    failure,
+                    doing=f"the request for {what} for {symbol} {span} on {dataset}",
+                    dataset=dataset,
+                ) from failure.last
             except Exception as exc:  # noqa: BLE001
                 kind = _failure_kind(exc)
                 if kind == "auth":
@@ -1307,8 +1864,13 @@ class DatabentoProvider(DataProvider):
                     with self._lock:
                         self._denied.add(dataset)
                     passed[dataset] = "declined by the subscription (HTTP 403)"
+                else:
+                    failed[dataset] = _describe_failure(exc)
                 continue
             if frame is not None and len(frame):
+                if served is not None and ends:
+                    served["end"] = ends[-1]
+                    served["window_end"] = end
                 return frame, dataset
             if raw in unresolved:
                 # THE VENDOR SAID THE SYMBOL DOES NOT EXIST, and asking the
@@ -1326,12 +1888,32 @@ class DatabentoProvider(DataProvider):
                     "instrument was listed in that window."
                 )
 
-        span = f"({schema}) between {start:%Y-%m-%d} and {end:%Y-%m-%d}"
+            empty.append(dataset)
+
         reasons = "; ".join(f"{name}: {why}" for name, why in passed.items())
-        if tried:
-            raise APIError(
-                f"Databento returned no {what} for {symbol} {span}. Datasets "
-                f"tried: {tried}." + (f" Passed over: {reasons}." if reasons else "")
+        if failed:
+            # A failure that is not the vendor's (a 422, a 400, an error the
+            # client raised): named rather than repeated, and never reported
+            # as an empty answer, which it is not.
+            accounts = [
+                f"{name}: the request failed, {why}" for name, why in failed.items()
+            ]
+            accounts += [f"{name}: answered with no records" for name in empty]
+            raise NonRetryableAPIError(
+                f"Databento could not serve {what} for {symbol} {span}. "
+                + "; ".join(accounts)
+                + "."
+                + (f" Passed over: {reasons}." if reasons else "")
+                + " None of these is a vendor-side failure -- an HTTP 408, "
+                "429 or 5xx, a timeout or a dropped connection -- so the "
+                "request was not repeated; a failure about the request itself "
+                "(a 400, a 422) returns the same way each time it is sent."
+            )
+        if empty:
+            raise DataNotFoundError(
+                f"Databento returned no {what} for {symbol} {span}: the "
+                f"datasets asked answered with no records. Datasets tried: "
+                f"{empty}." + (f" Passed over: {reasons}." if reasons else "")
             )
         if passed and all("HTTP 403" in why for why in passed.values()):
             # An entitlement answer, not a coverage one, and asking again
@@ -1345,13 +1927,17 @@ class DatabentoProvider(DataProvider):
                 "at one it includes (DATABENTO_DATASET, "
                 "DATABENTO_DEPTH_DATASET, DATABENTO_OHLCV_DATASET)."
             )
-        raise APIError(
-            f"Databento returned no {what} for {symbol} {span}. "
-            + (
-                f"No dataset was asked: {reasons}."
-                if reasons
-                else "No dataset covers that range."
+        if reasons:
+            # No dataset answered, so none "returned no data": say why each
+            # one was passed over instead.
+            raise APIError(
+                f"No Databento dataset could serve {what} for {symbol} {span}: "
+                f"{reasons}."
             )
+        raise APIError(
+            f"No Databento dataset covers {what} for {symbol} {span}: every "
+            "dataset this request routes to starts after the window's start "
+            f"or does not publish {schema}, so none was asked."
         )
 
     def _why_passed_over(self, dataset: str) -> str:
@@ -1424,19 +2010,26 @@ class DatabentoProvider(DataProvider):
             )
             served = _with_attrs(cached.copy(), cached.attrs)
             return disclose_served(served, symbol, interval, _bar_clock(symbol, served))
-        result, preferred = self._fetch_ohlcv_uncached(
+        result, preferred, complete = self._fetch_ohlcv_uncached(
             symbol, start_date, end_date, interval, schema, start_str, end_str
         )
         if preferred:
             # An answer from a lesser feed because a better one failed (or
             # returned nothing) is not kept for the session: the next call
             # on this instance asks the better feed again rather than
-            # repeating the degraded answer for an hour.
-            _session_cache_set(key, result, end=end_str)
+            # repeating the degraded answer for an hour. An answer short of
+            # its window is kept a minute, like a window still forming.
+            _session_cache_set(key, result, end=end_str, complete=complete)
         served = _with_attrs(result.copy(), result.attrs)
         return disclose_served(served, symbol, interval, _bar_clock(symbol, served))
 
-    @retry(times=3, delay=1)
+    # ONE ATTEMPT AT THIS LEVEL. The walk below retries a transient failure
+    # itself, on the same dataset, and ends every other way with an error the
+    # same request would repeat. Three attempts here re-ran the whole walk:
+    # an empty answer cost six requests and a 504 six more and three seconds
+    # of sleeps, reported as "no bars". The decorator stays for its type
+    # contract: an unexpected exception reaches the caller as an `APIError`.
+    @retry(times=1)
     def _fetch_ohlcv_uncached(
         self,
         symbol: str,
@@ -1446,11 +2039,13 @@ class DatabentoProvider(DataProvider):
         schema: str,
         start_str: str,
         end_str: str,
-    ) -> Tuple[pd.DataFrame, bool]:
+    ) -> Tuple[pd.DataFrame, bool, bool]:
         """
-        The bars, and whether they came from the feed the routing prefers
-        for this window now (False when a better feed failed and a lesser
-        one answered in its place).
+        The bars; whether they came from the feed the routing prefers for
+        this window now (False when a better feed failed and a lesser one
+        answered in its place); and whether the answer covers the whole
+        window (False when the vendor served a live request only part of
+        it -- see the disk-cache write below).
 
         THE DISK CACHE IS READ FOR THE FEED THAT WOULD ANSWER, AND NO OTHER.
         Entries are keyed by the dataset that answered, so the same window
@@ -1474,6 +2069,17 @@ class DatabentoProvider(DataProvider):
         (see `_cme_trade_date_bars`), because the vendor's `ohlcv-1d` is a
         UTC day: six bars a week, one of them a Sunday-evening fragment, and
         every close taken two or three hours into the next session.
+
+        A WINDOW ENDING TODAY KEEPS ITS SETTLED PART ON DISK. Such a window
+        is not historical, so it was never written, and every call -- every
+        tool call builds a new provider -- downloaded its whole history
+        again. Now the part dated `_SETTLED_LAG_DAYS` or more UTC days ago
+        is stored, marked settled, under the window it answers, once the
+        vendor has served past its last day; a later call reads that part
+        and asks the preferred feed only for the bars after it (see
+        `_from_settled_part`). The answer is the one a single request for
+        the whole window returns: the same rows, dtypes and attrs, the
+        dropped-bar disclosures included.
         """
         route = self.resolve_symbol(symbol)
         start = _to_utc(start_date, end_of_day=False)
@@ -1509,9 +2115,33 @@ class DatabentoProvider(DataProvider):
 
         first = self._first_to_ask(route.family, schema, start, end)
         if first is not None and _stored(first) is not None:
-            return _disclosed(served[first], first), True
+            return _disclosed(served[first], first), True, True
+        settle_through = self._settle_through(start, end_date)
+        if first is not None and settle_through is not None:
+            joined = self._from_settled_part(
+                route,
+                symbol,
+                start_date,
+                end_date,
+                interval,
+                schema,
+                start,
+                end,
+                start_str,
+                settle_through,
+                first,
+            )
+            if joined is not None:
+                return joined, True, True
+        reached: Dict[str, Any] = {}
         raw_frame, dataset = self._fetch(
-            request_schema, symbol, fetch_start, end_date, what="bars", stored=_stored
+            request_schema,
+            symbol,
+            fetch_start,
+            end_date,
+            what="bars",
+            stored=_stored,
+            served=reached,
         )
         # Asked again after the fetch, which has learned denials and
         # coverage: a feed passed over for either is not a failure, and the
@@ -1529,7 +2159,7 @@ class DatabentoProvider(DataProvider):
                 preferred,
             )
         if dataset in served:
-            return _disclosed(served[dataset], dataset), dataset == preferred
+            return _disclosed(served[dataset], dataset), dataset == preferred, True
         out = self._shape_bars(
             raw_frame,
             symbol,
@@ -1553,11 +2183,231 @@ class DatabentoProvider(DataProvider):
         # a failing feed's place: the entry is that dataset's true answer,
         # and the lookup above reads it only when that dataset is the one
         # that would answer.
+        #
+        # ONLY AN ANSWER TO THE WHOLE WINDOW IS WRITTEN. A window ending
+        # yesterday is historical, but the daily feed finalizes a day or two
+        # late: asked early, the walk-back serves it up to the day before,
+        # and that short answer used to be cached for good -- yesterday's bar
+        # missing from every later call. Now it is served and not written,
+        # and the next call asks again until the vendor serves the whole
+        # window. The same holds for an end the dataset's published edge
+        # clamped.
         path = self._bar_cache_path(route, dataset, start_str, end_str, interval)
-        if path is not None and _is_historical(end_date):
+        if (
+            path is not None
+            and _is_historical(end_date)
+            and _served_whole_window(reached)
+        ):
             # Never raises: a failed write is logged and its temp removed.
             _write_cached_ohlcv(path, out, interval, start_str, end_str)
-        return out, dataset == preferred
+        elif path is not None and _is_historical(end_date):
+            logger.info(
+                "databento %s %s: not cached -- the vendor served up to %s of a "
+                "window ending %s, so the answer is short until it publishes "
+                "the rest",
+                symbol,
+                schema,
+                reached.get("end"),
+                reached.get("window_end"),
+            )
+        if settle_through is not None:
+            self._store_settled_part(
+                out,
+                route,
+                symbol,
+                interval,
+                schema,
+                start,
+                start_str,
+                settle_through,
+                dataset,
+                reached.get("end"),
+            )
+        return out, dataset == preferred, _served_whole_window(reached)
+
+    @staticmethod
+    def _settle_through(
+        start: datetime, end_date: Union[str, datetime]
+    ) -> Optional[date]:
+        """
+        The last day of a window's settled part, for a window that is not
+        historical -- or None when there is none.
+
+        A bar dated `_SETTLED_LAG_DAYS` UTC days ago or earlier has closed
+        on every venue. A window that ends before today is historical and
+        cached whole, as before; one that starts after the settled day has
+        no settled part.
+        """
+        if _is_historical(end_date):
+            return None
+        through = _cache._utc_today() - timedelta(days=_SETTLED_LAG_DAYS)
+        if through < start.date():
+            return None
+        return through
+
+    def _from_settled_part(
+        self,
+        route: SymbolRoute,
+        symbol: str,
+        start_date: Union[str, datetime],
+        end_date: Union[str, datetime],
+        interval: str,
+        schema: str,
+        start: datetime,
+        end: datetime,
+        start_str: str,
+        settle_through: date,
+        first: str,
+    ) -> Optional[pd.DataFrame]:
+        """
+        A window ending today, from its stored settled part and ONE request
+        for the bars after it -- or None, and the caller fetches the window
+        whole, as it always did.
+
+        Only the preferred feed's part is read (the rule the disk cache
+        follows everywhere here), and only one marked settled. The rest is
+        asked of that feed alone: a lesser feed's bars after a better
+        feed's part would be a frame no single request returns. When that
+        request ends any way but with bars, an empty answer, or the
+        vendor's own failure (raised: the whole window's request would have
+        met it too), this returns None. When the part is older than
+        `settle_through`, the newer part is stored from the joined answer,
+        so the next day starts from there, and the older one is removed.
+        """
+        part: Optional[Tuple[date, pd.DataFrame]] = None
+        for back in range(_SETTLED_LOOKBACK_DAYS + 1):
+            day = settle_through - timedelta(days=back)
+            if day < start.date():
+                break
+            day_str = day.isoformat()
+            path = self._bar_cache_path(route, first, start_str, day_str, interval)
+            frame = _read_cached_ohlcv(
+                path, interval, start_str, day_str, settled_only=True
+            )
+            if frame is not None:
+                part = (day, frame)
+                break
+        if part is None:
+            return None
+        part_day, stored = part
+        rest_start = datetime(
+            part_day.year, part_day.month, part_day.day, tzinfo=timezone.utc
+        ) + timedelta(days=1)
+        trade_dates = route.family == "future" and interval == "1d"
+        reached: Dict[str, Any] = {}
+        try:
+            raw_rest, _answered = self._fetch(
+                "ohlcv-1h" if trade_dates else schema,
+                symbol,
+                rest_start - timedelta(days=1) if trade_dates else rest_start,
+                end_date,
+                datasets=[first],
+                what="bars",
+                served=reached,
+            )
+        except (DataNotFoundError, InvalidSymbolError):
+            # Nothing after the stored part. One request for the whole
+            # window would have returned the stored part's bars, from this
+            # feed, and resolved the symbol on them.
+            raw_rest = None
+        except (VendorUnavailableError, RequestRefusedError, RejectedKeyError):
+            # The whole window's request would meet these too.
+            raise
+        except QuantError as exc:
+            logger.info(
+                "databento %s %s: the bars after the stored settled part could "
+                "not be asked of %s alone (%s); fetching the window whole",
+                symbol,
+                schema,
+                first,
+                exc,
+            )
+            return None
+        if self._first_to_ask(route.family, schema, start, end) != first:
+            # What the request learned moved the routing: the whole window
+            # would now be answered by another feed.
+            return None
+        listed: List[pd.DatetimeIndex] = []
+        rest = (
+            None
+            if raw_rest is None
+            else self._shape_bars_undropped(
+                raw_rest,
+                symbol,
+                interval,
+                end_date,
+                trade_dates_from=rest_start if trade_dates else None,
+                listed=listed,
+            )
+        )
+        out = _join_settled(
+            stored, rest, symbol, interval, listed[0] if listed else None
+        )
+        out.attrs["dataset"] = first
+        out.attrs["provider"] = "databento"
+        self._disclose(out, symbol, route, interval, schema, start, end, first)
+        _record(symbol, start_date, end_date, interval, f"{first}:disk_cache+live", out)
+        if part_day < settle_through and self._store_settled_part(
+            out,
+            route,
+            symbol,
+            interval,
+            schema,
+            start,
+            start_str,
+            settle_through,
+            first,
+            reached.get("end") if raw_rest is not None else None,
+        ):
+            # The newer part holds every bar of the one it was built from,
+            # which no later call of this window reads; left in place, a
+            # window asked for daily would keep one copy of its history a day.
+            older = self._bar_cache_path(
+                route, first, start_str, part_day.isoformat(), interval
+            )
+            if older is not None:
+                _cache._remove(older)
+        return out
+
+    def _store_settled_part(
+        self,
+        frame: pd.DataFrame,
+        route: SymbolRoute,
+        symbol: str,
+        interval: str,
+        schema: str,
+        start: datetime,
+        start_str: str,
+        through: date,
+        dataset: str,
+        reached: Optional[datetime],
+    ) -> bool:
+        """
+        Store the part of a window's answer through `through`, marked
+        settled -- when the vendor served past that day's end (`reached` is
+        the exclusive end the request was answered to, after the edge clamp
+        and the daily walk-back). The part is what a request for that
+        window alone returns, written as one would be (see `_settled_part`).
+        Returns whether it was written; never raises.
+        """
+        boundary = datetime(
+            through.year, through.month, through.day, tzinfo=timezone.utc
+        ) + timedelta(days=1)
+        if reached is None or reached < boundary:
+            return False
+        through_str = through.isoformat()
+        part = _settled_part(frame, through_str, interval)
+        if part is None:
+            return False
+        part.attrs["dataset"] = dataset
+        part.attrs["provider"] = "databento"
+        self._disclose(part, symbol, route, interval, schema, start, boundary, dataset)
+        path = self._bar_cache_path(route, dataset, start_str, through_str, interval)
+        return bool(
+            _write_cached_ohlcv(
+                path, part, interval, start_str, through_str, settled=True
+            )
+        )
 
     @staticmethod
     def _bar_cache_path(
@@ -1707,6 +2557,31 @@ class DatabentoProvider(DataProvider):
         aggregated into CME trade dates, and the dates before that start --
         the partial one the widened request reached into -- are cut off.
         """
+        out = self._shape_bars_undropped(
+            raw_frame, symbol, interval, end_date, trade_dates_from=trade_dates_from
+        )
+        # A bar with no Close is dropped and disclosed, by the rule every
+        # provider follows, so this frame and a yfinance frame of the same
+        # sessions agree, and what is cached is what was served. After the
+        # trade-date aggregation and the trim: a trade date is judged by its
+        # own Close, and a row past the window is not reported as dropped.
+        return drop_unusable_closes(out, symbol, provider="databento")
+
+    def _shape_bars_undropped(
+        self,
+        raw_frame: pd.DataFrame,
+        symbol: str,
+        interval: str,
+        end_date: Union[str, datetime],
+        *,
+        trade_dates_from: Optional[Union[str, datetime]] = None,
+        listed: Optional[List[pd.DatetimeIndex]] = None,
+    ) -> pd.DataFrame:
+        """`_shape_bars` before its last step: the bars with no Close are
+        still in. The settled-part join drops them across both parts at
+        once, as one request's answer would be (see `_join_settled`).
+        `listed`, when given, receives the bar labels before the trim to
+        the window's end: the index pandas infers a daily `freq` from."""
         bars = self._to_ohlcv(raw_frame, symbol)
         if trade_dates_from is not None:
             bars = _cme_trade_date_bars(bars)
@@ -1722,14 +2597,9 @@ class DatabentoProvider(DataProvider):
             # uint64 from the vendor: `Volume.diff()` on it returned
             # 1.8e19 instead of -1,150,414. int64 like every other provider.
             out["Volume"] = out["Volume"].astype("int64")
-        # A bar with no Close is dropped and disclosed, by the rule every
-        # provider follows, so this frame and a yfinance frame of the same
-        # sessions agree, and what is cached is what was served. After the
-        # trade-date aggregation and the trim: a trade date is judged by its
-        # own Close, and a row past the window is not reported as dropped.
-        return drop_unusable_closes(
-            trim_to_inclusive_end(out, end_date, interval), symbol, provider="databento"
-        )
+        if listed is not None:
+            listed.append(pd.DatetimeIndex(out.index))
+        return trim_to_inclusive_end(out, end_date, interval)
 
     @staticmethod
     def _to_ohlcv(frame: pd.DataFrame, symbol: str) -> pd.DataFrame:
@@ -2027,6 +2897,11 @@ class DatabentoProvider(DataProvider):
         range the vendor returns unreadable -- is LEFT OUT of the mapping.
         Returning a window for it would be inventing the one number a
         caller plans around.
+
+        A lookup that fails ON THE VENDOR'S SIDE -- a 5xx, a timeout, a
+        dropped connection, after one retry -- is not left out: that would
+        read as "not entitled or unknown". It raises
+        `VendorUnavailableError`, naming the dataset and the status.
         """
         names = (
             [str(d).strip() for d in datasets]
@@ -2037,7 +2912,12 @@ class DatabentoProvider(DataProvider):
         for name in names:
             if not name or name in coverage:
                 continue
-            span = self._available_range(name)
+            try:
+                span = self._available_range(name)
+            except _TransientFailure as failure:
+                raise _unavailable(
+                    failure, doing=f"the coverage lookup for {name}", dataset=name
+                ) from failure.last
             if span is None:
                 continue
             first, last = span
@@ -2064,6 +2944,10 @@ class DatabentoProvider(DataProvider):
 
         The vendor's own cost endpoint reports `0.00` on a subscription
         that already includes the feed, which is why this returns BYTES.
+
+        A lookup that fails on the vendor's side, after one retry, raises
+        `VendorUnavailableError` rather than pricing the next dataset: that
+        would be the size of a different request.
         """
         start = _to_utc(start_date, end_of_day=False)
         end = _to_utc(end_date, end_of_day=True)
@@ -2089,12 +2973,24 @@ class DatabentoProvider(DataProvider):
         client = self._get_client()
         fmt = "%Y-%m-%d" if request_schema == "ohlcv-1d" else "%Y-%m-%dT%H:%M:%S"
         refused: List[str] = []
+        span = f"between {start:%Y-%m-%d} and {end:%Y-%m-%d}"
         for name in candidates:
             if not name or name in self._denied:
                 continue
-            window = self._range(name, start, end) or (start, end)
             try:
-                size = client.metadata.get_billable_size(
+                window = self._range(name, start, end) or (start, end)
+            except _TransientFailure as failure:
+                raise _unavailable(
+                    failure,
+                    doing=(
+                        f"the coverage lookup for {name}, before pricing "
+                        f"{schema} for {symbol} {span},"
+                    ),
+                    dataset=name,
+                ) from failure.last
+
+            def _price(name: str = name, window: Tuple[datetime, ...] = window) -> Any:
+                return client.metadata.get_billable_size(
                     dataset=name,
                     schema=request_schema,
                     symbols=[route.raw],
@@ -2102,6 +2998,15 @@ class DatabentoProvider(DataProvider):
                     start=window[0].strftime(fmt),
                     end=window[1].strftime(fmt),
                 )
+
+            try:
+                size = _retrying_transients(_price)
+            except _TransientFailure as failure:
+                raise _unavailable(
+                    failure,
+                    doing=f"the billable-size lookup for {schema} for {symbol} {span} on {name}",
+                    dataset=name,
+                ) from failure.last
             except Exception as exc:  # noqa: BLE001 - one refusal, not a trace
                 kind = _failure_kind(exc)
                 if kind == "auth":
@@ -2249,8 +3154,10 @@ __all__ = [
     "BillableFetch",
     "BillableRequest",
     "DatabentoProvider",
+    "RejectedKeyError",
     "RequestGate",
     "RequestRefusedError",
+    "forget_publication_edges",
     "request_gate",
     "set_request_gate",
 ]

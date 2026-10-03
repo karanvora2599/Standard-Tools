@@ -45,6 +45,40 @@ class NonRetryableAPIError(APIError):
     pass
 
 
+class VendorUnavailableError(NonRetryableAPIError):
+    """
+    The vendor failed on its side -- a 5xx, a 408 or 429, a timeout, a
+    dropped connection -- and kept failing after the provider's own retry.
+
+    NOT AN ANSWER ABOUT THE DATA. A request that times out says nothing
+    about whether the data exists, whether the subscription covers it or
+    whether the window is right, and reporting it as "no data" or "not
+    entitled" sends a caller to fix the wrong thing. The message names the
+    status and the dataset.
+
+    A `NonRetryableAPIError` because the provider has already retried it:
+    the shared retry layer must not repeat a walk that retried internally,
+    which multiplied every request. Asking again LATER may well succeed.
+    `status` is the HTTP status (None for a connection failure), `dataset`
+    the vendor dataset that failed, and `retry_after` the wait in seconds
+    the vendor asked for, when it said.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: Optional[int] = None,
+        dataset: Optional[str] = None,
+        retry_after: Optional[float] = None,
+        original_exception: Optional[Exception] = None,
+    ):
+        super().__init__(message, original_exception)
+        self.status = status
+        self.dataset = dataset
+        self.retry_after = retry_after
+
+
 class CalculationError(QuantError):
     """Raised when a calculation fails (e.g., division by zero, NaN inputs)."""
 

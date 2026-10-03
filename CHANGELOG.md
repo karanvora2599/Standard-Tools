@@ -1,5 +1,65 @@
 # Changelog
 
+## A vendor's failure is named as one, the daily edge is learned once, and a window ending today keeps its history
+
+- **A 504 is no longer "no bars".** The retry layer re-ran a Databento walk
+  that passed every failure to the next dataset: one empty hourly request
+  cost six requests and three seconds of sleeps, and a 504 cost the same and
+  was reported as "Databento returned no bars … Datasets tried". A failure
+  is now read by its status: a 408, 429 or 5xx, a timeout, a dropped
+  connection or a stream cut off mid-body is asked once more on the same
+  dataset after a short jittered pause (the vendor's `Retry-After` up to
+  five seconds; a longer one is not waited for), and then raised as
+  `VendorUnavailableError`, a `NonRetryableAPIError` naming the status and
+  the dataset. No lesser feed is asked in its place. The retry passes
+  through the request gate like the first request. A walk whose datasets
+  all answered with no records raises `DataNotFoundError`; a failure about
+  the request itself (a 400, a 422) is named, not called an empty answer.
+  The retry layer no longer repeats the walk: the empty case is now two
+  requests and the 504 two requests on one dataset.
+- **The free lookups say so too.** A coverage lookup that fails on the
+  vendor's side is retried once and raised, instead of passing the dataset
+  over as if it did not cover the window; `get_dataset_coverage` no longer
+  leaves such a dataset out (which read as "unentitled, unknown, or
+  declined"), and `get_billable_size` no longer prices the next dataset's
+  request in its place.
+- **The daily feed's publication edge is learned once per hour, not once
+  per call.** Every tool call builds a new provider, so each daily request
+  near today paid one or two refused requests before the walk-back found
+  the finalized end. The refused end is now remembered for the process, per
+  dataset, until the top of the next UTC hour; a later walk starts below it
+  and ends where the full walk would.
+- **A window ending today keeps its settled history on disk.** Such a
+  window was never written to the Parquet store, so every call downloaded
+  its whole history again. The part dated two or more UTC days ago is now
+  stored, marked settled, once the vendor has served past it, and a later
+  call asks the preferred feed only for the bars after it. The answer is the
+  one a single request for the whole window returns — rows, dtypes, index
+  frequency, dropped-bar disclosures and coverage notes included — and a
+  part is replaced, not added to, when a later day stores a newer one. An
+  entry not marked settled is never used as a part.
+- **A Databento window is written to the disk cache only when the vendor
+  served all of it.** A daily window ending yesterday, fetched before the
+  vendor finalized yesterday's bar, used to be cached without it for good;
+  it is now served, kept for a minute rather than an hour, and fetched again
+  until it is complete. The same holds for an intraday end clamped to the
+  dataset's published edge.
+- **A yfinance request that never reached Yahoo is no longer "No data
+  found".** A dropped connection, a timeout, Yahoo's maintenance page or a
+  rate limit was reported as "No data found … Verify symbol and date
+  range". The history call now asks yfinance to raise; a transport failure
+  is retried three times and then raised as `VendorUnavailableError`, and
+  only Yahoo's own empty answer is a `DataNotFoundError`. One consequence: a
+  failed price adjustment ("auto_adjust failed") now raises instead of
+  returning unadjusted prices without saying so. `get_ticker_info` and
+  `get_financial_ratios` read `ticker.info`, which cannot be asked to
+  raise, and can still report a transport failure as no data.
+- **`fetch_ohlcv_panel` no longer tells a caller to drop a symbol when the
+  data vendor failed.** A vendor-side failure, raised directly or chained,
+  is refused as `VendorUnavailableError`, naming the dataset and status it
+  knows and saying to run the batch again later; a failure about one symbol
+  keeps the old advice.
+
 ## A decision record names the compiler and the C runtime it ran on, and replay compares them
 
 - **The build label could not tell builds of the same sources apart.**

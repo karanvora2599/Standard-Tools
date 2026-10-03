@@ -156,12 +156,14 @@ def _session_cache_get(key):
     return value
 
 
-def _session_cache_set(key, value, *, end=None) -> None:
+def _session_cache_set(key, value, *, end=None, complete: bool = True) -> None:
     """Store a fetched window. `end` is the window's inclusive end bound;
     a window that is not yet historical is kept only for
-    _UNSETTLED_TTL_SECONDS, because its last bar is still moving."""
+    _UNSETTLED_TTL_SECONDS, because its last bar is still moving. So is an
+    answer the provider knows is short of its window (`complete=False`):
+    the vendor had not published all of it, and will."""
     expires_at = None
-    if end is not None and not _is_historical(end):
+    if not complete or (end is not None and not _is_historical(end)):
         expires_at = time.monotonic() + _UNSETTLED_TTL_SECONDS
     with _session_cache_lock:
         _session_cache[key] = (value, expires_at)
@@ -522,6 +524,13 @@ def _safe_parquet_path(
         return None
 
 
+def _utc_today() -> _date:
+    """Today's UTC date: the one clock the disk tier's "historical" guard and
+    a provider's settled-prefix rule both read. A seam, so a test can stand
+    in a day without moving the system clock."""
+    return datetime.now(timezone.utc).date()
+
+
 def _is_historical(end_date: Union[str, datetime, _date]) -> bool:
     """Return True when end_date is strictly before today (bar is fully formed,
     so it's eligible for the disk cache — see the cache-root comment above for
@@ -533,7 +542,7 @@ def _is_historical(end_date: Union[str, datetime, _date]) -> bool:
     the plumbing). Every provider's bars are on the UTC clock after
     normalisation, and so is this guard."""
     try:
-        return _norm_date(end_date) < datetime.now(timezone.utc).date().isoformat()
+        return _norm_date(end_date) < _utc_today().isoformat()
     except Exception:
         return False
 
@@ -669,7 +678,7 @@ def orphaned_temps(
 # ── The one write ─────────────────────────────────────────────────────────────
 
 
-def _write_parquet_atomic(path: Path, df: pd.DataFrame) -> None:
+def _write_parquet_atomic(path: Path, df: pd.DataFrame) -> bool:
     """
     Write `df` to `path` so no reader ever sees a partial file, through the
     library's one atomic writer (`artifact_store.write_bytes_atomically`):
@@ -682,7 +691,8 @@ def _write_parquet_atomic(path: Path, df: pd.DataFrame) -> None:
     A rename Windows refuses because a reader has the entry open is retried
     by that writer, briefly. Failures are logged and swallowed: a failed
     cache write should never fail the caller's data fetch, which already
-    succeeded. An interrupt still propagates, after the cleanup.
+    succeeded. An interrupt still propagates, after the cleanup. Returns
+    whether the entry was written.
     """
     try:
         buffer = io.BytesIO()
@@ -690,14 +700,23 @@ def _write_parquet_atomic(path: Path, df: pd.DataFrame) -> None:
         write_bytes_atomically(path, buffer.getvalue())
     except Exception as exc:  # noqa: BLE001 - caching is an optimisation
         logger.warning("[cache] disk write failed for %s: %s", path.name, exc)
-    else:
-        logger.debug("[cache] disk write → %s", path.name)
+        return False
+    logger.debug("[cache] disk write → %s", path.name)
+    return True
 
 
 # ── The one read, and what an entry must look like to be served ───────────────
 
 #: The columns every provider's live path guarantees, in the library's order.
 REQUIRED_OHLCV_COLUMNS = ("Open", "High", "Low", "Close", "Volume")
+
+#: The attrs key a writer sets on an entry it KNOWS is settled: the vendor
+#: served the whole window, published through its last day, so the entry is
+#: the complete answer and may stand as the stored first part of a longer
+#: window. Its value is the window `[start, end]` the entry answers. An
+#: entry without it is served as before for its own window and never used
+#: as a part. The reader removes the key, so no served frame carries it.
+SETTLED_ATTR = "sqt_settled_window"
 
 #: A read Windows refuses with a sharing violation -- another process is
 #: renaming a new version over the entry, or has it open -- is tried this
@@ -799,11 +818,22 @@ def _evict(path: Path, reason: str) -> None:
 
 
 def _read_cached_ohlcv(
-    path: Optional[Path], interval: str, start_str: str, end_str: str
+    path: Optional[Path],
+    interval: str,
+    start_str: str,
+    end_str: str,
+    *,
+    settled_only: bool = False,
 ) -> Optional[pd.DataFrame]:
     """
     The entry at `path` as a normalised OHLCV frame, or None when there is
     nothing to serve.
+
+    With `settled_only`, an entry that does not carry the settled marker
+    for exactly this window (`SETTLED_ATTR`) is a miss -- not evicted: it
+    is a valid answer for its own window, written before the marker existed
+    or by a fetch the vendor had not finished publishing. The marker is
+    removed from the frame either way.
 
     THE SAME CHECKS THE LIVE PATH MAKES. A file that reads but is not a
     plausible answer to this request (`_cached_frame_problem`) is evicted,
@@ -858,6 +888,9 @@ def _read_cached_ohlcv(
     except Exception as exc:  # noqa: BLE001 - an index that is not time
         _evict(path, f"its index is not a timestamp index ({exc})")
         return None
+    marker = frame.attrs.pop(SETTLED_ATTR, None)
+    if settled_only and _settled_marker(marker) != (start_str, end_str):
+        return None
     problem = _cached_frame_problem(frame, interval, start_str, end_str)
     if problem is not None:
         _evict(path, problem)
@@ -871,24 +904,45 @@ def _read_cached_ohlcv(
     return frame
 
 
+def _settled_marker(value: object) -> Optional[Tuple[str, str]]:
+    """The window a settled marker names, or None for anything else."""
+    try:
+        start, end = value  # type: ignore[misc]
+    except (TypeError, ValueError):
+        return None
+    return (start, end) if isinstance(start, str) and isinstance(end, str) else None
+
+
 def _write_cached_ohlcv(
     path: Optional[Path],
     df: pd.DataFrame,
     interval: str,
     start_str: str,
     end_str: str,
-) -> None:
+    *,
+    settled: bool = False,
+) -> bool:
     """
-    Persist a live answer, unless the read would refuse it.
+    Persist a live answer, unless the read would refuse it. Returns whether
+    the entry was written.
 
     A frame `_read_cached_ohlcv` would evict is not written: storing it
     would only cost a write now and an eviction and a refetch on every later
     call, and the answer is served live either way.
+
+    With `settled`, the entry is marked as the complete answer for its
+    window (`SETTLED_ATTR`). Only a caller that knows the vendor served the
+    whole window, published through its last day, passes it. The frame
+    passed in is not changed.
     """
     if path is None:
-        return
+        return False
     problem = _cached_frame_problem(df, interval, start_str, end_str)
     if problem is not None:
         logger.warning("[cache] not caching %s: %s", path.name, problem)
-        return
-    _write_parquet_atomic(path, df)
+        return False
+    if settled:
+        marked = df.copy(deep=False)
+        marked.attrs = {**df.attrs, SETTLED_ATTR: [start_str, end_str]}
+        df = marked
+    return _write_parquet_atomic(path, df)

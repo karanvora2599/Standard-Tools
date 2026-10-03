@@ -356,11 +356,16 @@ class TestTheDiskCacheAnswersWithTheFeedThatWouldAnswer:
         assert frame.attrs["dataset"] == SUMMARY
         assert _volumes(frame) == self.VOLUME[SUMMARY]
 
+    # The failures below are about the request (a 400, a 404), the kind a
+    # lesser feed is still asked after. A vendor-side failure -- a 5xx, a
+    # timeout -- is not passed to a lesser feed at all; see
+    # test_databento_vendor_failures.py and the CHANGELOG entry of 2026-10-02.
+
     def test_a_failed_data_request_does_not_pin_the_window(self):
         failing = self._client(
             rules=[
                 lambda kw: (
-                    RuntimeError("500 gateway error")
+                    RuntimeError("400 bad_request: the feed refused this request")
                     if kw["dataset"] == SUMMARY
                     else None
                 )
@@ -376,7 +381,7 @@ class TestTheDiskCacheAnswersWithTheFeedThatWouldAnswer:
 
         def flaky(dataset):
             if dataset == SUMMARY:
-                raise RuntimeError("503 service unavailable")
+                raise RuntimeError("404 dataset_not_found")
             return original(dataset)
 
         client.metadata.get_dataset_range = flaky
@@ -400,7 +405,7 @@ class TestTheDiskCacheAnswersWithTheFeedThatWouldAnswer:
         def once(kw):
             if kw["dataset"] == SUMMARY and state["failures"]:
                 state["failures"] -= 1
-                return RuntimeError("500 gateway error")
+                return RuntimeError("400 bad_request: the feed refused this request")
             return None
 
         client = self._client(rules=[once])

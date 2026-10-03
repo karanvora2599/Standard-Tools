@@ -23,7 +23,12 @@ from standard_quant_tools.data.databento import (
     UNDEF_PRICE,
 )
 from standard_quant_tools.data.databento_provider import DatabentoProvider, _to_utc
-from standard_quant_tools.error import APIError, ValidationError
+from standard_quant_tools.error import (
+    APIError,
+    DataNotFoundError,
+    ValidationError,
+    VendorUnavailableError,
+)
 
 CONSOLIDATED = "EQUS.MINI"
 BASIC = "XNAS.BASIC"
@@ -411,12 +416,16 @@ class TestDatasetPreference:
         assert client.datasets_called()[:2] == [CONSOLIDATED, BASIC]
 
     def test_exhausting_every_dataset_refuses_by_name(self) -> None:
+        """Every dataset answered with no records: a `DataNotFoundError`,
+        which the retry layer never repeats (see the CHANGELOG entry of
+        2026-10-02) -- one request per dataset, not three."""
         client = StubClient(
             {CONSOLIDATED: SINCE_2023, BASIC: WIDE, DEPTH: WIDE},
             rules=[lambda kw: pd.DataFrame()],
         )
-        with pytest.raises(APIError, match="Datasets tried"):
+        with pytest.raises(DataNotFoundError, match="Datasets tried"):
             _provider(client).get_ohlcv("NVDA", "2024-01-02", "2024-01-10")
+        assert client.datasets_called() == [CONSOLIDATED, BASIC, DEPTH]
 
 
 class TestEntitlementDenialsAreRemembered:
@@ -489,12 +498,14 @@ class TestTheDailyFinalizationLag:
             return RuntimeError("500 internal error")
 
         client = StubClient({CONSOLIDATED: SINCE_2023}, rules=[boom])
-        with pytest.raises(APIError):
+        with pytest.raises(VendorUnavailableError, match="HTTP|500"):
             _provider(client).get_ohlcv("NVDA", "2024-03-01", "2024-03-10")
-        # One attempt per dataset per try, not six walk-backs: the retry
-        # layer above re-asks a transient failure three times, like every
-        # other provider, so three calls and never eighteen.
-        assert len(client.calls) == 3
+        # No walk-back on a 500: it is asked once more, on the same dataset
+        # and the same end, and then named as the vendor's failure. The retry
+        # layer above no longer re-runs the walk (see the CHANGELOG entry of
+        # 2026-10-02), so two calls -- it used to be three, and never six.
+        assert len(client.calls) == 2
+        assert client.calls[0] == client.calls[1]
 
     def test_an_intraday_schema_does_not_walk_back(self) -> None:
         # Intraday asks the venue feeds only: the sample feed is not a tape.
