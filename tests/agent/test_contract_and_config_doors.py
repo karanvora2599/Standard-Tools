@@ -520,7 +520,7 @@ class TestTheConfigurationIsReadable:
         }
         assert by_name["SQT_AUDIT_DIR"]["value"] == str(tmp_path / "elsewhere")
 
-    def test_the_twenty_one_names_are_exactly_the_set_the_library_reads(self):
+    def test_the_twenty_two_names_are_exactly_the_set_the_library_reads(self):
         """Grep-backed: a variable added to the library and not to this
         table is a setting nothing reports, which is the state this tool
         exists to end. Twenty-one since SQT_EXTERNAL_DIRS, the directories
@@ -539,7 +539,7 @@ class TestTheConfigurationIsReadable:
             f"read by the library and not reported: {sorted(in_source - reported)}; "
             f"reported and not read: {sorted(reported - in_source)}"
         )
-        assert len(reported) == 21
+        assert len(reported) == 22
 
     def test_the_platform_directories_are_behind_the_flag(self):
         with_paths = {
@@ -550,7 +550,7 @@ class TestTheConfigurationIsReadable:
         without = dispatch("describe_effective_config", {"include_paths": False})
         names = {row["name"] for row in without["settings"]}
         assert not {"LOCALAPPDATA", "XDG_STATE_HOME"} & names
-        assert len(names) == 21
+        assert len(names) == 22
 
     def test_every_setting_names_its_reader_and_its_effect(self):
         for row in dispatch("describe_effective_config", {})["settings"]:

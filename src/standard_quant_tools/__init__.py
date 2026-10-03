@@ -1,9 +1,74 @@
 """Standard quantitative finance tools for backtesting, analysis, and agent-based trading."""
 
 import logging
+import os
 import sys
 
 __version__ = "0.1.0"
+
+#: The OpenMP runtime's wait policy, defaulted to PASSIVE here.
+#:
+#: After each parallel region, the MSVC OpenMP runtime (vcomp) keeps its
+#: worker threads spinning for about 100 ms, waiting for the next region.
+#: That spin kept 12 to 14 of 16 logical CPUs busy on the measuring machine,
+#: and the Python that ran after a kernel -- the pandas and numpy around it --
+#: ran 1.4x to 2.2x slower beside it. PASSIVE puts the workers to sleep instead:
+#: over 35 public calls at 16 threads the geometric-mean speed-up over one
+#: thread went from 1.79x to 2.13x. The cost is on kernels called back to
+#: back with no Python between them, 6% to 24% slower, and 0.1 to 0.6 ms to
+#: wake the workers for a small region. No result changes.
+#:
+#: The runtime reads the variable once, when it loads, and it loads with
+#: `_sqt_core` -- so it is set here, before anything below can import the
+#: extension. A value the caller set, in the environment or in `os.environ`
+#: before this import, is left alone; blank counts as unset, as it does for
+#: every setting this library reads. Being process-wide, it also reaches
+#: scikit-learn's OpenMP and any child process. When the runtime is already
+#: loaded -- scikit-learn imported first loads its own copy, which the
+#: extension then shares -- setting it changes nothing for this process,
+#: and a debug-level log line says so. Not a warning: it changes speed only,
+#: never an answer, and it follows from ordinary import order a caller may
+#: not control, so a warning would fire on every such import (and fail it
+#: under `-W error`) for something only a profile needs to know. The outcome
+#: is in `_OMP_WAIT_POLICY_DEFAULT`: "set", "caller" or "too_late".
+OMP_WAIT_POLICY_ENV = "OMP_WAIT_POLICY"
+
+
+def _openmp_runtime_loaded() -> "bool | None":
+    """Whether the MSVC OpenMP runtime is already in this process; None
+    where that cannot be told (any platform but Windows)."""
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetModuleHandleW.argtypes = [ctypes.c_wchar_p]
+        kernel32.GetModuleHandleW.restype = ctypes.c_void_p
+        return bool(kernel32.GetModuleHandleW("vcomp140.dll"))
+    except Exception:  # noqa: BLE001 - a diagnostic, never an import failure
+        return None
+
+
+def _default_omp_wait_policy() -> str:
+    if (os.environ.get(OMP_WAIT_POLICY_ENV) or "").strip():
+        return "caller"
+    os.environ[OMP_WAIT_POLICY_ENV] = "PASSIVE"
+    if _openmp_runtime_loaded():
+        logging.getLogger(__name__).debug(
+            "OMP_WAIT_POLICY=PASSIVE was set on import, but the OpenMP runtime "
+            "(vcomp140.dll) was already loaded -- by a package imported before "
+            "standard_quant_tools, such as scikit-learn -- and reads it only "
+            "when it loads. This process keeps the runtime's default: workers "
+            "spin about 100 ms after each parallel region, slowing the Python "
+            "that follows. Results are unaffected. Import standard_quant_tools "
+            "first, or set OMP_WAIT_POLICY before Python starts."
+        )
+        return "too_late"
+    return "set"
+
+
+_OMP_WAIT_POLICY_DEFAULT = _default_omp_wait_policy()
 
 #: Environment variable that forces every kernel onto its Python fallback.
 #:

@@ -41,6 +41,7 @@ from typing import Any, Dict, List, Optional, Sequence
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools._blas import single_threaded_blas
 from standard_quant_tools.backtest.costs import impact_cost
 from standard_quant_tools.constants import TRADING_DAYS_PER_YEAR
 from standard_quant_tools.error import ValidationError
@@ -61,6 +62,11 @@ TRADING_DAYS = TRADING_DAYS_PER_YEAR
 #: indefinite matrix rather than rounding; either way the matrix is
 #: repaired, and only the genuine case is warned about loudly.
 _PSD_TOLERANCE = 1e-10
+
+#: The largest matrix on which a completed Cholesky factorization proves the
+#: eigenvalue test above passes: n(n+1) * 2^-53 <= _PSD_TOLERANCE / 2 holds
+#: up to 670 and fails at 671. See `_repair_psd`.
+_CHOLESKY_PROOF_MAX_ASSETS = 670
 
 #: A variance at or below this share of the largest variance in the same
 #: problem is treated as zero: a volatility ratio of 1e-10. A constant
@@ -146,15 +152,41 @@ def _repair_psd(frame: pd.DataFrame, who: str) -> "tuple[pd.DataFrame, List[str]
     covariance is not a covariance of anything; the repair projects it onto
     the nearest one that is (Higham's eigenvalue clipping), re-symmetrized,
     and the caller is told by how much.
+
+    A CHOLESKY FACTORIZATION ANSWERS FIRST. Most matrices need no repair,
+    and saying so took a full eigendecomposition, most of a 235-asset risk
+    parity. A Cholesky factorization that completes in floating point
+    is exact for some A + E with ||E|| <= n(n+1)u ||A|| (Higham, Accuracy
+    and Stability of Numerical Algorithms, Theorem 10.5, with u = 2^-53), and
+    A + E = R'R is positive semi-definite, so the smallest eigenvalue of A is
+    at least -n(n+1)u times the largest. Up to `_CHOLESKY_PROOF_MAX_ASSETS`
+    that is at most half of `_PSD_TOLERANCE`, which leaves the other half
+    for eigh's own rounding: the eigenvalue test would have passed, and the
+    frame is returned untouched exactly as it was. When the factorization
+    fails -- a singular, a slightly negative or an indefinite matrix -- or
+    the matrix is larger, the eigenvalues decide as before. Both read the
+    lower triangle. Same outputs; at 235 assets the check takes 0.4 ms,
+    against 18 to 25 ms for the eigendecomposition on 16 BLAS threads and
+    about 5 ms on one.
+
+    On one BLAS thread: see `_blas`.
     """
     matrix = frame.to_numpy()
-    eigenvalues, vectors = np.linalg.eigh(matrix)
-    largest = float(eigenvalues.max())
-    smallest = float(eigenvalues.min())
-    if smallest >= -_PSD_TOLERANCE * max(largest, 1e-300):
-        return frame, []
-    floor = _PSD_TOLERANCE * largest
-    repaired = (vectors * np.maximum(eigenvalues, floor)) @ vectors.T
+    with single_threaded_blas():
+        if matrix.shape[0] <= _CHOLESKY_PROOF_MAX_ASSETS:
+            try:
+                np.linalg.cholesky(matrix)
+            except np.linalg.LinAlgError:
+                pass  # not proved PSD; the eigenvalues decide
+            else:
+                return frame, []
+        eigenvalues, vectors = np.linalg.eigh(matrix)
+        largest = float(eigenvalues.max())
+        smallest = float(eigenvalues.min())
+        if smallest >= -_PSD_TOLERANCE * max(largest, 1e-300):
+            return frame, []
+        floor = _PSD_TOLERANCE * largest
+        repaired = (vectors * np.maximum(eigenvalues, floor)) @ vectors.T
     repaired = (repaired + repaired.T) / 2.0
     fixed = pd.DataFrame(repaired, index=frame.index, columns=frame.columns)
     return fixed, [
@@ -1127,13 +1159,17 @@ def max_diversification(covariance: Any) -> Dict[str, Any]:
     # Maximizing w'v / sqrt(w'Sw) has the same solution as minimum variance
     # on the CORRELATION matrix, rescaled by volatility.
     correlation = matrix / np.outer(volatilities, volatilities)
-    try:
-        inverse = np.linalg.pinv(correlation)
-    except np.linalg.LinAlgError as exc:
-        raise ValidationError(
-            f"max_diversification: the correlation matrix could not be "
-            f"inverted ({exc})."
-        ) from None
+    # The pseudo-inverse and the condition number are two SVDs, on one BLAS
+    # thread: faster at these sizes, and the same bits on any machine.
+    with single_threaded_blas():
+        try:
+            inverse = np.linalg.pinv(correlation)
+        except np.linalg.LinAlgError as exc:
+            raise ValidationError(
+                f"max_diversification: the correlation matrix could not be "
+                f"inverted ({exc})."
+            ) from None
+        condition = float(np.linalg.cond(correlation))
     raw = inverse @ np.ones(n)
     if raw.sum() == 0:
         raise ValidationError(
@@ -1149,7 +1185,6 @@ def max_diversification(covariance: Any) -> Dict[str, Any]:
         if portfolio_volatility > 0
         else None
     )
-    condition = float(np.linalg.cond(correlation))
     negative = {str(name): float(w) for name, w in zip(frame.columns, weights) if w < 0}
 
     warnings: List[str] = list(psd_notes)

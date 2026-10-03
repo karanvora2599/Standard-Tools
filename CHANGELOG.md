@@ -1,5 +1,65 @@
 # Changelog
 
+## The library's own matrix factorizations run on one BLAS thread, OpenMP workers sleep after a region, and a PSD check costs a Cholesky
+
+- **`OMP_WAIT_POLICY` defaults to `PASSIVE`.** MSVC's OpenMP runtime kept
+  its workers spinning for about 100 ms after every parallel region — 12 to
+  14 of 16 logical CPUs busy — and the Python after a kernel ran 1.4–2.2×
+  slower beside them. Importing the package now sets
+  `OMP_WAIT_POLICY=PASSIVE` before the extension loads the runtime, the one
+  moment it reads the variable; a value the caller set is left alone, and
+  blank counts as unset. Over 35 public calls on 16 threads the
+  geometric-mean speed-up over one thread rises from 1.79× to 2.13×. The
+  price is paid by kernels called back to back with no Python between them:
+  6–24% slower in general, and a small region pays 0.1–0.6 ms to wake the
+  workers each time, so 64 Engle-Granger pairs called in a loop take 1.33 ms
+  a call against 0.30 ms with the workers spinning, though still less than
+  on one thread.
+  `OMP_WAIT_POLICY=ACTIVE`, set before Python starts, keeps the spinning. No
+  result changes. When another package loaded the runtime first
+  (scikit-learn imported before this one) the setting cannot take effect in
+  that process, and a debug-level log line says so rather than a warning.
+  The variable is process-wide, so scikit-learn's OpenMP and child processes
+  inherit it.
+- **Covariance-sized factorizations run on one BLAS thread.** OpenBLAS
+  starts a thread per logical CPU, which for the matrices this library
+  factors is slower than one and gives last bits that depend on the core
+  count. The PSD repair, `max_diversification`'s pseudo-inverse and
+  condition number, `pca_returns`' SVD and `estimate_covariance`'s
+  eigenvalues now run on one thread, through a reference-counted
+  process-wide limit so concurrent callers cannot undo each other. At 235
+  assets: risk parity 20 → 6 ms, maximum diversification 49 → 16 ms,
+  marginal risk 22 → 2 ms, `estimate_covariance` (Ledoit-Wolf) 75 → 22 ms,
+  `pca_returns` 202 → 70 ms, and 1.4 s → 0.17 s under OpenBLAS 0.3.31. Those
+  outputs change once, in the last bits, against the 16-thread default —
+  weights by at most 2e-12 relative, PCA loadings by at most 8e-13 — and are
+  then the same on any machine with the same BLAS. A covariance that needs
+  no repair is returned untouched, as before. Large products that gain from
+  threads keep them, so an EWMA covariance and PCA's factor returns still
+  vary in their last bits with the core count. `SQT_BLAS_THREADS` sets
+  another count, or 0 for no limit, and `describe_effective_config` reports
+  it with the other twenty-one settings. `threadpoolctl>=3.5.0` is now a
+  declared dependency; it was arriving only through scikit-learn.
+- **The modeling pools fit on one BLAS thread each.** Folds fitted side by
+  side and search candidates scored side by side each ran BLAS on every
+  core, W times over; every fit on a pool now runs on one, measured
+  2.4–2.8× faster for a 235-asset solve and eigendecomposition on four to
+  eight workers. A budget of 1 and the full-panel refit keep the caller's
+  setting, and a run's numbers are identical at budgets 1 and 4, now checked
+  bit for bit on a 150-feature ridge search.
+- **A positive semi-definite covariance is recognized by a Cholesky
+  factorization.** `_repair_psd` decided that no repair was needed with a
+  full eigendecomposition. A Cholesky factorization that completes proves
+  the eigenvalue test passes up to 670 assets (its backward error is within
+  half the 1e-10 tolerance there), and the frame is returned untouched as
+  before; when it fails, or the matrix is larger, the eigenvalues decide as
+  they did. On 1,500 matrices built across the threshold the factorization
+  never completed where the eigenvalues repaired, and every output matched.
+  The check costs 0.4 ms at 235 assets, against 18–25 ms.
+- **`estimate_covariance` no longer has Ledoit-Wolf compute a precision
+  matrix** nothing read: an eigendecomposition that took 15–27 ms of a
+  23–33 ms fit at 235 assets. Same bits.
+
 ## A GARCH fit at its maximum is converged on every SciPy, and the formatters are pinned
 
 - **`converged` no longer depends on how the optimizer phrased its stop.**

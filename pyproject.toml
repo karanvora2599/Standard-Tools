@@ -47,6 +47,11 @@ dependencies = [
     # requirements, would silently drop six modules onto those fallbacks.
     "scipy>=1.8.0",
     "joblib>=1.2.0",
+    # DECLARED because `_blas` imports it directly: it runs the library's
+    # covariance-sized factorizations on one BLAS thread. It was arriving
+    # only through scikit-learn, and without it the limit silently does
+    # nothing -- slower, and bits that depend on the machine's core count.
+    "threadpoolctl>=3.5.0",
     # Looks removable and is not. Eight of the ten @njit functions never
     # execute on a normal install, because a C++ kernel wins -- but they are
     # the `else:` arm of `if HAS_CPP`, so "never runs" here means "the

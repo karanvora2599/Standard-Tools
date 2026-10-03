@@ -246,6 +246,15 @@ def _num_threads_value() -> Optional[str]:
     return os.environ.get("SQT_NUM_THREADS") or None
 
 
+def _blas_threads_value() -> Optional[str]:
+    from standard_quant_tools._blas import blas_thread_limit
+
+    # The limit the library applies, read the way it applies it: an
+    # unusable value is refused by name here as it would be on first use.
+    limit = blas_thread_limit()
+    return "0" if limit is None else str(limit)
+
+
 def _local_app_data_value() -> Optional[str]:
     return os.environ.get("LOCALAPPDATA") or None
 
@@ -528,9 +537,25 @@ _OTHER_SETTINGS: Tuple[_Setting, ...] = (
         ),
         resolve=_num_threads_value,
     ),
+    _Setting(
+        name="SQT_BLAS_THREADS",
+        category="execution",
+        reader="_blas.blas_thread_limit",
+        default="1",
+        is_secret=False,
+        effect=(
+            "The BLAS threads the library's own covariance-sized "
+            "factorizations run on (the PSD repair, maximum diversification, "
+            "PCA's SVD, the covariance's eigenvalues, the optimizer's "
+            "decompositions, and every fit on a modeling pool). One is faster "
+            "at these sizes and gives the same bits on any machine; 0 leaves "
+            "BLAS at the process's own setting."
+        ),
+        resolve=_blas_threads_value,
+    ),
 )
 
-#: The twenty-one settings this library reads, in one place.
+#: The twenty-two settings this library reads, in one place.
 SETTINGS: Tuple[_Setting, ...] = AUDIT_SETTINGS + _OTHER_SETTINGS
 
 #: Consulted by the audit path when SQT_AUDIT_DIR is unset. Not this

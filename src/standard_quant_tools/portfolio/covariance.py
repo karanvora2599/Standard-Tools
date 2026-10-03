@@ -38,6 +38,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools._blas import single_threaded_blas
 from standard_quant_tools.error import ValidationError
 
 logger = logging.getLogger(__name__)
@@ -104,7 +105,11 @@ def estimate_covariance(
     elif method == "ledoit_wolf":
         from sklearn.covariance import LedoitWolf
 
-        estimator = LedoitWolf().fit(values)
+        # Without the precision matrix, which nothing here reads: the fit
+        # inverts its covariance (an eigendecomposition) to store one, and at
+        # 235 assets that was 15 to 27 ms of a 23 to 33 ms fit. The
+        # covariance and the shrinkage are the same bits either way.
+        estimator = LedoitWolf(store_precision=False).fit(values)
         cov = estimator.covariance_
         shrinkage = float(estimator.shrinkage_)
     else:
@@ -119,7 +124,12 @@ def estimate_covariance(
             cov, shrinkage = _shrink_to_identity(cov, n_obs, n_assets)
 
     annual = cov * periods_per_year
-    eigenvalues = np.linalg.eigvalsh(annual)
+    # On one BLAS thread (see `_blas`): faster at these sizes, and the
+    # condition number's bits no longer depend on the machine's core count.
+    # The products above keep their threads; only the EWMA one's last bits
+    # still depend on the thread count.
+    with single_threaded_blas():
+        eigenvalues = np.linalg.eigvalsh(annual)
     smallest = float(eigenvalues.min())
     condition = float(eigenvalues.max() / smallest) if smallest > 0 else float("inf")
 

@@ -25,6 +25,7 @@ from sklearn.ensemble import (
     RandomForestRegressor,
 )
 
+from standard_quant_tools._blas import single_threaded_blas
 from standard_quant_tools.error import ValidationError
 
 from . import artifacts as _artifacts
@@ -71,6 +72,7 @@ from .validation.ranking import (
 )
 from .validation.search import (
     grid_duplicates_warning,
+    n_search_candidates,
     require_optuna,
     search_best_params,
 )
@@ -448,7 +450,18 @@ def _run_folds_side_by_side(
     fold order, whatever order they finish in. The error raised is the one
     the loop would have met first: a fit's, when a fold before the failed
     preparation failed to fit, and otherwise the preparation's.
+
+    Each fit runs on one BLAS thread. At the BLAS default every fold's
+    linear algebra started one thread per logical CPU, `workers` times
+    over; one each was measured 2.4x to 2.8x faster for a 235-asset solve
+    and eigendecomposition on four to eight workers, and gives the same
+    bits whatever the machine's core count.
     """
+
+    def fit_on_one_blas_thread(ready: Dict[str, Any], jobs: int) -> Dict[str, Any]:
+        with single_threaded_blas():
+            return fit(ready, jobs)
+
     prepared: List[Dict[str, Any]] = []
     failure: "Exception | None" = None
     for fold in folds:
@@ -461,7 +474,9 @@ def _run_folds_side_by_side(
             prepared.append(ready)
     pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="sqt-fold")
     try:
-        futures = [pool.submit(fit, ready, n_jobs) for ready in prepared]
+        futures = [
+            pool.submit(fit_on_one_blas_thread, ready, n_jobs) for ready in prepared
+        ]
         for ready, future in zip(prepared, futures):
             record(ready, future.result())
     finally:
@@ -1070,6 +1085,15 @@ def run_experiment(
     # question needs asking at all.
     panel_has_missing = bool(np.isnan(feature_matrix).any())
     estimator_accepts_missing = accepts_missing(estimator_cls)
+    # Whether a search scores its candidates on a pool: the rule
+    # `search_best_params` applies (a grid or random search, a budget above
+    # one, more than one candidate; a tpe search runs one trial at a time).
+    search_on_pool = (
+        model_spec.search is not None
+        and int(model_spec.budget.max_parallelism) > 1
+        and model_spec.search.method != "tpe"
+        and n_search_candidates(model_spec.search) > 1
+    )
 
     def _search_on(frame: pd.DataFrame, *, prefix: str):
         """
@@ -1122,6 +1146,18 @@ def run_experiment(
             probabilities = predictions if model_spec.task == "classification" else None
             return predictions, probabilities
 
+        # When the search scores its candidates side by side, every
+        # candidate's fit runs on one BLAS thread, as the walk-forward
+        # folds' do (see `_run_folds_side_by_side`) -- the first candidate,
+        # which runs alone to fill the cache, included, so one search's
+        # scores all come from the same BLAS setting.
+        fit_predict = _fit_predict
+        if search_on_pool:
+
+            def fit_predict(params, inner_train, inner_test, fold_index):
+                with single_threaded_blas():
+                    return _fit_predict(params, inner_train, inner_test, fold_index)
+
         return search_best_params(
             task=model_spec.task,
             search_spec=model_spec.search,
@@ -1129,7 +1165,7 @@ def run_experiment(
             train_frame=frame,
             feature_ids=feature_ids,
             random_seed=model_spec.random_seed,
-            fit_predict=_fit_predict,
+            fit_predict=fit_predict,
             # The inner folds are cut under the SAME discipline as the outer
             # ones: the spec's embargo, and a purge on each row's own label
             # end. They were cut with neither, so the candidate that won was

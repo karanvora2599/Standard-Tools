@@ -39,13 +39,16 @@ PACKAGES = (
 )
 
 #: Thread caps read by numpy's BLAS, by numba and by this package's own
-#: kernels. Unset is recorded as None rather than skipped: "no cap was set"
-#: is a different environment from "capped at one".
+#: kernels, and the BLAS limit this package applies to its own small
+#: factorizations (whose last bits depend on it). Unset is recorded as None
+#: rather than skipped: "no cap was set" is a different environment from
+#: "capped at one".
 THREAD_VARIABLES = (
     "OMP_NUM_THREADS",
     "MKL_NUM_THREADS",
     "OPENBLAS_NUM_THREADS",
     "SQT_NUM_THREADS",
+    "SQT_BLAS_THREADS",
 )
 
 
