@@ -36,6 +36,51 @@ def _per_column(state: Dict[str, Any], key: str, columns) -> np.ndarray:
     return np.array([state[key][c] for c in columns], dtype=np.float64)
 
 
+def _column_quantiles(X: pd.DataFrame, lower: float, upper: float):
+    """
+    `{c: float(X[c].quantile(lower))}` and the same for `upper`, every
+    column, the doubles those per-column calls return -- from one
+    `X.quantile([lower, upper])`.
+
+    Two `Series.quantile` calls per column were the whole of the fit; one
+    frame call does every column and both bounds in one pass. pandas
+    computes each column's quantiles with one numpy percentile call over
+    that column, and with both bounds in the call the column is partitioned
+    at both positions at once. That puts the same value at each position,
+    but values that compare equal -- -0.0 and +0.0, or two NaNs -- can land
+    in a different order, and an interpolated bound can then differ in its
+    bits, though only when it is zero or NaN. Those bounds are recomputed
+    the per-column way, so the state is the per-column state to the bit.
+
+    Frames the frame call might treat differently from a column at a time
+    -- repeated labels, where `X[c]` is itself a frame, or any column that
+    is not float64 -- keep the per-column calls.
+    """
+    columns = X.columns
+    one_call = (
+        len(columns) > 0
+        and columns.is_unique
+        and all(dtype == np.float64 for dtype in X.dtypes)
+    )
+    if not one_call:
+        return (
+            {c: float(X[c].quantile(lower)) for c in columns},
+            {c: float(X[c].quantile(upper)) for c in columns},
+        )
+    bounds = X.quantile([lower, upper]).to_numpy(dtype=np.float64)
+    lo: Dict[Any, float] = {}
+    hi: Dict[Any, float] = {}
+    for k, c in enumerate(columns):
+        low, high = bounds[0, k], bounds[1, k]
+        if low == 0.0 or np.isnan(low):
+            low = X[c].quantile(lower)
+        if high == 0.0 or np.isnan(high):
+            high = X[c].quantile(upper)
+        lo[c] = float(low)
+        hi[c] = float(high)
+    return lo, hi
+
+
 class Winsorize(Preprocessor):
     """
     Clip each column to its training-fold quantiles.
@@ -58,10 +103,8 @@ class Winsorize(Preprocessor):
             raise ValidationError(
                 f"winsorize: lower={lower} must be below upper={upper}."
             )
-        return {
-            "lo": {c: float(X[c].quantile(lower)) for c in X.columns},
-            "hi": {c: float(X[c].quantile(upper)) for c in X.columns},
-        }
+        lo, hi = _column_quantiles(X, lower, upper)
+        return {"lo": lo, "hi": hi}
 
     def transform(self, X: pd.DataFrame, state: Dict[str, Any], ctx: FoldContext):
         lo = _per_column(state, "lo", X.columns)

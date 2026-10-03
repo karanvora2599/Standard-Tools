@@ -1,5 +1,55 @@
 # Changelog
 
+## The Monte Carlo bands, the lead-lag p-values and the winsorize fit are one pass each, and return the same doubles
+
+- **`simulate_forward_paths` computes its three equity bands in one
+  `np.percentile` call.** Seven percentile calls and a median were about 95%
+  of the function after the kernel, and two of them were the same 5th
+  percentile of the terminal returns. The 5th, 50th and 95th percentile
+  bands are now one call on a transposed copy, partitioned in place once per
+  day; the terminal 5th and 95th percentiles are one call; and the
+  terminal-return 5th percentile is computed once for both the VaR and the
+  CVaR threshold. 2.9–3.2× at 200,000 paths, 1.9–2.4× at 20,000 × 252,
+  1.7–1.9× at the default 1,000; `simulate_forward_paths_terminal`
+  1.1–1.4×. The results are the separate calls' to the bit. One call with
+  several percentiles can order −0.0 and +0.0 (or two NaNs) differently, and
+  then differs in the sign of a zero result, so any band or terminal
+  percentile that comes out zero or NaN is recomputed as its own call. The
+  kernel reaches −0.0 honestly: a −1 return zeroes a path and a later return
+  below −1 flips its sign. On such inputs the single call alone disagreed in
+  304 band values across 109 of 120 cases on numpy 2.0 and 2.4; with the
+  recomputation, in none. At a one-day horizon the copy is made explicitly,
+  since `np.ascontiguousarray` would have returned the caller's matrix to be
+  partitioned.
+- **`lead_lag_matrix` computes its p-values as one array pass.** The F tail
+  was a Python continued fraction called once per surviving pair: 1.1 s of
+  1.25 s on a 126-name universe at a 0.02 floor. `_special.f_sf_array` is
+  the same continued fraction over arrays, each element stopping at the
+  iteration the scalar loop would. The lgamma terms are computed once per
+  distinct pair of degrees of freedom, and `math.log`/`math.exp` run per
+  element, because numpy's SIMD versions round differently on some CPUs.
+  Inputs `f_sf` treats specially are `f_sf` itself, and so are batches under
+  128 elements and the last 32 still iterating, where a numpy pass costs
+  more than the loop. All 99,818 p-values of that universe are
+  bit-identical on numpy 2.0 and 2.4. 10–13× on the p-values; 4.4–5.8× on
+  the whole call at that floor, 1.3–1.6× at the default 0.1. Rows, order and
+  types are unchanged. The comment that said the continued fraction had no
+  exact array form was wrong and is corrected.
+- **The `winsorize` preprocessing step fits with one
+  `DataFrame.quantile([lower, upper])`** in place of two `Series.quantile`
+  calls per column: 3.3× at 20,000 rows × 50 columns, 12–19× at 2,000 ×
+  20–200, 41–56× at 500 × 500. The bounds are the per-column bounds to the
+  bit on pandas 2.3 and 3.0. A bound that comes out zero or NaN is
+  recomputed per column, for the same tie-order reason: without that, 43
+  bounds in 29 of 864 tie-heavy frames differ in the sign of a zero. Frames
+  with repeated labels or a non-float64 column keep the per-column calls.
+  The default `winsorize` + `zscore` pair is unaffected.
+- **311 new tests**, each against the previous implementation kept verbatim
+  and compared to the bit. A size-gated thread pool over the band columns
+  was measured (5–6× at 200,000 paths, 0.98× at the default) and not
+  adopted: `simulate_forward_paths` has no parallelism budget for it to
+  respect.
+
 ## The convex mean-variance portfolios are solved exactly, and say so
 
 - **`mean_variance_optimize` solves min_volatility, target_return and

@@ -51,6 +51,7 @@ __all__ = [
     "betacf",
     "betainc",
     "f_sf",
+    "f_sf_array",
     "norm_cdf",
     "norm_cdf_array",
     "norm_pdf",
@@ -192,8 +193,21 @@ def norm_ppf(p: float) -> float:
 
 # ── incomplete beta, and the F tail that uses it ────────────────────────
 
+# The continued fraction's floor, convergence tolerance and iteration cap,
+# shared by `betacf` and its array form.
+_BETACF_TINY = 1e-300
+_BETACF_TOLERANCE = 1e-14
+_BETACF_ITERATIONS = 300
 
-def betacf(a: float, b: float, x: float, iterations: int = 300) -> float:
+
+def _lgamma_ratio(a: float, b: float) -> float:
+    """log(Gamma(a + b) / (Gamma(a) Gamma(b))), the leading terms of the
+    incomplete beta's front factor, in the order `betainc` adds them up --
+    one definition for the scalar and the array form."""
+    return math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b)
+
+
+def betacf(a: float, b: float, x: float, iterations: int = _BETACF_ITERATIONS) -> float:
     """
     Continued fraction for the incomplete beta, by modified Lentz.
 
@@ -201,7 +215,7 @@ def betacf(a: float, b: float, x: float, iterations: int = 300) -> float:
     from exact zero, and the larger floor perturbs the result at a magnitude
     the algorithm can actually see.
     """
-    tiny = 1e-300
+    tiny = _BETACF_TINY
     qab, qap, qam = a + b, a + 1.0, a - 1.0
     c = 1.0
     d = 1.0 - qab * x / qap
@@ -230,7 +244,7 @@ def betacf(a: float, b: float, x: float, iterations: int = 300) -> float:
         d = 1.0 / d
         delta = d * c
         h *= delta
-        if abs(delta - 1.0) < 1e-14:
+        if abs(delta - 1.0) < _BETACF_TOLERANCE:
             break
     return h
 
@@ -242,24 +256,12 @@ def betainc(a: float, b: float, x: float) -> float:
         return 0.0
     if x >= 1:
         return 1.0
-    front = math.exp(
-        math.lgamma(a + b)
-        - math.lgamma(a)
-        - math.lgamma(b)
-        + a * math.log(x)
-        + b * math.log(1.0 - x)
-    )
+    front = math.exp(_lgamma_ratio(a, b) + a * math.log(x) + b * math.log(1.0 - x))
     if x < (a + 1.0) / (a + b + 2.0):
         return front * betacf(a, b, x) / a
     return (
         1.0
-        - math.exp(
-            math.lgamma(a + b)
-            - math.lgamma(a)
-            - math.lgamma(b)
-            + b * math.log(1.0 - x)
-            + a * math.log(x)
-        )
+        - math.exp(_lgamma_ratio(a, b) + b * math.log(1.0 - x) + a * math.log(x))
         * betacf(b, a, 1.0 - x)
         / b
     )
@@ -282,3 +284,231 @@ def f_sf(statistic: float, d1: float, d2: float) -> float:
         return 1.0
     x = d2 / (d2 + d1 * statistic)
     return float(max(0.0, min(1.0, betainc(d2 / 2.0, d1 / 2.0, x))))
+
+
+# Degrees of freedom the array form computes itself; anything else -- zero,
+# negative, NaN, infinite, or outside these bounds -- is handed to `f_sf`
+# element by element. Inside them nothing in the scalar path can raise:
+# `lgamma` stays far from its poles and its overflow, the front factor's
+# exponent stays far below `math.exp`'s overflow at about 709.8, and every
+# divisor is positive. Real tests' degrees of freedom sit well inside.
+_F_SF_ARRAY_MIN_DOF = 2.0**-40
+_F_SF_ARRAY_MAX_DOF = 2.0**40
+
+# Below these sizes a numpy pass costs more than the Python loop it
+# replaces: each continued-fraction iteration is some forty numpy calls,
+# about 40 microseconds whatever the length, paid until the slowest element
+# converges. A batch smaller than `_F_SF_ARRAY_MIN_BATCH` is `f_sf` per
+# element (measured break-even: 100-400 elements), and once the iterating
+# set is down to `_BETACF_ARRAY_TAIL` elements they are finished by
+# `betacf` from the start. Both hand-offs are the scalar itself, so neither
+# can change a bit.
+_F_SF_ARRAY_MIN_BATCH = 128
+_BETACF_ARRAY_TAIL = 32
+
+
+def _each(function: Any, values: np.ndarray) -> np.ndarray:
+    """A `math` function per element: numpy's own SIMD `exp`/`log` may round
+    the last bit differently from the platform libm on some CPUs (AVX-512
+    among them), and the array form has to be the scalar's double."""
+    return np.fromiter(
+        map(function, values.tolist()), dtype=np.float64, count=values.size
+    )
+
+
+def _floor_at_tiny(values: np.ndarray) -> None:
+    """`if abs(v) < tiny: v = tiny`, in place, for every element."""
+    np.copyto(values, _BETACF_TINY, where=np.abs(values) < _BETACF_TINY)
+
+
+def _betacf_array(a: np.ndarray, b: np.ndarray, x: np.ndarray) -> np.ndarray:
+    """
+    `betacf` over 1-D arrays, element for element the scalar's double.
+
+    The same operations in the same order, each element stopping at the
+    iteration its scalar loop would break on. An element that converges
+    leaves the working set, so the later iterations run only on the
+    elements still iterating. numpy's add, multiply and divide round as
+    Python's float arithmetic does, and the floor test `abs(d) < tiny` is
+    the same comparison (a NaN fails it in both).
+
+    The loop body works in place, into a few buffers, which is 1.5x faster
+    than allocating each intermediate. Each step is commented with the
+    scalar statement it computes; where an operation's operands appear
+    swapped, it is an add or a multiply, which IEEE arithmetic makes exact
+    in either order. The last `_BETACF_ARRAY_TAIL` elements still iterating
+    are handed to `betacf` itself.
+    """
+    out = np.empty(x.shape[0], dtype=np.float64)
+    qab, qap, qam = a + b, a + 1.0, a - 1.0
+    c = np.ones(x.shape[0], dtype=np.float64)
+    # d = 1.0 - qab * x / qap; floor; d = 1.0 / d
+    d = qab * x
+    d /= qap
+    np.subtract(1.0, d, out=d)
+    _floor_at_tiny(d)
+    np.divide(1.0, d, out=d)
+    h = d.copy()
+    index = np.arange(x.shape[0])
+    for m in range(1, _BETACF_ITERATIONS + 1):
+        if index.size <= _BETACF_ARRAY_TAIL:
+            # a, b and x are still the inputs for these elements; `betacf`
+            # runs them from the first iteration, so this is its double.
+            out[index] = [
+                betacf(p, q, r) for p, q, r in zip(a.tolist(), b.tolist(), x.tolist())
+            ]
+            return out
+        m2 = float(2 * m)
+        fm = float(m)
+        a_m2 = a + m2
+        # aa = m * (b - m) * x / ((qam + m2) * (a + m2))
+        aa = b - fm
+        aa *= fm
+        aa *= x
+        scratch = qam + m2
+        scratch *= a_m2
+        aa /= scratch
+        # d = 1.0 + aa * d; floor
+        d *= aa
+        d += 1.0
+        _floor_at_tiny(d)
+        # c = 1.0 + aa / c; floor
+        np.divide(aa, c, out=c)
+        c += 1.0
+        _floor_at_tiny(c)
+        # d = 1.0 / d; h *= d * c
+        np.divide(1.0, d, out=d)
+        np.multiply(d, c, out=scratch)
+        h *= scratch
+        # aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))
+        np.add(a, fm, out=aa)
+        np.negative(aa, out=aa)
+        np.add(qab, fm, out=scratch)
+        aa *= scratch
+        aa *= x
+        np.add(qap, m2, out=scratch)
+        np.multiply(a_m2, scratch, out=scratch)
+        aa /= scratch
+        # d = 1.0 + aa * d; floor; c = 1.0 + aa / c; floor; d = 1.0 / d
+        d *= aa
+        d += 1.0
+        _floor_at_tiny(d)
+        np.divide(aa, c, out=c)
+        c += 1.0
+        _floor_at_tiny(c)
+        np.divide(1.0, d, out=d)
+        # delta = d * c; h *= delta; converged where abs(delta - 1.0) < 1e-14
+        np.multiply(d, c, out=scratch)
+        h *= scratch
+        scratch -= 1.0
+        np.abs(scratch, out=scratch)
+        done = scratch < _BETACF_TOLERANCE
+        if done.any():
+            out[index[done]] = h[done]
+            going = ~done
+            index = index[going]
+            a, b, x = a[going], b[going], x[going]
+            qab, qap, qam = qab[going], qap[going], qam[going]
+            c, d, h = c[going], d[going], h[going]
+    out[index] = h
+    return out
+
+
+def _betainc_inside_array(a: np.ndarray, b: np.ndarray, x: np.ndarray) -> np.ndarray:
+    """`betainc` over 1-D arrays with 0 < x < 1 and a, b inside the array
+    form's bounds, element for element the scalar's double."""
+    # One lgamma triple per distinct (a, b) -- a handful in practice, where
+    # the scalar computed it per element. Same function, same order.
+    pairs = np.empty(a.shape[0], dtype=np.complex128)
+    pairs.real = a
+    pairs.imag = b
+    distinct, which = np.unique(pairs, return_inverse=True)
+    ratio = np.array(
+        [
+            _lgamma_ratio(p, q)
+            for p, q in zip(distinct.real.tolist(), distinct.imag.tolist())
+        ],
+        dtype=np.float64,
+    )[which.reshape(-1)]
+    log_x = _each(math.log, x)
+    log_1mx = _each(math.log, 1.0 - x)
+
+    out = np.empty(x.shape[0], dtype=np.float64)
+    left = x < (a + 1.0) / (a + b + 2.0)
+    if left.any():
+        al, bl, xl = a[left], b[left], x[left]
+        front = _each(math.exp, ratio[left] + al * log_x[left] + bl * log_1mx[left])
+        out[left] = front * _betacf_array(al, bl, xl) / al
+    right = ~left
+    if right.any():
+        ar, br, xr = a[right], b[right], x[right]
+        front = _each(math.exp, ratio[right] + br * log_1mx[right] + ar * log_x[right])
+        out[right] = 1.0 - front * _betacf_array(br, ar, 1.0 - xr) / br
+    return out
+
+
+def f_sf_array(statistic: Any, d1: Any, d2: Any) -> np.ndarray:
+    """
+    `f_sf` over arrays: element for element the double `f_sf` returns.
+
+    The arguments broadcast together and are taken as doubles. The result
+    is `f_sf` to the bit on every input, including the ones `f_sf` treats
+    specially, because those ARE `f_sf`: an element with a non-positive,
+    NaN or infinite argument, or degrees of freedom outside
+    [2**-40, 2**40], is computed by calling it. Where `f_sf` would raise on
+    such an element, this raises the same error at the first one.
+
+    Everything else runs as array passes -- the masked continued fraction
+    of `_betacf_array`, the lgamma terms once per distinct pair of degrees
+    of freedom, and `math.log` / `math.exp` per element (see `_each`) -- so
+    a lead-lag search with tens of thousands of p-values is one pass, not
+    tens of thousands of Python calls. Fewer than `_F_SF_ARRAY_MIN_BATCH`
+    such elements are `f_sf` per element too, since a pass costs more than
+    the loop at that size. The clamp into [0, 1] is Python's
+    `max(0.0, min(1.0, p))` written out, which a NaN does not survive: it
+    returns 1.0 for NaN, where `np.clip` would return NaN.
+    """
+    statistic_b, d1_b, d2_b = np.broadcast_arrays(
+        np.asarray(statistic, dtype=np.float64),
+        np.asarray(d1, dtype=np.float64),
+        np.asarray(d2, dtype=np.float64),
+    )
+    shape = statistic_b.shape
+    stat = statistic_b.reshape(-1)
+    dof1 = d1_b.reshape(-1)
+    dof2 = d2_b.reshape(-1)
+    result = np.empty(stat.shape[0], dtype=np.float64)
+
+    with np.errstate(invalid="ignore"):
+        regular = (
+            np.isfinite(stat)
+            & (stat > 0)
+            & (dof1 >= _F_SF_ARRAY_MIN_DOF)
+            & (dof1 <= _F_SF_ARRAY_MAX_DOF)
+            & (dof2 >= _F_SF_ARRAY_MIN_DOF)
+            & (dof2 <= _F_SF_ARRAY_MAX_DOF)
+        )
+    if np.count_nonzero(regular) < _F_SF_ARRAY_MIN_BATCH:
+        regular[:] = False
+    scalar = np.flatnonzero(~regular)
+    if scalar.size:
+        result[scalar] = [
+            f_sf(s, a, b)
+            for s, a, b in zip(
+                stat[scalar].tolist(), dof1[scalar].tolist(), dof2[scalar].tolist()
+            )
+        ]
+
+    if regular.any():
+        with np.errstate(all="ignore"):
+            s, n1, n2 = stat[regular], dof1[regular], dof2[regular]
+            x = n2 / (n2 + n1 * s)
+            p = np.where(x <= 0, 0.0, 1.0)
+            inside = (x > 0) & (x < 1)
+            if inside.any():
+                p[inside] = _betainc_inside_array(
+                    n2[inside] / 2.0, n1[inside] / 2.0, x[inside]
+                )
+            p = np.where(p < 1.0, p, 1.0)
+            result[regular] = np.where(p > 0.0, p, 0.0)
+    return result.reshape(shape)

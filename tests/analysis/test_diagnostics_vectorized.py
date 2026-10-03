@@ -370,28 +370,42 @@ def _universe(n_names, n_bars, seed, lagged=0.3):
 
 
 def _assert_same_lead_lag(frame, monkeypatch, **kwargs):
-    """Both results, and the p-value calls each made: one per pair that
-    clears the floor, in row order, before the sort. Equal call lists mean
-    the same rows in the same order with the same t-statistics, not only
-    the same top twenty."""
+    """Both results, and the p-values each asked for: one per pair that
+    clears the floor, in row order, before the sort. Equal argument lists
+    mean the same rows in the same order with the same t-statistics, not
+    only the same top twenty.
+
+    The reference asks `_f_sf` once per pair. The function asks
+    `_f_sf_array` once for all of them (see the CHANGELOG entry of
+    2026-10-02), so its arrays are unrolled into the same (statistic, d1,
+    d2) triples, and it must not fall back to the per-pair calls."""
     calls: Dict[str, list] = {"reference": [], "new": []}
+    passes: Dict[str, int] = {"reference": 0, "new": 0}
     f_sf = diagnostics._f_sf
+    f_sf_array = diagnostics._f_sf_array
+    current = {"key": "reference"}
 
-    def watch(key):
-        def recorded(statistic, d1, d2):
-            calls[key].append((statistic, d1, d2))
-            return f_sf(statistic, d1, d2)
+    def recorded(statistic, d1, d2):
+        calls[current["key"]].append((statistic, d1, d2))
+        return f_sf(statistic, d1, d2)
 
-        return recorded
+    def recorded_array(statistic, d1, d2):
+        passes[current["key"]] += 1
+        unrolled = np.broadcast_arrays(np.asarray(statistic), d1, d2)
+        calls[current["key"]].extend(zip(*(part.tolist() for part in unrolled)))
+        return f_sf_array(statistic, d1, d2)
 
-    monkeypatch.setattr(diagnostics, "_f_sf", watch("reference"))
+    monkeypatch.setattr(diagnostics, "_f_sf", recorded)
+    monkeypatch.setattr(diagnostics, "_f_sf_array", recorded_array)
     expected = _outcome(_reference_lead_lag_matrix, frame, **kwargs)
-    monkeypatch.setattr(diagnostics, "_f_sf", watch("new"))
+    current["key"] = "new"
     actual = _outcome(lead_lag_matrix, frame, **kwargs)
     monkeypatch.setattr(diagnostics, "_f_sf", f_sf)
+    monkeypatch.setattr(diagnostics, "_f_sf_array", f_sf_array)
 
     assert _identical(actual, expected), kwargs
     assert _identical(calls["new"], calls["reference"]), kwargs
+    assert passes == {"reference": 0, "new": 0 if isinstance(actual, tuple) else 1}
     for statistic, d1, d2 in calls["new"]:
         assert type(statistic) is float and type(d1) is int and type(d2) is int
     return actual, len(calls["new"])

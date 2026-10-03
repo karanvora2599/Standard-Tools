@@ -47,6 +47,7 @@ from standard_quant_tools._special import (
     betacf,
     betainc,
     f_sf,
+    f_sf_array,
 )
 from standard_quant_tools.analysis._series import clean_series
 from standard_quant_tools.constants import TRADING_DAYS_PER_YEAR
@@ -138,6 +139,10 @@ _betainc = betainc
 # See `_special`: this had 2 copies across the library, and the ones
 # that were not identical disagreed at the edge of the domain.
 _f_sf = f_sf
+
+# `_f_sf` over arrays, the scalar's double element for element; reached
+# through the module so a test can watch what `lead_lag_matrix` asks of it.
+_f_sf_array = f_sf_array
 
 
 def _clean(series: pd.Series, who: str, minimum: int = 30) -> pd.Series:
@@ -956,9 +961,13 @@ def lead_lag_matrix(
     # 47,250 at 126 names -- to keep a few thousand. `np.nonzero` on a
     # (leader, follower, lag) array returns the survivors in that same
     # nested order, so the rows, and the order `sort` breaks ties in, are
-    # unchanged. The t-statistic is the same elementwise arithmetic; the
-    # p-value is still `_f_sf` per pair, a Python continued fraction with
-    # no exact array form.
+    # unchanged. The t-statistic is the same elementwise arithmetic, and
+    # the p-values are one `_f_sf_array` pass over every surviving pair:
+    # the continued fraction does have an exact array form, masked so each
+    # pair stops at the iteration the scalar loop would, and it returns
+    # `_f_sf`'s double for every pair (see `_special.f_sf_array`). The
+    # per-pair calls were nearly all of this function's time on a wide
+    # universe with a low floor.
     lags = sorted(correlations)
     if lags:
         stacked = np.stack([correlations[lag] for lag in lags], axis=-1)
@@ -970,15 +979,14 @@ def lead_lag_matrix(
         lag_of = np.asarray(lags)[slots]
         degrees = np.maximum(n - lag_of - 2, 1)
         t = rho * np.sqrt(degrees / np.maximum(1 - rho * rho, 1e-12))
-        for i, j, lag, correlation, dof, t_squared in zip(
+        raw_ps = _f_sf_array(t * t, 1, degrees)
+        for i, j, lag, correlation, raw_p in zip(
             leaders.tolist(),
             followers.tolist(),
             lag_of.tolist(),
             rho.tolist(),
-            degrees.tolist(),
-            (t * t).tolist(),
+            raw_ps.tolist(),
         ):
-            raw_p = _f_sf(t_squared, 1, dof)
             pairs.append(
                 {
                     "leader": str(columns[i]),

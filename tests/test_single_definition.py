@@ -47,7 +47,16 @@ class TestSpecialFunctionsAreDefinedOnce:
 
     @pytest.mark.parametrize(
         "name",
-        ["_norm_cdf", "_norm_pdf", "_norm_ppf", "_betainc", "_betacf", "_f_sf"],
+        [
+            "_norm_cdf",
+            "_norm_pdf",
+            "_norm_ppf",
+            "_betainc",
+            "_betacf",
+            "_f_sf",
+            "_f_sf_array",
+            "_betacf_array",
+        ],
     )
     def test_no_module_reimplements_it(self, name):
         offenders = _definitions(rf"^def {name}\(", "_special.py")
@@ -60,7 +69,15 @@ class TestSpecialFunctionsAreDefinedOnce:
     def test_the_canonical_ones_exist(self):
         from standard_quant_tools import _special
 
-        for name in ("norm_cdf", "norm_pdf", "norm_ppf", "betainc", "betacf", "f_sf"):
+        for name in (
+            "norm_cdf",
+            "norm_pdf",
+            "norm_ppf",
+            "betainc",
+            "betacf",
+            "f_sf",
+            "f_sf_array",
+        ):
             assert callable(getattr(_special, name))
 
 
@@ -252,6 +269,26 @@ class TestTheConsolidatedHelpersOnDegenerateInput:
         assert norm_pdf_array(xs).tolist() == [norm_pdf(x) for x in xs]
         assert norm_pdf_array([]).shape == (0,)
         assert norm_cdf_array(np.zeros((2, 3))).shape == (2, 3)
+
+    def test_the_f_tail_array_form_is_the_scalar_to_the_bit(self):
+        """`f_sf_array` is a second implementation of `f_sf`'s continued
+        fraction, which is the shape of the drift this file exists to stop.
+        What holds the two together is this: the lead-lag p-values it
+        returns are `f_sf`'s doubles, and the inputs `f_sf` treats specially
+        are `f_sf` itself. `tests/test_special_f_sf_array.py` is the long
+        form."""
+        from standard_quant_tools._special import f_sf, f_sf_array
+
+        rng = np.random.default_rng(2)
+        statistic = np.concatenate(
+            [10.0 ** rng.uniform(-4, 3, 3000), [0.0, -1.0, np.inf, np.nan]]
+        )
+        d1 = np.concatenate([rng.integers(1, 40, 3000), [1, 1, 1, 1]])
+        d2 = np.concatenate([rng.integers(1, 3000, 3000), [10, 10, 0, 10]])
+        assert f_sf_array(statistic, d1, d2).tolist() == [
+            f_sf(s, a, b)
+            for s, a, b in zip(statistic.tolist(), d1.tolist(), d2.tolist())
+        ]
 
     @pytest.mark.parametrize("block_size", [0, -1, -3])
     def test_block_indices_refuses_a_block_size_below_one(self, block_size):
