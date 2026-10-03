@@ -20,7 +20,8 @@ pluggable storage backends, ...):
                   round_floats for the twelve-digit output hash)
     json_native — what a record's input is made of before it is hashed
     context     — per-call request context + correlated-logging helper
-    provenance  — git/package-version/strategy-source best-effort provenance
+    provenance  — git/package-version/strategy-source best-effort provenance,
+                  and the build and platform facts the last bits depend on
     paths       — audit-dir resolution, day-file discovery, advisory locking
     models      — DecisionRecord, ReplayResult
     storage     — AuditStorageBackend, LocalFilesystemBackend (pluggable I/O)
@@ -63,8 +64,10 @@ from .provenance import (
     _cpp_available,
     _git_sha,
     _native_build_label,
+    _native_detail,
     _native_isa_label,
     _package_version,
+    _platform_facts,
     _strategy_source_hash,
 )
 from .redaction import _redact, _redact_fields, redact_text

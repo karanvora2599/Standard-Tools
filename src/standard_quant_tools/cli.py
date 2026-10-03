@@ -178,7 +178,9 @@ def _replay_exit_code(result: audit.ReplayResult) -> int:
     (the stored record has no output_hash to compare against, so replay
     success can't be determined either way), 3 = the exact hash missed but
     the output reproduced to twelve significant digits on a different native
-    build or instruction-set path.
+    build, instruction-set path or platform -- any fact `build_differences`
+    lists, from the source digest to the compiler, the C runtime's version
+    and its FMA3 path.
 
     3 is not folded into 0 or 1. It is not bit-exact, so 0 would claim more
     than happened; and nothing changed in the code or the data, so 1 would

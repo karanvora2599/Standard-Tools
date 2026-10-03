@@ -26,8 +26,10 @@ from .provenance import (
     _cpp_available,
     _git_sha,
     _native_build_label,
+    _native_detail,
     _native_isa_label,
     _package_version,
+    _platform_facts,
     _strategy_source_hash,
 )
 from .redaction import _redact, _redact_fields, redact_text
@@ -220,6 +222,12 @@ def _run_and_record(
                         cpp_available=_cpp_available(),
                         native_build=_native_build_label(),
                         native_isa=_native_isa_label(),
+                        # What the label cannot say: the compiler, its
+                        # configuration and CRT linkage, and the C runtime,
+                        # OS and FMA3 path underneath -- each moves the last
+                        # bits on its own.
+                        native_detail=_native_detail(),
+                        platform=_platform_facts(),
                         n_workers=getattr(model_instance, "n_workers", None),
                         duration_ms=duration_ms,
                         fetch_ms=fetch_ms,

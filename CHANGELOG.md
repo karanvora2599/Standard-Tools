@@ -1,5 +1,36 @@
 # Changelog
 
+## A decision record names the compiler and the C runtime it ran on, and replay compares them
+
+- **The build label could not tell builds of the same sources apart.**
+  `native_build` names the C++ sources the extension was built from, so
+  MSVC with `/arch:AVX2`, MSVC with SSE2, clang-cl and a PGO build all
+  recorded the same `match:` label, and replay saw no difference between
+  them; a clang-cl build that contracts multiply-adds, which differs on 27
+  of 44 kernel calls, would have replayed as the same build. Nor did a
+  record say which C runtime the process called, though three things about
+  it each move the last bits: the CRT linkage (`/MD` against `/MT` moved 5
+  of 476 implied volatilities), the version of `ucrtbase.dll` (an OS
+  component), and whether the CRT takes its FMA3 code path (0.146% of `exp`
+  and 0.112% of `erf` inputs differ between the paths, on the Python path
+  too, through `math`).
+- **New records carry `native_detail` and `platform`.** `native_detail` is
+  every key of the build stamp but the digest (compiler and version,
+  `build_type`, `native_arch`, `openmp`, `openmp_runtime`, `pgo`), plus
+  `crt_linkage`, read from the binary's import table; it is null when no
+  extension ran. `platform` is `os`, `machine`, `crt` (the loaded
+  `ucrtbase.dll`'s file version, or the glibc version) and `crt_fma3`. Each
+  fact is best-effort: one that cannot be determined is null, never a
+  failed call. `explain_decision` shows both.
+- **Replay compares them.** On an exact-hash miss, a difference in any
+  recorded fact counts as a build or platform difference, so a bit mismatch
+  that agrees to twelve digits reads `reproduced_to_12_digits` and
+  `sqt replay` exits 3. `build_differences` names the fact, e.g.
+  `native_detail.compiler: recorded 'Clang 23.1.2', now 'MSVC 19.44.35228.0'`.
+- **Existing trails are untouched.** A record written before the fields is
+  judged exactly as before, and every existing day, chain index and
+  checkpoint verifies unchanged: a record is hashed as it was stored.
+
 ## The Monte Carlo bands, the lead-lag p-values and the winsorize fit are one pass each, and return the same doubles
 
 - **`simulate_forward_paths` computes its three equity bands in one

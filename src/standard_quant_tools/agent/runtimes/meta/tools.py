@@ -221,6 +221,8 @@ def explain_decision(input_data: ExplainDecisionInput) -> ExplainDecisionResult:
         execution_path="C++" if record.get("cpp_available") else "Python/Numba",
         native_build=record.get("native_build"),
         native_isa=record.get("native_isa"),
+        native_detail=record.get("native_detail"),
+        platform=record.get("platform"),
         n_workers=record.get("n_workers"),
         output_hash=record.get("output_hash"),
         output_hash_normalized=record.get("output_hash_normalized"),
@@ -250,11 +252,13 @@ def replay_decision(input_data: ReplayDecisionInput) -> ReplayDecisionResult:
     expected rather than suspicious.
 
     Nor does a different build. An output hash is bit-exact only for the
-    same native build on the same instruction-set path; elsewhere the
-    promise is twelve significant digits. A replay that misses bit for bit
-    but matches the twelve-digit hash, on a build or path other than the
-    record's, is `reproduced_to_12_digits` -- not `code_changed`. On the
-    same build and path a miss keeps its verdict.
+    same native build on the same instruction-set path and platform;
+    elsewhere the promise is twelve significant digits. A replay that misses
+    bit for bit but matches the twelve-digit hash, on a build, path or
+    platform other than the record's -- another compiler, C runtime version
+    or CRT FMA3 path counts -- is `reproduced_to_12_digits`, not
+    `code_changed`. On the same build, path and platform a miss keeps its
+    verdict.
 
     The hashes behind the verdict come with it: the stored and new output
     hash, and both hashes of every data source, so a caller told the code

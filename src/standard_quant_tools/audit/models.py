@@ -67,6 +67,24 @@ class DecisionRecord(BaseModel):
     # takes either path -- and the paths agree to twelve significant
     # digits, not bit for bit. None for records written before the field.
     native_isa: Optional[str] = None
+    # WHAT the build behind `native_build` was made with: every key of the
+    # extension's build stamp but the source digest -- compiler and version,
+    # build_type, native_arch, openmp, openmp_runtime, pgo -- plus
+    # crt_linkage ("dynamic" for /MD, "static" for /MT), read from the
+    # binary. Builds of the same sources by different toolchains share one
+    # `native_build` label and can still differ in the last bits; this tells
+    # them apart. None when no extension ran (the Python path ran, and no
+    # build facts apply). Absent on records written before it existed; those
+    # still verify, because a record is hashed as it was stored.
+    native_detail: Optional[Dict[str, Any]] = None
+    # WHERE the call ran, as far as the last bits are concerned: "os" (the
+    # OS and its build), "machine", "crt" (the C runtime and its version:
+    # the loaded ucrtbase.dll on Windows, glibc on Linux) and "crt_fma3"
+    # (whether that runtime's math takes its FMA3 code path on this CPU).
+    # These reach the Python path too, through `math`. A value is None when
+    # it could not be determined. Absent on records written before it
+    # existed.
+    platform: Optional[Dict[str, Any]] = None
     # Hash-chain tamper-evidence: each record's hash covers its own content
     # plus the previous record's hash, so editing a past line changes that
     # line's hash and breaks the chain for every record after it (unless an
@@ -106,8 +124,12 @@ class ReplayResult:
     rounded_output_match: Optional[bool] = None
     new_output_hash_rounded: Optional[str] = None
     stored_output_hash_rounded: Optional[str] = None
-    # How the build that wrote the record differs from the one replaying it
-    # ("native_build: recorded 'match:…', now 'match:…'", or "not recorded"
-    # for a record that predates the field). Filled whenever the exact hash
-    # missed; empty means same build on the same instruction-set path.
+    # How the build and platform that wrote the record differ from the ones
+    # replaying it, one line per fact ("native_build: recorded 'match:…',
+    # now 'match:…'", "native_detail.compiler: recorded 'Clang 23.1.2', now
+    # 'MSVC 19.44.35228.0'", "platform.crt: recorded …", or "not recorded"
+    # for a record that predates native_build or native_isa). Filled
+    # whenever the exact hash missed; empty means the same build on the same
+    # instruction-set path and, as far as the record says, the same
+    # platform.
     build_differences: List[str] = field(default_factory=list)

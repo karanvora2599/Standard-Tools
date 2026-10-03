@@ -98,15 +98,46 @@ def normalize_identifiers(obj: Any) -> Any:
 _normalize_identifiers = normalize_identifiers
 
 
+def _detail_differences(
+    name: str, then: Dict[str, Any], now: Optional[Dict[str, Any]]
+) -> List[str]:
+    """One line per fact in the recorded `then` that `now` does not repeat.
+
+    The record is the authority on what it vouched for: a fact it carries
+    is compared, and a fact it does not carry -- one a later release began
+    recording -- is not, so adding a fact never turns an older record's
+    verdict."""
+    if not isinstance(now, dict):
+        return [f"{name}: recorded {then!r}, now {now!r}"]
+    return [
+        f"{name}.{key}: recorded {then[key]!r}, now {now.get(key)!r}"
+        for key in sorted(then)
+        if then[key] != now.get(key)
+    ]
+
+
 def _build_differences(record: Dict[str, Any]) -> List[str]:
     """
-    How the native build and instruction-set path that wrote `record`
-    differ from the ones replaying it, one line per field that differs.
+    How the native build, instruction-set path and platform that wrote
+    `record` differ from the ones replaying it, one line per fact that
+    differs.
 
-    A field the record does not carry counts as different: a record that
-    predates it cannot vouch for having run where the replay runs. Empty
-    means the same build on the same path, the one case in which the exact
-    output hash is promised to reproduce.
+    `native_build` and `native_isa`: a record that does not carry one counts
+    as different, since it cannot vouch for having run where the replay
+    runs.
+
+    `native_detail` (compiler, configuration, OpenMP runtime, PGO, CRT
+    linkage) and `platform` (OS, machine, C runtime version, its FMA3
+    path): each fact the record carries is compared, because two builds of
+    the same sources share one `native_build` label and the same build on
+    another C runtime or CPU can differ in the last bits. A record without
+    them -- written before they existed, or with no extension in use, which
+    `native_build` already says -- is judged on `native_build` and
+    `native_isa` alone, exactly as before.
+
+    Empty means the same build on the same path and, as far as the record
+    says, the same platform: the one case in which the exact output hash is
+    promised to reproduce.
     """
     current = {
         "native_build": _provenance._native_build_label(),
@@ -119,7 +150,22 @@ def _build_differences(record: Dict[str, Any]) -> List[str]:
             differences.append(f"{name}: not recorded, now {now!r}")
         elif then != now:
             differences.append(f"{name}: recorded {then!r}, now {now!r}")
+    for name, probe in (
+        ("native_detail", _provenance._native_detail),
+        ("platform", _provenance._platform_facts),
+    ):
+        recorded = record.get(name)
+        if isinstance(recorded, dict):
+            differences.extend(_detail_differences(name, recorded, probe()))
     return differences
+
+
+def _records_build_facts(record: Dict[str, Any]) -> bool:
+    """Whether `record` names the compiler and platform, not only the
+    sources and the instruction-set path."""
+    return isinstance(record.get("native_detail"), dict) or isinstance(
+        record.get("platform"), dict
+    )
 
 
 def _redacted_input_fields(node: Any, prefix: str = "") -> List[str]:
@@ -276,14 +322,14 @@ def verify_replay(record: Dict[str, Any]) -> ReplayResult:
 
     # ── The twelve-significant-digit comparison ──────────────────────────
     # An output hash is bit-exact only for the same native build on the
-    # same instruction-set path: the AVX2+FMA reduction fuses each
-    # multiply-add and sums in four lanes, so it rounds differently from
-    # the scalar loop, and a different compiler or OpenMP runtime may move
-    # the last bits too. Across builds or paths the promise is twelve
-    # significant digits. So when the exact hash misses, the rounded one
-    # decides between "reproduced to twelve digits elsewhere" and a real
-    # difference -- and on the SAME build and path a miss keeps the verdict
-    # it always had.
+    # same instruction-set path and platform: the AVX2+FMA reduction fuses
+    # each multiply-add and sums in four lanes, so it rounds differently
+    # from the scalar loop, and a different compiler, OpenMP runtime, CRT
+    # linkage, C runtime version or CRT FMA3 path may move the last bits
+    # too. Across those the promise is twelve significant digits. So when
+    # the exact hash misses, the rounded one decides between "reproduced to
+    # twelve digits elsewhere" and a real difference -- and on the SAME
+    # build, path and platform a miss keeps the verdict it always had.
     digits = ROUNDED_SIGNIFICANT_DIGITS
     rounded_match: Optional[bool] = None
     new_rounded_hash: Optional[str] = None
@@ -309,12 +355,23 @@ def verify_replay(record: Dict[str, Any]) -> ReplayResult:
             if rounded_match and build_differences:
                 notes.append(
                     f"Reproduced to {digits} significant digits, not bit for "
-                    f"bit, on a different build or instruction-set path "
-                    f"({where}). That is the contract across builds: an "
-                    "output hash is bit-exact only for the same native build "
-                    "on the same instruction-set path, and elsewhere the "
-                    f"outputs agree to {digits} significant digits. It is "
-                    "not evidence that the code changed."
+                    f"bit, on a different build, instruction-set path or "
+                    f"platform ({where}). That is the contract across "
+                    "builds: an output hash is bit-exact only for the same "
+                    "native build on the same instruction-set path and "
+                    "platform, and elsewhere the outputs agree to "
+                    f"{digits} significant digits. It is not evidence that "
+                    "the code changed."
+                )
+            elif rounded_match and _records_build_facts(record):
+                notes.append(
+                    f"The output agrees to {digits} significant digits but "
+                    "not bit for bit, on the same native build, "
+                    "instruction-set path, compiler and platform as far as "
+                    "the record names them. Something none of them covers "
+                    "moved the last bits: compiler flags given outside the "
+                    "build files, the Python-side libraries (NumPy, SciPy, "
+                    "pandas) or the BLAS they load."
                 )
             elif rounded_match:
                 notes.append(
@@ -328,10 +385,11 @@ def verify_replay(record: Dict[str, Any]) -> ReplayResult:
             elif build_differences:
                 notes.append(
                     f"The output differs beyond {digits} significant digits "
-                    f"as well, so the different build or path ({where}) does "
-                    "not account for it on its own. (Two values a last bit "
-                    "apart can still round apart at a rounding boundary, so "
-                    "this is strong rather than conclusive.)"
+                    f"as well, so the different build, path or platform "
+                    f"({where}) does not account for it on its own. (Two "
+                    "values a last bit apart can still round apart at a "
+                    "rounding boundary, so this is strong rather than "
+                    "conclusive.)"
                 )
     reproduced_elsewhere = bool(rounded_match) and bool(build_differences)
     output_moved = output_match is False and not reproduced_elsewhere

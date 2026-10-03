@@ -6142,6 +6142,29 @@ class ExplainDecisionResult(BaseModel):
             "for records written before the field existed."
         ),
     )
+    native_detail: Optional[Dict[str, Any]] = Field(
+        None,
+        description=(
+            "WHAT the build behind native_build was made with: compiler and "
+            "version, build_type, native_arch (host-CPU code generation), "
+            "openmp and openmp_runtime, pgo, and crt_linkage ('dynamic' for "
+            "/MD, 'static' for /MT). Builds of the same sources by "
+            "different toolchains share one native_build label and can "
+            "differ in the last bits. None when no extension ran, and for "
+            "records written before the field existed."
+        ),
+    )
+    platform: Optional[Dict[str, Any]] = Field(
+        None,
+        description=(
+            "WHERE the call ran, as far as the last bits are concerned: os "
+            "(and its build), machine, crt (the C runtime and its version: "
+            "ucrtbase.dll on Windows, glibc on Linux) and crt_fma3 (whether "
+            "that runtime's math took its FMA3 code path). These reach the "
+            "Python path too, through math.exp and math.erf. None for "
+            "records written before the field existed."
+        ),
+    )
     output_hash: Optional[str] = None
     output_hash_normalized: Optional[str] = Field(
         None,
@@ -6265,9 +6288,10 @@ class ReplayDecisionResult(BaseModel):
             "'reproduced' output and data both match. "
             "'reproduced_to_12_digits' the output is not bit-identical but "
             "agrees to twelve significant digits, and the record was written "
-            "by a different native build or instruction-set path -- which "
-            "is all an output hash promises across builds, so it does not "
-            "implicate the code. 'data_changed' the "
+            "by a different native build, instruction-set path or platform "
+            "(compiler, C runtime version, CRT FMA3 path) -- which is all an "
+            "output hash promises across them, so it does not implicate the "
+            "code. 'data_changed' the "
             "inputs no longer hash the same, so a different output is "
             "EXPECTED and says nothing about the code. 'code_changed' the "
             "data still matches but the output does not — the only "
@@ -6304,11 +6328,14 @@ class ReplayDecisionResult(BaseModel):
     build_differences: List[str] = Field(
         default_factory=list,
         description=(
-            "How the native build and instruction-set path that wrote the "
-            "record differ from the ones replaying it, reported when the "
-            "exact hash missed. Empty means the same build on the same "
-            "path -- the one case in which the exact hash is promised to "
-            "reproduce."
+            "How the native build, instruction-set path and platform that "
+            "wrote the record differ from the ones replaying it, one line "
+            "per fact (e.g. native_detail.compiler: recorded 'Clang "
+            "23.1.2', now 'MSVC 19.44.35228.0'), reported when the exact "
+            "hash missed. Empty means the same "
+            "build on the same path and, as far as the record says, the "
+            "same platform -- the one case in which the exact hash is "
+            "promised to reproduce."
         ),
     )
     notes: List[str] = Field(default_factory=list)
