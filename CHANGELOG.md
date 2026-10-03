@@ -1,5 +1,24 @@
 # Changelog
 
+## A sample covariance keeps the caller's BLAS threads, and on CI's OpenBLAS its last bits follow them
+
+- **The determinism tests held more than the one-thread limit promises.**
+  They ran `estimate_covariance` and the portfolio optimizers at caller
+  limits of one and four BLAS threads and required the same bits. The limit
+  covers the factorizations — the eigenvalues, the SVD behind a condition
+  number — but the covariance before them is a product numpy computes on
+  the caller's threads (`np.cov`, Ledoit-Wolf's, and the one
+  `DataFrame.cov()` makes for the optimizers), left threaded on purpose:
+  one thread doubles it, 3.7 ms against 1.7 ms at 1,260 × 235 here. This
+  machine's OpenBLAS gives that product the same bits at any thread count;
+  numpy's on CI's Linux and Windows runners does not, so five tests failed
+  there. Each now holds what is promised: the reported condition number or
+  eigenvalue is the one-thread value of the matrix its own call estimated.
+- **The guides say so.** The performance and portfolio guides list the
+  sample and Ledoit-Wolf matrices with the EWMA one as products whose last
+  bits can follow the core count, and say that a condition number is the
+  same bits for the same matrix, not for the same returns.
+
 ## The guides say when a kernel goes parallel, how a portfolio answer is certified and what a replay compares
 
 - **The performance guide** has the serial-time rule with each kernel's

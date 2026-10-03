@@ -299,9 +299,8 @@ CALLS = {
     "portfolio_scenarios": lambda: construction.portfolio_scenarios(
         WEIGHTS, {"down": {"A000": -0.2, "A001": -0.1}}, covariance=RAGGED
     ),
-    "estimate_covariance_sample": lambda: estimate_covariance(RETURNS, method="sample"),
-    "estimate_covariance_ledoit_wolf": lambda: estimate_covariance(RETURNS),
-    # Not the factor returns: that product keeps its threads (see pca.py).
+    # Not estimate_covariance: its sample product keeps the caller's threads
+    # (see the eigenvalue test below). Not the factor returns: that product keeps its threads (see pca.py).
     "pca_returns": lambda: {
         k: v for k, v in pca_returns(RETURNS).items() if k != "factor_returns"
     },
@@ -319,6 +318,33 @@ class TestTheAnswerDoesNotDependOnTheCallersThreads:
         default = _bits(call())
         assert two == one
         assert default == one
+
+    @pytest.mark.parametrize("method", ["sample", "ledoit_wolf"])
+    def test_a_covariance_reports_the_one_thread_eigenvalues_of_its_matrix(
+        self, method
+    ):
+        """The sample product behind the matrix, np.cov's or Ledoit-Wolf's,
+        keeps the caller's threads, and some OpenBLAS builds (numpy's on
+        Python 3.10 in CI) give it different last bits at one and two
+        threads. What runs under the limit is the eigendecomposition: at any
+        caller setting, the smallest eigenvalue and the condition number are
+        the one-thread ones of the matrix returned."""
+        for limit in (1, 2, None):
+            if limit is None:
+                result = estimate_covariance(RETURNS, method=method)
+            else:
+                with threadpool_limits(limits=limit, user_api="blas"):
+                    result = estimate_covariance(RETURNS, method=method)
+            assets = result["assets"]
+            matrix = np.array(
+                [[result["matrix"][row][col] for col in assets] for row in assets]
+            )
+            with threadpool_limits(limits=1, user_api="blas"):
+                eigenvalues = np.linalg.eigvalsh(matrix)
+            assert result["smallest_eigenvalue"] == float(eigenvalues.min())
+            assert result["condition_number"] == float(
+                eigenvalues.max() / eigenvalues.min()
+            )
 
     def test_the_repair_is_the_one_thread_repair(self):
         """A known answer for the bits: the repaired matrix is exactly what

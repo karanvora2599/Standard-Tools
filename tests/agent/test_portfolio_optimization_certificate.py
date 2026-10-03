@@ -148,7 +148,13 @@ def test_risk_parity_reports_one_condition_number_at_any_blas_thread_count():
     """risk_parity does not go through mean_variance_optimize and took its
     condition number from a bare np.linalg.cond, which on this 235-asset
     covariance differs in the last bits between one and four BLAS threads.
-    It now comes from the same one-thread computation."""
+    It now comes from the same one-thread computation.
+
+    The covariance itself is a product numpy computes on the caller's
+    threads, and some OpenBLAS builds (numpy's on Python 3.10 in CI) give
+    it different last bits at one and four threads. So each reported value
+    is held to the one-thread condition number of the covariance its own
+    call estimated, at the caller's setting."""
     threadpoolctl = pytest.importorskip("threadpoolctl")
     tickers = [f"T{i:03d}" for i in range(235)]
     inp = PortfolioOptimizationInput(
@@ -161,10 +167,7 @@ def test_risk_parity_reports_one_condition_number_at_any_blas_thread_count():
     def fake(req_tickers, start, end, interval="1d"):
         return _wide_returns(req_tickers)
 
-    _, cov = opt.annualized_mean_cov(_wide_returns(tickers), 252)
-    with threadpoolctl.threadpool_limits(limits=1, user_api="blas"):
-        one_thread = float(np.linalg.cond(cov))
-    reported = []
+    reported, expected = [], []
     for threads in (1, 4):
         with threadpoolctl.threadpool_limits(limits=threads, user_api="blas"):
             with patch(
@@ -173,4 +176,7 @@ def test_risk_parity_reports_one_condition_number_at_any_blas_thread_count():
                 fake,
             ):
                 reported.append(run_portfolio_optimization(inp).condition_number)
-    assert reported[0] == reported[1] == one_thread
+            _, cov = opt.annualized_mean_cov(_wide_returns(tickers), 252)
+        with threadpoolctl.threadpool_limits(limits=1, user_api="blas"):
+            expected.append(float(np.linalg.cond(cov)))
+    assert reported == expected

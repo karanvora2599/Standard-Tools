@@ -604,18 +604,24 @@ class TestDeterminism:
         frame's is 781.0238456977911 on one and 781.023845697788 on four
         under numpy 2.0's OpenBLAS, and the noise frame's differs under
         OpenBLAS 0.3.31. The SVD now runs on one thread whatever the caller
-        set, so the reported number is one number, the one-thread value."""
+        set, so the reported number is the one-thread value.
+
+        The covariance it is the condition number of is a product numpy
+        computes on the caller's threads, and some OpenBLAS builds (numpy's
+        on Python 3.10 in CI) give it different last bits at one and four
+        threads. So each reported number is held to the one-thread
+        condition number of the covariance its own call estimated."""
         threadpoolctl = pytest.importorskip("threadpoolctl")
         frame = (_noise_frame if kind == "noise" else _factor_frame)(12, 235, 2000)
-        _, cov = _moments(frame)
-        with threadpoolctl.threadpool_limits(limits=1, user_api="blas"):
-            one_thread = float(np.linalg.cond(cov))
-        reported = []
+        reported, expected = [], []
         for threads in (1, 4):
             with threadpoolctl.threadpool_limits(limits=threads, user_api="blas"):
                 result = mean_variance_optimize(frame, "min_volatility")
+                _, cov = _moments(frame)
+            with threadpoolctl.threadpool_limits(limits=1, user_api="blas"):
+                expected.append(float(np.linalg.cond(cov)))
             reported.append(result["condition_number"])
-        assert reported[0] == reported[1] == one_thread
+        assert reported == expected
 
 
 # ── what a non-converged run says ────────────────────────────────────────

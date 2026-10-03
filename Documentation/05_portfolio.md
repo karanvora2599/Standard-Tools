@@ -787,8 +787,9 @@ unbiasing denominator `1 − Σw²` was exactly zero and a raw numpy
 number of 1e12–1e17 came back without a warning.
 
 The condition number and smallest eigenvalue are computed on one BLAS
-thread, so they are the same bits on any machine. The EWMA matrix's own
-product keeps its threads, so its last bits still follow the core count. A
+thread, so the same matrix gives the same bits on any machine. The matrix's
+own product keeps its threads: an EWMA matrix's last bits follow the core
+count, and on some OpenBLAS builds a sample or Ledoit-Wolf matrix's do too. A
 Ledoit-Wolf estimate no longer has scikit-learn compute the precision matrix
 it stores by default, which nothing read: that was 15–27 ms of a 23–33 ms
 fit at 235 assets, and skipping it leaves the bits identical.

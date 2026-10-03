@@ -402,7 +402,12 @@ The Ledoit-Wolf row includes no longer computing a precision matrix nothing
 read. Products that gain from threads keep them — the sample and Ledoit-Wolf
 Gram matrices, the EWMA product, PCA's factor-return product — so an EWMA
 covariance and PCA's `factor_returns` still vary in their last bits with the
-core count. While any caller is inside the limit, BLAS work on other threads
+core count. So can a sample or Ledoit-Wolf covariance, including the one
+`DataFrame.cov()` computes for the optimizers, on some OpenBLAS builds:
+numpy's on CI's Linux and Windows runners gave the 1,260 × 235 product
+different last bits at one and four threads, where this machine's did not.
+A condition number or eigenvalue reported from such a matrix is still the
+one-thread value of that matrix. While any caller is inside the limit, BLAS work on other threads
 of the process also runs on one thread. `SQT_BLAS_THREADS` sets another
 count; 0 disables the limit. `threadpoolctl`, a declared dependency, applies
 it; where it finds no BLAS it can control, the limit does nothing.
