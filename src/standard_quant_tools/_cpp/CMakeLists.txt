@@ -21,6 +21,7 @@ set(SQT_SOURCES
     src/panel_stats.cpp
     src/options.cpp
     src/cusum.cpp
+    src/correlation.cpp
     src/build_info.cpp
     bindings/bindings.cpp
 )
@@ -31,23 +32,44 @@ pybind11_add_module(_sqt_core MODULE ${SQT_SOURCES})
 # directories at the end of this file).
 set(_pkg_dir "${CMAKE_SOURCE_DIR}/src/standard_quant_tools")
 
-# ── Options and CUSUM: the Python arithmetic, operation for operation ────────
-# options.cpp is held to the Python option formulas result for result -- a
-# converged flag and an iteration count are only comparable between the two
-# if every price along the way is the same double. That rules out fusing
-# a*b+c into one rounding: Clang contracts within an expression by default
-# and GCC does under -std=gnu++*, and either would do so under
-# -march=native. MSVC's /fp:precise does not contract since VS 2022; it is
-# stated here so a change of default cannot quietly alter it.
-#
-# cusum.cpp is held to the Python CUSUM loop bit for bit under the same
-# rule. Its recursion has no multiply to fuse, so the flag guards against a
-# later edit rather than against today's code.
-if(MSVC)
-    set_source_files_properties(src/options.cpp src/cusum.cpp PROPERTIES COMPILE_OPTIONS "/fp:precise")
+# ── Which compiler: cl, clang-cl, or a GCC-style driver ─────────────────────
+# clang-cl is Clang behind MSVC's command line, and CMake sets MSVC for it:
+# every `if(MSVC)` below is true for both. That is right for the flags the
+# two drivers share (/O2, /arch:AVX2, /W3) and wrong for three things that
+# differ -- whether a*b+c is contracted, which OpenMP runtime is linked, and
+# MSVC's profile-guided workflow -- so those test SQT_CLANG_CL. It is cached
+# because tests/cpp, a sibling directory, makes the same decisions.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+    set(SQT_CLANG_CL ON CACHE INTERNAL "The compiler is clang-cl")
 else()
-    set_source_files_properties(src/options.cpp src/cusum.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+    set(SQT_CLANG_CL OFF CACHE INTERNAL "The compiler is clang-cl")
 endif()
+
+# ── No floating-point contraction, in every translation unit ────────────────
+# The kernels are held to the Python and pandas arithmetic they replace bit
+# for bit: options.cpp result for result (a converged flag and an iteration
+# count are only comparable if every price along the way is the same
+# double), cusum.cpp and correlation.cpp operation for operation, and the
+# rest by the bit-identity tests in tests/cpp_bindings. Fusing a*b+c into one
+# rounding breaks all of that, and the compilers disagree about doing it:
+#
+#   - cl: /fp:precise does not contract (VS 2022 and later). Stated anyway,
+#     so a /fp:fast earlier on the command line is overridden.
+#   - clang-cl: contracts within an expression by default EVEN UNDER
+#     /fp:precise. Measured: 27 of 44 sampled kernel outputs moved and 41
+#     tests failed; with /clang:-ffp-contract=off all 44 matched cl's. A
+#     plain -ffp-contract=off is silently dropped by the clang-cl driver --
+#     the /clang: prefix is what passes it through.
+#   - GCC and Clang: GCC contracts under -std=gnu++* and Clang within an
+#     expression, both of them once -march allows FMA.
+#
+# This used to cover options.cpp and cusum.cpp only; every unit now gets it,
+# through sqt_native_codegen() below, as does every library and test
+# executable in tests/cpp. The flag is half of the guard. The other half is
+# sqt/fp_contract.hpp, which every unit includes first: its pragma survives
+# a global /fp:contract that a later /fp:precise does not undo (measured,
+# cl 19.44). FMA instructions in the linked module come only from the
+# intrinsics in rolling_beta_avx2.cpp.
 
 # ── AVX2+FMA translation unit (item L: runtime ISA dispatch demo) ────────────
 # rolling_beta_avx2.cpp uses AVX2/FMA intrinsics directly and must always be
@@ -94,23 +116,84 @@ target_compile_features(_sqt_core PRIVATE cxx_std_17)
 target_include_directories(_sqt_core PRIVATE include)
 
 # ── Native-arch optimization (opt-in) ─────────────────────────────────────────
-# -march=native / /arch:AVX2 tune codegen for the exact CPU that compiles the
-# extension -- the resulting binary is not guaranteed to run on a different/
-# older CPU lacking those ISA extensions (an "illegal instruction" crash, not
-# a graceful fallback). Defaulting this off means a build produced on one
-# machine (a CI runner, a shared dev image, a wheel destined for another
-# user's laptop) doesn't silently bake in an assumption about the build
-# machine's own CPU. Opt in explicitly for local development if you want the
-# extra speed -- this session's own measured benchmarks in
-# the published performance figures were built with it on.
+# /arch:AVX2 / -march=x86-64-v3 let the compiler use AVX2, FMA and BMI2 --
+# the resulting binary is not guaranteed to run on an older CPU lacking those
+# ISA extensions (an "illegal instruction" crash, not a graceful fallback).
+# Defaulting this off means a build produced on one machine (a CI runner, a
+# shared dev image, a wheel destined for another user's laptop) doesn't
+# silently bake in an assumption about the build machine's own CPU. Opt in
+# explicitly for local development if you want the extra speed -- the
+# published performance figures were built with it on.
+#
+# On x86-64, GCC and Clang get -march=x86-64-v3 rather than -march=native:
+# the same level MSVC's /arch:AVX2 targets (AVX2, FMA, BMI1/2, LZCNT, MOVBE,
+# F16C), portable across every x86-64 CPU since Haswell and Excavator, and
+# the same codegen on every machine that builds it -- -march=native on an
+# AVX-512 host would have turned on instructions no CI runner or second
+# laptop has. A compiler too old to know the level name (GCC < 11, Clang
+# < 12) gets -march=haswell, the same instruction set. Other architectures
+# keep -march=native. Contraction stays off at every level (see above).
 option(SQT_NATIVE_ARCH
-    "Optimize for the host CPU's instruction set (not portable to a different/older CPU)"
+    "Compile for AVX2+FMA (x86-64-v3) rather than baseline x86-64 (not portable to older CPUs)"
     OFF)
+set(SQT_X86 OFF)
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|i686|X86|i386)$")
+    set(SQT_X86 ON)
+endif()
+set(SQT_GNU_ARCH_FLAG "-march=native")
+if(NOT MSVC AND SQT_X86)
+    include(CheckCXXCompilerFlag)
+    check_cxx_compiler_flag("-march=x86-64-v3" SQT_HAS_MARCH_X86_64_V3)
+    if(SQT_HAS_MARCH_X86_64_V3)
+        set(SQT_GNU_ARCH_FLAG "-march=x86-64-v3")
+    else()
+        set(SQT_GNU_ARCH_FLAG "-march=haswell")
+    endif()
+endif()
+# Cached for tests/cpp, which compiles its libraries the same way.
+set(SQT_GNU_ARCH_FLAG "${SQT_GNU_ARCH_FLAG}" CACHE INTERNAL "SQT_NATIVE_ARCH for GCC/Clang")
 if(SQT_NATIVE_ARCH)
-    message(STATUS "Native arch: ON  — /arch:AVX2 or -march=native (not portable off this CPU)")
+    if(MSVC)
+        message(STATUS "Native arch: ON  — /arch:AVX2 (not portable to CPUs without AVX2/FMA)")
+    else()
+        message(STATUS "Native arch: ON  — ${SQT_GNU_ARCH_FLAG} (not portable to CPUs without AVX2/FMA)")
+    endif()
 else()
     message(STATUS "Native arch: OFF — portable codegen (pass -DSQT_NATIVE_ARCH=ON for local speed)")
 endif()
+
+# ── Codegen every native target shares ──────────────────────────────────────
+# What the compiled arithmetic IS -- contraction off, the target instruction
+# set, link-time optimization -- in one place, applied to the extension below
+# and to every library and test executable in tests/cpp. The C++ suite used
+# to compile the same sources at baseline ISA with no LTO whatever this
+# extension was built with, so a defect that only the shipped codegen has
+# could not fail it. A function is global once defined, and this file is
+# processed before tests/cpp.
+function(sqt_native_codegen target)
+    if(SQT_CLANG_CL)
+        target_compile_options(${target} PRIVATE "/clang:-ffp-contract=off")
+    elseif(MSVC)
+        target_compile_options(${target} PRIVATE /fp:precise)
+    else()
+        target_compile_options(${target} PRIVATE -ffp-contract=off)
+    endif()
+    # Release and RelWithDebInfo, on both families: this was Release-only on
+    # MSVC, so a RelWithDebInfo build got native codegen on GCC/Clang and
+    # portable codegen on MSVC from the same flag.
+    if(SQT_NATIVE_ARCH)
+        if(MSVC)
+            target_compile_options(${target} PRIVATE
+                $<$<CONFIG:Release,RelWithDebInfo>:/arch:AVX2>)
+        else()
+            target_compile_options(${target} PRIVATE
+                $<$<CONFIG:Release,RelWithDebInfo>:${SQT_GNU_ARCH_FLAG}>)
+        endif()
+    endif()
+    if(SQT_LTO_RELEASE)
+        set_property(TARGET ${target} PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    endif()
+endfunction()
 
 # ── PGO (Profile-Guided Optimization, opt-in, local-only) ───────────────────
 # A two-step workflow, not a single build: (1) build with SQT_PGO_GENERATE=ON,
@@ -128,6 +211,12 @@ option(SQT_PGO_USE       "Build using previously-collected PGO profile data (loc
 if(SQT_PGO_GENERATE AND SQT_PGO_USE)
     message(FATAL_ERROR "SQT_PGO_GENERATE and SQT_PGO_USE are mutually exclusive -- run the two-step workflow one flag at a time (see Documentation/30_build_guide.md).")
 endif()
+if(SQT_CLANG_CL AND (SQT_PGO_GENERATE OR SQT_PGO_USE))
+    message(FATAL_ERROR
+        "SQT_PGO_GENERATE and SQT_PGO_USE drive cl's profile-guided workflow "
+        "(/GENPROFILE, pgort140.dll, pgomgr), which clang-cl and lld-link do "
+        "not take. Build the profile-guided extension with cl.")
+endif()
 if(SQT_PGO_GENERATE)
     message(STATUS "PGO:      GENERATE — instrumented build for training, not for distribution")
 elseif(SQT_PGO_USE)
@@ -135,8 +224,8 @@ elseif(SQT_PGO_USE)
 endif()
 
 # ── Compiler flags ────────────────────────────────────────────────────────────
-# Release/RelWithDebInfo: full optimisation, +SIMD tuned for the build
-#   machine only if SQT_NATIVE_ARCH is on.
+# Release/RelWithDebInfo: full optimisation. The instruction set and the
+#   contraction rule are sqt_native_codegen()'s, applied below.
 # Debug: no optimisation + debug info so the extension is debuggable with
 #   gdb / lldb / WinDbg.
 
@@ -144,12 +233,6 @@ if(MSVC)
     target_compile_options(_sqt_core PRIVATE
         # Optimisation — config-specific
         $<$<CONFIG:Release,RelWithDebInfo>:/O2>
-        # Release,RelWithDebInfo -- matching the non-MSVC branch below, which
-        # applies -march=native to both. This was Release-only, so a
-        # RelWithDebInfo build got native codegen on GCC/Clang and portable
-        # codegen on MSVC from the same flag: a benchmark comparing the two
-        # compilers in that configuration was not comparing the same build.
-        $<$<AND:$<CONFIG:Release,RelWithDebInfo>,$<BOOL:${SQT_NATIVE_ARCH}>>:/arch:AVX2>
         $<$<CONFIG:Debug>:/Od /Zi>
         # Warnings
         /W3
@@ -251,7 +334,6 @@ else()
     # Covers GCC on Linux, Apple Clang on macOS, and Clang everywhere
     target_compile_options(_sqt_core PRIVATE
         $<$<CONFIG:Release,RelWithDebInfo>:-O3>
-        $<$<AND:$<CONFIG:Release,RelWithDebInfo>,$<BOOL:${SQT_NATIVE_ARCH}>>:-march=native>
         $<$<CONFIG:Debug>:-O0 -g>
         -Wall
         -Wextra
@@ -312,7 +394,7 @@ endif()
 option(SQT_OPENMP_LLVM
     "MSVC only: link LLVM's OpenMP runtime (libomp140, not in the VC++ redistributable) instead of vcomp140"
     OFF)
-if(MSVC)
+if(MSVC AND NOT SQT_CLANG_CL)
     if(SQT_OPENMP_LLVM)
         if(MSVC_VERSION LESS 1928)
             message(FATAL_ERROR "SQT_OPENMP_LLVM needs MSVC 19.28 (Visual Studio 2019 16.8) or later for /openmp:llvm.")
@@ -330,7 +412,47 @@ if(MSVC)
         unset(OpenMP_CXX_SPEC_DATE CACHE)
     endif()
 elseif(SQT_OPENMP_LLVM)
-    message(WARNING "SQT_OPENMP_LLVM applies to MSVC only and is ignored by ${CMAKE_CXX_COMPILER_ID}.")
+    message(WARNING "SQT_OPENMP_LLVM applies to MSVC's cl only and is ignored by ${CMAKE_CXX_COMPILER_ID}; clang-cl always links LLVM's runtime.")
+endif()
+
+# ── clang-cl links LLVM's own OpenMP runtime, and carries it ────────────────
+# FindOpenMP looks for clang-cl's import library on the linker's search path,
+# where a Visual Studio prompt puts the MSVC toolset's libomp.lib first. That
+# one imports libomp140.x86_64.dll -- the runtime SQT_OPENMP_LLVM links, not
+# in the VC++ redistributable (see above) -- so the build linked a DLL the
+# build facts did not name and most machines do not have. LLVM ships its own
+# import library beside clang-cl, for its own libomp.dll (Apache-2.0 with
+# LLVM exceptions); that is the one named here, unless the configure was
+# given another.
+#
+# Python 3.8+ does not search PATH for an extension's DLLs: it looks beside
+# the extension, beside python.exe, in System32 and in directories added
+# with os.add_dll_directory. LLVM's bin directory is none of those, so the
+# DLL is copied beside the extension after each link -- the place Windows
+# looks first -- and installed with it, so an editable or wheel install
+# carries it too. A copy rather than an add_dll_directory in the loader:
+# nothing at import has to know where LLVM was installed on the machine that
+# built it (the build stamp records no paths), and the extension loads in any
+# process that imports it, not only through the package. (One Windows rule
+# applies to such a direct load: the extension's own directory is searched
+# only when the path it is loaded by uses backslashes -- measured, the same
+# file loaded by a forward-slash path did not find its libomp.dll. Imports
+# through sys.path are unaffected.) The copy is a build output, ignored by
+# git like the extension; a build that does not link it removes it again. A
+# missing copy makes the import fail, and the package's import check names
+# the DLL (native_build_status(), `unloadable`).
+#
+# Any other import library (the MSVC toolset's, given explicitly or found on
+# the search path) is linked as found and named `libomp140` in the build
+# facts, with a warning: an extension so built loads only where Visual Studio
+# has installed libomp140.x86_64.dll.
+if(SQT_CLANG_CL)
+    get_filename_component(_sqt_llvm_bin "${CMAKE_CXX_COMPILER}" DIRECTORY)
+    get_filename_component(_sqt_llvm_root "${_sqt_llvm_bin}" DIRECTORY)
+    if(NOT OpenMP_libomp_LIBRARY AND EXISTS "${_sqt_llvm_root}/lib/libomp.lib")
+        set(OpenMP_libomp_LIBRARY "${_sqt_llvm_root}/lib/libomp.lib" CACHE FILEPATH
+            "The OpenMP import library clang-cl links: LLVM's own, beside the compiler")
+    endif()
 endif()
 
 find_package(OpenMP)
@@ -339,6 +461,42 @@ if(OpenMP_CXX_FOUND)
     message(STATUS "OpenMP:   found (${OpenMP_CXX_FLAGS}) — simulate_forward_paths/batch_run_strategy will run in parallel")
 else()
     message(STATUS "OpenMP:   not found — affected loops will run serially (still correct, just single-threaded)")
+endif()
+
+set(_sqt_clang_cl_runtime "")
+set(SQT_LIBOMP_DLL "" CACHE INTERNAL "LLVM's libomp.dll, copied beside every binary that links it")
+if(SQT_CLANG_CL AND OpenMP_CXX_FOUND)
+    # An import library does not say where its DLL is; LLVM's layout does:
+    # lib/libomp.lib imports bin/libomp.dll.
+    get_filename_component(_sqt_omp_lib_dir "${OpenMP_libomp_LIBRARY}" DIRECTORY)
+    get_filename_component(_sqt_libomp_dll "${_sqt_omp_lib_dir}/../bin/libomp.dll" ABSOLUTE)
+    if(OpenMP_libomp_LIBRARY AND EXISTS "${_sqt_libomp_dll}")
+        set(_sqt_clang_cl_runtime "libomp")
+        set(SQT_LIBOMP_DLL "${_sqt_libomp_dll}" CACHE INTERNAL
+            "LLVM's libomp.dll, copied beside every binary that links it")
+        add_custom_command(TARGET _sqt_core POST_BUILD
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                    "${SQT_LIBOMP_DLL}" "$<TARGET_FILE_DIR:_sqt_core>"
+            VERBATIM)
+        install(FILES "${SQT_LIBOMP_DLL}" DESTINATION standard_quant_tools)
+        message(STATUS "OpenMP:   clang-cl links LLVM's runtime (${OpenMP_libomp_LIBRARY}); libomp.dll is copied beside the extension")
+    else()
+        set(_sqt_clang_cl_runtime "libomp140")
+        message(WARNING
+            "clang-cl: OpenMP links ${OpenMP_libomp_LIBRARY}, which is not LLVM's "
+            "own import library (no libomp.dll in its ../bin). It is taken to be "
+            "the MSVC toolset's, whose libomp140.x86_64.dll is not in the VC++ "
+            "redistributable: the extension will load only where Visual Studio "
+            "installed that DLL. Pass -DOpenMP_libomp_LIBRARY=<LLVM>/lib/libomp.lib "
+            "to link LLVM's runtime instead.")
+    endif()
+endif()
+if(WIN32 AND NOT _sqt_clang_cl_runtime STREQUAL "libomp")
+    # A clang-cl build's runtime, left beside the extension by an earlier
+    # build in the same source tree, is nothing this extension loads.
+    add_custom_command(TARGET _sqt_core POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E rm -f "$<TARGET_FILE_DIR:_sqt_core>/libomp.dll"
+        VERBATIM)
 endif()
 
 # ── Build stamp: which sources and which build produced this binary ─────────
@@ -369,11 +527,16 @@ else()
 endif()
 # The runtime is named from the flag or library FindOpenMP settled on, not
 # from the version: MSVC reports "2.0" for vcomp and for libomp alike.
+# clang-cl is tested first because MSVC is true for it too, and the cl
+# branch named its LLVM runtime `vcomp` -- the one full-suite failure of a
+# clang-cl build was that mislabel.
 set(_sqt_openmp "")
 set(_sqt_openmp_runtime "")
 if(OpenMP_CXX_FOUND)
     set(_sqt_openmp "${OpenMP_CXX_VERSION}")
-    if(MSVC)
+    if(SQT_CLANG_CL)
+        set(_sqt_openmp_runtime "${_sqt_clang_cl_runtime}")
+    elseif(MSVC)
         if("${OpenMP_CXX_FLAGS}" MATCHES "openmp:llvm")
             set(_sqt_openmp_runtime "libomp")
         elseif("${OpenMP_CXX_FLAGS}" MATCHES "openmp:experimental")
@@ -444,12 +607,18 @@ set_property(SOURCE src/build_info.cpp APPEND PROPERTY
 # hoisted into a caller that no CPUID check guards.
 include(CheckIPOSupported)
 check_ipo_supported(RESULT SQT_IPO_SUPPORTED OUTPUT SQT_IPO_ERROR)
+# Cached so tests/cpp links its libraries the way the extension is linked;
+# sqt_native_codegen() reads it.
+set(SQT_LTO_RELEASE "${SQT_IPO_SUPPORTED}" CACHE INTERNAL
+    "LTO for the Release builds of every native target")
 if(SQT_IPO_SUPPORTED)
-    set_property(TARGET _sqt_core PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
     message(STATUS "LTO/IPO:  enabled for Release builds")
 else()
     message(STATUS "LTO/IPO:  not supported by this toolchain (${SQT_IPO_ERROR}) — skipping")
 endif()
+
+# Contraction off, the instruction set, LTO: see sqt_native_codegen().
+sqt_native_codegen(_sqt_core)
 
 # ── Target properties ─────────────────────────────────────────────────────────
 # CXX_VISIBILITY_PRESET hidden + VISIBILITY_INLINES_HIDDEN:

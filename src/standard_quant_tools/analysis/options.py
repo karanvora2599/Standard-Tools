@@ -184,9 +184,15 @@ def _d1_d2(
     dividend_yield: float = 0.0,
 ) -> Tuple[float, float]:
     sqrt_t = math.sqrt(time_to_expiry)
+    # The volatility is squared by multiplying, as `derivatives.option_greeks`
+    # and `pricing` do: `v * v` is the correctly rounded square, while
+    # `v**2` is the C library's pow(v, 2.0), which on the Windows CRT misses
+    # it in the last bit for about 1 volatility in 2,000. The compiled chain
+    # kernel and the numpy fallback in `options_batch` square the same way.
     d1 = (
         math.log(spot / strike)
-        + (risk_free_rate - dividend_yield + 0.5 * volatility**2) * time_to_expiry
+        + (risk_free_rate - dividend_yield + 0.5 * volatility * volatility)
+        * time_to_expiry
     ) / (volatility * sqrt_t)
     d2 = d1 - volatility * sqrt_t
     return d1, d2

@@ -181,6 +181,31 @@ class TestTheHedgeSimulationIsThePerPathLoop:
         )
         assert calls == [40] * 21
 
+    @pytest.mark.parametrize("kw", HEDGES)
+    def test_it_asks_for_delta_alone_and_gets_the_full_sets_delta(
+        self, backend, monkeypatch, kw
+    ):
+        """The hedge reads one greek, so it computes one (see the CHANGELOG
+        entry of 2026-10-02). With the full set computed instead, every
+        statistic is the same double."""
+        asked = []
+        real = derivatives.black_scholes_greeks_batch
+
+        def spying(*args, **kwargs):
+            asked.append(kwargs.get("greeks"))
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(derivatives, "black_scholes_greeks_batch", spying)
+        selected = simulate_delta_hedge(**kw)
+        assert set(asked) == {("delta",)}
+
+        def everything(*args, **kwargs):
+            kwargs.pop("greeks", None)
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(derivatives, "black_scholes_greeks_batch", everything)
+        assert simulate_delta_hedge(**kw) == selected
+
     def test_a_spot_the_hedge_cannot_price_is_refused_by_option_greeks(self):
         """A realized volatility of 9,000% drives some path's spot below
         1e-8 within a few steps. The per-path loop refused it through
@@ -318,6 +343,28 @@ class TestTheScenarioGridIsTheCellByCellLoop:
             spot=100.0, strike=100.0, time_to_expiry=0.5, volatility=0.25
         )
         assert calls == [True]
+
+    @pytest.mark.parametrize("kw", SCENARIOS)
+    def test_it_asks_for_the_price_alone_and_gets_the_full_sets_price(
+        self, backend, monkeypatch, kw
+    ):
+        asked = []
+        real = derivatives.black_scholes_greeks_batch
+
+        def spying(*args, **kwargs):
+            asked.append(kwargs.get("greeks"))
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(derivatives, "black_scholes_greeks_batch", spying)
+        selected = option_risk_scenarios(**kw)
+        assert asked == [("price",)]
+
+        def everything(*args, **kwargs):
+            kwargs.pop("greeks", None)
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(derivatives, "black_scholes_greeks_batch", everything)
+        assert option_risk_scenarios(**kw) == selected
 
     def test_a_nan_shock_is_still_refused_by_the_pricer(self, backend):
         """The loop skipped a shock only when `shocked <= 0`, so a NaN shock

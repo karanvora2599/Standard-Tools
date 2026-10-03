@@ -53,6 +53,21 @@ from standard_quant_tools.numeric_contract import (
 
 logger = logging.getLogger(__name__)
 
+# Optional native fast path for the correlation matrix HRP clusters on:
+# `frame.corr()` was 78-86% of `hierarchical_risk_parity` at 235 assets.
+# The kernel is pandas' own arithmetic, so `frame.corr()` stays the fallback
+# and the reference it is held to, bit for bit.
+_cpp_core: Any = None
+HAS_CPP = False
+try:
+    from standard_quant_tools import (
+        _sqt_core as _cpp_core,  # type: ignore[attr-defined]
+    )
+
+    HAS_CPP = hasattr(_cpp_core, "pearson_correlation")
+except ImportError:
+    pass
+
 # One definition, in `constants`. This name stays because it is
 # imported from here by name.
 TRADING_DAYS = TRADING_DAYS_PER_YEAR
@@ -500,7 +515,7 @@ def hierarchical_risk_parity(
             "and 100% at float residue. Remove it and size it outside HRP."
         )
 
-    correlation = frame.corr().to_numpy()
+    correlation = _correlation_matrix(frame)
     covariance = frame.cov().to_numpy()
     distance = np.sqrt(np.clip(0.5 * (1.0 - correlation), 0.0, None))
     order = _quasi_diagonal_order(distance)
@@ -596,6 +611,95 @@ def hierarchical_risk_parity(
         "periods_per_year": int(periods_per_year),
         "warnings": warnings,
     }
+
+
+#: How the native correlation kernel stands against the installed pandas,
+#: decided once per process on first use: "raw" (pandas does not clip, the
+#: pandas 1.5-2.3 behaviour), "clip" (pandas clips to [-1, 1], pandas 3), or
+#: "pandas" (the kernel does not reproduce this pandas -- `frame.corr()` is
+#: used). None until asked.
+_correlation_mode: Optional[str] = None
+
+
+def _correlation_probe() -> np.ndarray:
+    """A panel `frame.corr()` answers differently with and without the clip.
+
+    Built from operations every IEEE platform rounds alike (division,
+    multiplication, sqrt), not from a random stream whose values may change
+    between numpy releases. The first two columns are a line, whose
+    coefficient pandas' Welford arithmetic computes as 1.0000000000000009
+    before any clip; the last has a missing row, so the pairwise path is
+    asked too.
+    """
+    steps = np.arange(1, 9, dtype=float)
+    line = steps / 7.0
+    gapped = (steps**2 % 7) / 11.0
+    gapped[5] = np.nan
+    return np.column_stack(
+        [line, line * 0.1 + 1.0, (steps * 5 % 8) / 3.0, np.sqrt(steps), gapped]
+    )
+
+
+def _same_bits(a: np.ndarray, b: np.ndarray) -> bool:
+    """Equal bit for bit, any NaN matching any NaN."""
+    if a.shape != b.shape:
+        return False
+    same = (a.view(np.int64) == b.view(np.int64)) | (np.isnan(a) & np.isnan(b))
+    return bool(same.all())
+
+
+def _native_correlation_mode() -> str:
+    """Whether the kernel reproduces the installed pandas, and with the clip
+    or without: asked of pandas itself, once, on a small probe.
+
+    pandas 3 clips each coefficient to [-1, 1] and pandas 1.5-2.3 do not;
+    the Welford arithmetic is the same in all of them. Asking pandas rather
+    than reading its version also settles the case no version number
+    shows: a pandas built to fuse a*b+c into one rounding (as a compiler
+    targeting an FMA-capable CPU may do by default) computes other bits than
+    the kernel's unfused arithmetic, and is then left to compute its own.
+    """
+    global _correlation_mode
+    if _correlation_mode is None:
+        mode = "pandas"
+        try:
+            probe = _correlation_probe()
+            raw = np.asarray(_cpp_core.pearson_correlation(probe, 1))
+            expected = pd.DataFrame(probe).corr().to_numpy()
+            if raw[0, 1] > 1.0 and _same_bits(raw, expected):
+                mode = "raw"
+            elif raw[0, 1] > 1.0 and _same_bits(np.clip(raw, -1.0, 1.0), expected):
+                mode = "clip"
+        except Exception:  # noqa: BLE001 - any doubt means pandas computes it
+            mode = "pandas"
+        if mode == "pandas":
+            logger.info(
+                "hierarchical_risk_parity: the native correlation kernel does "
+                "not reproduce this pandas (%s) on its probe; frame.corr() "
+                "computes the correlation matrix instead.",
+                pd.__version__,
+            )
+        _correlation_mode = mode
+    return _correlation_mode
+
+
+def _correlation_matrix(frame: pd.DataFrame) -> np.ndarray:
+    """`frame.corr().to_numpy()`, bit for bit, from the native kernel when
+    there is one that reproduces the installed pandas.
+
+    `DataFrame.corr` hands pandas' `nancorr` exactly this matrix
+    (`to_numpy(dtype=float, na_value=nan, copy=False)`) with min_periods 1;
+    the kernel runs the same Welford arithmetic per pair, in row order, and
+    the clip is applied here when the installed pandas applies it. See the
+    CHANGELOG entry of 2026-10-02.
+    """
+    if HAS_CPP and _native_correlation_mode() != "pandas":
+        values = frame.to_numpy(dtype=float, na_value=np.nan, copy=False)
+        correlation = np.asarray(_cpp_core.pearson_correlation(values, 1))
+        if _correlation_mode == "clip":
+            np.clip(correlation, -1.0, 1.0, out=correlation)
+        return correlation
+    return frame.corr().to_numpy()
 
 
 def _cluster_variance(covariance: np.ndarray, index: Sequence[int]) -> float:

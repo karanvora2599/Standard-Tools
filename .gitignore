@@ -15,6 +15,10 @@ __pycache__/
 *.pgc
 *.pgd
 pgort140.dll
+# A clang-cl build: LLVM's OpenMP runtime, copied beside the extension so the
+# interpreter can load it (src/standard_quant_tools/_cpp/CMakeLists.txt). A
+# build output, like the extension itself.
+libomp.dll
 .ruff_cache/
 .mypy_cache/
 .pytest_cache/

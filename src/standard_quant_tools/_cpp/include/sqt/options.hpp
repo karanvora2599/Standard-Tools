@@ -15,8 +15,9 @@ namespace sqt {
  *
  * THE SAME ARITHMETIC, NOT A SIMILAR ONE. Every formula below is written
  * operation for operation as the Python it replaces evaluates it -- the
- * same association, the same `volatility**2` through `pow` where the Python
- * squares that way and `vol * vol` where it multiplies, the normal CDF as
+ * same association, the volatility squared as `vol * vol` (both Python
+ * modules multiply; `analysis.options` squared through `pow` until the
+ * CHANGELOG entry of 2026-10-02), the normal CDF as
  * `0.5 * (1 + erf(x / sqrt(2)))` -- and the translation unit is compiled
  * without floating-point contraction or vectorised math routines. On a
  * toolchain whose libm is the one CPython calls, the results are
@@ -136,6 +137,12 @@ BlackScholesGreeks black_scholes_greeks_one(double spot, double strike,
                                             bool is_call);
 
 /// Output buffers for black_scholes_greeks_batch, one per greek.
+///
+/// A NULL pointer is an output the caller does not want, and the batch
+/// neither computes nor writes it: a gamma profile needs no erf at all, and
+/// a hedge needs one per cell where the full set takes two. Every output
+/// that IS written is the double the full call writes there -- each is the
+/// same expression on the same inputs whichever others are formed beside it.
 struct BlackScholesGreeksOut {
     double* price;
     double* delta;
@@ -149,17 +156,46 @@ struct BlackScholesGreeksOut {
     double* speed;
     double* d1;
     double* d2;
+    /// 1 where the cell's price is a finite number, 0 where it is not -- an
+    /// input outside the domain, a discounted spot or strike past a double,
+    /// or a d1 of 0/0. Decided without forming the price (see options.cpp),
+    /// so a caller that wants only gamma can still refuse what a caller of
+    /// the full set refuses. Optional, like every other output.
+    std::uint8_t* price_finite = nullptr;
+};
+
+/// One bit per output of BlackScholesGreeksOut, in its field order: the
+/// selector the binding takes. The first twelve are
+/// analysis.options_batch.GREEKS in order.
+enum GreekOutput : std::uint32_t {
+    kGreekPrice = 1u << 0,
+    kGreekDelta = 1u << 1,
+    kGreekGamma = 1u << 2,
+    kGreekVega = 1u << 3,
+    kGreekTheta = 1u << 4,
+    kGreekRho = 1u << 5,
+    kGreekVanna = 1u << 6,
+    kGreekVolga = 1u << 7,
+    kGreekCharm = 1u << 8,
+    kGreekSpeed = 1u << 9,
+    kGreekD1 = 1u << 10,
+    kGreekD2 = 1u << 11,
+    kGreekPriceFinite = 1u << 12,
+    kGreeksAll = (1u << 12) - 1,  // the twelve greeks, without the flag
 };
 
 /**
- * black_scholes_greeks_one over a batch.
+ * black_scholes_greeks_one over a batch, for the outputs whose pointers are
+ * not NULL.
  *
  * grid == false: `spot` has one entry per contract (n_spots == n_contracts)
  * and every output has length n_contracts.
  *
  * grid == true: every contract is valued at every spot, and each output is
  * a row-major (n_contracts, n_spots) array -- the shape a gamma profile or
- * a scenario revaluation reads by row.
+ * a scenario revaluation reads by row. The terms that depend only on the
+ * contract (sqrt T, both discount factors, the drift) are formed once per
+ * contract rather than once per cell: each is the same double either way.
  */
 void black_scholes_greeks_batch(const double* spot, std::size_t n_spots,
                                 const double* strike, const double* time_to_expiry,

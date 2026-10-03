@@ -1546,8 +1546,17 @@ def simulate_delta_hedge(
     for step in range(n_hedges):
         remaining = max(t - step * dt, 1e-8)
         _require_hedgeable_spots(s, strike, remaining, iv, risk_free_rate, option_type)
+        # Delta alone: the full set's delta, bit for bit, at one erf per path
+        # instead of two, and without the eleven greeks the hedge never reads.
         greeks = black_scholes_greeks_batch(
-            s, strike, remaining, iv, risk_free_rate, 0.0, option_type == "call"
+            s,
+            strike,
+            remaining,
+            iv,
+            risk_free_rate,
+            0.0,
+            option_type == "call",
+            greeks=("delta",),
         )
         target = greeks["delta"]  # long delta hedges the short option
         trade = target - shares
@@ -1643,6 +1652,7 @@ def _scenario_prices(
             dividend_yield,
             option_type == "call",
             grid=True,
+            greeks=("price",),
         )["price"]
     except ValidationError:
         for shocked_spot in spots:

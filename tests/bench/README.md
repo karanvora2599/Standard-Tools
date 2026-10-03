@@ -18,8 +18,9 @@ run by hand (or by a dedicated CI job), not as part of the suite.
     python tests/bench/bench_modeling.py
     python tests/bench/bench_modeling.py ic build      # or one section at a time
 
-    # one build of the extension against another (OpenMP runtime, PGO):
-    # the same kernels on the raw bindings, median and spread per process
+    # one build of the extension against another (OpenMP runtime, PGO,
+    # clang-cl): the same kernels on the raw bindings, median and spread per
+    # process
     python tests/bench/bench_build.py --json vcomp_1.json
     SQT_NUM_THREADS=1 python tests/bench/bench_build.py --json vcomp_serial_1.json
 

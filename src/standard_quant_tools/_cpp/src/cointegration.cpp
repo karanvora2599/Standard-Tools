@@ -1,3 +1,4 @@
+#include "sqt/fp_contract.hpp"  // first: no contraction in this unit
 #include "sqt/cointegration.hpp"
 
 #include "sqt/numerics.hpp"
@@ -616,8 +617,9 @@ void batch_engle_granger(
     // demand, which also absorbs unequal threads (SMT siblings, hybrid
     // P/E cores, a cgroup CPU quota, another process on the box) without
     // assuming anything about the machine.
+    const sqt::omp_policy::parallel_call omp_call(n_pairs, n_bars, sqt::omp_policy::cost::engle_granger);
     #pragma omp parallel for schedule(guided) reduction(||: region_error) \
-        if(sqt::omp_policy::worth_parallel(n_pairs, n_bars)) \
+        if(omp_call.parallel()) \
         num_threads(sqt::omp_policy::max_threads() > 0 \
                     ? sqt::omp_policy::max_threads() : omp_get_max_threads())
 #endif

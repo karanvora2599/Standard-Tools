@@ -2,11 +2,12 @@
 
 Compares builds of `_sqt_core` rather than kernels against their fallbacks --
 the OpenMP runtime (vcomp against LLVM's libomp under SQT_OPENMP_LLVM), a
-profile-guided build against a plain one. Each kernel is timed on the raw
-binding, warm, REPS times in this process, and the median is reported with
-the fastest and slowest run beside it. A build comparison needs more than one
-process as well: run this several times per build and compare the medians of
-the per-process medians, which is what `--json` is for.
+profile-guided build against a plain one, clang-cl against cl. Each kernel
+is timed on the raw binding, warm, REPS times in this process, and the
+median is reported with the fastest and slowest run beside it. A build
+comparison needs more than one process as well: run this several times per
+build and compare the medians of the per-process medians, which is what
+`--json` is for.
 
     python tests/bench/bench_build.py                      # OpenMP default
     SQT_NUM_THREADS=1 python tests/bench/bench_build.py    # serial kernels
@@ -245,6 +246,15 @@ def cases():
     # Drawn last so the inputs of every case above are unchanged.
     zc = rng.normal(0, 1, (200, 2_105))
     case("cusum_peaks 200 x 2105", False, lambda: c.cusum_peaks(zc, 631, 0.5))
+    # pandas' correlation matrix, as hierarchical_risk_parity asks for it: a
+    # Fortran-ordered panel of 235 complete columns, parallel over column
+    # blocks. Drawn last, like the case above, so no other input moves.
+    returns = np.asfortranarray(rng.normal(0, 0.012, (2_106, 235)))
+    case(
+        "pearson_correlation 2106 x 235",
+        True,
+        lambda: c.pearson_correlation(returns, 1),
+    )
     return out
 
 
@@ -268,9 +278,9 @@ def main():
     facts = dict(c.__build_info__)
     threads = os.environ.get("SQT_NUM_THREADS", "(unset)")
     print(
-        f"# build: openmp={facts.get('openmp')} runtime={facts.get('openmp_runtime')} "
-        f"pgo={facts.get('pgo')} native_arch={facts.get('native_arch')} "
-        f"digest={facts['source_digest'][:12]}"
+        f"# build: compiler={facts.get('compiler')} openmp={facts.get('openmp')} "
+        f"runtime={facts.get('openmp_runtime')} pgo={facts.get('pgo')} "
+        f"native_arch={facts.get('native_arch')} digest={facts['source_digest'][:12]}"
     )
     print(f"# SQT_NUM_THREADS={threads}  reps={REPS}")
     results = {}

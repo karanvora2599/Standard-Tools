@@ -229,7 +229,235 @@ static void test_a_large_batch_answers_what_one_contract_does() {
     CHECK(iv_same);
 }
 
+// ── Output selection ────────────────────────────────────────────────────────
+
+namespace {
+
+// Twelve greek buffers plus the price_finite flag, for one batch call.
+struct Buffers {
+    std::vector<std::vector<double>> greek;
+    std::vector<std::uint8_t> finite;
+    explicit Buffers(std::size_t cells) : greek(12, std::vector<double>(cells)), finite(cells) {}
+    // Only the outputs in `mask` get a pointer; the rest are NULL, so a
+    // write to an unselected output would fault rather than pass.
+    sqt::BlackScholesGreeksOut out(std::uint32_t mask) {
+        double* p[12];
+        for (std::size_t i = 0; i < 12; ++i)
+            p[i] = (mask & (1u << i)) ? greek[i].data() : nullptr;
+        return sqt::BlackScholesGreeksOut{
+            p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11],
+            (mask & sqt::kGreekPriceFinite) ? finite.data() : nullptr};
+    }
+};
+
+// A book that reaches every branch of the cell loop: calls and puts, a
+// contract outside the domain, and -- on the spot axis -- spots outside it
+// on both sides of a block boundary.
+struct Book {
+    std::vector<double> spots, strike, t, vol, rate, q;
+    std::vector<std::uint8_t> call;
+    Book() {
+        for (int j = 0; j < 150; ++j) spots.push_back(40.0 + 0.8 * j);  // 3 blocks of 64
+        spots[3] = 0.0;
+        spots[63] = kNaN;    // the last spot of the first block
+        spots[64] = -5.0;    // the first of the second
+        spots[149] = 2e12;   // past any market
+        const double k[] = {60, 90, 100, 100, 115, 150, 100, 80};
+        const double tt[] = {0.02, 0.25, 1.0, 1.0, 2.5, 0.5, 1.0, 4.0};
+        const double v[] = {0.9, 0.2, 0.25, 0.25, 0.4, 1.5, 0.0, 0.05};  // vol 0: refused
+        const double r[] = {0.0, 0.03, -0.01, 0.05, 0.07, 0.0, 0.02, 0.01};
+        const double d[] = {0.0, 0.01, 0.02, -0.01, 0.0, 0.05, 0.0, 0.03};
+        for (int i = 0; i < 8; ++i) {
+            strike.push_back(k[i]);
+            t.push_back(tt[i]);
+            vol.push_back(v[i]);
+            rate.push_back(r[i]);
+            q.push_back(d[i]);
+            call.push_back(static_cast<std::uint8_t>(i % 2));
+        }
+    }
+    std::size_t nc() const { return strike.size(); }
+    std::size_t ns() const { return spots.size(); }
+    void grid(sqt::BlackScholesGreeksOut out) const {
+        sqt::black_scholes_greeks_batch(spots.data(), ns(), strike.data(), t.data(),
+                                        vol.data(), rate.data(), q.data(), call.data(),
+                                        nc(), true, out);
+    }
+};
+
+double field(const sqt::BlackScholesGreeks& g, std::size_t i) {
+    const double v[12] = {g.price, g.delta, g.gamma, g.vega,  g.theta, g.rho,
+                          g.vanna, g.volga, g.charm, g.speed, g.d1,    g.d2};
+    return v[i];
+}
+
+}  // namespace
+
+static void test_a_grid_longer_than_a_block_is_one_contract_at_a_time() {
+    // The grid is cut into blocks of spots per contract; every cell of every
+    // block, the refused ones included, is the scalar function's doubles.
+    const Book b;
+    Buffers buf(b.nc() * b.ns());
+    b.grid(buf.out(sqt::kGreeksAll));
+    bool all_same = true;
+    for (std::size_t i = 0; i < b.nc(); ++i) {
+        for (std::size_t j = 0; j < b.ns(); ++j) {
+            const auto g = sqt::black_scholes_greeks_one(b.spots[j], b.strike[i], b.t[i],
+                                                         b.vol[i], b.rate[i], b.q[i],
+                                                         b.call[i] != 0);
+            for (std::size_t f = 0; f < 12; ++f)
+                all_same = all_same && same(buf.greek[f][i * b.ns() + j], field(g, f));
+        }
+    }
+    CHECK(all_same);
+    // The refused contract and the refused spots are NaN, the rest are not.
+    CHECK(std::isnan(buf.greek[2][6 * b.ns() + 10]));
+    CHECK(std::isnan(buf.greek[2][1 * b.ns() + 63]) && std::isnan(buf.greek[2][1 * b.ns() + 64]));
+    CHECK(std::isfinite(buf.greek[2][1 * b.ns() + 62]) && std::isfinite(buf.greek[2][1 * b.ns() + 65]));
+}
+
+static void test_a_selection_writes_the_full_calls_doubles() {
+    // Each selection -- one greek, the shapes callers use, and an arbitrary
+    // mix read at run time -- writes exactly the full call's arrays for the
+    // outputs it names, and nothing else (the others are NULL).
+    const Book b;
+    const std::size_t cells = b.nc() * b.ns();
+    Buffers full(cells);
+    b.grid(full.out(sqt::kGreeksAll | sqt::kGreekPriceFinite));
+    std::vector<std::uint32_t> masks;
+    for (std::uint32_t f = 0; f < 12; ++f) masks.push_back(1u << f);
+    masks.push_back(sqt::kGreekGamma | sqt::kGreekPriceFinite);
+    masks.push_back(sqt::kGreekDelta | sqt::kGreekPriceFinite);
+    masks.push_back(sqt::kGreekVanna | sqt::kGreekD1 | sqt::kGreekCharm);
+    masks.push_back(sqt::kGreekSpeed | sqt::kGreekVolga | sqt::kGreekPriceFinite);
+    masks.push_back(sqt::kGreekPriceFinite);
+    for (std::uint32_t mask : masks) {
+        Buffers sel(cells);
+        b.grid(sel.out(mask));
+        bool ok = true;
+        for (std::size_t f = 0; f < 12; ++f) {
+            if (!(mask & (1u << f))) continue;
+            ok = ok && std::memcmp(sel.greek[f].data(), full.greek[f].data(),
+                                   cells * sizeof(double)) == 0;
+        }
+        if (mask & sqt::kGreekPriceFinite) ok = ok && sel.finite == full.finite;
+        CHECK(ok);
+    }
+    // Without grid as well: one cell per contract, at its own spot.
+    std::vector<double> s(b.nc(), 104.0);
+    s[2] = kNaN;
+    Buffers f1(b.nc()), g1(b.nc());
+    sqt::black_scholes_greeks_batch(s.data(), b.nc(), b.strike.data(), b.t.data(),
+                                    b.vol.data(), b.rate.data(), b.q.data(), b.call.data(),
+                                    b.nc(), false, f1.out(sqt::kGreeksAll));
+    sqt::black_scholes_greeks_batch(s.data(), b.nc(), b.strike.data(), b.t.data(),
+                                    b.vol.data(), b.rate.data(), b.q.data(), b.call.data(),
+                                    b.nc(), false,
+                                    g1.out(sqt::kGreekDelta | sqt::kGreekPriceFinite));
+    CHECK(std::memcmp(f1.greek[1].data(), g1.greek[1].data(), b.nc() * sizeof(double)) == 0);
+}
+
+static void test_price_finite_is_whether_the_price_is_finite() {
+    // The flag is decided without forming the price: finite exactly when
+    // spot * growth and strike * discount are, and d1 is not NaN. Each way
+    // a price inside the domain can still fail is planted here, and the
+    // flag must say what the price says -- whichever outputs ride with it.
+    struct Cell { double s, k, t, v, r, q; };
+    const Cell cells[] = {
+        {100, 100, 0.5, 0.2, 0.03, 0.0},          // ordinary
+        {100, 1e12, 77.7, 0.2, -9.0, 0.0},        // strike * discount past a double
+        {1e12, 100, 77.7, 0.2, 0.0, -9.0},        // spot * growth past a double
+        {100, 100, 1e-300, 1e-300, 0.0, 0.0},     // d1 = 0 / 0
+        {101, 100, 1e-300, 1e-300, 0.0, 0.0},     // d1 = +inf: a finite price
+        {99, 100, 1e-300, 1e-300, 0.0, 0.0},      // d1 = -inf: a finite price
+        {1e-300, 1e12, 100.0, 100.0, 7.0, -7.0},  // extremes that still price
+        {0.0, 100, 0.5, 0.2, 0.0, 0.0},           // outside the domain
+        {100, 100, 0.5, 0.2, kNaN, 0.0},          // outside the domain
+    };
+    const std::size_t n = sizeof(cells) / sizeof(cells[0]);
+    std::vector<double> s(n), k(n), t(n), v(n), r(n), q(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        s[i] = cells[i].s; k[i] = cells[i].k; t[i] = cells[i].t;
+        v[i] = cells[i].v; r[i] = cells[i].r; q[i] = cells[i].q;
+    }
+    int non_finite = 0;
+    for (std::uint8_t c : {std::uint8_t{0}, std::uint8_t{1}}) {
+        std::vector<std::uint8_t> call(n, c);
+        for (std::uint32_t mask : {std::uint32_t{sqt::kGreekPriceFinite},
+                                   std::uint32_t{sqt::kGreekGamma | sqt::kGreekPriceFinite},
+                                   std::uint32_t{sqt::kGreekDelta | sqt::kGreekPriceFinite},
+                                   std::uint32_t{sqt::kGreeksAll | sqt::kGreekPriceFinite}}) {
+            Buffers buf(n);
+            sqt::black_scholes_greeks_batch(s.data(), n, k.data(), t.data(), v.data(),
+                                            r.data(), q.data(), call.data(), n, false,
+                                            buf.out(mask));
+            for (std::size_t i = 0; i < n; ++i) {
+                const double price =
+                    sqt::black_scholes_greeks_one(s[i], k[i], t[i], v[i], r[i], q[i], c != 0)
+                        .price;
+                CHECK((buf.finite[i] != 0) == std::isfinite(price));
+                if (mask == sqt::kGreekPriceFinite && !std::isfinite(price)) ++non_finite;
+            }
+        }
+    }
+    // Cells 1-3 and the two outside the domain, as a call and as a put:
+    // the planted failures are failures, so the agreement above means
+    // something.
+    CHECK(non_finite == 10);
+}
+
 // ── Implied volatility ──────────────────────────────────────────────────────
+
+namespace {
+
+// The square the solver used until the CHANGELOG entry of 2026-10-02: the C
+// library's pow(v, 2.0), the way CPython evaluates `v**2`. Kept as the
+// reference the change is measured against.
+double pow_square(double v) {
+    volatile double two = 2.0;
+    return std::pow(v, two);
+}
+
+}  // namespace
+
+static void test_the_solver_prices_a_volatility_as_the_greeks_do() {
+    // The solver squares the volatility by multiplying, as the greeks do,
+    // so its model price at any volatility is the greeks' price there to
+    // the bit. Started AT the volatility a quote was priced at, Newton takes
+    // a step of exactly zero: one iteration, that volatility back, and a
+    // price error of exactly zero -- at every volatility, including those
+    // whose pow square is not the correctly rounded one.
+    const double s = 100.0, k = 104.0, t = 0.75, r = 0.03, q = 0.01;
+    // An even grid, and every volatility of a fine scan whose pow square
+    // misses the correctly rounded one on this C runtime.
+    std::vector<double> vols;
+    for (int i = 0; i < 2000; ++i) vols.push_back(0.05 + 2.5 * (i + 0.5) / 2000.0);
+    int pow_differs = 0;
+    for (int i = 0; i < 200000; ++i) {
+        const double vol = 0.05 + 2.5 * i / 200000.0 + 1e-9 * std::sin(i);
+        if (pow_square(vol) != vol * vol) {
+            ++pow_differs;
+            vols.push_back(vol);
+        }
+    }
+    bool all_exact = true;
+    for (double vol : vols) {
+        for (bool call : {true, false}) {
+            const double price = price_of(s, k, t, vol, r, q, call);
+            sqt::ImpliedVolSettings settings;
+            settings.initial_guess = vol;
+            const auto res = sqt::implied_volatility_one(price, s, k, t, r, q, call, settings);
+            all_exact = all_exact && res.reason == sqt::kIvSolved &&
+                        res.method == sqt::kIvMethodNewton && res.iterations == 1 &&
+                        res.vol == vol && res.price_error == 0.0;
+        }
+    }
+    CHECK(all_exact);
+    // On the Windows C runtime about 1 square in 2,000 differs; a correctly
+    // rounded pow (glibc's) differs on none. Reported, not asserted.
+    std::printf("pow(v, 2) != v * v for %d of 200000 volatilities on this runtime\n",
+                pow_differs);
+}
 
 static void test_round_trip_recovers_the_volatility() {
     for (bool call : {true, false}) {
@@ -325,6 +553,10 @@ int main() {
     test_outside_the_domain_is_nan_in_every_field();
     test_grid_is_every_contract_at_every_spot();
     test_a_large_batch_answers_what_one_contract_does();
+    test_a_grid_longer_than_a_block_is_one_contract_at_a_time();
+    test_a_selection_writes_the_full_calls_doubles();
+    test_price_finite_is_whether_the_price_is_finite();
+    test_the_solver_prices_a_volatility_as_the_greeks_do();
     test_round_trip_recovers_the_volatility();
     test_hull_solves_in_one_newton_step();
     test_a_price_at_intrinsic_is_a_ceiling();

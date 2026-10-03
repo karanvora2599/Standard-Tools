@@ -1,3 +1,4 @@
+#include "sqt/fp_contract.hpp"  // first: no contraction in this unit
 #include "sqt/cusum.hpp"
 
 #include "sqt/platform.hpp"

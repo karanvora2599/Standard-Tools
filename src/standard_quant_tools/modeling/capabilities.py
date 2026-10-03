@@ -329,8 +329,10 @@ def modeling_capabilities() -> Dict[str, Any]:
 #: the two option-chain kernels, implied_volatility_batch and
 #: black_scholes_greeks_batch. 39 with isa_path, which reports the
 #: instruction-set path the rolling kernels take on this machine. 40 with
-#: cusum_peaks, the CUSUM scan of the AR(1) null in liquidity_events.
-_EXPECTED_NATIVE_EXPORTS = 40
+#: cusum_peaks, the CUSUM scan of the AR(1) null in liquidity_events. 41
+#: with pearson_correlation, pandas' correlation matrix for
+#: hierarchical_risk_parity.
+_EXPECTED_NATIVE_EXPORTS = 41
 
 
 def _importable(module: str) -> bool:

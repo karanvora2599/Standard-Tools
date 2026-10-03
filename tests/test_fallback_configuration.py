@@ -1,7 +1,7 @@
 """
 The configuration this package could not run, and the surveys it broke.
 
-Nineteen modules each decide `HAS_CPP` for themselves by probing
+Twenty modules each decide `HAS_CPP` for themselves by probing
 `_sqt_core`. That per-symbol design is right -- a kernel added later falls
 back on its own rather than all-or-nothing -- but it meant the NO-EXTENSION
 configuration could not be executed. Every fallback was reachable only by
@@ -50,6 +50,7 @@ NATIVE_AWARE_MODULES = (
     "modeling.features.transforms",
     "modeling.validation.metrics",
     "modeling.validation.weights",
+    "portfolio.construction",
 )
 
 
@@ -87,7 +88,7 @@ _FLAGS = """
 
 class TestTheSwitchReachesEveryModule:
     def test_all_of_them_fall_back_together(self):
-        """One name made unimportable flips all nineteen, because they all
+        """One name made unimportable flips all twenty, because they all
         import the same one. No module needed changing."""
         import json
 
@@ -220,6 +221,38 @@ class TestTheFallbackActuallyComputes:
         native = json.loads(_run(script, disable=False))
         assert fallback["has_cpp"] is False
         assert fallback["sha256"] == native["sha256"]
+
+    def test_hierarchical_risk_parity_is_the_same_bits_on_both_paths(self):
+        """HRP's correlation matrix comes from a kernel holding pandas'
+        `frame.corr()` arithmetic, and the single-linkage tree breaks ties
+        on its last bits, so the two paths are compared on the bytes of the
+        correlation and the weights. See the CHANGELOG entry of 2026-10-02."""
+        script = """
+            import hashlib, json
+            import numpy as np, pandas as pd
+            from standard_quant_tools.portfolio import construction as c
+            rng = np.random.default_rng(11)
+            frame = pd.DataFrame(rng.normal(0, 0.01, (500, 40)),
+                                 columns=[f"A{i:02d}" for i in range(40)])
+            corr = c._correlation_matrix(frame)
+            out = c.hierarchical_risk_parity(frame)
+            weights = np.array([out["weights"][k] for k in sorted(out["weights"])])
+            print(json.dumps({"has_cpp": c.HAS_CPP,
+                              "corr": hashlib.sha256(corr.tobytes()).hexdigest(),
+                              "pandas": hashlib.sha256(
+                                  frame.corr().to_numpy().tobytes()).hexdigest(),
+                              "weights": hashlib.sha256(weights.tobytes()).hexdigest(),
+                              "order": out["cluster_order"]}))
+        """
+        import json
+
+        fallback = json.loads(_run(script, disable=True))
+        native = json.loads(_run(script, disable=False))
+        assert fallback["has_cpp"] is False
+        assert native["corr"] == native["pandas"]
+        assert fallback["corr"] == native["corr"]
+        assert fallback["weights"] == native["weights"]
+        assert fallback["order"] == native["order"]
 
 
 class TestTheSwitchIsReadableFromCode:

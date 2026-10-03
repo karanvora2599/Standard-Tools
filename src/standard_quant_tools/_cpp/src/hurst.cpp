@@ -1,3 +1,4 @@
+#include "sqt/fp_contract.hpp"  // first: no contraction in this unit
 #include "sqt/hurst.hpp"
 
 #include "sqt/numerics.hpp"
@@ -634,7 +635,8 @@ void rolling_hurst_into(
     // comment rather than being restated at each call site.
     // Work per task is one Hurst fit over win_sz bars, so total work is
     // count*win_sz -- not `count`, which says nothing about window size.
-    #pragma omp parallel reduction(||: sse_error) reduction(||: alloc_error) if(sqt::omp_policy::worth_parallel(static_cast<std::size_t>(count), win_sz)) num_threads(sqt::omp_policy::max_threads() > 0 ? sqt::omp_policy::max_threads() : omp_get_max_threads())
+    const sqt::omp_policy::parallel_call omp_call(static_cast<std::size_t>(count), win_sz, method == "dfa" ? sqt::omp_policy::cost::hurst_dfa : sqt::omp_policy::cost::hurst_rs);
+    #pragma omp parallel reduction(||: sse_error) reduction(||: alloc_error) if(omp_call.parallel()) num_threads(sqt::omp_policy::max_threads() > 0 ? sqt::omp_policy::max_threads() : omp_get_max_threads())
 #endif
     {
         RollingHurstScratch scratch;

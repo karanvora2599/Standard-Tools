@@ -1,3 +1,4 @@
+#include "sqt/fp_contract.hpp"  // first: no contraction in this unit
 #include "sqt/build_info.hpp"
 
 // Generated into the build tree at build time by cmake/source_digest.cmake;

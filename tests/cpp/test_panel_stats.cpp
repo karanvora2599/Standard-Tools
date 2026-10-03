@@ -24,9 +24,13 @@
 
 #include "sqt/panel_stats.hpp"
 
+#include "sqt/numerics.hpp"
+
 #include <cassert>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <limits>
 #include <vector>
 
@@ -220,6 +224,81 @@ static void test_nan_survives_the_transform() {
     sqt::apply_preprocess_stats(values.data(), 3, 1, fitted.view(), out.data());
     expect(std::isnan(out[1]), "NaN passes through apply untouched");
     expect(!std::isnan(out[0]) && !std::isnan(out[2]), "other rows transform");
+}
+
+static double from_bits(std::uint64_t bits) {
+    double x;
+    std::memcpy(&x, &bits, sizeof x);
+    return x;
+}
+
+static std::uint64_t to_bits(double x) {
+    std::uint64_t bits;
+    std::memcpy(&bits, &x, sizeof bits);
+    return bits;
+}
+
+static void test_is_nan_is_std_isnan() {
+    std::printf("test_is_nan_is_std_isnan\n");
+    // numerics::is_nan replaced std::isnan in apply's loop (CHANGELOG,
+    // 2026-10-02). They must agree on every double; the edges of the NaN
+    // range and a spread of random bit patterns stand in for all 2^64.
+    const std::uint64_t edges[] = {
+        0x0000000000000000ULL, 0x8000000000000000ULL,  // +-0
+        0x0000000000000001ULL, 0x000FFFFFFFFFFFFFULL,  // subnormals
+        0x7FEFFFFFFFFFFFFFULL, 0xFFEFFFFFFFFFFFFFULL,  // +-DBL_MAX
+        0x7FF0000000000000ULL, 0xFFF0000000000000ULL,  // +-inf
+        0x7FF0000000000001ULL, 0x7FF7FFFFFFFFFFFFULL,  // signalling NaN
+        0x7FF8000000000000ULL, 0xFFF8000000000000ULL,  // quiet NaN, both signs
+        0x7FFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL,  // all-ones payloads
+        0xFFF0000000000001ULL, 0x3FF0000000000000ULL,  // -sNaN, 1.0
+    };
+    bool all_agree = true;
+    for (const std::uint64_t b : edges) {
+        const double x = from_bits(b);
+        all_agree = all_agree && (sqt::numerics::is_nan(x) == std::isnan(x));
+    }
+    expect(all_agree, "is_nan agrees with std::isnan at every edge pattern");
+    std::uint64_t state = 0x9E3779B97F4A7C15ULL;
+    bool random_agree = true;
+    for (int i = 0; i < 1'000'000; ++i) {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        // Half the draws forced into the all-ones exponent, where NaN lives.
+        const std::uint64_t b = (i % 2) ? (state | 0x7FF0000000000000ULL) : state;
+        const double x = from_bits(b);
+        random_agree = random_agree && (sqt::numerics::is_nan(x) == std::isnan(x));
+    }
+    expect(random_agree, "is_nan agrees with std::isnan on a million bit patterns");
+}
+
+static void test_every_nan_passes_through_apply_bit_for_bit() {
+    std::printf("test_every_nan_passes_through_apply_bit_for_bit\n");
+    // Whatever NaN arrives -- either sign, any payload, signalling -- is the
+    // value that leaves, bit for bit; the infinities beside them are clipped
+    // to the bounds like any other value.
+    const std::uint64_t nan_bits[] = {
+        0x7FF8000000000000ULL, 0xFFF8000000000000ULL, 0x7FF8000000000123ULL,
+        0xFFFFFFFFFFFFFFFFULL, 0x7FF0000000000001ULL,
+    };
+    std::vector<double> values{1.0, 2.0, 3.0, 4.0, 5.0};
+    Fitted fitted(1);
+    sqt::fit_preprocess_stats(values.data(), 5, 1, 0.0, 1.0, fitted.view());
+    std::vector<double> panel;
+    for (const std::uint64_t b : nan_bits) panel.push_back(from_bits(b));
+    panel.push_back(kInf);
+    panel.push_back(-kInf);
+    panel.push_back(-0.0);
+    std::vector<double> out(panel.size());
+    sqt::apply_preprocess_stats(panel.data(), panel.size(), 1, fitted.view(), out.data());
+    bool kept = true;
+    for (std::size_t i = 0; i < 5; ++i) kept = kept && to_bits(out[i]) == nan_bits[i];
+    expect(kept, "every NaN leaves with the bits it arrived with");
+    const double sd = fitted.stdev[0];
+    expect(out[5] == (5.0 - 3.0) / sd, "+inf is clipped to the upper bound");
+    expect(out[6] == (1.0 - 3.0) / sd, "-inf is clipped to the lower bound");
+    expect(out[7] == (1.0 - 3.0) / sd, "-0.0 is a value, clipped like one");
 }
 
 static void test_infinity_is_not_treated_as_missing() {
@@ -509,6 +588,8 @@ int main() {
     test_all_nan_column();
     test_nan_is_skipped_by_the_moments();
     test_nan_survives_the_transform();
+    test_is_nan_is_std_isnan();
+    test_every_nan_passes_through_apply_bit_for_bit();
     test_infinity_is_not_treated_as_missing();
     test_columns_are_independent();
     test_apply_can_write_into_its_own_input();

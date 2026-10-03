@@ -1,3 +1,4 @@
+#include "sqt/fp_contract.hpp"  // first: no contraction in this unit
 #include "sqt/indicators.hpp"
 
 #include "sqt/numerics.hpp"
@@ -880,8 +881,21 @@ void technical_indicators_panel(
     // a cgroup CPU quota or another process on the box all make an equal
     // split of iterations finish at unequal times. guided rebalances on
     // demand without assuming anything about the machine.
+    //
+    // A unit costs the mean of the requested indicators' costs per bar,
+    // which differ sevenfold (RSI against the stochastic oscillator).
+    namespace cost = sqt::omp_policy::cost;
+    const double unit_ns =
+        ((config.compute_rsi ? cost::rsi_bar : 0.0) +
+         (config.compute_adx ? cost::adx_bar : 0.0) +
+         (config.compute_atr ? cost::atr_bar : 0.0) +
+         (config.compute_bollinger ? cost::bollinger_bar : 0.0) +
+         (config.compute_stochastic ? cost::stochastic_bar : 0.0)) /
+        static_cast<double>(n_indicators);
+    const sqt::omp_policy::parallel_call omp_call(
+        n_tickers, n_bars * n_indicators, sqt::omp_policy::serial_cost{unit_ns, 0.0});
     #pragma omp parallel for schedule(guided) reduction(||: region_error) \
-        if(sqt::omp_policy::worth_parallel(n_tickers, n_bars * n_indicators)) \
+        if(omp_call.parallel()) \
         num_threads(sqt::omp_policy::max_threads() > 0 \
                     ? sqt::omp_policy::max_threads() : omp_get_max_threads())
 #endif

@@ -32,8 +32,8 @@ is imported:
 When the extension cannot be imported at all, a binary built for a different
 CPython ABI sitting in the package directory is reported by both tags
 (`abi-mismatch`) instead of being invisible, and one built for this
-interpreter that still fails to load is reported with its error
-(`unloadable`). No extension anywhere is the ordinary pure-Python install
+interpreter that still fails to load is reported with its error and, on
+Windows, the DLLs it imports that cannot be found (`unloadable`). No extension anywhere is the ordinary pure-Python install
 (`absent`), and `SQT_DISABLE_NATIVE` keeps its meaning (`disabled`).
 
 The check runs once per process, hashes a few dozen files, and never raises:
@@ -276,6 +276,150 @@ def _extension_binaries(directories: List[str]) -> List[Tuple[str, str]]:
     return found
 
 
+# ── A DLL the extension imports and Windows cannot find ─────────────────────
+#
+# "DLL load failed while importing _sqt_core: The specified module could not
+# be found" names no module. Python 3.8+ resolves an extension's DLLs beside
+# the extension, beside python.exe, in System32 and in directories added with
+# os.add_dll_directory -- never on PATH -- so a runtime that works for a
+# program started from a developer prompt can be invisible to the
+# interpreter. The import table says which DLLs the extension needs; each is
+# looked for where the loader would look, and the ones it cannot find are
+# named, with what they are.
+
+#: What a missing DLL is, and what to do about it.
+_DLL_REMEDIES = {
+    "libomp.dll": (
+        "LLVM's OpenMP runtime, which a clang-cl build links and copies beside "
+        "the extension: rebuild that tree, or copy libomp.dll from the LLVM "
+        "installation's bin directory beside the extension"
+    ),
+    "libomp140.x86_64.dll": (
+        "the OpenMP runtime cl links under /openmp:llvm, which Visual Studio "
+        "installs and the VC++ redistributable does not: rebuild with cl's "
+        "default OpenMP runtime, vcomp140.dll"
+    ),
+    "vcomp140.dll": "cl's OpenMP runtime: install the Visual C++ Redistributable",
+    "msvcp140.dll": "the C++ runtime: install the Visual C++ Redistributable",
+    "vcruntime140.dll": "the C++ runtime: install the Visual C++ Redistributable",
+    "vcruntime140_1.dll": "the C++ runtime: install the Visual C++ Redistributable",
+    "pgort140.dll": (
+        "the runtime of a profile-instrumented build, copied beside it by that "
+        "build: rebuild that tree, or build without the instrumentation"
+    ),
+}
+
+
+def pe_imports(path: str) -> List[str]:
+    """The DLL names a Windows PE image imports, lower-cased, in import-table
+    order -- what `dumpbin /dependents` prints. Raises ValueError for a file
+    that is not a PE image."""
+    import struct
+
+    with open(path, "rb") as handle:
+        data = handle.read()
+    try:
+        pe = struct.unpack_from("<I", data, 0x3C)[0]
+        if data[pe : pe + 4] != b"PE\0\0":
+            raise ValueError(f"{path} is not a PE image")
+        (n_sections,) = struct.unpack_from("<H", data, pe + 6)
+        (optional_size,) = struct.unpack_from("<H", data, pe + 20)
+        optional = pe + 24
+        (magic,) = struct.unpack_from("<H", data, optional)
+        directories = optional + (112 if magic == 0x20B else 96)
+        (import_rva,) = struct.unpack_from("<I", data, directories + 8)
+        sections = []
+        for i in range(n_sections):
+            vsize, vaddr, raw_size, raw_ptr = struct.unpack_from(
+                "<IIII", data, optional + optional_size + 40 * i + 8
+            )
+            sections.append((vaddr, max(vsize, raw_size), raw_ptr))
+
+        def offset(rva: int) -> int:
+            for vaddr, size, raw_ptr in sections:
+                if vaddr <= rva < vaddr + size:
+                    return rva - vaddr + raw_ptr
+            raise ValueError(f"RVA {rva:#x} is in no section of {path}")
+
+        names: List[str] = []
+        if import_rva == 0:
+            return names
+        descriptor = offset(import_rva)
+        while True:
+            (name_rva,) = struct.unpack_from("<I", data, descriptor + 12)
+            if name_rva == 0:
+                return names
+            start = offset(name_rva)
+            names.append(data[start : data.index(b"\0", start)].decode("ascii").lower())
+            descriptor += 20
+    except struct.error as exc:
+        raise ValueError(f"{path}: truncated PE image ({exc})") from exc
+
+
+def missing_dlls(extension_file: str) -> List[str]:
+    """
+    The DLLs `extension_file` imports that Windows would not find for it in
+    this process: not loaded already, not beside it, and not in the
+    directories an extension's DLLs are searched in. Empty off Windows, and
+    empty when the check itself fails -- it only ever adds an explanation.
+    Only the extension's own imports are checked, not theirs.
+    """
+    if sys.platform != "win32":
+        return []
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+        kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+        kernel32.LoadLibraryExW.restype = wintypes.HMODULE
+        kernel32.LoadLibraryExW.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.HANDLE,
+            wintypes.DWORD,
+        ]
+        kernel32.FreeLibrary.argtypes = [wintypes.HMODULE]
+        # Mapped as data, never run, from the directories the loader searches
+        # for an extension's dependencies (application, System32, and any
+        # os.add_dll_directory); the extension's own directory is checked
+        # by name.
+        as_data_from_default_dirs = 0x00000002 | 0x00001000
+        beside = os.path.dirname(os.path.abspath(extension_file))
+        missing: List[str] = []
+        for name in pe_imports(extension_file):
+            if name.startswith(("api-ms-win-", "ext-ms-")):
+                continue  # API sets resolve inside the loader, not to files
+            if kernel32.GetModuleHandleW(name):
+                continue
+            if os.path.isfile(os.path.join(beside, name)):
+                continue
+            handle = kernel32.LoadLibraryExW(name, None, as_data_from_default_dirs)
+            if handle:
+                kernel32.FreeLibrary(handle)
+                continue
+            missing.append(name)
+        return missing
+    except Exception:  # noqa: BLE001 - an explanation, never a failure
+        return []
+
+
+def _missing_dll_detail(extension_file: str) -> str:
+    missing = missing_dlls(extension_file)
+    if not missing:
+        return ""
+    parts = [
+        f"{name} ({_DLL_REMEDIES[name]})" if name in _DLL_REMEDIES else name
+        for name in missing
+    ]
+    return (
+        "It imports "
+        + "; ".join(parts)
+        + ", which Windows cannot find beside it or on the DLL search path an "
+        "extension is loaded with (PATH is not on it). "
+    )
+
+
 # ── How to refresh ───────────────────────────────────────────────────────────
 
 
@@ -374,9 +518,10 @@ def _unimportable(
             detail=(
                 f"standard_quant_tools: the compiled extension {own[0]} is "
                 f"built for this interpreter ({tag}) but could not be loaded "
-                f"({type(exc).__name__}: {exc}). Every kernel is running its "
-                "Python path, which is correct but slower. "
-                + refresh_instructions(own[0], package_dir)
+                f"({type(exc).__name__}: {exc}). "
+                + _missing_dll_detail(own[0])
+                + "Every kernel is running its Python path, which is correct "
+                "but slower. " + refresh_instructions(own[0], package_dir)
             ),
         )
     if foreign:

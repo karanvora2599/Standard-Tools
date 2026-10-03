@@ -160,6 +160,23 @@ _MSVC_RUNTIME_DLL = {
     "libomp": "libomp140.x86_64.dll",
 }
 
+#: The runtime clang-cl links: LLVM's own, or -- when the configure was given
+#: the MSVC toolset's import library -- the one SQT_OPENMP_LLVM links.
+_CLANG_CL_RUNTIME_DLL = {
+    "libomp": "libomp.dll",
+    "libomp140": "libomp140.x86_64.dll",
+}
+
+
+def _runtime_dlls(info) -> dict:
+    """The runtime-to-DLL map for the compiler that built this extension.
+    `libomp` is LLVM's runtime under both, but cl's /openmp:llvm links
+    Microsoft's build of it (libomp140.x86_64.dll) and clang-cl links
+    LLVM's own (libomp.dll)."""
+    if str(info.get("compiler", "")).startswith("Clang"):
+        return _CLANG_CL_RUNTIME_DLL
+    return _MSVC_RUNTIME_DLL
+
 
 class TestTheStampNamesTheOpenMPRuntime:
     """MSVC reports OpenMP "2.0" for vcomp140 and for LLVM's libomp140
@@ -174,21 +191,39 @@ class TestTheStampNamesTheOpenMPRuntime:
         if info["openmp"] is None:
             assert info["openmp_runtime"] is None
         else:
-            assert info["openmp_runtime"] in _MSVC_RUNTIME_DLL or re.fullmatch(
+            assert info["openmp_runtime"] in _runtime_dlls(info) or re.fullmatch(
                 r"lib\w+", info["openmp_runtime"]
             ), info["openmp_runtime"]
 
     @pytest.mark.skipif(sys.platform != "win32", reason="reads a PE import table")
     def test_the_named_runtime_is_the_dll_the_extension_imports(self):
+        """clang-cl is MSVC to CMake, and its LLVM runtime was stamped
+        `vcomp` until the stamp tested for clang-cl first: the one failure
+        of a clang-cl build's full suite was this test."""
         _sqt_core = pytest.importorskip("standard_quant_tools._sqt_core")
         info = _sqt_core.__build_info__
-        if info["openmp_runtime"] not in _MSVC_RUNTIME_DLL:
-            pytest.skip(f"not an MSVC OpenMP build ({info['openmp_runtime']})")
+        dlls = _runtime_dlls(info)
+        if info["openmp_runtime"] not in dlls:
+            pytest.skip(f"not a Windows OpenMP build ({info['openmp_runtime']})")
         imports = _pe_imports(Path(_sqt_core.__file__))
-        expected = _MSVC_RUNTIME_DLL[info["openmp_runtime"]]
+        expected = dlls[info["openmp_runtime"]]
         assert expected in imports, sorted(imports)
-        others = set(_MSVC_RUNTIME_DLL.values()) - {expected}
+        others = (
+            set(_MSVC_RUNTIME_DLL.values()) | set(_CLANG_CL_RUNTIME_DLL.values())
+        ) - {expected}
         assert not others & imports, sorted(imports)
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows DLL placement")
+    def test_llvms_runtime_sits_beside_the_extension_that_links_it(self):
+        """Python does not search PATH for an extension's DLLs, so a clang-cl
+        build copies LLVM's libomp.dll beside the extension; a build that
+        does not link it removes the copy."""
+        _sqt_core = pytest.importorskip("standard_quant_tools._sqt_core")
+        info = _sqt_core.__build_info__
+        beside = Path(_sqt_core.__file__).with_name("libomp.dll")
+        links_llvm = _runtime_dlls(info).get(info["openmp_runtime"]) == "libomp.dll"
+        assert beside.is_file() is links_llvm, (info["compiler"], beside)
+        assert nb.missing_dlls(_sqt_core.__file__) == []
 
     @pytest.mark.skipif(shutil.which("cmake") is None, reason="needs cmake")
     def test_the_recipe_stamps_the_runtime_it_is_given(self, tmp_path):
@@ -639,6 +674,29 @@ class TestAnotherInterpretersBinaryIsNamed:
         assert status.verdict == nb.UNLOADABLE
         assert own in warned[0] and "could not be loaded" in warned[0]
 
+    def test_an_unloadable_binary_names_the_dll_it_cannot_find(self, pkg, monkeypatch):
+        """ "DLL load failed ... The specified module could not be found"
+        names no module. A clang-cl build whose libomp.dll copy is gone is
+        the case in point: the report says which DLL, what it is, and where
+        it has to be."""
+        own = f"{nb.EXTENSION}{importlib.machinery.EXTENSION_SUFFIXES[0]}"
+        monkeypatch.setattr(nb, "_listdir", lambda d: [own])
+        monkeypatch.setattr(nb, "missing_dlls", lambda path: ["libomp.dll"])
+        status, warned = _screen(pkg)
+        assert status.verdict == nb.UNLOADABLE
+        assert "libomp.dll" in status.detail
+        assert "LLVM's OpenMP runtime" in status.detail
+        assert "beside the extension" in status.detail
+        assert warned and "libomp.dll" in warned[0]
+
+    def test_with_nothing_missing_the_report_is_as_before(self, pkg, monkeypatch):
+        own = f"{nb.EXTENSION}{importlib.machinery.EXTENSION_SUFFIXES[0]}"
+        monkeypatch.setattr(nb, "_listdir", lambda d: [own])
+        monkeypatch.setattr(nb, "missing_dlls", lambda path: [])
+        status, _ = _screen(pkg)
+        assert status.verdict == nb.UNLOADABLE
+        assert "It imports" not in status.detail
+
     def test_the_tags_are_read_from_the_file_name(self):
         assert nb._tag_of(".cp311-win_amd64.pyd") == "cp311-win_amd64"
         assert nb._tag_of(".cpython-311-x86_64-linux-gnu.so") == (
@@ -648,6 +706,42 @@ class TestAnotherInterpretersBinaryIsNamed:
         assert nb.interpreter_tag() == nb._tag_of(
             importlib.machinery.EXTENSION_SUFFIXES[0]
         )
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows DLL resolution")
+class TestADllTheExtensionCannotFindIsNamed:
+    """The lookup behind the report above: the extension's import table,
+    each DLL looked for where the loader looks for an extension's DLLs."""
+
+    def test_the_import_table_is_this_tests_own_reading_of_it(self):
+        _sqt_core = pytest.importorskip("standard_quant_tools._sqt_core")
+        names = nb.pe_imports(_sqt_core.__file__)
+        assert set(names) == _pe_imports(Path(_sqt_core.__file__))
+        assert any(name.startswith("python3") for name in names), names
+
+    def test_an_import_found_nowhere_is_missing(self, tmp_path, monkeypatch):
+        binary = tmp_path / "ext.pyd"
+        binary.write_bytes(b"")
+        monkeypatch.setattr(
+            nb, "pe_imports", lambda path: ["kernel32.dll", "sqt_no_such_runtime.dll"]
+        )
+        assert nb.missing_dlls(str(binary)) == ["sqt_no_such_runtime.dll"]
+
+    def test_a_dll_beside_the_extension_is_found(self, tmp_path, monkeypatch):
+        binary = tmp_path / "ext.pyd"
+        binary.write_bytes(b"")
+        (tmp_path / "sqt_no_such_runtime.dll").write_bytes(b"")
+        monkeypatch.setattr(nb, "pe_imports", lambda path: ["sqt_no_such_runtime.dll"])
+        assert nb.missing_dlls(str(binary)) == []
+
+    def test_a_file_that_is_not_an_image_explains_nothing_and_raises_nothing(
+        self, tmp_path
+    ):
+        junk = tmp_path / "ext.pyd"
+        junk.write_bytes(b"not a PE image")
+        assert nb.missing_dlls(str(junk)) == []
+        with pytest.raises(ValueError):
+            nb.pe_imports(str(junk))
 
 
 # ── Where native availability is reported ───────────────────────────────────

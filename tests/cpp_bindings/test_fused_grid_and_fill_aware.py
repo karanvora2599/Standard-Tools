@@ -224,7 +224,8 @@ class TestOpenMpGovernance:
             / "backtest.cpp"
         ).read_text(encoding="utf-8")
         assert "if(num_tests > 1)" not in source
-        assert "worth_parallel" in source
+        # A counted call decides with worth_parallel on (tasks, units, cost).
+        assert "parallel_call omp_call(num_tests, n," in source
 
     def test_results_are_identical_under_a_single_thread(self, monkeypatch):
         """Whatever the policy decides, the numbers must not depend on it."""

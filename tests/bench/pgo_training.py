@@ -8,11 +8,11 @@ SQT_PGO_USE configure folds them into the profile.
 It calls the raw bindings of every kernel family -- indicators, single and
 batched backtests, the signal state machines, the portfolio bar loop,
 rolling regression, Hurst, cointegration, Monte Carlo, GARCH, the Kalman
-filters, the CUSUM scan, the panel statistics and the option chains --
-over a spread of sizes and parameters, with inputs drawn from their own
-seeds rather than from the benchmark's. A profile only knows the paths it
-was shown, so a kernel this script leaves out is optimized as if it were
-cold.
+filters, the CUSUM scan, the panel statistics, the option chains and the
+correlation matrix -- over a spread of sizes and parameters, with inputs
+drawn from their own seeds rather than from the benchmark's. A profile only
+knows the paths it was shown, so a kernel this script leaves out is
+optimized as if it were cold.
 
     python tests/bench/pgo_training.py     # ~5 s instrumented; PGO_ROUNDS=5
 
@@ -226,6 +226,18 @@ def options(c, rng):
         )
 
 
+def correlation(c, rng):
+    # Both paths of pandas' correlation: complete panels in either order
+    # (the shared-recursion path) and one with gaps (the per-pair loop).
+    for n_rows, n_cols in ((60, 8), (500, 40), (2_106, 235)):
+        returns = rng.normal(0, 0.012, (n_rows, n_cols))
+        c.pearson_correlation(returns, 1)
+        c.pearson_correlation(np.asfortranarray(returns), 1)
+    gapped = rng.normal(0, 0.012, (500, 40))
+    gapped[rng.random(gapped.shape) < 0.05] = np.nan
+    c.pearson_correlation(gapped, 1)
+
+
 def main():
     status = standard_quant_tools.native_build_status()
     if not status.used:
@@ -247,6 +259,8 @@ def main():
             regression_and_series,
             panel_stats,
             options,
+            # Last, so every family above draws the inputs it always has.
+            correlation,
         ):
             family(c, rng)
         print(f"round {round_ + 1}/{ROUNDS} done", flush=True)

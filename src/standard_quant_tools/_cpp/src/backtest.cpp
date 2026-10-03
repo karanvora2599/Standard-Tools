@@ -1,3 +1,4 @@
+#include "sqt/fp_contract.hpp"  // first: no contraction in this unit
 #include "sqt/backtest.hpp"
 #include "sqt/omp_policy.hpp"
 
@@ -1048,8 +1049,9 @@ std::vector<BacktestResult> batch_backtest_crossover(
     // propagates out of the region, and the failure is rethrown outside it.
     bool region_error = false;
 #ifdef _OPENMP
+    const sqt::omp_policy::parallel_call omp_call(num_combos, n, sqt::omp_policy::cost::batch_backtest_crossover);
 #pragma omp parallel reduction(||: region_error) \
-    if(sqt::omp_policy::worth_parallel(num_combos, n)) \
+    if(omp_call.parallel()) \
     num_threads(sqt::omp_policy::max_threads() > 0 \
                 ? sqt::omp_policy::max_threads() : omp_get_max_threads())
     {
@@ -1140,8 +1142,9 @@ std::vector<BacktestResult> batch_run_strategy(
     // Work-based, not count-based: two tiny backtests cost more in thread
     // startup than they save, and this library often runs inside something
     // already parallel. See sqt::omp_policy.
+    const sqt::omp_policy::parallel_call omp_call(num_tests, n, sqt::omp_policy::cost::batch_run_strategy);
     #pragma omp parallel for schedule(guided) \
-        if(sqt::omp_policy::worth_parallel(num_tests, n)) \
+        if(omp_call.parallel()) \
         num_threads(sqt::omp_policy::max_threads() > 0 \
                     ? sqt::omp_policy::max_threads() : omp_get_max_threads())
 #endif

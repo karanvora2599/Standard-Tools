@@ -38,6 +38,19 @@ inline bool is_finite(double x) noexcept {
     return (bits & 0x7FF0000000000000ULL) != 0x7FF0000000000000ULL;
 }
 
+// True when `x` is a NaN, of either sign and any payload: exactly
+// std::isnan(x), for a per-element loop, and inline for the reason
+// is_finite is -- MSVC's std::isnan is the same _dclass call into the CRT
+// DLL.
+//
+// The IEEE self-compare, not a bit test like is_finite's: it is one
+// ucomisd, where the bit test first moves the value to an integer register,
+// and apply_preprocess_stats measured 4-14% faster with it (CHANGELOG,
+// 2026-10-02). It is no weaker than std::isnan, which a -ffinite-math-only
+// build folds to `false` just the same; this module is never built that way
+// (cusum.cpp relies on the same compare).
+inline bool is_nan(double x) noexcept { return x != x; }
+
 // Relative-epsilon singularity/pivot test, replacing fixed absolute
 // thresholds like `< 1e-14` that don't scale with the input's magnitude.
 // `scale` should be a magnitude representative of the *original*

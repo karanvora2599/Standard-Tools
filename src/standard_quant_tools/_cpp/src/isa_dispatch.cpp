@@ -1,3 +1,4 @@
+#include "sqt/fp_contract.hpp"  // first: no contraction in this unit
 #include "sqt/isa_dispatch.hpp"
 
 #include <atomic>

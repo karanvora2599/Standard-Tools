@@ -668,3 +668,410 @@ class TestTheBackendChoice:
         monkeypatch.setattr(ob, "_cpp_core", _Old())
         out = ob.black_scholes_greeks_batch(SPOT, 100.0, 0.5, 0.2, 0.0)
         assert out["path"] == "python"
+
+
+# ── choosing which greeks to compute ────────────────────────────────────
+
+
+def _bits(x: np.ndarray) -> bytes:
+    """An array's exact bytes: equality here is equality to the bit, with
+    NaN equal to the same NaN."""
+    return np.ascontiguousarray(x).tobytes()
+
+
+#: Inputs inside the pricing domain whose price is still not a number: a
+#: discounted strike past a double, a grown spot past a double, and a d1 of
+#: 0/0 (spot at the strike, volatility x sqrt(T) underflowing to zero).
+_UNPRICEABLE = [
+    dict(spot=SPOT, strike=1e12, t=77.7, vol=0.2, rate=-9.0, q=0.0),
+    dict(spot=1e12, strike=SPOT, t=77.7, vol=0.2, rate=0.0, q=-9.0),
+    dict(spot=SPOT, strike=SPOT, t=1e-300, vol=1e-300, rate=0.0, q=0.0),
+]
+
+
+class TestAGreekSelection:
+    """`greeks=` computes only what is named; what it returns is the full
+    call's arrays for those names, and it refuses what the full call does."""
+
+    @pytest.mark.parametrize("grid", [False, True])
+    def test_each_selected_greek_is_the_full_calls_array(self, backend, grid):
+        g = _greek_inputs(10, n=60)
+        if grid:
+            g = dict(g, spot=np.linspace(40.0, 200.0, 150))  # several blocks
+        full = _greeks(g, grid=grid)
+        selections = [(name,) for name in ob.GREEKS] + [
+            ("gamma", "delta"),
+            ("d2", "vanna", "charm"),
+            ("speed", "volga", "rho", "theta"),
+            ob.GREEKS,
+        ]
+        for names in selections:
+            out = _greeks(g, grid=grid, greeks=names)
+            assert set(out) == set(names) | {"units", "path"}, names
+            assert out["path"] == _path(backend)
+            for name in names:
+                assert out[name].shape == full[name].shape
+                assert _bits(out[name]) == _bits(full[name]), (names, name)
+
+    def test_the_default_is_every_greek_as_before(self, backend):
+        g = _greek_inputs(11, n=30)
+        out = _greeks(g)
+        assert list(out) == list(ob.GREEKS) + ["units", "path"]
+        assert out["units"] == ob.GREEK_UNITS
+        named = _greeks(g, greeks=None)
+        for name in ob.GREEKS:
+            assert _bits(named[name]) == _bits(out[name])
+
+    def test_one_name_may_be_given_alone_and_order_does_not_matter(self, backend):
+        g = _greek_inputs(12, n=20)
+        alone = _greeks(g, greeks="gamma")
+        assert set(alone) == {"gamma", "units", "path"}
+        assert alone["units"] == {"gamma": ob.GREEK_UNITS["gamma"]}
+        both = _greeks(g, greeks=["delta", "price", "delta"])
+        assert [k for k in both if k in ob.GREEKS] == ["price", "delta"]
+        assert "price" not in both["units"]
+
+    @pytest.mark.parametrize(
+        "greeks,match",
+        [
+            (("gamma", "omega"), "'omega'"),
+            ((), "selects nothing"),
+            ("Gamma", "'Gamma'"),
+            ((1,), "1"),
+            (7, "7"),
+        ],
+    )
+    def test_a_selection_must_name_greeks(self, greeks, match):
+        with pytest.raises(ValidationError, match=match):
+            ob.black_scholes_greeks_batch(SPOT, 100.0, 0.5, 0.2, 0.0, greeks=greeks)
+
+    @pytest.mark.parametrize("case", range(len(_UNPRICEABLE)))
+    @pytest.mark.parametrize("grid", [False, True])
+    @pytest.mark.parametrize(
+        "greeks", [None, ("gamma",), ("delta",), ("d1", "d2"), ("price",)]
+    )
+    def test_an_unpriceable_contract_is_refused_with_the_same_words(
+        self, backend, case, grid, greeks
+    ):
+        """A selection without the price does not form it, and must still
+        refuse the batch the full call refuses -- naming the same cell and
+        quoting the same non-finite price."""
+        bad = _UNPRICEABLE[case]
+        strikes = np.array([95.0, bad["strike"], 105.0])
+        t = np.array([0.5, bad["t"], 0.5])
+        vol = np.array([0.2, bad["vol"], 0.2])
+        rate = np.array([0.01, bad["rate"], 0.01])
+        q = np.array([0.0, bad["q"], 0.0])
+        spot = (
+            np.array([90.0, bad["spot"]])
+            if grid
+            else np.array([90.0, bad["spot"], 99.0])
+        )
+
+        def run(selection):
+            with pytest.raises(ValidationError) as err:
+                ob.black_scholes_greeks_batch(
+                    spot, strikes, t, vol, rate, q, True, grid=grid, greeks=selection
+                )
+            return str(err.value)
+
+        assert run(greeks) == run(None)
+        assert "Check the rate units" in run(greeks)
+
+    def test_price_finite_is_whether_the_price_is_finite(self, backend):
+        """The flag the kernel (or the fallback) returns in place of the
+        price: finite exactly when spot x growth and strike x discount are
+        and d1 is not NaN. Every way a price in the domain fails is here,
+        beside the cases that look extreme and still price."""
+        rows = _UNPRICEABLE + [
+            dict(spot=101.0, strike=SPOT, t=1e-300, vol=1e-300, rate=0.0, q=0.0),
+            dict(spot=99.0, strike=SPOT, t=1e-300, vol=1e-300, rate=0.0, q=0.0),
+            dict(spot=1e-300, strike=1e12, t=100.0, vol=100.0, rate=7.0, q=-7.0),
+            dict(spot=SPOT, strike=SPOT, t=0.5, vol=0.2, rate=0.03, q=0.0),
+        ]
+        cols = {key: np.array([r[key] for r in rows]) for key in rows[0]}
+        for call in (True, False):
+            args = (
+                cols["spot"],
+                cols["strike"],
+                cols["t"],
+                cols["vol"],
+                cols["rate"],
+                cols["q"],
+                np.full(len(rows), call),
+            )
+            values = ob._greeks_arrays(*args, False, ("gamma",), price_finite=True)
+            price = ob._greeks_arrays(*args, False, ("price",))["price"]
+            np.testing.assert_array_equal(values["price_finite"], np.isfinite(price))
+            assert values["price_finite"].tolist() == [False] * 3 + [True] * 4
+
+    @pytest.mark.skipif(not NATIVE, reason="extension not built")
+    def test_the_kernel_computes_only_what_is_asked(self):
+        """The binding hands back the selected arrays and nothing else."""
+        from standard_quant_tools import _sqt_core
+
+        one = np.ones(3)
+        out = _sqt_core.black_scholes_greeks_batch(
+            one * SPOT,
+            one * 100.0,
+            one * 0.5,
+            one * 0.2,
+            one * 0.0,
+            one * 0.0,
+            np.ones(3, np.uint8),
+            False,
+            (1 << 2) | (1 << 12),
+        )
+        assert sorted(out) == ["gamma", "price_finite"]
+        assert out["price_finite"].dtype == np.uint8
+        for bits in (0, 1 << 13):
+            with pytest.raises(ValueError, match="outputs"):
+                _sqt_core.black_scholes_greeks_batch(
+                    one, one, one, one, one, one, np.ones(3, np.uint8), False, bits
+                )
+
+    def test_zero_gamma_asks_for_gamma_alone(self, backend, monkeypatch):
+        """Each step of the search prices only gamma, and finds the spot the
+        full set finds."""
+        rng = np.random.default_rng(9)
+        k = SPOT * np.exp(rng.normal(0.0, 0.2, 120))
+        t = rng.uniform(0.05, 1.0, 120)
+        v = rng.uniform(0.15, 0.6, 120)
+        qty = np.where(rng.random(120) < 0.5, -1.0, 1.0)
+        kw = dict(spot_low=40.0, spot_high=200.0, risk_free_rate=0.03)
+        asked = []
+        real = ob._greeks_arrays
+
+        def spying(*args, **kwargs):
+            asked.append(args[8] if len(args) > 8 else kwargs.get("names"))
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(ob, "_greeks_arrays", spying)
+        selected = ob.zero_gamma_spot(k, t, v, qty, **kw)
+        assert asked and set(asked) == {("gamma",)}
+
+        def everything(*args, **kwargs):
+            return real(*args[:8], ob.GREEKS)
+
+        monkeypatch.setattr(ob, "_greeks_arrays", everything)
+        reference = ob.zero_gamma_spot(k, t, v, qty, **kw)
+        assert selected == reference
+
+
+# ── the volatility square ───────────────────────────────────────────────
+
+
+def _d1_pow(spot, strike, t, rate, vol, q):
+    """`analysis.options._d1_d2`'s d1 as it was until the CHANGELOG entry of
+    2026-10-02: the volatility squared through pow (`vol**2`). Kept as the
+    reference the change is measured against."""
+    return (math.log(spot / strike) + (rate - q + 0.5 * vol**2) * t) / (
+        vol * math.sqrt(t)
+    )
+
+
+def _pow_misses(n: int = 400_000, seed: int = 31) -> np.ndarray:
+    """Volatilities whose `v**2` is not `v * v` on this C runtime: about 1 in
+    2,000 on Windows, none where pow is correctly rounded."""
+    vols = np.random.default_rng(seed).uniform(0.02, 3.0, n).tolist()
+    return np.array([v for v in vols if v**2 != v * v])
+
+
+class TestTheVolatilityIsSquaredByMultiplying:
+    """`analysis.options` squares the volatility as `v * v`, as
+    `derivatives`, `pricing`, the kernel and the fallback all do (see the
+    CHANGELOG entry of 2026-10-02). `v**2` is the C library's pow, which on
+    the Windows runtime misses the correctly rounded square in the last bit
+    for about 1 volatility in 2,000."""
+
+    def test_the_two_pricers_now_agree_to_the_bit(self):
+        rng = np.random.default_rng(32)
+        vols = np.concatenate([_pow_misses()[:200], rng.uniform(0.02, 3.0, 300)])
+        for i, vol in enumerate(vols.tolist()):
+            s = float(SPOT * math.exp(rng.normal(0.0, 0.3)))
+            k = float(SPOT * math.exp(rng.normal(0.0, 0.5)))
+            t, r, q = float(rng.uniform(0.01, 3.0)), 0.03, 0.01
+            kind = "call" if i % 2 else "put"
+            raw = black_scholes_greeks(s, k, t, r, vol, kind, q)
+            ref = option_greeks(
+                spot=s,
+                strike=k,
+                time_to_expiry=t,
+                volatility=vol,
+                risk_free_rate=r,
+                option_type=kind,
+                dividend_yield=q,
+            )
+            assert raw["d1"] == ref["d1"] and raw["d2"] == ref["d2"], (s, k, t, vol)
+            assert (
+                black_scholes_price(s, k, t, r, vol, kind, q)
+                == price_option(
+                    spot=s,
+                    strike=k,
+                    time_to_expiry=t,
+                    volatility=vol,
+                    risk_free_rate=r,
+                    option_type=kind,
+                    dividend_yield=q,
+                )["price"]
+            )
+
+    def test_the_change_is_confined_to_the_squares_pow_missed(self):
+        """Wherever pow's square was the correctly rounded one, d1 is the
+        double it always was; only where it was not can d1 move."""
+        rng = np.random.default_rng(33)
+        for vol in rng.uniform(0.02, 3.0, 3000).tolist():
+            s, k, t = 101.0, 97.0, 0.4
+            new = black_scholes_greeks(s, k, t, 0.02, vol, "call", 0.01)["d1"]
+            old = _d1_pow(s, k, t, 0.02, vol, 0.01)
+            if vol**2 == vol * vol:
+                assert new == old
+
+    def test_a_quote_solves_to_the_volatility_it_was_priced_at(self, backend):
+        """A planted known answer at every volatility, including those whose
+        pow square was off: priced at sigma and started at sigma, Newton's
+        first step is exactly zero -- one iteration, sigma back, a price
+        error of exactly zero. The scalar solves `price_option`'s quote; each
+        path of the batch solves its own greeks' price. While the solver
+        squared through pow, the volatilities in `_pow_misses` failed this."""
+        vols = np.concatenate([_pow_misses()[:60], np.linspace(0.05, 2.5, 60)])
+        s, k, t, r, q = SPOT, 104.0, 0.75, 0.03, 0.01
+        for call in (True, False):
+            kind = "call" if call else "put"
+            prices = ob.black_scholes_greeks_batch(
+                s, k, t, vols, r, q, call, greeks="price"
+            )["price"]
+            for vol, price in zip(vols.tolist(), prices.tolist()):
+                quote = price_option(
+                    spot=s,
+                    strike=k,
+                    time_to_expiry=t,
+                    volatility=vol,
+                    risk_free_rate=r,
+                    option_type=kind,
+                    dividend_yield=q,
+                )["price"]
+                ref = implied_volatility(quote, s, k, t, r, kind, q, initial_guess=vol)
+                assert ref["implied_volatility"] == vol and ref["price_error"] == 0.0
+                assert ref["iterations"] == 1 and ref["method"] == "newton"
+                out = ob.implied_volatility_batch(
+                    price, s, k, t, r, q, call, initial_guess=vol
+                )
+                assert out["path"] == _path(backend)
+                assert out["implied_volatility"].item() == vol, (vol, kind)
+                assert out["price_error"].item() == 0.0
+                assert out["iterations"].item() == 1
+
+    def test_hulls_example_still_solves_in_one_step(self, backend):
+        out = ob.implied_volatility_batch(4.759422392871528, 42.0, 40.0, 0.5, 0.10)
+        assert out["iterations"].item() == 1
+        assert out["implied_volatility"].item() == pytest.approx(0.2, abs=1e-14)
+
+
+# ── the discounting check ───────────────────────────────────────────────
+
+
+def _validate_discounting_reference(fn, shape, spot, strike, t, rate, q):
+    """`_validate_discounting` as it was until the CHANGELOG entry of
+    2026-10-02: both exponentials of every contract, through `math.exp`."""
+    with np.errstate(over="ignore", invalid="ignore"):
+        bad = ~np.isfinite(strike * ob._exp(-rate * t)) | ~np.isfinite(
+            spot * ob._exp(-q * t)
+        )
+    if bad.any():
+
+        def check(i):
+            ob._scalar._require_finite_price(
+                float("inf"), "the discounted strike or spot"
+            )
+
+        ob._refuse_first(bad, shape, fn, check)
+
+
+def _discounting_cases(seed: int, n: int = 4000):
+    """Contracts inside the domain with exponents crowded around where a
+    spot or strike of up to 1e12 overflows (about 682) and around the
+    screen (about 680), plus ordinary ones."""
+    rng = np.random.default_rng(seed)
+    x = np.where(
+        rng.random(n) < 0.5,
+        rng.uniform(679.0, 699.9, n),
+        rng.uniform(-50.0, 50.0, n),
+    )
+    x[:4] = [ob._DISCOUNT_SCREEN, np.nextafter(ob._DISCOUNT_SCREEN, 0), 699.9, 682.1]
+    t = rng.uniform(70.0, 100.0, n)
+    big = 10.0 ** rng.uniform(9.0, 12.0, n)
+    small = rng.uniform(1.0, 200.0, n)
+    on_strike = rng.random(n) < 0.5
+    rate = np.where(on_strike, -x / t, rng.uniform(-0.05, 0.05, n))
+    q = np.where(on_strike, rng.uniform(-0.05, 0.05, n), -x / t)
+    strike = np.where(on_strike, big, small)
+    spot = np.where(on_strike, small, big)
+    return spot, strike, t, rate, q
+
+
+class TestTheDiscountingCheckIsScreened:
+    """The batch's discounted-strike check runs `math.exp` only where an
+    overflow is possible, and refuses exactly what the full check refused."""
+
+    def test_the_screen_is_safely_short_of_an_overflow(self):
+        assert 680.0 < ob._DISCOUNT_SCREEN < 682.0
+        assert math.isfinite(ob._MAX_PRICE * math.exp(ob._DISCOUNT_SCREEN))
+        assert ob._MAX_PRICE * math.exp(ob._DISCOUNT_SCREEN) < 1.8e308 / 7.0
+
+    @pytest.mark.parametrize("seed", range(6))
+    def test_it_refuses_what_the_full_check_refused(self, seed):
+        spot, strike, t, rate, q = _discounting_cases(seed)
+        assert not ob._outside_domain(spot, strike, t, rate, q).any()
+        refused = 0
+        for lo in range(0, spot.size, 37):  # many batches, each its own verdict
+            sl = slice(lo, lo + 37)
+            args = ("f", (spot[sl].size,), spot[sl], strike[sl], t[sl], rate[sl], q[sl])
+            try:
+                _validate_discounting_reference(*args)
+                expected = None
+            except ValidationError as err:
+                expected = str(err)
+                refused += 1
+            try:
+                ob._validate_discounting(*args)
+                got = None
+            except ValidationError as err:
+                got = str(err)
+            assert got == expected
+        assert refused > 0  # the cases reach the refusal
+
+    def test_a_chain_far_from_the_bound_is_not_checked_further(self, monkeypatch):
+        """Null case: an ordinary chain never reaches `math.exp` here."""
+        monkeypatch.setattr(ob, "_exp", None)  # any call would raise
+        chain = _chain(0)
+        n = chain["strike"].size
+        ob._validate_discounting(
+            "f",
+            (n,),
+            np.full(n, SPOT),
+            chain["strike"],
+            chain["t"],
+            chain["rate"],
+            chain["q"],
+        )
+
+    def test_a_zero_quote_on_an_overflowing_discount_still_refuses(self, backend):
+        """Why the check is not left to the kernel's `not_priceable` code: the
+        kernel looks at a price of zero first and reports it as
+        `price_not_positive`, where the batch refuses the discounting."""
+        with pytest.raises(ValidationError, match="the discounted strike or spot"):
+            ob.implied_volatility_batch([5.0, 0.0], SPOT, [100.0, 1e12], 77.7, -9.0)
+        if NATIVE:
+            from standard_quant_tools import _sqt_core
+
+            raw = _sqt_core.implied_volatility_batch(
+                np.array([0.0]),
+                np.array([SPOT]),
+                np.array([1e12]),
+                np.array([77.7]),
+                np.array([-9.0]),
+                np.zeros(1),
+                np.ones(1, np.uint8),
+            )
+            assert raw["reason"].tolist() == [1]  # price_not_positive

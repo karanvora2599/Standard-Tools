@@ -1,5 +1,7 @@
+#include "sqt/fp_contract.hpp"  // first: no contraction in this unit
 #include "sqt/panel_stats.hpp"
 
+#include "sqt/numerics.hpp"
 #include "sqt/omp_policy.hpp"
 
 #include <algorithm>
@@ -139,8 +141,10 @@ bool fit_preprocess_stats(const double* values,
     // kernels here use.
     bool alloc_error = false;
 
+    const sqt::omp_policy::parallel_call omp_call(n_cols, n_rows,
+                                                  sqt::omp_policy::cost::fit_preprocess);
     #pragma omp parallel for schedule(guided) reduction(|| : alloc_error) \
-        if (sqt::omp_policy::worth_parallel(n_cols, n_rows)) \
+        if (omp_call.parallel()) \
         num_threads(sqt::omp_policy::max_threads() > 0 \
                         ? sqt::omp_policy::max_threads() : omp_get_max_threads())
     for (std::ptrdiff_t col = 0; col < static_cast<std::ptrdiff_t>(n_cols); ++col) {
@@ -254,8 +258,10 @@ void apply_preprocess_stats(const double* values,
     // needs no thread cap tuned to this one; the point-to-point wobble
     // beyond that is measurement noise on a workstation with other work on
     // it, not a scheduling defect worth engineering against.
+    const sqt::omp_policy::parallel_call omp_call(n_rows, n_cols,
+                                                  sqt::omp_policy::cost::apply_preprocess);
     #pragma omp parallel for schedule(static) \
-        if (sqt::omp_policy::worth_parallel(n_rows, n_cols)) \
+        if (omp_call.parallel()) \
         num_threads(sqt::omp_policy::max_threads() > 0 \
                         ? sqt::omp_policy::max_threads() : omp_get_max_threads())
     for (std::ptrdiff_t row = 0; row < static_cast<std::ptrdiff_t>(n_rows); ++row) {
@@ -264,7 +270,13 @@ void apply_preprocess_stats(const double* values,
             const double v = values[base + c];
             // NaN passes through untouched: Series.clip leaves missing
             // values missing rather than pinning them to a bound.
-            if (std::isnan(v)) {
+            //
+            // numerics::is_nan, not std::isnan: under MSVC the latter is a
+            // call into the CRT DLL for every value, and that call -- not
+            // the static schedule, nor memory -- was a quarter to a third of
+            // this loop's serial time (1.3-1.5x faster without it, measured;
+            // numerics.hpp has why).
+            if (numerics::is_nan(v)) {
                 out[base + c] = v;
                 continue;
             }
@@ -398,9 +410,15 @@ void average_ranks(const double* values,
     // itself called from inside a parallel loop there.
     constexpr std::size_t kParallelSortMin = 50000;
 #ifdef _OPENMP
-    const int configured = sqt::omp_policy::max_threads();
+    // Pooled correlations ranked from several threads at once share the
+    // cores (omp_policy.hpp): each sort takes an equal part of the threads
+    // among the calls in a parallel region. The run count follows the share;
+    // the ranks do not depend on it.
+    const sqt::omp_policy::parallel_call omp_call(allow_parallel_sort &&
+                                                  n >= kParallelSortMin);
+    const int configured = sqt::omp_policy::shared_threads();
     const int usable = configured > 0 ? configured : omp_get_max_threads();
-    if (allow_parallel_sort && n >= kParallelSortMin && usable > 1) {
+    if (omp_call.parallel() && usable > 1) {
         const auto chunks = static_cast<std::size_t>(usable);
         std::vector<std::size_t> bounds(chunks + 1);
         for (std::size_t c = 0; c <= chunks; ++c) {
@@ -512,9 +530,13 @@ bool cross_sectional_correlation(const double* y_true,
     // that was supposed to be parallel. Hence the explicit n_dates > 1.
     const bool parallel_over_dates =
         n_dates > 1 &&
-        sqt::omp_policy::worth_parallel(n_dates, n_rows / n_dates);
+        sqt::omp_policy::worth_parallel(
+            n_dates, n_rows / n_dates,
+            spearman ? sqt::omp_policy::cost::cross_section_spearman
+                     : sqt::omp_policy::cost::cross_section_pearson);
     const bool parallel_within_segment = (n_dates == 1);
 
+    const sqt::omp_policy::parallel_call omp_call(parallel_over_dates);
     #pragma omp parallel for schedule(guided) reduction(|| : alloc_error) \
         if (parallel_over_dates) \
         num_threads(sqt::omp_policy::max_threads() > 0 \
@@ -589,9 +611,11 @@ bool standardize_by_date(const double* values,
 
     bool alloc_error = false;
 
+    const sqt::omp_policy::parallel_call omp_call(
+        n_dates, (n_rows / (n_dates ? n_dates : 1)) * n_cols,
+        sqt::omp_policy::cost::standardize_by_date);
     #pragma omp parallel for schedule(guided) reduction(|| : alloc_error) \
-        if (sqt::omp_policy::worth_parallel(n_dates, \
-                                            (n_rows / (n_dates ? n_dates : 1)) * n_cols)) \
+        if (omp_call.parallel()) \
         num_threads(sqt::omp_policy::max_threads() > 0 \
                         ? sqt::omp_policy::max_threads() : omp_get_max_threads())
     for (std::ptrdiff_t date = 0; date < static_cast<std::ptrdiff_t>(n_dates); ++date) {
@@ -699,7 +723,13 @@ bool rank_by_date(const double* values,
 
     bool alloc_error = false;
 
-    #pragma omp parallel for schedule(guided) reduction(|| : alloc_error)         if (sqt::omp_policy::worth_parallel(n_dates,                                             (n_rows / (n_dates ? n_dates : 1)) * n_cols))         num_threads(sqt::omp_policy::max_threads() > 0                         ? sqt::omp_policy::max_threads() : omp_get_max_threads())
+    const sqt::omp_policy::parallel_call omp_call(
+        n_dates, (n_rows / (n_dates ? n_dates : 1)) * n_cols,
+        sqt::omp_policy::cost::rank_by_date);
+    #pragma omp parallel for schedule(guided) reduction(|| : alloc_error) \
+        if (omp_call.parallel()) \
+        num_threads(sqt::omp_policy::max_threads() > 0 \
+                        ? sqt::omp_policy::max_threads() : omp_get_max_threads())
     for (std::ptrdiff_t date = 0; date < static_cast<std::ptrdiff_t>(n_dates); ++date) {
         const auto d = static_cast<std::size_t>(date);
         const std::size_t n = counts[d];
@@ -861,8 +891,14 @@ bool permutation_null_ic(const double* target,
     }
 
     bool alloc_error = false;
-    #pragma omp parallel for schedule(static) reduction(|| : alloc_error) \
-        if (sqt::omp_policy::worth_parallel(n_permutations, n_rows)) \
+    // guided, the codebase default: every draw is the same work, but the
+    // threads running them are not the same speed, and static's equal split
+    // finished with its slowest thread (guided is 1.1-1.8x faster at 12-16
+    // threads, measured, and even at 6).
+    const sqt::omp_policy::parallel_call omp_call(n_permutations, n_rows,
+                                                  sqt::omp_policy::cost::permutation_null);
+    #pragma omp parallel for schedule(guided) reduction(|| : alloc_error) \
+        if (omp_call.parallel()) \
         num_threads(sqt::omp_policy::max_threads() > 0 \
                         ? sqt::omp_policy::max_threads() : omp_get_max_threads())
     for (std::ptrdiff_t perm = 0; perm < static_cast<std::ptrdiff_t>(n_permutations);
@@ -927,8 +963,10 @@ bool label_uniqueness(const long long* dates,
 
     bool alloc_error = false;
 
+    const sqt::omp_policy::parallel_call omp_call(n_entities, n_rows / n_entities,
+                                                  sqt::omp_policy::cost::label_uniqueness);
     #pragma omp parallel for schedule(guided) reduction(|| : alloc_error) \
-        if (sqt::omp_policy::worth_parallel(n_entities, n_rows / n_entities)) \
+        if (omp_call.parallel()) \
         num_threads(sqt::omp_policy::max_threads() > 0 \
                         ? sqt::omp_policy::max_threads() : omp_get_max_threads())
     for (std::ptrdiff_t entity = 0;

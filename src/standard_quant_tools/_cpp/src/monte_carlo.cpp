@@ -1,3 +1,4 @@
+#include "sqt/fp_contract.hpp"  // first: no contraction in this unit
 #include "sqt/monte_carlo.hpp"
 
 #include "sqt/numerics.hpp"
@@ -77,7 +78,8 @@ bool simulate_forward_paths_into(
     // reasoning -- why `if(<count> > 1)` is both too eager and too greedy,
     // with the measurements -- lives once in omp_policy.hpp's header
     // comment rather than being restated at each call site.
-    #pragma omp parallel if(sqt::omp_policy::worth_parallel(static_cast<std::size_t>(n_simulations), horizon)) num_threads(sqt::omp_policy::max_threads() > 0 ? sqt::omp_policy::max_threads() : omp_get_max_threads())
+    const sqt::omp_policy::parallel_call omp_call(static_cast<std::size_t>(n_simulations), horizon, sqt::omp_policy::cost::bootstrap_paths);
+    #pragma omp parallel if(omp_call.parallel()) num_threads(sqt::omp_policy::max_threads() > 0 ? sqt::omp_policy::max_threads() : omp_get_max_threads())
 #endif
     {
         std::mt19937_64 gen;
@@ -196,7 +198,8 @@ bool simulate_forward_paths_terminal_into(
     // reasoning -- why `if(<count> > 1)` is both too eager and too greedy,
     // with the measurements -- lives once in omp_policy.hpp's header
     // comment rather than being restated at each call site.
-    #pragma omp parallel if(sqt::omp_policy::worth_parallel(static_cast<std::size_t>(n_simulations), horizon)) num_threads(sqt::omp_policy::max_threads() > 0 ? sqt::omp_policy::max_threads() : omp_get_max_threads())
+    const sqt::omp_policy::parallel_call omp_call(static_cast<std::size_t>(n_simulations), horizon, sqt::omp_policy::cost::bootstrap_terminal);
+    #pragma omp parallel if(omp_call.parallel()) num_threads(sqt::omp_policy::max_threads() > 0 ? sqt::omp_policy::max_threads() : omp_get_max_threads())
 #endif
     {
         std::mt19937_64 gen;

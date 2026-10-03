@@ -1,3 +1,4 @@
+#include "sqt/fp_contract.hpp"  // first: no contraction in this unit
 #include <optional>
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
@@ -26,6 +27,7 @@
 #include "sqt/panel_stats.hpp"
 #include "sqt/build_info.hpp"
 #include "sqt/isa_dispatch.hpp"
+#include "sqt/correlation.hpp"
 
 namespace py = pybind11;
 
@@ -2427,9 +2429,18 @@ PYBIND11_MODULE(_sqt_core, m) {
            Array1D rate,
            Array1D dividend_yield,
            py::array_t<std::uint8_t, py::array::c_style | py::array::forcecast> is_call,
-           bool grid) -> py::dict
+           bool grid,
+           std::uint32_t outputs) -> py::dict
         {
             constexpr const char* fn = "black_scholes_greeks_batch";
+            constexpr std::uint32_t every_output =
+                sqt::kGreeksAll | sqt::kGreekPriceFinite;
+            if (outputs == 0 || (outputs & ~every_output) != 0)
+                throw std::invalid_argument(
+                    std::string(fn) + ": outputs must select at least one of bits "
+                    "0-12 (price, delta, gamma, vega, theta, rho, vanna, volga, "
+                    "charm, speed, d1, d2, price_finite) and no other, got " +
+                    std::to_string(outputs));
             require_1d(spot, "spot");
             require_1d(strike, "strike");
             require_1d(time_to_expiry, "time_to_expiry");
@@ -2462,18 +2473,30 @@ PYBIND11_MODULE(_sqt_core, m) {
             } else {
                 shape = {n_contracts};
             }
+            // Only the selected outputs are allocated; the kernel computes
+            // and writes exactly the ones whose pointer is set.
             const char* names[] = {"price", "delta", "gamma", "vega",  "theta", "rho",
                                    "vanna", "volga", "charm", "speed", "d1",    "d2"};
-            std::vector<py::array_t<double>> arrays;
-            arrays.reserve(12);
-            for (int i = 0; i < 12; ++i) arrays.emplace_back(shape);
+            std::vector<py::object> arrays(12);
+            double* slots[12] = {};
+            for (std::size_t i = 0; i < 12; ++i) {
+                if (outputs & (1u << i)) {
+                    py::array_t<double> a(shape);
+                    slots[i] = a.mutable_data();
+                    arrays[i] = std::move(a);
+                }
+            }
+            py::object price_finite;
+            std::uint8_t* finite_slot = nullptr;
+            if (outputs & sqt::kGreekPriceFinite) {
+                py::array_t<std::uint8_t> a(shape);
+                finite_slot = a.mutable_data();
+                price_finite = std::move(a);
+            }
             sqt::BlackScholesGreeksOut out{
-                arrays[0].mutable_data(), arrays[1].mutable_data(),
-                arrays[2].mutable_data(), arrays[3].mutable_data(),
-                arrays[4].mutable_data(), arrays[5].mutable_data(),
-                arrays[6].mutable_data(), arrays[7].mutable_data(),
-                arrays[8].mutable_data(), arrays[9].mutable_data(),
-                arrays[10].mutable_data(), arrays[11].mutable_data()};
+                slots[0], slots[1], slots[2], slots[3], slots[4],  slots[5],
+                slots[6], slots[7], slots[8], slots[9], slots[10], slots[11],
+                finite_slot};
             const double* s = spot.data();
             const double* k = strike.data();
             const double* t = time_to_expiry.data();
@@ -2488,7 +2511,10 @@ PYBIND11_MODULE(_sqt_core, m) {
                     static_cast<std::size_t>(n_contracts), grid, out);
             }
             py::dict d;
-            for (int i = 0; i < 12; ++i) d[names[i]] = arrays[static_cast<std::size_t>(i)];
+            for (std::size_t i = 0; i < 12; ++i) {
+                if (outputs & (1u << i)) d[names[i]] = arrays[i];
+            }
+            if (outputs & sqt::kGreekPriceFinite) d["price_finite"] = price_finite;
             return d;
         },
         py::arg("spot"),
@@ -2499,6 +2525,7 @@ PYBIND11_MODULE(_sqt_core, m) {
         py::arg("dividend_yield"),
         py::arg("is_call"),
         py::arg("grid") = false,
+        py::arg("outputs") = static_cast<std::uint32_t>(sqt::kGreeksAll),
         "Black-Scholes-Merton price and greeks for every contract of a batch.\n\n"
         "The numbers analysis.derivatives.option_greeks returns, in its units:\n"
         "vega and vanna per volatility point, volga per point squared, theta\n"
@@ -2507,9 +2534,15 @@ PYBIND11_MODULE(_sqt_core, m) {
         "grid=False: spot has one entry per contract and every output is 1-D.\n"
         "grid=True: every contract is valued at every spot and every output is\n"
         "(n_contracts, n_spots). A contract or spot outside the pricing domain\n"
-        "gives NaN in its cells. Returns a dict: price, delta, gamma, vega,\n"
-        "theta, rho, vanna, volga, charm, speed, d1, d2. Every array is 1-D;\n"
-        "anything else raises ValueError.");
+        "gives NaN in its cells.\n\n"
+        "outputs selects what is computed, one bit each: price (bit 0), delta,\n"
+        "gamma, vega, theta, rho, vanna, volga, charm, speed, d1, d2 (bit 11),\n"
+        "and price_finite (bit 12, uint8: 1 where the price is a finite\n"
+        "number, decided without forming it). The default is the twelve\n"
+        "greeks. Only the selected outputs are computed or returned, and each\n"
+        "is the array the full call returns for it. Returns a dict of the\n"
+        "selected arrays. Every input array is 1-D; anything else raises\n"
+        "ValueError.");
 
     // ── CUSUM over simulated paths ────────────────────────────────────────────
     //
@@ -2564,4 +2597,70 @@ PYBIND11_MODULE(_sqt_core, m) {
         "which NaN it carries can differ.\n\n"
         "Returns a 1-D float64 array with one peak per row. z must be 2-D and\n"
         "n_reference >= 0; anything else raises ValueError.");
+
+    // ── Pearson correlation, pandas' arithmetic ───────────────────────────────
+    //
+    // The panel is read in place through its strides, in either order: the
+    // matrix DataFrame.to_numpy() returns for a frame of one dtype is
+    // Fortran-ordered, and copying it to C order would cost a pass over the
+    // panel for nothing. Only a stride that is not a whole number of doubles
+    // (a view into a byte-offset buffer) is copied to C order first. The data
+    // is not validated: NaN and +/-inf are missing values, exactly as pandas
+    // treats them, and min_periods is taken as pandas takes it.
+
+    m.def(
+        "pearson_correlation",
+        [](py::array_t<double, py::array::forcecast> values,
+           long long min_periods) -> py::array_t<double>
+        {
+            constexpr const char* fn = "pearson_correlation";
+            if (values.ndim() != 2)
+                throw std::invalid_argument(
+                    std::string(fn) + ": values must be a 2-D array (n_rows, n_cols), "
+                    "got ndim=" + std::to_string(values.ndim()));
+            constexpr auto item = static_cast<py::ssize_t>(sizeof(double));
+            py::array_t<double, py::array::c_style | py::array::forcecast> contiguous;
+            const double* data = values.data();
+            std::ptrdiff_t row_stride = 0;
+            std::ptrdiff_t col_stride = 0;
+            if (values.strides(0) % item == 0 && values.strides(1) % item == 0) {
+                row_stride = static_cast<std::ptrdiff_t>(values.strides(0) / item);
+                col_stride = static_cast<std::ptrdiff_t>(values.strides(1) / item);
+            } else {
+                contiguous =
+                    py::array_t<double, py::array::c_style | py::array::forcecast>::ensure(
+                        values);
+                if (!contiguous) throw py::error_already_set();
+                data = contiguous.data();
+                row_stride = static_cast<std::ptrdiff_t>(values.shape(1));
+                col_stride = 1;
+            }
+            const auto n_rows = static_cast<std::size_t>(values.shape(0));
+            const auto n_cols = static_cast<std::size_t>(values.shape(1));
+            py::array_t<double> out({values.shape(1), values.shape(1)});
+            double* out_ptr = out.mutable_data();
+            {
+                py::gil_scoped_release release;
+                sqt::pearson_correlation_into(data, n_rows, n_cols, row_stride,
+                                              col_stride, min_periods, out_ptr);
+            }
+            return out;
+        },
+        py::arg("values"),
+        py::arg("min_periods") = 1,
+        "Pearson correlation matrix of the columns of a 2-D panel, as pandas'\n"
+        "DataFrame.corr() computes it, before pandas 3's clip to [-1, 1].\n\n"
+        "The arithmetic of pandas._libs.algos.nancorr(values, cov=False,\n"
+        "minp=min_periods), operation for operation: per pair, a Welford\n"
+        "recursion over the rows where both values are finite (NaN and +/-inf\n"
+        "are missing), in row order; NaN when fewer than min_periods rows remain\n"
+        "or the divisor sqrt(ssqdmx * ssqdmy) is 0. Pairs of columns finite on\n"
+        "every row share each column's recursion, which reorders nothing, so\n"
+        "every cell is pandas' to the bit, on any number of threads.\n\n"
+        "The coefficient is NOT clipped: pandas 3 clips it to [-1, 1] and\n"
+        "pandas 2 does not, so the caller clips exactly when the installed\n"
+        "pandas does.\n\n"
+        "Returns a (n_cols, n_cols) float64 array, exactly symmetric. values\n"
+        "must be 2-D, read in place in C or Fortran order; anything else raises\n"
+        "ValueError.");
 }

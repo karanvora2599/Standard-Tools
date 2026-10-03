@@ -11,15 +11,16 @@ and answer for every contract at once:
 - `implied_volatility_batch` -- the scalar `implied_volatility`, contract
   for contract.
 - `black_scholes_greeks_batch` -- the price and the full greek set of
-  `analysis.derivatives.option_greeks`, per contract or on a grid of spots.
+  `analysis.derivatives.option_greeks`, per contract or on a grid of spots,
+  or only the greeks a caller names.
 - `zero_gamma_spot` -- where a book's aggregate signed gamma changes sign,
   or a statement that it does not inside the bracket.
 
 THE SAME NUMBERS, NOT CLOSE ONES. Each batch function is the scalar
 function's arithmetic, operation for operation, in both of its paths: the
 compiled kernel (`_sqt_core`) and the numpy fallback beside it. The
-fallback does its arithmetic in numpy but takes exp, log, pow and erf from
-the `math` module -- the functions the scalar formulas call -- because
+fallback does its arithmetic in numpy but takes exp, log and erf from the
+`math` module -- the functions the scalar formulas call -- because
 numpy's own vectorised transcendentals may round differently in the last
 bit on some CPUs, and a last-bit difference in a price is enough to move an
 iteration count or tip a quote across a no-arbitrage bound. Tests hold all
@@ -47,7 +48,8 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Any, Callable, Dict, List, Optional, Tuple
+import sys
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
 import numpy as np
 
@@ -126,6 +128,11 @@ _MAX_VOLATILITY = 100.0
 #: The bisection may exit on the PRICE tolerance only once its bracket is
 #: narrower than this, as in the scalar solver.
 _PRICE_EXIT_WIDTH = 1e-4
+#: An exponent at or below this cannot carry a spot or strike of at most
+#: `_MAX_PRICE` past the largest double: `_MAX_PRICE * exp(x)` is then at
+#: least a factor e^2 short of it, far more than the last-bit error of
+#: `math.exp` and of the product. About 680.15.
+_DISCOUNT_SCREEN = math.log(sys.float_info.max) - math.log(_MAX_PRICE) - 2.0
 
 
 # ── the transcendentals, from `math` ────────────────────────────────────
@@ -154,10 +161,9 @@ def _from_math(fn: Callable[..., float], nargs: int = 1) -> Callable[..., np.nda
 
 _exp = _from_math(math.exp)
 _log = _from_math(math.log)
-# `volatility**2` in analysis.options is CPython's pow(v, 2.0), which is not
-# always v * v in the last bit; derivatives.py multiplies. Each formula
-# below squares the way the scalar it mirrors does.
-_pow = _from_math(math.pow, 2)
+# Every formula below squares a volatility as `v * v`, the way both scalar
+# modules do. (analysis.options squared through pow(v, 2.0) until the
+# CHANGELOG entry of 2026-10-02, and this module with it.)
 
 
 def _native(name: str) -> Any:
@@ -356,9 +362,28 @@ def _validate_discounting(
     1e12 discounted at r=-9 over 77 years is 1e316. The scalar finds this as
     a non-finite price part-way through a solve; a batch refuses it before
     any contract is solved, with the same words.
+
+    Called after `_validate_domain`, so every spot and strike is at most
+    `_MAX_PRICE` and every exponent is finite. The exact test -- the
+    product, with the exponential from `math` -- runs only on contracts
+    whose exponent is past `_DISCOUNT_SCREEN`, since no other contract can
+    overflow; on a real chain that is none of them, and the test costs two
+    multiplies per contract instead of two `math.exp` calls. The kernel's
+    own `not_priceable` code is not a substitute: it reports a price of zero
+    as `price_not_positive` before it looks at the discounting, where this
+    refuses the batch.
     """
     with np.errstate(over="ignore", invalid="ignore"):
-        bad = ~np.isfinite(strike * _exp(-rate * t)) | ~np.isfinite(spot * _exp(-q * t))
+        near = (-rate * t > _DISCOUNT_SCREEN) | (-q * t > _DISCOUNT_SCREEN)
+    if not near.any():
+        return
+    at = np.flatnonzero(near)
+    with np.errstate(over="ignore", invalid="ignore"):
+        overflow = ~np.isfinite(strike[at] * _exp(-rate[at] * t[at])) | ~np.isfinite(
+            spot[at] * _exp(-q[at] * t[at])
+        )
+    bad = np.zeros(near.shape, dtype=bool)
+    bad[at[overflow]] = True
     if bad.any():
 
         def check(i: int) -> None:
@@ -545,9 +570,9 @@ class _Chain:
         return sub
 
     def d1(self, sigma: np.ndarray) -> np.ndarray:
-        # analysis.options._d1_d2, volatility squared through pow.
+        # analysis.options._d1_d2, term for term.
         return (
-            self.log_moneyness + (self.r - self.q + 0.5 * _pow(sigma, 2.0)) * self.t
+            self.log_moneyness + (self.r - self.q + 0.5 * sigma * sigma) * self.t
         ) / (sigma * self.sqrt_t)
 
     def model(self, sigma: np.ndarray, d1: np.ndarray) -> np.ndarray:
@@ -756,6 +781,7 @@ def black_scholes_greeks_batch(
     is_call: Any = True,
     *,
     grid: bool = False,
+    greeks: Optional[Union[str, Iterable[str]]] = None,
 ) -> Dict[str, Any]:
     """
     The Black-Scholes-Merton price and full greek set of every contract in
@@ -778,15 +804,32 @@ def black_scholes_greeks_batch(
     row i is contract i across the grid, which is the shape a gamma profile
     or a scenario revaluation reads.
 
+    `greeks` names the outputs to compute -- one name or several, from
+    `GREEKS` -- and None (the default) is all of them. Only those are
+    computed and returned: a gamma profile, `greeks=("gamma",)`, takes no
+    erf at all and a twelfth of the memory, and a hedge, `greeks=("delta",)`,
+    one erf per cell where the full set takes two. Each selected array is
+    the full call's array for that name, bit for bit, and a selection
+    refuses exactly the inputs the full call refuses, with the same words
+    -- including a price that comes out non-finite, which is detected
+    without forming the price.
+
     Refuses, with the scalar's `ValidationError` naming the contract, any
     input outside the pricing domain (the rules of `black_scholes_price`,
     which are also `price_option`'s) and any contract whose price comes out
     non-finite.
 
     Returns:
-        Dict with one array per entry of `GREEKS`, plus `units` and `path`.
+        Dict with one array per selected entry of `GREEKS` (every entry by
+        default), `units` for those of them that have one, and `path`.
+
+    Raises:
+        ValidationError: an input outside the pricing domain, a price that
+            is not finite, or a `greeks` selection that names nothing or
+            names something not in `GREEKS`.
     """
     fn = "black_scholes_greeks_batch"
+    names = _selection(greeks, fn)
     contract = dict(
         strike=_floats(strike, "strike", fn),
         time_to_expiry=_floats(time_to_expiry, "time_to_expiry", fn),
@@ -823,16 +866,75 @@ def black_scholes_greeks_batch(
         _validate_domain(fn, shape, spots, k, t, r, q, v)
         out_shape = shape
 
-    values = _greeks_arrays(spots, k, t, v, r, q, call, grid)
-    price = values["price"].reshape(-1)
-    if not np.isfinite(price).all():
-        first = int(np.flatnonzero(~np.isfinite(price))[0])
+    # A selection without the price gets a flag of where it would be
+    # non-finite instead, so it refuses what the full call refuses.
+    values = _greeks_arrays(
+        spots, k, t, v, r, q, call, grid, names, price_finite="price" not in names
+    )
+    if "price" in values:
+        unpriceable = ~np.isfinite(values["price"].reshape(-1))
+    else:
+        unpriceable = ~values["price_finite"].reshape(-1)
+    if unpriceable.any():
+        first = int(np.flatnonzero(unpriceable)[0])
         where = _where(out_shape, first)
-        _scalar._require_finite_price(float(price[first]), f"{fn}: {where}")
-    result: Dict[str, Any] = {name: values[name].reshape(out_shape) for name in GREEKS}
-    result["units"] = dict(GREEK_UNITS)
+        if "price" in values:
+            price = float(values["price"].reshape(-1)[first])
+        else:
+            # The one cell, priced: the refusal quotes the value the full
+            # call would have, and a cell is the same double alone.
+            i, j = divmod(first, spots.size) if grid else (first, first)
+            one = slice(i, i + 1)
+            price = float(
+                _greeks_arrays(
+                    spots[j : j + 1],
+                    k[one],
+                    t[one],
+                    v[one],
+                    r[one],
+                    q[one],
+                    call[one],
+                    False,
+                    ("price",),
+                )["price"][0]
+            )
+        _scalar._require_finite_price(price, f"{fn}: {where}")
+    result: Dict[str, Any] = {name: values[name].reshape(out_shape) for name in names}
+    result["units"] = {
+        name: words for name, words in GREEK_UNITS.items() if name in names
+    }
     result["path"] = values["path"]
     return result
+
+
+def _selection(greeks: Any, fn: str) -> Tuple[str, ...]:
+    """The `greeks` argument as names, in `GREEKS` order; None is all."""
+    if greeks is None:
+        return GREEKS
+    try:
+        asked = [greeks] if isinstance(greeks, str) else list(greeks)
+    except TypeError:
+        asked = [greeks]
+    unknown = [
+        name for name in asked if not isinstance(name, str) or name not in GREEKS
+    ]
+    if unknown:
+        raise ValidationError(
+            f"{fn}: greeks must name entries of GREEKS ({', '.join(GREEKS)}), "
+            f"got {unknown[0]!r}. Pass greeks=None for all of them."
+        )
+    if not asked:
+        raise ValidationError(
+            f"{fn}: greeks selects nothing. Name the greeks to compute, e.g. "
+            "greeks=('gamma',), or pass greeks=None for all of them."
+        )
+    return tuple(name for name in GREEKS if name in asked)
+
+
+#: The kernel's output bits: one per entry of GREEKS in order, then the
+#: price_finite flag.
+_GREEK_BITS = {name: 1 << i for i, name in enumerate(GREEKS)}
+_PRICE_FINITE_BIT = 1 << len(GREEKS)
 
 
 def _greeks_arrays(
@@ -844,13 +946,25 @@ def _greeks_arrays(
     q: np.ndarray,
     call: np.ndarray,
     grid: bool,
+    names: Tuple[str, ...] = GREEKS,
+    price_finite: bool = False,
 ) -> Dict[str, Any]:
-    """Validated, flat inputs in; the twelve greek arrays out, flat
-    (contracts x spots, row-major, under `grid`)."""
+    """
+    Validated, flat inputs in; the arrays named in `names` out, flat
+    (contracts x spots, row-major, under `grid`). With `price_finite`, also
+    a boolean array that is True where the price is a finite number.
+    """
     kernel = _native("black_scholes_greeks_batch")
     if kernel is not None:
-        raw = kernel(spots, k, t, v, r, q, call.astype(np.uint8), bool(grid))
-        out = {name: np.asarray(raw[name]).reshape(-1) for name in GREEKS}
+        bits = sum(_GREEK_BITS[name] for name in names)
+        if price_finite:
+            bits |= _PRICE_FINITE_BIT
+        raw = kernel(spots, k, t, v, r, q, call.astype(np.uint8), bool(grid), bits)
+        out: Dict[str, Any] = {
+            name: np.asarray(raw[name]).reshape(-1) for name in names
+        }
+        if price_finite:
+            out["price_finite"] = np.asarray(raw["price_finite"]).reshape(-1) != 0
         out["path"] = "C++"
         return out
     if grid:
@@ -859,70 +973,116 @@ def _greeks_arrays(
         k, t, v, r, q, call = (x[column] for x in (k, t, v, r, q, call))
     else:
         spots_b = spots
-    out = _greeks_python(spots_b, k, t, v, r, q, call)
-    out = {
-        name: np.broadcast_to(out[name], np.broadcast(spots_b, k).shape).reshape(-1)
-        for name in GREEKS
-    }
+    values = _greeks_python(spots_b, k, t, v, r, q, call, names, price_finite)
+    shape = np.broadcast(spots_b, k).shape
+    wanted = names + (("price_finite",) if price_finite else ())
+    out = {name: np.broadcast_to(values[name], shape).reshape(-1) for name in wanted}
     out["path"] = "python"
     return out
 
 
-def _greeks_python(spot, strike, t, vol, rate, q, call) -> Dict[str, np.ndarray]:
+def _greeks_python(
+    spot,
+    strike,
+    t,
+    vol,
+    rate,
+    q,
+    call,
+    names: Tuple[str, ...] = GREEKS,
+    price_finite: bool = False,
+) -> Dict[str, np.ndarray]:
     """
-    The numpy fallback: `option_greeks` term for term, elementwise.
+    The numpy fallback: `option_greeks` term for term, elementwise, for the
+    outputs in `names`.
 
     Both the call and the put expressions are formed and `call` picks one;
     each is the scalar's own association, so the selected one is the
-    scalar's double.
+    scalar's double. An intermediate no selected output needs is not
+    formed, and a formed one is the same expression on the same inputs, so
+    a selection is the full call's arrays for those names.
     """
+    want = set(names)
+    out: Dict[str, np.ndarray] = {}
     sqrt_t = np.sqrt(t)
-    growth = _exp(-q * t)
-    discount = _exp(-rate * t)
-    # `vol * vol`, not pow: option_greeks and pricing._black_scholes multiply.
+    growth = discount = pdf_d1 = n1 = n2 = None
+    if price_finite or want & _NEEDS_GROWTH:
+        growth = _exp(-q * t)
+    if price_finite or want & _NEEDS_DISCOUNT:
+        discount = _exp(-rate * t)
+    # `vol * vol`: option_greeks and pricing._black_scholes multiply.
     d1 = (_log(spot / strike) + (rate - q + 0.5 * vol * vol) * t) / (vol * sqrt_t)
     d2 = d1 - vol * sqrt_t
-    pdf_d1 = norm_pdf_array(d1)
-    n1 = norm_cdf_array(np.where(call, d1, -d1))  # N(d1) for a call, N(-d1) for a put
-    n2 = norm_cdf_array(np.where(call, d2, -d2))
-    decay = -spot * pdf_d1 * vol * growth / (2.0 * sqrt_t)
-    shape_term = (
-        pdf_d1 * (2.0 * (rate - q) * t - d2 * vol * sqrt_t) / (2.0 * t * vol * sqrt_t)
-    )
-    price = np.where(
-        call,
-        spot * growth * n1 - strike * discount * n2,
-        strike * discount * n2 - spot * growth * n1,
-    )
-    delta = np.where(call, growth * n1, -growth * n1)
-    rho = np.where(call, strike * t * discount * n2, -strike * t * discount * n2)
-    theta_raw = np.where(
-        call,
-        decay + q * spot * growth * n1 - rate * strike * discount * n2,
-        decay - q * spot * growth * n1 + rate * strike * discount * n2,
-    )
-    charm_raw = np.where(
-        call, -growth * (shape_term - q * n1), -growth * (shape_term + q * n1)
-    )
-    gamma = growth * pdf_d1 / (spot * vol * sqrt_t)
-    vega_raw = spot * growth * pdf_d1 * sqrt_t
-    vanna_raw = -growth * pdf_d1 * d2 / vol
-    volga_raw = vega_raw * d1 * d2 / vol
-    speed = -gamma / spot * (d1 / (vol * sqrt_t) + 1.0)
-    return {
-        "price": price,
-        "delta": delta,
-        "gamma": gamma,
-        "vega": vega_raw / 100.0,
-        "theta": theta_raw / 365.0,
-        "rho": rho / 100.0,
-        "vanna": vanna_raw / 100.0,
-        "volga": volga_raw / 10000.0,
-        "charm": charm_raw / 365.0,
-        "speed": speed,
-        "d1": d1,
-        "d2": d2,
-    }
+    if want & _NEEDS_PDF:
+        pdf_d1 = norm_pdf_array(d1)
+    if want & _NEEDS_N1:  # N(d1) for a call, N(-d1) for a put
+        n1 = norm_cdf_array(np.where(call, d1, -d1))
+    if want & _NEEDS_N2:
+        n2 = norm_cdf_array(np.where(call, d2, -d2))
+    if "price" in want:
+        out["price"] = np.where(
+            call,
+            spot * growth * n1 - strike * discount * n2,
+            strike * discount * n2 - spot * growth * n1,
+        )
+    if "delta" in want:
+        out["delta"] = np.where(call, growth * n1, -growth * n1)
+    if "gamma" in want or "speed" in want:
+        gamma = growth * pdf_d1 / (spot * vol * sqrt_t)
+        out["gamma"] = gamma
+        out["speed"] = -gamma / spot * (d1 / (vol * sqrt_t) + 1.0)
+    if "vega" in want or "volga" in want:
+        vega_raw = spot * growth * pdf_d1 * sqrt_t
+        out["vega"] = vega_raw / 100.0
+        out["volga"] = vega_raw * d1 * d2 / vol / 10000.0
+    if "theta" in want:
+        decay = -spot * pdf_d1 * vol * growth / (2.0 * sqrt_t)
+        theta_raw = np.where(
+            call,
+            decay + q * spot * growth * n1 - rate * strike * discount * n2,
+            decay - q * spot * growth * n1 + rate * strike * discount * n2,
+        )
+        out["theta"] = theta_raw / 365.0
+    if "rho" in want:
+        rho = np.where(call, strike * t * discount * n2, -strike * t * discount * n2)
+        out["rho"] = rho / 100.0
+    if "vanna" in want:
+        out["vanna"] = -growth * pdf_d1 * d2 / vol / 100.0
+    if "charm" in want:
+        shape_term = (
+            pdf_d1
+            * (2.0 * (rate - q) * t - d2 * vol * sqrt_t)
+            / (2.0 * t * vol * sqrt_t)
+        )
+        charm_raw = np.where(
+            call, -growth * (shape_term - q * n1), -growth * (shape_term + q * n1)
+        )
+        out["charm"] = charm_raw / 365.0
+    out["d1"] = d1
+    out["d2"] = d2
+    if price_finite:
+        if "price" in out:
+            out["price_finite"] = np.isfinite(out["price"])
+        else:
+            # The kernel's test, and the same fact: the price is
+            # (spot * growth) * N - (strike * discount) * N' with each N in
+            # [0, 1], or NaN exactly when d1 is -- finite exactly when both
+            # heads are and d1 is not NaN.
+            with np.errstate(over="ignore", invalid="ignore"):
+                out["price_finite"] = (
+                    np.isfinite(spot * growth)
+                    & np.isfinite(strike * discount)
+                    & ~np.isnan(d1)
+                )
+    return out
+
+
+# What each intermediate of `_greeks_python` is needed for.
+_NEEDS_N1 = {"price", "delta", "theta", "charm"}
+_NEEDS_N2 = {"price", "rho", "theta"}
+_NEEDS_PDF = {"gamma", "vega", "theta", "vanna", "volga", "charm", "speed"}
+_NEEDS_GROWTH = _NEEDS_PDF | {"price", "delta"}
+_NEEDS_DISCOUNT = {"price", "rho", "theta"}
 
 
 # ── where a book's gamma changes sign ───────────────────────────────────
@@ -1030,7 +1190,9 @@ def zero_gamma_spot(
     call = np.ones(k.size, dtype=bool)  # gamma does not depend on it
 
     def net_gamma(spots: np.ndarray) -> np.ndarray:
-        gamma = _greeks_arrays(spots, k, t, v, r, q, call, True)["gamma"]
+        # Gamma alone: the full set's gamma, without the two erfs per cell
+        # and eleven other arrays it has no use for.
+        gamma = _greeks_arrays(spots, k, t, v, r, q, call, True, ("gamma",))["gamma"]
         # Summed row by row down each column, a fixed order: a BLAS dot
         # would be free to split it by thread, and the two paths' identical
         # gammas would no longer give identical sums.

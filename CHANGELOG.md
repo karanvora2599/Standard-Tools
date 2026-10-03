@@ -1,5 +1,122 @@
 # Changelog
 
+## The parallel kernels decide on serial time, a selection of greeks computes only itself, and no native unit fuses a multiply-add
+
+- **A region goes parallel when its work would take 150 µs on one thread.**
+  Every parallel kernel used to compare a count of work units with
+  `SQT_OMP_MIN_WORK` (50,000). A unit is about 1 ns of an
+  implied-volatility solve and 140 ns of an Engle-Granger test, so that
+  count suited the option kernels and held the rest back until they had
+  milliseconds of serial work. Each call site now states its units and the
+  measured serial cost of one. From 150 µs the parallel path measured
+  1.4–7× faster on back-to-back calls and about even (0.75–1.2×) on a call
+  made after the runtime's workers had gone idle. Against the previous
+  build, warm/cold: 8–64 Engle-Granger pairs of 252 bars 1.4–6.7×;
+  `rolling_hurst` on 200–300 windows 2.3–5.4×; a 1,000-path, 21-day
+  `simulate_forward_paths` 2.5–7.8×; the five-indicator panel on 16 tickers
+  1.7–4.5×; `fit_preprocess_stats` on 252 × 128 2.2–6.3×; a 256-date
+  Spearman IC 1.9–3.7×; `label_uniqueness` on 64 entities 1.5–2.5×.
+  Implied volatility, greeks and preprocessing keep the parallel path they
+  had at these sizes, and the Pearson cross-sectional correlation, whose
+  per-date loop barely scales, switches at 50,000 rows as before.
+  `SQT_OMP_MIN_WORK`, when set, is the old unit rule exactly.
+- **Pooled rank correlations run from several threads at once share the
+  cores.** The parallel sort behind a pooled Spearman correlation now takes
+  an equal share of the threads among the calls running. From 8 threads it
+  is 1.2–1.6× faster and uses 1.3–1.7× less CPU. Every other region still
+  takes the configured thread count.
+- **`permutation_null_ic` hands out its draws guided**: 1.1–1.8× faster at
+  12–16 threads.
+- **`apply_preprocess_stats` tests for NaN inline.** MSVC compiled
+  `std::isnan` to a call into the C runtime DLL for every value. The inline
+  test is 1.3–1.5× faster on one thread, with identical output.
+- **`black_scholes_greeks_batch(..., greeks=("gamma",))` computes and
+  returns only the greeks it names.** Pass one name or several from
+  `GREEKS`; `None`, the default, is all twelve, as before. Each selected
+  array is the full call's array to the bit, and a selection refuses exactly
+  what the full call refuses, in the same words. A price that comes out
+  non-finite is caught without computing the price. Gamma alone takes no
+  erf and writes one array instead of twelve. On one thread a 2,000-contract
+  × 201-spot gamma grid is 4.6–5× faster than the full set was, and the full
+  set itself is 1.5× faster, because each contract's terms are now formed
+  once per contract instead of once per cell. `zero_gamma_spot` now asks for
+  gamma alone (3.4–4×), `simulate_delta_hedge` for delta (1.1–1.3×), and
+  `option_risk_scenarios` for the price.
+- **`analysis.options`, the implied-volatility kernel and its numpy
+  fallback square the volatility as `v * v`.** They used `v**2`, the C
+  library's `pow(v, 2.0)`, which on the Windows runtime misses the correctly
+  rounded square in the last bit for about 1 volatility in 2,000;
+  `derivatives` and `pricing` already multiplied. The three paths still
+  agree to the bit, and `black_scholes_price` now equals `price_option` to
+  the bit. About 0.01–0.03% of implied volatilities change: by at most
+  1.2e-14 relative, except one deep out-of-the-money quote that moves
+  1.6e-10, inside the solver's tolerance. About 0.01% of
+  `black_scholes_price` and `black_scholes_greeks` values change, by at most
+  1.3e-14. Across 3 million contracts no reason, iteration count, method,
+  `converged` or `at_bound` flag changes. The solve is 1.5–1.7× faster.
+- **`implied_volatility_batch` checks the discounting only where it can
+  overflow.** Checking every contract for a discounted spot or strike too
+  large for a double cost two `math.exp` calls per contract, about 60% of
+  the wrapper's time. For prices up to 1e12 only an exponent above about 680
+  can overflow, so only those contracts get the exact check, with the same
+  refusal. The wrapper is 1.7–2.9× faster overall.
+- **No floating-point contraction in any native unit, and clang-cl is a
+  correct opt-in build.** The rule that keeps the compiler from fusing
+  `a*b + c` into one fused multiply-add covered `options.cpp` and
+  `cusum.cpp` only, and it did not hold for clang-cl at all: clang-cl
+  contracts within an expression by default even under `/fp:precise`, so a
+  clang-cl build moved 27 of 44 sampled kernel outputs and failed 41 tests.
+  Every translation unit, and every library and test executable of the C++
+  suite, now compiles with contraction off in its compiler's own spelling
+  (`/fp:precise` for cl, `/clang:-ffp-contract=off` for clang-cl — a plain
+  `-ffp-contract=off` is silently dropped by that driver — and
+  `-ffp-contract=off` for GCC and Clang), and includes a new header,
+  `sqt/fp_contract.hpp`, first, whose pragma also survives a global
+  `/fp:contract`. Disassembled, a clang-cl module now carries the same three
+  FMA instructions as a cl one, all in the AVX2 intrinsics of
+  `rolling_beta_reduce_avx2`, against 406 before, and its outputs are
+  bit-identical to cl's on the 44-call kernel sample. Two more defects made
+  a clang-cl build wrong rather than different: CMake sets `MSVC` for it, so
+  `__build_info__["openmp_runtime"]` named `vcomp` for a module that links
+  LLVM's runtime, and FindOpenMP linked the MSVC toolset's `libomp.lib`,
+  whose DLL is not in the VC++ redistributable. A clang-cl build now links
+  LLVM's own `libomp.lib`, names it `libomp`, and copies `libomp.dll` beside
+  the extension. When that DLL is missing, `native_build_status()` names
+  each DLL the extension imports that Windows cannot find, instead of
+  stopping at "The specified module could not be found". clang-cl stays an
+  opt-in local build, not for wheels, and PGO options are refused under it.
+- **The C++ suite compiles what ships.** Its libraries compiled the
+  extension's sources at baseline ISA with no LTO whatever the extension was
+  built with. They now take the extension's codegen — contraction off, the
+  `SQT_NATIVE_ARCH` instruction set, LTO in Release, and -O3 under GCC and
+  Clang — through one CMake function both use. Under GCC and Clang on
+  x86-64, `SQT_NATIVE_ARCH=ON` now means `-march=x86-64-v3` (AVX2, FMA,
+  BMI2: the level cl's `/arch:AVX2` targets) rather than `-march=native`,
+  which on an AVX-512 build host turned on instructions no CI runner or
+  second machine has; a compiler that does not know the level name gets
+  `-march=haswell`, the same instruction set.
+- **`hierarchical_risk_parity` is 4.5× faster at 235 assets, to the bit.**
+  Its correlation matrix, `frame.corr()`, was 78–86% of its time: pandas'
+  `nancorr` walks every row once per pair of columns. A new kernel,
+  `pearson_correlation`, is that arithmetic operation for operation — per
+  pair, in row order, over the rows where both values are finite — and is
+  faster without changing a bit: when both columns of a pair are complete,
+  each column's recursion is the same in every pair it is in, so it is
+  computed once and each pair reduces to a row-ordered sum of the same
+  products. A pair with a gap runs pandas' loop as written. pandas 3 clips
+  each coefficient to [-1, 1] and pandas 1.5–2.3 do not; the library asks
+  the installed pandas which it does, once, on a probe where the arithmetic
+  overshoots 1, and if pandas' answer on the probe is not the kernel's at
+  all, `frame.corr()` computes the matrix itself. On a 2,106 × 235 return
+  panel, `frame.corr()` 260 ms → 8–11 ms, and the whole call 341 → 77 ms on
+  pandas 2.3.3 and 295 → 63 ms on pandas 3.0.5, with weights, order and risk
+  contributions bit-identical to the `frame.corr()` path on both.
+- **No result of a parallel kernel changes.** Every one is bit-identical to
+  the previous build at one to sixteen threads, under each threshold setting
+  and wait policy, and from concurrent callers; the thread-count
+  determinism test now also covers a greeks selection and the correlation
+  kernel.
+
 ## The library's own matrix factorizations run on one BLAS thread, OpenMP workers sleep after a region, and a PSD check costs a Cholesky
 
 - **`OMP_WAIT_POLICY` defaults to `PASSIVE`.** MSVC's OpenMP runtime kept

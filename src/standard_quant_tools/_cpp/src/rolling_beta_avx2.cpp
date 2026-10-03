@@ -31,6 +31,7 @@
 // cost is one out-of-line call against a body that loops over an entire
 // window. GCC/Clang LTO is a different optimizer and was not measured here.
 
+#include "sqt/fp_contract.hpp"  // first: no contraction in this unit
 #include "sqt/rolling_beta_avx2.hpp"
 
 // This file is compiled with AVX2+FMA codegen enabled ONLY on x86/x64 (see
