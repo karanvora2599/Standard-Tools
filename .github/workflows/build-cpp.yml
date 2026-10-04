@@ -115,16 +115,13 @@ jobs:
     name: C++ extension (ASan/UBSan, ubuntu)
     if: github.event_name != 'workflow_run'
     runs-on: ubuntu-latest
-    # This job's sanitizer/LD_PRELOAD plumbing could not be verified locally
-    # (no C++ toolchain on the machine that wrote it) -- continue-on-error
-    # until it's proven green on a real run, so a config mistake here (wrong
-    # libasan path, incompatible flag combination) doesn't block unrelated
-    # PRs. Flip this to false once confirmed working. Its C++ suite has run
-    # green; its Python step aborted in ASan's __cxa_throw wrapper until
-    # libstdc++ was preloaded with the runtime (see that step). With it
-    # the step ran the whole suite (13,236 passed), and its one failure
-    # was a benchmark's speed assertion, which instrumentation defeats.
-    continue-on-error: true
+    # This job ran continue-on-error until its sanitizer/LD_PRELOAD plumbing
+    # was proven on a real run. Its C++ suite always passed; its Python step
+    # aborted in ASan's __cxa_throw wrapper until libstdc++ was preloaded
+    # with the runtime (see that step), and with benchmarks deselected the
+    # whole job has run green, so an out-of-bounds write or undefined
+    # behaviour in the extension now fails the build.
+    continue-on-error: false
 
     steps:
       - uses: actions/checkout@v4

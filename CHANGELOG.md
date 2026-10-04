@@ -1,5 +1,15 @@
 # Changelog
 
+## The sanitizer job fails the build
+
+- **The ASan/UBSan job is no longer `continue-on-error`.** It ran that
+  way until its sanitizer setup was proven on a real run. With libstdc++
+  preloaded after the ASan runtime and benchmarks deselected, the whole
+  job ran green on all three of its steps, so an out-of-bounds write or
+  undefined behaviour the instrumented extension hits now fails the C++
+  build instead of being reported beside it. The macOS and Windows legs
+  keep `continue-on-error`.
+
 ## The sanitizer job deselects benchmarks
 
 - **The ASan/UBSan job's Python step runs the whole suite.** With
