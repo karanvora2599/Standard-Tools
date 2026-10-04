@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
 
@@ -384,6 +384,33 @@ def get_feature_ic_decay(input_data: FeatureICDecayInput) -> FeatureICDecayResul
     )
 
 
+def _selection_embargo(
+    requested: Optional[int], meta: Dict[str, Any]
+) -> Tuple[int, Optional[str]]:
+    """
+    The dates `select_features` leaves between its selection window and
+    the holdout, and a note when the default could not be resolved.
+
+    Unset, it is the horizon of the dataset's label (`target_id`
+    "<type>:<horizon>"), the dates whose labels reach into the holdout. A
+    label with no horizon in its id gets no embargo and a note saying so.
+    """
+    if requested is not None:
+        return int(requested), None
+    from standard_quant_tools.modeling.engine import _target_horizon
+
+    target_id = meta.get("target_id")
+    horizon = _target_horizon(target_id)
+    if horizon is None or horizon < 1:
+        return 0, (
+            f"NOTE: target_id {target_id!r} names no horizon, so no dates were "
+            "embargoed between the selection window and the holdout, and a "
+            "label dated near the end of the window may end inside it. Pass "
+            "embargo_dates=<the label's horizon in bars>."
+        )
+    return int(horizon), None
+
+
 def select_features(input_data: SelectFeaturesInput) -> SelectFeaturesResult:
     """
     Choose a feature set: drop the duplicates, drop what does not pass a
@@ -413,7 +440,10 @@ def select_features(input_data: SelectFeaturesInput) -> SelectFeaturesResult:
     feature's IC on the dates after that. Selecting on the whole panel
     put the walk-forward holdout inside the selection, and the top five
     of sixty noise columns chosen that way scored +0.045 out of sample
-    against +0.002 for five chosen blind (findings D4).
+    against +0.002 for five chosen blind (findings D4). The window's last
+    `embargo_dates` dates -- the target horizon unless the caller names a
+    number -- are dropped from it, because their labels end inside the
+    holdout; 0 keeps the window as it was.
 
     The redundancy work comes back with the answer. `clusters` is exactly
     what get_feature_redundancy returns for this panel and threshold, each
@@ -432,6 +462,7 @@ def select_features(input_data: SelectFeaturesInput) -> SelectFeaturesResult:
     features = _resolve_features(meta, input_data.features, input_data.dataset_id)
     _require_features(panel, features, input_data.dataset_id)
 
+    embargo, embargo_note = _selection_embargo(input_data.embargo_dates, meta)
     result = _select_features(
         panel,
         features,
@@ -445,7 +476,11 @@ def select_features(input_data: SelectFeaturesInput) -> SelectFeaturesResult:
         n_permutations=input_data.n_permutations,
         random_seed=input_data.random_seed,
         max_draws=input_data.max_draws,
+        embargo_dates=embargo,
+        correction=input_data.correction,
     )
+    if embargo_note and result["holdout_window"] is not None:
+        result["warnings"].append(embargo_note)
     return SelectFeaturesResult(
         dataset_id=input_data.dataset_id,
         selected=result["selected"],
@@ -463,8 +498,11 @@ def select_features(input_data: SelectFeaturesInput) -> SelectFeaturesResult:
         correlation=(result["correlation"] if input_data.include_correlation else {}),
         selection_window=result["selection_window"],
         holdout_window=result["holdout_window"],
+        embargo_dates=result["embargo_dates"],
+        embargo_window=result["embargo_window"],
         selection_ic=result["selection_ic"],
         selection_p_value=result["selection_p_value"],
+        selection_p_value_adjusted=result["selection_p_value_adjusted"],
         significance=result["significance"],
         holdout_ic=result["holdout_ic"],
         warnings=result["warnings"],
@@ -1267,9 +1305,13 @@ FEATURE_TOOL_DEFS: List[tuple] = [
         "feature series handed to randomly permuted entities, kept at p < "
         "alpha (0.05); drops are reason 'insignificant' with their p-value, "
         "and selection_p_value carries every tested p. On the live panel it "
-        "kept 2 of 8. 'circular_shift' is the screen's null; 'none' keeps "
-        "every non-redundant feature above the floor, as before the test "
-        "existed, and warns. Needs at least 4-5 entities. Deliberately has "
+        "kept 2 of 8. correction='bh' passes on Benjamini-Hochberg adjusted "
+        "p-values instead (off by default). 'circular_shift' is the "
+        "screen's null; 'none' keeps every non-redundant feature above the "
+        "floor, as before the test existed, and warns. Needs at least 4-5 "
+        "entities. The last `embargo_dates` dates before the holdout (the "
+        "target horizon by default) are read by neither side, so no label "
+        "the selection reads ends inside the holdout. Deliberately has "
         "no greedy search -- a selector scored on the panel it selects from "
         "manufactures overfit that looks like evidence. Redundancy is "
         "resolved before the floor and the test, because a cluster is one "

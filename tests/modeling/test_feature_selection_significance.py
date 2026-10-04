@@ -413,6 +413,8 @@ class TestTheGateSelects:
             "random_seed": 0,
             "n_tested": len(features),
             "n_passed": len(result["selected"]),
+            "correction": "none",
+            "n_passed_uncorrected": len(result["selected"]),
         }
         assert set(result["selection_p_value"]) == set(features)
         assert result["selection_p_value"]["signal"] < 0.05

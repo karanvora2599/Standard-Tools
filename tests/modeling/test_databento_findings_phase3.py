@@ -175,10 +175,24 @@ class TestSelectionDoesNotReadTheHoldout:
         assert result.selection_window["n_dates"] > result.holdout_window["n_dates"]
         assert set(result.holdout_ic) == set(result.selected)
         assert result.warnings
+        # The named date is the last before the holdout. By default the
+        # label's five bars before it are embargoed (the CHANGELOG entry of
+        # 2026-10-04), so the selection reads through an earlier date and
+        # the embargo ends on the one named; without the embargo the
+        # selection reads through it.
         explicit = select_features(
             SelectFeaturesInput(dataset_id=dataset_id, selection_end="2023-06-30")
         )
-        assert explicit.selection_window["end"] == "2023-06-30"
+        assert explicit.embargo_dates == 5
+        assert explicit.embargo_window["end"] == "2023-06-30"
+        assert explicit.selection_window["end"] < "2023-06-30"
+        assert explicit.holdout_window["start"] > "2023-06-30"
+        unembargoed = select_features(
+            SelectFeaturesInput(
+                dataset_id=dataset_id, selection_end="2023-06-30", embargo_dates=0
+            )
+        )
+        assert unembargoed.selection_window["end"] == "2023-06-30"
 
 
 # ── D10 ──────────────────────────────────────────────────────────────────

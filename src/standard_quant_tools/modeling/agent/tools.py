@@ -2624,10 +2624,22 @@ def score_predictions(input_data: ScorePredictionsInput) -> ScorePredictionsResu
     be measured with the same yardstick as one built here, and the yardstick
     includes the two things a headline metric leaves out.
 
-    THE BASELINE. The same metrics for predicting the training mean. A model
-    that does not beat it has learned nothing, and an R2 that looks strong
-    beside a baseline that also looks strong usually means the target was
-    easy rather than the model clever.
+    THE BASELINE. The same metrics for predicting the training mean, and
+    `beats_baseline` compares r2 with it. That judges the predictions as
+    VALUES -- their scale and level as well as their order -- so on a
+    ranked or demeaned label a prediction that orders the names well can
+    still lose to the constant. An R2 that looks strong beside a baseline
+    that also looks strong usually means the target was easy rather than
+    the model clever.
+
+    THE HEADLINE TEST. `beats_null` and `headline` are the test a run makes
+    of its own headline (see `modeling.engine._headline_report`), on these
+    predictions: for a regression or ranking frame the per-date
+    cross-sectional rank IC's mean against zero, with a Newey-West t at
+    `headline_lag` for the scored dates and `horizon`, two-sided at 5%;
+    for a classifier the AUC against 0.5, for survival the concordance
+    against 0.5, as points. On a frame from `attach_model_outcomes` with
+    the label's horizon it reproduces the run's own test.
 
     THE EFFECTIVE SAMPLE SIZE. A 20-day forward return sampled daily has far
     fewer independent observations than rows, so any t-statistic computed
@@ -2779,9 +2791,13 @@ def score_predictions(input_data: ScorePredictionsInput) -> ScorePredictionsResu
         beats = bool(metrics["r2"] > baseline["baseline_r2"])
         if not beats:
             notes.append(
-                "This does NOT beat predicting the mean. Whatever the "
-                "headline metric says, the model has not learned anything "
-                "the baseline did not already know."
+                f"r2 {metrics['r2']:.4f} does not beat baseline_r2 "
+                f"{baseline['baseline_r2']:.4f}: as values, these predictions "
+                "did no better than predicting the mean. r2 judges their "
+                "scale and level as well as their order, so on a ranked or "
+                "demeaned label predictions that order the names well can "
+                "still lose here; whether they order them better than chance "
+                "is `beats_null`."
             )
         if baseline.get("baseline_is_oracle"):
             notes.append(
@@ -2812,8 +2828,30 @@ def score_predictions(input_data: ScorePredictionsInput) -> ScorePredictionsResu
             "effective_sample_size assumes NON-overlapping labels (horizon=1). "
             "For a forward return over h bars pass horizon=h: the count of "
             "independent observations is roughly n / h, and a t-statistic read "
-            "off the raw count is overstated by that factor."
+            "off the raw count is overstated by that factor. The headline "
+            "test's Newey-West lag is the Andrews bandwidth alone at "
+            "horizon=1, and max(2h, that bandwidth) at horizon=h."
         )
+
+    # The run's headline test, on these predictions. The adapter names the
+    # metric and its null, and `_headline_report` is the run's own test, so
+    # a frame from attach_model_outcomes scored at the label's horizon
+    # reproduces the run's block.
+    from standard_quant_tools.modeling.adapters import get_adapter
+    from standard_quant_tools.modeling.engine import _headline_report
+
+    adapter = get_adapter(input_data.task)
+    headline_series = None
+    if adapter.headline_series == "cs_rank_ic":
+        headline_series = cross_sectional_ic(y_true, y_pred, dates, "spearman")
+    headline, headline_warnings = _headline_report(
+        adapter, input_data.task, metrics, headline_series, horizon, scope="scored"
+    )
+    headline = {
+        key: (None if isinstance(value, float) and not np.isfinite(value) else value)
+        for key, value in headline.items()
+    }
+    warnings.extend(headline_warnings)
     # Discounted across entities too: rows on one date are one cluster, and
     # names whose outcomes move together hold fewer independent
     # observations than rows / horizon. The entity count used to be passed
@@ -2847,6 +2885,8 @@ def score_predictions(input_data: ScorePredictionsInput) -> ScorePredictionsResu
         cross_sectional_ic={k: float(v) for k, v in ic_summary.items()},
         baseline={k: float(v) for k, v in baseline.items()},
         beats_baseline=beats,
+        beats_null=headline["beats_null"],
+        headline=headline,
         effective_sample_size=ess,
         effective_sample_size_floor=ess_report["floor"],
         effective_sample_size_ceiling=ess_report["ceiling"],
@@ -3567,10 +3607,13 @@ _MODELING_TOOL_DEFS: List[tuple] = [
         "score_predictions",
         "Score a predictions reference against its realized outcome — "
         "accuracy metrics, cross-sectional IC and ICIR, a predict-the-mean "
-        "baseline, and an effective sample size adjusted for overlapping "
-        "forward returns and for outcomes that move together across "
-        "entities, with the two bounds it lies between. Works on predictions "
-        "this library never produced.",
+        "baseline, the headline test a run makes (`beats_null`: the mean "
+        "per-date rank IC against zero with a Newey-West t at the label's "
+        "horizon, or an AUC or concordance against 0.5), and an effective "
+        "sample size adjusted for overlapping forward returns and for "
+        "outcomes that move together across entities, with the two bounds "
+        "it lies between. `beats_baseline` compares r2 only. Works on "
+        "predictions this library never produced.",
         ScorePredictionsInput,
     ),
     (

@@ -183,7 +183,9 @@ class TestPairedComparison:
         assert abs(result["mean_a"]) < 0.15
         assert result["verdict"] == "b_better"
         assert result["diebold_mariano"]["statistic"] > 0
-        assert result["diebold_mariano"]["lag"] == 4
+        # max(2 x 5, floor(4 * 1.2^(2/9)) = 4) on 120 dates: the run
+        # headline's lag, not horizon - 1 (the CHANGELOG entry of 2026-10-04).
+        assert result["diebold_mariano"]["lag"] == 10
         assert result["diebold_mariano"]["loss"] == "squared_error"
         assert result["n_entities"] == 12
 

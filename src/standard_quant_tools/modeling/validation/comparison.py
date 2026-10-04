@@ -27,10 +27,12 @@ rewritten.
 
 THE LOSS TEST IS DIEBOLD-MARIANO, where a loss exists. For a regression
 the per-date mean squared error differential is tested against a
-Newey-West long-run variance at the label horizon, with the
-Harvey-Leybourne-Newbold small-sample correction; for a classifier the
-Brier differential; for a ranker there is no loss with units, so there is
-no DM and the IC difference carries the comparison alone.
+Newey-West long-run variance at `headline_lag` -- max(2h, the Andrews
+bandwidth) for an h-bar label, the lag a run's headline is tested at --
+with the Harvey-Leybourne-Newbold small-sample correction; for a
+classifier the Brier differential; for a ranker there is no loss with
+units, so there is no DM and the IC difference carries the comparison
+alone.
 
 MANY CANDIDATES AGAINST ONE REFERENCE need a multiple-testing correction,
 and the p-values come back Holm-adjusted. What Holm does not do is control
@@ -162,9 +164,11 @@ def newey_west_variance(values: np.ndarray, lag: int) -> float:
     Long-run variance of the MEAN of `values`, Bartlett kernel to `lag`.
 
     gamma_0 + 2 * sum_{k=1..lag} (1 - k/(lag+1)) * gamma_k, divided by n.
-    `lag=0` is the ordinary variance of the mean. The lag to use for an
-    overlapping h-bar label is h-1: two rows h-1 bars apart still share a
-    bar, and beyond that they do not.
+    `lag=0` is the ordinary variance of the mean. For a series of dates
+    whose labels look h bars forward the lag is `headline_lag(n, h)`, not
+    h - 1: two rows h - 1 bars apart still share a bar, but these weights
+    shrink the autocorrelations they keep, and cut at h - 1 they recover
+    68% of a 5-bar overlap's long-run variance (see `headline_lag`).
     """
     x = np.asarray(values, dtype=np.float64)
     n = x.size
@@ -198,6 +202,14 @@ def headline_lag(n_dates: int, horizon: Optional[int]) -> int:
     The Newey-West lag a run's headline is tested at: max(2h, the Andrews
     bandwidth), capped at `n_dates - 1`, with h the target horizon. Without
     a horizon, the Andrews bandwidth alone.
+
+    ONE RULE FOR EVERY MEAN OVER DATES. The same lag is used wherever a
+    per-date series is tested and its horizon is known: the run's headline
+    (`modeling.engine`), `score_predictions`' headline, the Diebold-Mariano
+    test of `paired_comparison` (`compare_models(method='paired')`,
+    `compare_signals(mode='paired')`) and `compare_signals(mode=
+    'ic_series')`'s long-run variance. A lag the caller names is used as
+    named.
 
     WHY 2h AND NOT h - 1. Daily ICs of an h-day forward-return label share
     up to h - 1 days of outcome, so their autocorrelation falls roughly
@@ -270,16 +282,31 @@ def mean_vs_null_test(
 
 
 def diebold_mariano(
-    loss_a: pd.Series, loss_b: pd.Series, *, lag: int = 0
+    loss_a: pd.Series,
+    loss_b: pd.Series,
+    *,
+    lag: Optional[int] = None,
+    horizon: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Diebold-Mariano on the per-date loss differential `loss_a - loss_b`.
 
     A POSITIVE statistic means B's loss is smaller. The variance is
-    Newey-West at `lag`, and the statistic carries the Harvey-Leybourne-
-    Newbold correction for the small samples this is used on; the p-value
-    is two-sided normal. NaN when the differential has no variance, which
-    two identical models produce and which is not evidence of anything.
+    Newey-West at `lag`, or, when no lag is named, at `headline_lag` for
+    the dates and `horizon` -- max(2h, the Andrews bandwidth), the Andrews
+    bandwidth alone without a horizon. The statistic carries the Harvey-
+    Leybourne-Newbold correction for the small samples this is used on, at
+    the forecast horizon: `horizon` when given, else `lag + 1` for a named
+    lag (the reading of a lag as h - 1 this function used to take), else
+    one. The p-value is two-sided normal. NaN when the differential has no
+    variance, which two identical models produce and which is not evidence
+    of anything.
+
+    The lag used to be h - 1 for an h-bar label. These Bartlett weights cut
+    there recover 68% of a 5-bar overlap's long-run variance: on 4,000
+    simulated differentials of a 5-bar overlap over 504 dates the test
+    rejected a true zero 11.3% of the time at a nominal 5% at lag 4, and
+    7.9% at lag 10 (see the CHANGELOG entry of 2026-10-04).
     """
     from scipy.stats import norm
 
@@ -293,6 +320,14 @@ def diebold_mariano(
         )
     differential = (joined["a"] - joined["b"]).to_numpy(dtype=np.float64)
     mean = float(differential.mean())
+    if horizon is not None and int(horizon) > 0:
+        h = int(horizon)
+    elif lag is not None:
+        h = int(lag) + 1
+    else:
+        h = 1
+    if lag is None:
+        lag = headline_lag(n, horizon)
     variance = newey_west_variance(differential, int(lag))
     if not math.isfinite(variance) or variance <= 0.0:
         return {
@@ -302,7 +337,6 @@ def diebold_mariano(
             "lag": int(lag),
             "n_dates": n,
         }
-    h = int(lag) + 1
     correction = math.sqrt(max((n + 1 - 2 * h + h * (h - 1) / n) / n, 1e-12))
     statistic = float(mean / math.sqrt(variance) * correction)
     return {
@@ -439,7 +473,8 @@ def paired_comparison(
     labels under the same name. The per-date `metric` is computed for each
     on the joined rows, the difference series is bootstrapped, and where
     the task has a loss with units the Diebold-Mariano test is reported
-    beside it.
+    beside it, its Newey-West lag `headline_lag` of the shared dates and
+    `horizon`.
     """
     if metric not in COMPARISON_METRICS:
         raise ValidationError(
@@ -490,8 +525,10 @@ def paired_comparison(
     loss_a = _per_date_loss(joined, "a", task)
     loss_b = _per_date_loss(joined, "b", task)
     if loss_a is not None and loss_b is not None:
-        lag = max(int(horizon) - 1, 0) if horizon else 0
-        dm = diebold_mariano(loss_a, loss_b, lag=lag)
+        # The lag is `headline_lag` for the shared dates and the horizon, the
+        # run headline's rule. It was horizon - 1 (zero without a horizon),
+        # which under-corrects an overlapping label: see `headline_lag`.
+        dm = diebold_mariano(loss_a, loss_b, horizon=horizon)
         dm["loss"] = "squared_error" if task == "regression" else "brier"
 
     warnings: List[str] = []

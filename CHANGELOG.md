@@ -1,5 +1,93 @@
 # Changelog
 
+## One Newey-West lag for overlapping labels, an embargo before the selection holdout, and score_predictions tests its headline
+
+- **The Diebold-Mariano test used lag h − 1, which under-corrects an h-bar
+  overlap.** `compare_models(method='paired')` and
+  `compare_signals(mode='paired')` ran it at horizon − 1 (zero without a
+  horizon) while a run's headline was tested at max(2h, the Andrews
+  bandwidth ⌊4(n/100)^(2/9)⌋), capped at n − 1. Bartlett weights cut at h −
+  1 recover 68% of a 5-bar overlap's long-run variance. On 4,000 simulated
+  loss differentials of a 5-bar overlap over 504 dates the test rejected a
+  true zero 11.3% of the time at a nominal 5% at lag 4 and 7.9% at lag 10
+  (20-bar: 12.7% → 10.4%; one bar: 5.0% → 5.3%); two no-skill forecasts,
+  persistent per entity, planted on the live panel's forward_return_rank:5
+  label: 11.2% → 8.2% over 2,000 pairs. A caller who left `compare_signals`'
+  horizon at 1 on a 5-bar label got lag 0 and 38.0%; the Andrews lag it now
+  gets gives 10.0%. The rule is closer to its size, not at it: at 2h these
+  weights still recover 85%.
+- **`headline_lag` is now the lag wherever a horizon is known.**
+  `paired_comparison` passes its horizon to `diebold_mariano`, whose `lag`
+  now defaults to `headline_lag(n, horizon)` (the Andrews bandwidth without
+  a horizon) and whose Harvey-Leybourne-Newbold factor reads the forecast
+  horizon, not lag + 1. A lag the caller names is used as named, and
+  `diebold_mariano(..., lag=h - 1)` returns the old statistic to the bit.
+  `compare_signals(mode='ic_series')` now reads `horizon` for its `hac` lag;
+  at the default horizon of 1 that lag is the Andrews bandwidth it used
+  before, and `hac_lag` still wins. The docstrings and field descriptions
+  that recommended h − 1 now give the rule and why.
+- **What moves.** `diebold_mariano.statistic`, `p_value` and `lag` in
+  `compare_models(method='paired')` pairs and in
+  `compare_signals(mode='paired')`; `hac` in `ic_series` only when a horizon
+  above 1 is passed. The bootstrap interval, its p-value, the Holm
+  adjustment and the verdict do not move. On the live panel, against ridge
+  at a 5-day horizon over 504 dates: hist_gradient_boosting t −6.03 → −4.82
+  (p 1.7e-9 → 1.4e-6), random_forest t −2.18 → −1.74 (p 0.030 → 0.082, no
+  longer below 5%), lag 4 → 10. `compare_signals(mode='paired')` at its
+  default horizon of 1: lag 0 → 5, t −10.56 → −5.76.
+- **`select_features` embargoes the label horizon between its selection
+  window and its holdout.** A label dated on one of the window's last h
+  dates looks h bars forward, into the dates the holdout is scored on, so
+  the selection IC and the significance test read outcomes the holdout
+  shares. `embargo_dates` (default: the target horizon from `target_id`)
+  drops that many dates from the end of the selection window; the holdout is
+  unchanged, and the result records `embargo_dates` and `embargo_window`. 0
+  returns the previous selection bit for bit, and is the library function's
+  default, since it does not know the label. A `target_id` naming no horizon
+  gets no embargo and a note. On the live panel (5-day label) the window
+  goes from 741 dates to 736, ending 2025-06-10 instead of 2025-06-17; the 5
+  dates dropped carry exactly the 150 rows whose recorded `label_end_date`
+  falls in the holdout. The decision does not change: beta_60 and rvol_20
+  kept (p 0.005 each), the six others dropped. Selection ICs move by at most
+  0.0023 (beta_60 +0.0672 → +0.0649) and p-values by up to 0.075 (volsurp_20
+  0.328 → 0.403); `holdout_ic` and the clusters are unchanged, and the VIFs
+  move by at most 0.035 (rsi_14 6.99 → 7.03).
+- **An optional Benjamini-Hochberg correction for the gate.**
+  `correction='bh'` (default `'none'`) passes a representative on its
+  Benjamini-Hochberg adjusted p-value below `alpha`, over every
+  representative tested, an untestable one entering at p = 1, so the kept
+  set is always a subset of the uncorrected one. The result carries
+  `selection_p_value_adjusted`, the significance block gains `correction`
+  and `n_passed_uncorrected`, and a drop's detail and the warning give both.
+  Holm is not offered: a permutation p-value is at least 1/(n_permutations +
+  1), 1/201 at the default, and Holm's first step needs one below alpha/m,
+  so at alpha 0.05 and 200 draws it can pass nothing once more than ten
+  features are tested. On the live panel the correction keeps the same two
+  (adjusted p 0.020 each). Refused with `significance='none'`.
+- **`score_predictions` tests the headline a run tests.** Its one verdict
+  was `beats_baseline`, r2 against the constant, and the shipped reference
+  prompt told an agent to stop when it was false; on a ranked label that
+  judges the predictions' scale, not their order. The result now carries
+  `beats_null` and `headline` (`metric`, `null`, `value`, `n_dates`,
+  `t_stat`, `t_stat_uncorrected`, `p_value`, `hac_lag`,
+  `ic_autocorrelation_lag1`, `beats_null`), computed by the run's own test
+  at `headline_lag` for the scored dates and `horizon`, its warnings worded
+  for scored dates. On a registered model's predictions, attached to their
+  outcomes and scored at the label's horizon, it reproduces
+  `validation_report["headline"]`: on the live panel ridge t 0.30 (p 0.768),
+  hist_gradient_boosting t 1.79 (p 0.074), random_forest t 0.10 (p 0.923) at
+  lag 10. `beats_baseline` is unchanged and now described as an r2
+  comparison; its note no longer says a model that loses it has learned
+  nothing, and points to `beats_null`. The reference prompt
+  (`Implementation/Agent_Model_Backtester.py` and its three provider copies)
+  now stops on `beats_null`.
+- **Unchanged.** Every other `score_predictions` field; the run's own
+  headline block and warnings (its wording takes the dates' description as
+  an argument, and a run passes "out-of-sample"); `select_features` at
+  `embargo_dates=0`, compared whole against the previous output on the live
+  panel. One `select_features` call on the live panel took 1.07 s against
+  1.02 s before (one run each, Python 3.11, pandas 3).
+
 ## A replay under the other pandas no longer calls unchanged data revised, `sqt audit repair-tail` cuts a torn chain index, and `model.skops` reproduces
 
 - **The false revision.** Every provider recorded a fetched frame's

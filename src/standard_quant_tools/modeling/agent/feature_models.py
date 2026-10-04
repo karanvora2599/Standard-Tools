@@ -543,8 +543,20 @@ class SelectionSignificance(BaseModel):
     )
     n_passed: int = Field(
         ...,
-        description="How many of them reached p < alpha. Compare with "
-        "alpha x n_tested, the number noise alone passes on average.",
+        description="How many of them passed: p < alpha, or under "
+        "correction='bh' a Benjamini-Hochberg adjusted p-value below alpha. "
+        "Uncorrected, compare with alpha x n_tested, the number noise alone "
+        "passes on average.",
+    )
+    correction: str = Field(
+        "none",
+        description="'none' (each p-value against alpha) or 'bh' "
+        "(Benjamini-Hochberg over the n_tested p-values).",
+    )
+    n_passed_uncorrected: Optional[int] = Field(
+        None,
+        description="How many reached p < alpha before any correction; equal "
+        "to n_passed when correction='none'.",
     )
 
 
@@ -607,9 +619,23 @@ class SelectFeaturesInput(BaseModel):
         gt=0.0,
         lt=1.0,
         description="A feature passes at a two-sided permutation p-value "
-        "below this. Not corrected for the number of features tested: at "
-        "0.05, about one candidate in twenty passes from noise alone, and "
-        "the warnings say how many that is here.",
+        "below this. Not corrected for the number of features tested unless "
+        "correction='bh': at 0.05, about one candidate in twenty passes from "
+        "noise alone, and the warnings say how many that is here.",
+    )
+    correction: Literal["none", "bh"] = Field(
+        "none",
+        description="'none' (default) passes a feature at p < alpha. 'bh' "
+        "passes it at a Benjamini-Hochberg adjusted p-value below alpha, over "
+        "every representative tested (one that could not be tested counts as "
+        "p = 1), which holds the expected share of the kept features that "
+        "noise kept at or below alpha; the adjusted values are "
+        "`selection_p_value_adjusted`, and the kept set is always a subset of "
+        "the uncorrected one. No family-wise correction (Holm, Bonferroni) is "
+        "offered: a permutation p-value is at least 1/(n_permutations + 1), "
+        "1/201 at the default, and Holm's first step needs one below alpha / "
+        "n_tested, so at alpha 0.05 and 200 draws it can pass nothing once "
+        "more than ten features are tested. Refused with significance='none'.",
     )
     n_permutations: int = Field(
         200,
@@ -634,9 +660,22 @@ class SelectFeaturesInput(BaseModel):
     )
     selection_end: Optional[str] = Field(
         None,
-        description="Last date (YYYY-MM-DD) the selection may read; the dates "
+        description="Last date (YYYY-MM-DD) before the holdout; the dates "
         "after it are held out and each selected feature's IC on them is "
-        "reported as `holdout_ic`. Overrides holdout_fraction.",
+        "reported as `holdout_ic`. The selection reads through it less "
+        "`embargo_dates`. Overrides holdout_fraction.",
+    )
+    embargo_dates: Optional[int] = Field(
+        None,
+        ge=0,
+        description="Dates dropped from the end of the selection window, "
+        "between it and the holdout, so that no label the selection reads "
+        "ends inside the holdout. Unset (default), the dataset's target "
+        "horizon (5 for forward_return_rank:5): a label dated on one of the "
+        "window's last h dates looks h bars forward, into the dates the "
+        "holdout is scored on. The holdout is unchanged. 0 selects on the "
+        "window as it was before the embargo, to the bit. Applies only when "
+        "there is a holdout.",
     )
     holdout_fraction: float = Field(
         0.3,
@@ -679,6 +718,17 @@ class SelectFeaturesResult(BaseModel):
         description="start/end/n_dates of the dates held out, or None when the "
         "selection read the whole panel.",
     )
+    embargo_dates: int = Field(
+        0,
+        description="How many dates between the selection window and the "
+        "holdout neither read: the target horizon by default, 0 when "
+        "embargo_dates=0 was passed or nothing was held out.",
+    )
+    embargo_window: Optional[Dict[str, Any]] = Field(
+        None,
+        description="start/end/n_dates of the embargoed dates, or None when "
+        "none were.",
+    )
     selection_ic: Dict[str, Stat] = Field(
         default_factory=dict,
         description="Each candidate's rank IC on the selection window. "
@@ -690,13 +740,20 @@ class SelectFeaturesResult(BaseModel):
         "for each feature the significance test was run on (the cluster "
         "representatives that cleared min_abs_rank_ic); None for one that "
         "could not be tested. Empty when significance='none'. Not corrected "
-        "for the number of features tested.",
+        "for the number of features tested: under correction='bh' the "
+        "adjusted values are `selection_p_value_adjusted`.",
+    )
+    selection_p_value_adjusted: Dict[str, Stat] = Field(
+        default_factory=dict,
+        description="Under correction='bh', each tested feature's "
+        "Benjamini-Hochberg adjusted p-value, the number it passed or failed "
+        "on (None for one that could not be tested). Empty otherwise.",
     )
     significance: Optional[SelectionSignificance] = Field(
         None,
         description="The test that was run -- null, alpha, permutations, "
-        "seed, how many were tested and how many passed -- or None when "
-        "significance='none' and nothing was tested.",
+        "seed, correction, how many were tested and how many passed -- or "
+        "None when significance='none' and nothing was tested.",
     )
     holdout_ic: Dict[str, Stat] = Field(
         default_factory=dict,

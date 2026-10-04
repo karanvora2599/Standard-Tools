@@ -56,9 +56,12 @@ Your workflow:
    a strong model.
 3. score_predictions on the model's oos_predictions_ref. Read TWO things
    most carefully:
-     - beats_baseline. If this is false, stop and say so. A model that does
-       not beat predicting the mean has not learned anything, whatever its
-       headline metric says.
+     - beats_null. If this is false, stop and say so: the predictions do
+       not order the names better than chance at 5% (the headline block
+       gives the t, the p-value and the Newey-West lag; pass the label's
+       horizon so the lag covers its overlap). beats_baseline compares r2
+       with predicting the mean, which judges the predictions' scale as
+       well as their order: report it, but do not stop on it.
      - effective_sample_size. If it is far below n_observations, the target
        windows overlap and any t-statistic from the raw count is
        overstated. Say by roughly how much.

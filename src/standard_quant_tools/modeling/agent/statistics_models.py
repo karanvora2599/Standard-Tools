@@ -437,11 +437,20 @@ class CompareSignalsInput(BaseModel):
         1,
         ge=1,
         description=(
-            "mode='paired': bars the label looks forward. Sets the lag of "
-            "the Diebold-Mariano long-run variance to horizon - 1, because "
-            "two rows fewer than that many bars apart still share a bar. "
-            "Left at 1 on an overlapping label, the loss test's standard "
-            "error is too small and its p-value too confident."
+            "mode='paired' or 'ic_series': bars the label looks forward. "
+            "Sets the Newey-West lag of the Diebold-Mariano test (paired) "
+            "and of `hac` (ic_series, unless hac_lag is given) to "
+            "max(2 x horizon, floor(4 * (n/100)^(2/9))), capped at n - 1 "
+            "for n dates -- the lag a run's headline is tested at. Not "
+            "horizon - 1: two rows that many bars apart still share a bar, "
+            "but Bartlett weights cut there recover 68% of a 5-bar label's "
+            "long-run variance. Simulated on a 5-bar overlap over 504 "
+            "dates, the Diebold-Mariano test rejected a true zero 11.3% of "
+            "the time at a nominal 5% at lag horizon - 1 and 7.9% at this "
+            "lag. Left at 1 on an overlapping label, the lag is the Andrews "
+            "bandwidth alone (5 at 504 dates, against 10 for a 5-bar label) "
+            "and the p-value is too confident: 10.0% on the same "
+            "simulation."
         ),
     )
 
@@ -470,10 +479,11 @@ class CompareSignalsInput(BaseModel):
         ge=0,
         description=(
             "mode='ic_series': Bartlett-kernel lag for the "
-            "autocorrelation-consistent variance of the mean difference. "
-            "Unset, the usual data-driven rule floor(4 * (n/100)^(2/9)) is "
-            "used. Zero is the ordinary variance of the mean and makes "
-            "hac_ratio exactly 1."
+            "autocorrelation-consistent variance of the mean difference, "
+            "used as given. Unset, max(2 x horizon, floor(4 * "
+            "(n/100)^(2/9))), capped at n - 1: at the default horizon of 1 "
+            "the usual data-driven rule alone. Zero is the ordinary "
+            "variance of the mean and makes hac_ratio exactly 1."
         ),
     )
 

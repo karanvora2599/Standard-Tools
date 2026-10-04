@@ -32,6 +32,7 @@ import pandas as pd
 from standard_quant_tools.error import ValidationError
 
 from ..limits import MAX_PERMUTATION_DRAWS
+from ..validation.comparison import bh_adjust
 from .feature_report import (
     _abs_rank_ic,
     _boundary_date,
@@ -49,6 +50,10 @@ logger = logging.getLogger(__name__)
 
 #: The nulls `select_features` can gate on, and "none" for no gate.
 SELECTION_NULLS = ("entity_shuffle", "circular_shift", "none")
+
+#: The multiple-testing corrections the gate can apply. No family-wise
+#: correction is offered: see `_check_gate_arguments`.
+SELECTION_CORRECTIONS = ("none", "bh")
 
 #: How each null reads in a sentence.
 _NULL_PROSE = {
@@ -149,16 +154,44 @@ def _window(dates: pd.DatetimeIndex) -> Dict[str, Any]:
 
 
 def _check_gate_arguments(
-    significance: str, alpha: float, n_permutations: int, random_seed: int
+    significance: str,
+    alpha: float,
+    n_permutations: int,
+    random_seed: int,
+    correction: str = "none",
 ) -> None:
-    """The gate's arguments, refused by name for a direct caller the way
-    the tool's schema refuses them."""
+    """
+    The gate's arguments, refused by name for a direct caller the way the
+    tool's schema refuses them.
+
+    WHY BENJAMINI-HOCHBERG AND NOT HOLM. A permutation p-value from N draws
+    is at least 1/(N + 1): 1/201 at the default 200. Holm's first step
+    compares the smallest p-value with alpha/m, so at alpha 0.05 and 200
+    draws it can pass nothing at all once more than ten features are
+    tested (0.05/11 < 1/201), however strong they are. Benjamini-Hochberg's
+    k-th step compares the k-th smallest with k x alpha/m, so several
+    strong features pass together, and what it controls -- the expected
+    share of the kept features that noise kept -- is the question a
+    selection asks.
+    """
     if significance not in SELECTION_NULLS:
         raise ValidationError(
             f"select_features: significance={significance!r}; expected "
             "'entity_shuffle' (default), 'circular_shift' or 'none'."
         )
+    if correction not in SELECTION_CORRECTIONS:
+        raise ValidationError(
+            f"select_features: correction={correction!r}; expected 'none' "
+            "(default) or 'bh'."
+        )
     if significance == "none":
+        if correction != "none":
+            raise ValidationError(
+                f"select_features: correction={correction!r} adjusts the "
+                "significance test's p-values, and significance='none' runs "
+                "no test. Pass a significance null, or leave correction at "
+                "'none'."
+            )
         return
     if not (0.0 < float(alpha) < 1.0):
         raise ValidationError(
@@ -184,18 +217,32 @@ def _significance_gate(
     alpha: float,
     n_permutations: int,
     random_seed: int,
-) -> "tuple[List[str], Dict[str, Optional[float]], List[Dict[str, Any]]]":
+    correction: str = "none",
+) -> tuple[
+    List[str],
+    Dict[str, Optional[float]],
+    Dict[str, Optional[float]],
+    List[Dict[str, Any]],
+]:
     """
     Each candidate's two-sided permutation p-value on the selection window;
-    what passes, every p-value, and a drop record for what does not.
+    what passes, every p-value, the Benjamini-Hochberg adjusted p-values
+    (empty without the correction), and a drop record for what does not.
+
+    Without a correction a feature passes at p < alpha. With
+    `correction='bh'` it passes at a Benjamini-Hochberg adjusted p-value
+    below alpha, over every candidate tested -- one that could not be
+    tested enters the family at p = 1, since it was asked and cannot pass.
+    The comparison is strict in both, so the corrected selection is always
+    a subset of the uncorrected one.
 
     Reads `selection_panel` only. The holdout is not in it, and the caller
     reads the holdout after this returns, for the features this kept.
     """
-    passed: List[str] = []
     p_values: Dict[str, Optional[float]] = {}
     dropped: List[Dict[str, Any]] = []
     prose = _NULL_PROSE[null]
+    tested: Dict[str, float] = {}
     for feature in candidates:
         try:
             result = permutation_test_ic(
@@ -220,13 +267,28 @@ def _significance_gate(
                 }
             )
             continue
-        p_value = float(result["p_value"])
-        p_values[feature] = p_value
-        if p_value < alpha:
+        p_values[feature] = tested[feature] = float(result["p_value"])
+
+    adjusted: Dict[str, Optional[float]] = {}
+    if correction == "bh":
+        family = [p_values[f] if p_values[f] is not None else 1.0 for f in candidates]
+        for feature, value in zip(candidates, bh_adjust(family)):
+            adjusted[feature] = value if p_values[feature] is not None else None
+
+    passed: List[str] = []
+    for feature, p_value in tested.items():
+        decided_on = adjusted[feature] if correction == "bh" else p_value
+        if decided_on is not None and decided_on < alpha:
             passed.append(feature)
             continue
         ic = (predictive.get(feature) or {}).get("rank_ic_mean")
         shown = f"{ic:+.4f}" if ic is not None and np.isfinite(ic) else "None"
+        corrected = (
+            f" (Benjamini-Hochberg adjusted {adjusted[feature]:.3f} over "
+            f"{len(candidates)} tested)"
+            if correction == "bh"
+            else ""
+        )
         dropped.append(
             {
                 "feature": feature,
@@ -234,12 +296,12 @@ def _significance_gate(
                 "duplicate_of": None,
                 "p_value": p_value,
                 "detail": (
-                    f"rank IC {shown} on the selection window, p={p_value:.3f} "
-                    f"against {prose} at alpha {alpha:g}"
+                    f"rank IC {shown} on the selection window, p={p_value:.3f}"
+                    f"{corrected} against {prose} at alpha {alpha:g}"
                 ),
             }
         )
-    return passed, p_values, dropped
+    return passed, p_values, adjusted, dropped
 
 
 def select_features(
@@ -256,6 +318,8 @@ def select_features(
     n_permutations: int = 200,
     random_seed: int = 0,
     max_draws: int = DEFAULT_MAX_DRAWS,
+    embargo_dates: int = 0,
+    correction: str = "none",
 ) -> Dict[str, Any]:
     """
     Keep one feature per redundancy cluster, drop what does not pass a
@@ -298,13 +362,27 @@ def select_features(
     IC +0.015) and rvol_20 (p 0.005, +0.027) and dropped the six others
     (p 0.28-0.89). 'circular_shift' is the screen's null; 'none' applies no
     test and returns what this function returned before it had one, to the
-    bit, with a warning saying no test was applied. The p-values are not
-    corrected for the number of features tested, and the warning says how
-    many would clear from noise alone.
+    bit, with a warning saying no test was applied. By default the p-values
+    are not corrected for the number of features tested, and the warning
+    says how many would clear from noise alone; `correction='bh'` passes a
+    feature on its Benjamini-Hochberg adjusted p-value instead, which
+    controls the expected share of the kept features that noise kept (see
+    `_check_gate_arguments` for why no family-wise correction is offered).
 
     The test reads the selection window ONLY, and is fixed before the
     holdout is read: `holdout_ic` is computed afterwards, for the features
     the test kept.
+
+    THE EMBARGO. A label dated on one of the selection window's last h
+    dates looks h bars forward, into the holdout, so the selection IC and
+    the test read outcomes the holdout is later scored on. `embargo_dates`
+    drops that many dates from the end of the selection window; the
+    holdout is unchanged. Every number the selection computes then reads
+    only dates whose labels end before the holdout starts, for a label of
+    up to that many bars. The function does not know the label, so the
+    default is 0, the window as it was, to the bit; `select_features` the
+    tool passes the target horizon. The embargo applies only when there is
+    a holdout.
 
     `max_features` truncates by absolute rank IC after every filter. It is
     a cap for a caller who has a hard budget, not a ranking to trust: the
@@ -326,14 +404,31 @@ def select_features(
     if missing:
         raise ValidationError(f"panel has no features: {sorted(missing)}")
     _named_once(panel, feature_ids, "select_features")
-    _check_gate_arguments(significance, alpha, n_permutations, random_seed)
+    _check_gate_arguments(significance, alpha, n_permutations, random_seed, correction)
+    if int(embargo_dates) < 0:
+        raise ValidationError(
+            f"select_features: embargo_dates={embargo_dates!r} must be zero or more."
+        )
 
     dates, cutoff = _selection_cutoff(panel, selection_end, holdout_fraction)
+    embargoed = dates[0:0]
     if cutoff is None:
         selection_panel, holdout_panel = panel, panel.iloc[0:0]
     else:
         date_values = pd.to_datetime(panel["date"])
-        selection_panel = panel[date_values <= cutoff]
+        last_read = cutoff
+        if embargo_dates:
+            before = dates[dates <= cutoff]
+            if int(embargo_dates) >= len(before):
+                raise ValidationError(
+                    f"select_features: embargo_dates={embargo_dates} would "
+                    f"leave no date to select on: the selection window holds "
+                    f"{len(before)} date(s) through {_date_label(cutoff)}. "
+                    "Lower embargo_dates, or hold out fewer dates."
+                )
+            embargoed = before[-int(embargo_dates) :]
+            last_read = before[-int(embargo_dates) - 1]
+        selection_panel = panel[date_values <= last_read]
         holdout_panel = panel[date_values > cutoff]
 
     predictive = feature_predictive_stats(selection_panel, feature_ids)
@@ -389,6 +484,7 @@ def select_features(
     # counted before the first draw, as the significance screen counts its
     # own: a long run is chosen rather than discovered.
     p_values: Dict[str, Optional[float]] = {}
+    adjusted: Dict[str, Optional[float]] = {}
     gate: Optional[Dict[str, Any]] = None
     if significance != "none":
         n_draws = len(kept) * int(n_permutations)
@@ -412,7 +508,7 @@ def select_features(
                 "minute(s). Narrow `features`, lower `n_permutations`, pass "
                 f"significance='none' to skip the test, or {remedy}."
             )
-        passed, p_values, insignificant = _significance_gate(
+        passed, p_values, adjusted, insignificant = _significance_gate(
             selection_panel,
             kept,
             predictive,
@@ -420,6 +516,7 @@ def select_features(
             alpha=alpha,
             n_permutations=n_permutations,
             random_seed=random_seed,
+            correction=correction,
         )
         gate = {
             "null": significance,
@@ -428,6 +525,12 @@ def select_features(
             "random_seed": int(random_seed),
             "n_tested": len(kept),
             "n_passed": len(passed),
+            "correction": correction,
+            # What the uncorrected rule would have kept, so the cost of
+            # the correction is a number rather than a second call.
+            "n_passed_uncorrected": sum(
+                1 for p in p_values.values() if p is not None and p < alpha
+            ),
         }
         dropped.extend(insignificant)
         kept = passed
@@ -466,23 +569,40 @@ def select_features(
         held = dates[dates > cutoff]
         # `end` is the cutoff as asked for, not the last date at or before
         # it: a caller who named `selection_end` should read their own date
-        # back rather than the nearest trading day to it.
+        # back rather than the nearest trading day to it. Under an embargo
+        # it is the last date the selection read.
         selection_window = {
             "start": _date_label(dates[0]),
-            "end": _date_label(cutoff),
-            "n_dates": int((dates <= cutoff).sum()),
+            "end": _date_label(cutoff if not len(embargoed) else last_read),
+            "n_dates": int((dates <= cutoff).sum()) - int(len(embargoed)),
         }
         holdout_window = _window(held)
         if kept:
             holdout_stats = feature_predictive_stats(holdout_panel, kept)
             holdout_ic = {f: _signed_rank_ic(holdout_stats, f) for f in kept}
-        warnings.append(
-            f"Selected on dates through {selection_window['end']}; "
-            f"`holdout_ic` is each selected feature's rank IC on the "
-            f"{holdout_window['n_dates']} date(s) after it, which the selection "
-            "never read. That is the number to believe: `selection_ic` chose "
-            "the features and is optimistic by construction."
-        )
+        if len(embargoed):
+            embargo_window = _window(embargoed)
+            warnings.append(
+                f"Selected on dates through {selection_window['end']}; the "
+                f"{embargo_window['n_dates']} date(s) after it, through "
+                f"{embargo_window['end']}, were embargoed, so no label of up "
+                f"to {embargo_window['n_dates']} bar(s) that the selection "
+                "read ends inside the holdout. `holdout_ic` is each "
+                "selected feature's rank IC on the "
+                f"{holdout_window['n_dates']} date(s) after the embargo, which "
+                "the selection never read. That is the number to believe: "
+                "`selection_ic` chose the features and is optimistic by "
+                "construction."
+            )
+        else:
+            warnings.append(
+                f"Selected on dates through {selection_window['end']}; "
+                f"`holdout_ic` is each selected feature's rank IC on the "
+                f"{holdout_window['n_dates']} date(s) after it, which the "
+                "selection never read. That is the number to believe: "
+                "`selection_ic` chose the features and is optimistic by "
+                "construction."
+            )
         if holdout_window["n_dates"] < 20:
             warnings.append(
                 f"NOTE: the holdout is {holdout_window['n_dates']} date(s), too "
@@ -520,8 +640,11 @@ def select_features(
         "min_abs_rank_ic": min_abs_rank_ic,
         "selection_window": selection_window,
         "holdout_window": holdout_window,
+        "embargo_dates": int(len(embargoed)),
+        "embargo_window": _window(embargoed) if len(embargoed) else None,
         "selection_ic": {f: _signed_rank_ic(predictive, f) for f in feature_ids},
         "selection_p_value": p_values,
+        "selection_p_value_adjusted": adjusted,
         "significance": gate,
         "holdout_ic": holdout_ic,
         # Paid for by the `redundancy_report` call above and previously
@@ -569,6 +692,11 @@ def _gate_warnings(
             )
     if n_tested == 0:
         return warnings
+    if gate.get("correction") == "bh":
+        warnings.append(
+            _bh_sentence(gate, prose, n_selection_dates, _NULL_MEANING[null])
+        )
+        return warnings
     if gate["n_passed"] == 0:
         warnings.append(
             f"No feature cleared p < {alpha:g} against {prose} on the "
@@ -585,6 +713,40 @@ def _gate_warnings(
             f"{n_tested} tests."
         )
     return warnings
+
+
+def _bh_sentence(
+    gate: Dict[str, Any], prose: str, n_selection_dates: int, meaning: str
+) -> str:
+    """What the Benjamini-Hochberg gate kept, beside what the uncorrected
+    rule would have kept."""
+    alpha, n_tested = gate["alpha"], gate["n_tested"]
+    n_passed, uncorrected = gate["n_passed"], gate["n_passed_uncorrected"]
+    beside = (
+        f" Uncorrected, {uncorrected} cleared p < {alpha:g}."
+        if uncorrected != n_passed
+        else ""
+    )
+    if n_passed == 0:
+        tail = (
+            f" None of these features ranks these entities better than {meaning}."
+            if uncorrected == 0
+            else ""
+        )
+        return (
+            f"No feature cleared a Benjamini-Hochberg adjusted p < {alpha:g} "
+            f"over the {n_tested} tested, against {prose} on the "
+            f"{n_selection_dates} selection dates, so `selected` is empty."
+            f"{beside}{tail}"
+        )
+    return (
+        f"{n_passed} of {n_tested} features cleared a Benjamini-Hochberg "
+        f"adjusted p < {alpha:g} against {prose} on the {n_selection_dates} "
+        f"selection dates.{beside} The correction holds the expected share "
+        f"of the kept features that noise kept at or below {alpha:g} when the "
+        "tests are independent or positively dependent; it does not say "
+        "which of them those are."
+    )
 
 
 def summarize_feature_set(

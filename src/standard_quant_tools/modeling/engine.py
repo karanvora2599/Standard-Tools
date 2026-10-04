@@ -452,10 +452,16 @@ def _headline_report(
     oos_metrics: Dict[str, float],
     series: "pd.Series | None",
     horizon: "int | None",
+    *,
+    scope: str = "out-of-sample",
 ) -> "Tuple[Dict[str, Any], List[str]]":
     """
     The headline metric against what a model with no skill scores, and the
     warning when it does not beat it.
+
+    `scope` names the dates in the warning: a run's are out-of-sample;
+    `score_predictions` passes "scored", since a frame from anywhere may
+    not be.
 
     For a headline that is the mean of a per-date series (the
     cross-sectional rank IC of a regression or a ranker) the test is a
@@ -494,6 +500,7 @@ def _headline_report(
         block["beats_null"] = beats
         if beats:
             return block, []
+        where = "out of sample" if scope == "out-of-sample" else f"on the {scope} rows"
         what = (
             "the predicted probabilities did not separate the classes"
             if task == "classification"
@@ -501,7 +508,7 @@ def _headline_report(
         )
         return block, [
             f"{metric} is {value:.4f}, at or below the {null} a random "
-            f"ordering scores: out of sample, {what}. {rank_by}"
+            f"ordering scores: {where}, {what}. {rank_by}"
         ]
 
     values = (
@@ -513,7 +520,7 @@ def _headline_report(
     block["n_dates"] = n
     if n < MIN_HEADLINE_DATES:
         return block, [
-            f"{metric} is {value:.4f} over {n} out-of-sample date(s), fewer than "
+            f"{metric} is {value:.4f} over {n} {scope} date(s), fewer than "
             f"the {MIN_HEADLINE_DATES} a Newey-West test needs, so whether it "
             "differs from zero was not tested."
         ]
@@ -531,7 +538,7 @@ def _headline_report(
     t_stat, p_value = test["t_stat"], test["p_value"]
     if not (math.isfinite(t_stat) and math.isfinite(p_value)):
         return block, [
-            f"{metric} is {value:.4f} over {n:,} out-of-sample dates whose daily "
+            f"{metric} is {value:.4f} over {n:,} {scope} dates whose daily "
             "values do not vary, so whether it differs from zero was not "
             "tested."
         ]
@@ -545,7 +552,7 @@ def _headline_report(
     )
     if p_value < 0.05:
         return block, [
-            f"{metric} is {value:.4f} over {n:,} out-of-sample dates, below "
+            f"{metric} is {value:.4f} over {n:,} {scope} dates, below "
             f"zero by more than noise explains: {variance}. The predictions "
             "order the names in reverse: ranking by the negated prediction "
             f"would have scored {-value:+.4f} on these dates. {rank_by}"
@@ -559,7 +566,7 @@ def _headline_report(
         else ""
     )
     return block, [
-        f"{metric} is {value:.4f} over {n:,} out-of-sample dates and is not "
+        f"{metric} is {value:.4f} over {n:,} {scope} dates and is not "
         f"distinguishable from zero: {variance}.{independent} {rank_by}"
     ]
 

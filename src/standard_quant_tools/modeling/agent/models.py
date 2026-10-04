@@ -1791,7 +1791,9 @@ class PairedComparison(BaseModel):
         None,
         description="The loss test where the task has a loss with units; "
         "None for a ranker. A positive statistic means the candidate's loss "
-        "is smaller.",
+        "is smaller. `lag` is its Newey-West lag, max(2 x horizon, "
+        "floor(4 * (n/100)^(2/9))) capped at n - 1 for the n shared dates "
+        "and the label's horizon: the lag a run's headline is tested at.",
     )
     warnings: List[str] = Field(default_factory=list)
 
@@ -2068,9 +2070,12 @@ class ScorePredictionsInput(BaseModel):
         ge=1,
         description=(
             "The label's forward horizon in bars, for the effective sample "
-            "size under overlapping labels. 1 applies no adjustment; pass the "
-            "horizon the target was built with (TargetSpec.horizon) and the "
-            "count of independent observations is deflated accordingly."
+            "size under overlapping labels and the Newey-West lag of the "
+            "headline test, max(2 x horizon, the Andrews bandwidth). 1 "
+            "applies no overlap adjustment; pass the horizon the target was "
+            "built with (TargetSpec.horizon, or attach_model_outcomes' "
+            "`horizon`) and the count of independent observations is "
+            "deflated accordingly."
         ),
     )
     train_mean: Optional[float] = Field(
@@ -2118,13 +2123,50 @@ class ScorePredictionsResult(ExplainsNulls):
     baseline: Dict[str, Stat] = Field(
         default_factory=dict,
         description=(
-            "The same metrics for predicting the training mean. A model that "
-            "does not beat this has not learned anything, and a good-looking "
-            "R2 next to a good-looking baseline usually means the target was "
-            "easy rather than the model clever."
+            "The same metrics for predicting the training mean. A good-"
+            "looking R2 next to a good-looking baseline usually means the "
+            "target was easy rather than the model clever."
         ),
     )
-    beats_baseline: Optional[bool] = None
+    beats_baseline: Optional[bool] = Field(
+        None,
+        description=(
+            "Regression only: whether r2 is above baseline_r2 -- an r2 "
+            "comparison, which judges the predictions as values, their "
+            "scale and level as well as their order. On a ranked or "
+            "demeaned label (forward_return_rank) predictions that order "
+            "the names well can still be false here; whether they order "
+            "them better than chance is `beats_null`. None for the other "
+            "tasks, which have no baseline."
+        ),
+    )
+    beats_null: Optional[bool] = Field(
+        None,
+        description=(
+            "Whether the headline metric beats what a model with no skill "
+            "scores, the test run_model_experiment makes of its own "
+            "headline: for regression and ranking, the mean per-date "
+            "cross-sectional rank IC above zero at 5%, two-sided, by a "
+            "Newey-West t; for classification, the AUC above 0.5; for "
+            "survival, the concordance above 0.5. None when it was not "
+            "tested (fewer than 10 dates, a single entity, or daily values "
+            "that do not vary), and `warnings` says which."
+        ),
+    )
+    headline: Optional[Dict[str, Any]] = Field(
+        None,
+        description=(
+            "The headline test, in the shape of a run's "
+            "validation_report.headline: `metric` (cs_rank_ic_mean, auc or "
+            "cs_concordance_mean), `null`, `value`, `n_dates`, `t_stat`, "
+            "`t_stat_uncorrected` (the same series read as independent), "
+            "`p_value`, `hac_lag` (max(2 x horizon, floor(4 * "
+            "(n/100)^(2/9))), capped at n - 1), `ic_autocorrelation_lag1` "
+            "and `beats_null`. The test statistics are null for a metric "
+            "compared as a point. Read at the Spearman rank IC whatever "
+            "ic_method says."
+        ),
+    )
     effective_sample_size: Optional[float] = Field(
         None,
         description=(

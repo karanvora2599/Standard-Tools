@@ -58,6 +58,7 @@ from ..validation.comparison import (
     bh_adjust,
     bonferroni_adjust,
     compare_ic_series,
+    headline_lag,
     holm_adjust,
     newey_west_variance,
     paired_comparison,
@@ -642,7 +643,7 @@ _FIELD_OWNER: Dict[str, str] = {
     "predictions_ref_b": "'paired'",
     "task": "'paired'",
     "metric": "'paired'",
-    "horizon": "'paired'",
+    "horizon": "'paired' or 'ic_series'",
     "ic_a": "'ic_series'",
     "ic_b": "'ic_series'",
     "hac_lag": "'ic_series'",
@@ -671,6 +672,7 @@ _MODE_FIELDS: Dict[str, Tuple[str, ...]] = {
         "ic_a",
         "ic_b",
         "hac_lag",
+        "horizon",
         "n_bootstrap",
         "block_size",
         "confidence",
@@ -760,19 +762,23 @@ def _ic_series(mapping: Dict[str, float], label: str) -> pd.Series:
 
 
 def _hac_block(
-    difference: np.ndarray, requested_lag: Optional[int]
+    difference: np.ndarray, requested_lag: Optional[int], horizon: Optional[int]
 ) -> Dict[str, Optional[float]]:
     """
     The variance of the mean difference, without and with the correction.
 
-    The lag defaults to the usual data-driven rule floor(4 (n/100)^(2/9)).
-    `hac_ratio` above 1 means the difference series is positively
+    The lag defaults to `headline_lag(n, horizon)`, the rule a run's
+    headline is tested at: max(2 x horizon, the Andrews bandwidth
+    floor(4 (n/100)^(2/9))), capped at n - 1. At the default horizon of 1
+    that is the Andrews bandwidth from five dates up, which is what this
+    used before the horizon was read. A lag the caller names is used as
+    named. `hac_ratio` above 1 means the difference series is positively
     autocorrelated, so the ordinary standard error is too small and any
     t-statistic built on it is overstated by its square root.
     """
     n = int(difference.size)
     if requested_lag is None:
-        lag = int(math.floor(4.0 * (n / 100.0) ** (2.0 / 9.0)))
+        lag = headline_lag(n, horizon)
     else:
         lag = int(requested_lag)
     lag = max(0, min(lag, max(n - 1, 0)))
@@ -879,7 +885,7 @@ def _compare_ic_series_mode(input_data: CompareSignalsInput) -> CompareSignalsRe
         [series_a.rename("a"), series_b.rename("b")], axis=1, join="inner"
     ).dropna()
     difference = (joined["b"] - joined["a"]).to_numpy(dtype=np.float64)
-    hac = _hac_block(difference, input_data.hac_lag)
+    hac = _hac_block(difference, input_data.hac_lag, input_data.horizon)
 
     warnings: List[str] = []
     n_dates = int(comparison["n_dates"])
