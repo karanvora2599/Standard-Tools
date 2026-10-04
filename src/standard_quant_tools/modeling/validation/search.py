@@ -39,10 +39,70 @@ import pandas as pd
 
 from standard_quant_tools.error import ValidationError
 
+from ..preprocessing.base import datetime_values
 from .metrics import cross_sectional_ic
 from .walk_forward import WalkForwardSplit, label_overlap_mask
 
 logger = logging.getLogger(__name__)
+
+# What `pd.api.types.infer_dtype` calls an object array `_instants` reads as
+# datetimes: Timestamps or datetimes, numpy datetime64 scalars, or nothing
+# but missing values.
+_DATETIME_OBJECTS = frozenset({"datetime", "datetime64", "empty"})
+
+
+def _instants(values: Any, what: str) -> Tuple[np.ndarray, Optional[str]]:
+    """
+    Dates as one numpy array the inner folds sort, search and compare
+    without a Python object per row, and whether they carried a time zone:
+    'aware', 'naive', or None when that cannot be told (no datetime type,
+    or no value present).
+
+    A timezone-aware column, index or array is returned as its UTC instants
+    (`datetime_values`), a `datetime64` one as it is. An object array of
+    Timestamps or datetimes -- what `to_numpy()` returns for a zoned
+    column -- is parsed into one of those two, its zones converted to UTC
+    when they differ from row to row; one that mixes zoned and naive values
+    names no instant for the naive ones and is refused by name. Anything
+    else (strings, `datetime.date` objects) is returned as given and
+    compared as it always was.
+
+    Instants order, compare and subtract as the zoned Timestamps did, so
+    every fold, purge and score cut from them is the one cut from the
+    Timestamps; only a calendar label would differ, and none is read here.
+    """
+    if isinstance(getattr(values, "dtype", None), pd.DatetimeTZDtype):
+        return datetime_values(values), "aware"
+    array = values.to_numpy() if hasattr(values, "to_numpy") else np.asarray(values)
+    if array.dtype.kind == "M":
+        return array, "naive"
+    if array.dtype != object or (
+        pd.api.types.infer_dtype(array, skipna=True) not in _DATETIME_OBJECTS
+    ):
+        return array, None
+    try:
+        index = pd.DatetimeIndex(array)
+    except (TypeError, ValueError):
+        # pandas parses one zone per array: Timestamps in several zones, or
+        # zoned and naive ones together, land here.
+        zoned = {
+            getattr(value, "tzinfo", None) is not None
+            for value in array
+            if not pd.isna(value)
+        }
+        if zoned != {True}:
+            raise ValidationError(
+                f"search_best_params: {what} mixes timezone-aware and naive "
+                "datetimes. A naive time names no instant beside a zoned one, "
+                "so the label-overlap purge cannot compare them. Give every "
+                "value a time zone, or none."
+            ) from None
+        index = pd.DatetimeIndex(pd.to_datetime(array, utc=True))
+    if not index.notna().any():
+        return index.to_numpy(), None
+    if index.tz is not None:
+        return index.tz_convert(None).to_numpy(), "aware"
+    return index.to_numpy(), "naive"
 
 
 def optuna_available() -> bool:
@@ -386,6 +446,14 @@ def search_best_params(
     the one that scored best on rows whose labels had already seen the
     window they were scored against.
 
+    `label_end` may be the label-end column itself, a `datetime64` array,
+    or an array of Timestamps. The row dates and the label ends are read
+    as instants once, here (see `_instants`), and every fold is cut and
+    scored on those. A timezone-aware `date` column with naive label ends,
+    or the other way round, is refused by name, as `plan_experiment`
+    refuses such a panel: a naive time and a zoned one name no common
+    instant.
+
     Returns (best_params, report). The report carries every candidate's
     score, because "which alpha won" is much less informative than "the
     top four alphas were within 0.001 of each other", and only the second
@@ -407,7 +475,24 @@ def search_best_params(
             f"search_best_params: label_end has {len(label_end)} entries for "
             f"{len(train_frame)} training rows; it must be one per row."
         )
-    dates = pd.Index(sorted(train_frame["date"].unique()))
+    # The dates as instants, read once. A timezone-aware column's
+    # `to_numpy()` built a Timestamp per row, and the sorts, searches,
+    # purges and per-date scores below then compared them one at a time:
+    # on a 31,680-row panel the search spent more time on that than on its
+    # fits.
+    row_dates, date_zone = _instants(train_frame["date"], "train_frame's 'date'")
+    if label_end is not None:
+        label_end, end_zone = _instants(label_end, "label_end")
+        if date_zone is not None and end_zone is not None and date_zone != end_zone:
+            raise ValidationError(
+                f"search_best_params: train_frame's 'date' column is "
+                f"timezone-{date_zone} and label_end is timezone-{end_zone}. "
+                "The label-overlap purge compares each row's label end with "
+                "an inner test window's dates, and a naive time and a "
+                "timezone-aware one do not name a common instant. Give both "
+                "a time zone, or neither."
+            )
+    dates = np.unique(row_dates)
     splitter = _inner_splitter(len(dates), search_spec.inner_splits, embargo)
     if splitter is None:
         return dict(base_params), {
@@ -419,8 +504,10 @@ def search_best_params(
             ),
         }
 
-    row_dates = train_frame["date"].to_numpy()
-    date_code = np.searchsorted(dates.to_numpy(), row_dates)
+    date_code = np.searchsorted(dates, row_dates)
+    entities = (
+        train_frame["entity"].to_numpy() if "entity" in train_frame.columns else None
+    )
 
     # The inner folds' row masks, cut ONCE: they do not depend on the
     # candidate, and the purge is the same for every one of them.
@@ -442,16 +529,22 @@ def search_best_params(
 
     # The inner frames, sliced ONCE: they do not depend on the candidate
     # either, and each was re-sliced from the training frame once per
-    # candidate per fold.
+    # candidate per fold. With them, each test window's dates and entities
+    # for the score.
     inner_frames = [
         (train_frame[train_mask], train_frame[test_mask])
         for train_mask, test_mask in fold_masks
+    ]
+    inner_test_rows = [
+        (row_dates[test_mask], None if entities is None else entities[test_mask])
+        for _train_mask, test_mask in fold_masks
     ]
 
     def score_fold(params: Dict[str, Any], fold_index: int) -> Optional[float]:
         """One candidate on one inner fold: its score, NaN when it could
         not be scored, None when the fold itself cannot score anything."""
         inner_train, inner_test = inner_frames[fold_index]
+        test_dates, test_entities = inner_test_rows[fold_index]
         if inner_train.empty or inner_test.empty:
             return None
         if task == "classification" and len(np.unique(inner_train["target"])) < 2:
@@ -473,8 +566,8 @@ def search_best_params(
             _labels_for(task, inner_test),
             predictions,
             probabilities,
-            inner_test["date"].to_numpy(),
-            entities=inner_test["entity"].to_numpy(),
+            test_dates,
+            entities=test_entities,
             turnover_penalty=float(getattr(search_spec, "turnover_penalty", 0.0)),
         )
 

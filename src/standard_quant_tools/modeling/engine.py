@@ -1718,7 +1718,9 @@ def run_experiment(
             # the one that scored best on training rows whose labels had
             # already seen the inner test window.
             embargo=model_spec.validation.embargo,
-            label_end=(frame[LABEL_END_COL].to_numpy() if has_label_end else None),
+            # The column itself, which the search reads as instants: its
+            # `to_numpy()` built a Timestamp per row on a zoned panel.
+            label_end=(frame[LABEL_END_COL] if has_label_end else None),
             purge_basis=purge_basis,
             max_parallelism=budget,
             # The report says what the spec asked for: 'auto', not this

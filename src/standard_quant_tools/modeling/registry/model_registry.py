@@ -120,7 +120,10 @@ def save_model(
         (dataset_spec or {}).get("features") if dataset_spec else None
     )
 
-    model_path = _artifacts.save_joblib(directory, "model", estimator)
+    # Written in the state that makes the same model the same bytes: tree
+    # node padding zeroed, a histogram-boosting model's fit-time thread
+    # count left out (see `serialization.reproducible_state`).
+    model_path = _serialization.save_joblib(directory, "model", estimator)
     # The same estimator as a skops bundle when the package can write
     # one: loadable without pickle. None -- and joblib alone -- when
     # it cannot, which the manifest's `formats` records.
@@ -167,7 +170,7 @@ def save_model(
             directory, "distribution", distribution
         )
     if quantile_models:
-        quantile_models_path = _artifacts.save_joblib(
+        quantile_models_path = _serialization.save_joblib(
             directory, "quantile_models", quantile_models
         )
     content_hashes: Dict[str, str] = {

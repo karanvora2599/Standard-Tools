@@ -1,5 +1,86 @@
 # Changelog
 
+## The search reads its dates as instants, a forest's skops bundle loads, and a model's joblib records neither padding nor a thread count
+
+- **The hyperparameter search reads a zoned panel's dates as instants.**
+  `search_best_params` still called `to_numpy()` on each training
+  window's `date` column and on the label ends the engine handed it,
+  which on a timezone-aware column builds a `pd.Timestamp` per row, and
+  handed every (candidate, inner fold) score the test window's dates the
+  same way, where the per-date IC then factorized the object array. The
+  row dates and label ends are now read once, as instants, and each inner
+  fold's test dates and entities are cut once. A ridge grid search on the
+  live 31,680-row panel (4 values of `alpha`, 2 inner folds, 8 outer folds
+  and the refit: 72 inner scores), warm, two rounds of five on a quiet
+  16-thread machine: 7.0-7.2 s to 1.5 s (medians) under pandas 3.0 and
+  5.1 s to 1.2-1.3 s under pandas 2.3. Under the profiler, factorizing
+  the object arrays was 3.9 s of a 9.9 s run and boxing the Timestamps
+  2.1 s. A histogram-boosting grid (2 learning rates, 30 iterations)
+  went from 15.2-16.0 s to 10.6-10.9 s and from 13.1-13.7 s to
+  10.3-10.4 s.
+- **Every number a search reports is unchanged.** On both interpreters,
+  ridge grids at budgets 1 and 4, a random-forest grid and a
+  histogram-boosting grid on the live panel, the three recorded specs,
+  and ridge, turnover-scored ridge and random-forest grids on a naive
+  synthetic panel and its UTC twin agree with the previous code in the
+  chosen parameters, every candidate's score, the purge counts, the
+  out-of-sample predictions, every manifest field and every artifact
+  hash, except a histogram-boosting `model.joblib` (below).
+- **What `search_best_params` takes as `label_end`.** The label-end
+  column (what the engine now passes), a `datetime64` array, or
+  Timestamps as an object array or a list, in one zone or several. A
+  timezone-aware `date` column with naive label ends, or the reverse, is
+  refused by name, as `plan_experiment` refuses such a panel, where
+  pandas raised `TypeError: Cannot compare tz-naive and tz-aware
+  timestamps` from the purge; label ends mixing zoned and naive values
+  are refused by name too. The frames handed to `fit_predict` keep their
+  zone.
+- **A forest's skops bundle loads.** `load_estimator` refused every
+  bundle holding a scikit-learn type outside skops' defaults: every
+  random forest, gradient boosting, quantile gradient boosting,
+  histogram boosting, calibrated classifier and MLP. The five such types
+  `skops.io.get_untrusted_types` reports across the registered
+  estimators (skops 0.15, scikit-learn 1.9) are trusted by name
+  (`serialization.TRUSTED_TYPES`): trees (`sklearn.tree._tree.Tree`,
+  `TreePredictor`), the calibrators (`_CalibratedClassifier`,
+  `_SigmoidCalibration`) and the MLP's `AdamOptimizer`. Every registered
+  scikit-learn and package estimator, each classifier calibrated both
+  ways, loads with the same predictions. Any other type is still refused
+  by name: an MLP fitted with `solver="sgd"` (its `SGDOptimizer`), and
+  the LightGBM and XGBoost boosters. A bundle written before loads now.
+- **The same model writes the same `model.joblib`.** A tree's node
+  record holds 57 bytes of fields in 64, and pickle writes all 64: a
+  forest loaded from a file carries whatever its loader left in the
+  other seven, so loads of one file re-dumped to different files. A
+  histogram-boosting model pickled its bin mapper's `n_threads`, the
+  OpenMP count it was fitted under. `model.joblib`,
+  `quantile_models.joblib` and `model.skops` are now written with the
+  padding zeroed (in the model, for good; no field is touched) and
+  `n_threads` recorded as None, then restored on the model in memory.
+  scikit-learn reads that count only while binning inside `fit`, and
+  `predict` picks its thread count when called, so a loaded model
+  predicts as the registered one did.
+- **What changes.** A histogram-boosting model's files are one file at
+  any thread count and differ once from the previous code's: the live
+  fixture's runs recorded `16413ffd8e1f73fb` with 10 threads, a budget-1
+  rerun `cf2f7f06ec960dbc` with 1, and both are now `6cd6d579ad02cdbc`
+  under pandas 3, the same trees. Ridge and random-forest files keep
+  their hashes (`a9b5ce72d5feab97`, `628b5ae08bcc3894`).
+- **What does not reproduce.** A loaded model re-dumped is not the
+  fitted model's file, for any estimator: pickle writes an object
+  referenced twice once, and a fit shares objects a load does not (a
+  Ridge's coefficients and intercept share numpy's float64 dtype; a
+  forest's parameter names are its trees' attribute-name strings). Two
+  loads of one file now re-dump to one file.
+- **The fold-parallelism test compares `model.skops` too.** It left the
+  bundle out because two identical runs wrote different bundles; they
+  write one now, at every budget.
+- **Cost.** 0.05 ms for a ridge, 0.8 ms for a 330 KiB
+  histogram-boosting model, 2.5-6.5 ms for a 1.8 MiB 200-tree forest of
+  depth 6 and 20-27 ms for an 82 MiB one of depth 12, against dumps of
+  0.49, 25, 86 and 479 ms; a registration that also writes the bundle
+  pays it twice.
+
 ## A mean over dates is tested against Student's t on its lowest cosine frequencies, the selection embargo drops each row whose label reaches the holdout, and the uniqueness weights' fallback reads instants
 
 - **The overlap rule still over-rejected.** A Newey-West variance at max(2h,

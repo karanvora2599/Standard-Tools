@@ -13,10 +13,11 @@ exceeds the budget. See the CHANGELOG entry of 2026-10-01.
 The bar is identity: every output a run records -- metrics, per-fold
 records, importances, warnings, the OOS predictions file and the content
 hashes in the manifest -- is the same at 1 and at N workers, and its order
-does not depend on which fit finished first. Two things are excluded from
-the comparison, each for a reason that has nothing to do with the folds:
-`model_spec.json` carries the budget, which is the thing being varied, and
-`model.skops` hashes differently between two identical sequential runs.
+does not depend on which fit finished first. One thing is excluded from
+the comparison: `model_spec.json` carries the budget, which is the thing
+being varied. `model.skops` is compared like every other artifact: a
+bundle is written the same way by identical runs (see the CHANGELOG entry
+of 2026-10-04).
 """
 
 import math
@@ -118,7 +119,7 @@ def _recorded(result, drop_hashes=()):
     out["validation_report"] = report
     out["oos_predictions"] = _artifacts.load_artifact(result["oos_predictions_uri"])
     hashes = dict(load_manifest(result["model_id"]).content_hashes)
-    for name in ("model_spec.json", "model.skops", *drop_hashes):
+    for name in ("model_spec.json", *drop_hashes):
         hashes.pop(name, None)
     out["content_hashes"] = hashes
     return out

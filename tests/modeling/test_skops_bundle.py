@@ -11,6 +11,7 @@ refused by that type's name.
 
 import io
 import json
+import warnings
 import zipfile
 from pathlib import Path
 
@@ -19,7 +20,9 @@ import pytest
 
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.modeling import artifacts as _artifacts
+from standard_quant_tools.modeling import engine
 from standard_quant_tools.modeling.capabilities import modeling_capabilities
+from standard_quant_tools.modeling.estimators.registry import ESTIMATOR_REGISTRY
 from standard_quant_tools.modeling.estimators.survival import CoxPHRegressor
 from standard_quant_tools.modeling.registry.model_registry import (
     load_manifest,
@@ -28,6 +31,8 @@ from standard_quant_tools.modeling.registry.model_registry import (
 )
 from standard_quant_tools.modeling.registry.serialization import (
     FORMAT_ENV,
+    TRUSTED_PREFIX,
+    TRUSTED_TYPES,
     deterministic_archive,
     dump_estimator,
     load_estimator,
@@ -375,9 +380,6 @@ class TestTheSameModelGivesTheSameBytes:
         import skops.io as sio
 
         X, models = _fitted()
-        # The forest is left out: its tree type is outside skops' defaults,
-        # so `load_estimator` refuses it either way.
-        models.pop("forest")
         for name, model in models.items():
             model, inputs = model if isinstance(model, tuple) else (model, X)
             original = tmp_path / f"{name}-original.skops"
@@ -416,3 +418,189 @@ class TestTheSameModelGivesTheSameBytes:
         with zipfile.ZipFile(buffer, "w") as archive:
             archive.writestr("other.json", "{}")
         assert deterministic_archive(buffer.getvalue()) == buffer.getvalue()
+
+
+#: The registered estimators whose fitted state is a LightGBM or XGBoost
+#: booster: skops writes them, and loading one would mean trusting that
+#: library's own state, so their bundles are refused by name.
+_BOOSTER_LIBRARIES = ("lightgbm", "xgboost")
+
+
+def _is_booster(name):
+    return any(library in name for library in _BOOSTER_LIBRARIES)
+
+
+def _cases():
+    """(task, name, calibration) for every registered estimator, and each
+    scikit-learn classifier calibrated both ways the spec allows."""
+    out = []
+    for task, name in sorted(ESTIMATOR_REGISTRY):
+        out.append((task, name, None))
+        if task == "classification" and not _is_booster(name):
+            out.extend([(task, name, "sigmoid"), (task, name, "isotonic")])
+    return out
+
+
+_CASES = _cases()
+
+
+def _case_id(case):
+    task, name, calibration = case
+    return f"{task}-{name}" + (f"-{calibration}" if calibration else "")
+
+
+#: Small fits of the slow estimators: the types a model holds do not depend
+#: on how many trees or iterations it has.
+_SMALL = {
+    "gradient_boosting": {"n_estimators": 10},
+    "hist_gradient_boosting": {"max_iter": 10},
+    "mlp": {"max_iter": 30},
+    "quantile_gradient_boosting": {"n_estimators": 10},
+    "random_forest": {"n_estimators": 8},
+}
+
+
+def _fit_registered(case, n=240, seed=3):
+    """The estimator built and fitted the way the engine builds and fits
+    one, on a small planted problem for its task."""
+    from sklearn.calibration import CalibratedClassifierCV
+
+    task, name, calibration = case
+    rng = np.random.default_rng(seed)
+    X = rng.standard_normal((n, 4))
+    score = X @ np.array([0.5, -0.3, 0.2, 0.0]) + 0.2 * rng.standard_normal(n)
+    y = {
+        "regression": score,
+        "classification": (score > 0).astype(int),
+        "ranking": np.digitize(score, [-0.5, 0.0, 0.5]),
+        "survival": np.column_stack(
+            [np.exp(-score) + 0.1, (rng.random(n) < 0.7).astype(float)]
+        ),
+    }[task]
+    params = _SMALL.get(name, {})
+    model = engine._instantiate(ESTIMATOR_REGISTRY[(task, name)], params, 7, n_jobs=1)
+    if calibration:
+        model = CalibratedClassifierCV(model, method=calibration, cv=3)
+    group = np.full(n // 24, 24) if task == "ranking" else None
+    with warnings.catch_warnings():
+        # A 30-iteration MLP has not converged, and need not have.
+        warnings.simplefilter("ignore")
+        engine._fit(model, X, y, None, group=group)
+    return model, X
+
+
+@pytest.fixture(scope="module")
+def bundles(tmp_path_factory):
+    """Every case fitted once and written as `dump_estimator` writes it."""
+    directory = tmp_path_factory.mktemp("bundles")
+    out = {}
+    for case in _CASES:
+        model, X = _fit_registered(case)
+        path = dump_estimator(directory, _case_id(case), model)
+        out[case] = (model, X, path)
+    return out
+
+
+@needs_skops
+class TestEveryRegisteredEstimatorLoads:
+    """`load_estimator` refused every random forest's bundle, and every
+    gradient-boosting, histogram-boosting, calibrated and MLP bundle as
+    well: the trees, calibrators and optimizer those models hold are
+    outside skops' default trusted types (the CHANGELOG entry of
+    2026-10-04). It now trusts those five scikit-learn types by name and
+    nothing else."""
+
+    @pytest.mark.parametrize(
+        "case", [c for c in _CASES if not _is_booster(c[1])], ids=_case_id
+    )
+    def test_the_bundle_loads_the_same_model(self, bundles, case):
+        model, X, path = bundles[case]
+        assert path is not None, "the library wrote no bundle"
+        restored = load_estimator(path)
+        assert type(restored) is type(model)
+        assert np.array_equal(restored.predict(X), model.predict(X))
+        if hasattr(model, "predict_proba"):
+            assert np.array_equal(restored.predict_proba(X), model.predict_proba(X))
+
+    @pytest.mark.parametrize(
+        "case", [c for c in _CASES if _is_booster(c[1])], ids=_case_id
+    )
+    def test_a_booster_is_refused_by_its_type(self, bundles, case):
+        _model, _X, path = bundles[case]
+        assert path is not None
+        with pytest.raises(ValidationError, match=r"(lightgbm|xgboost)\.[\w.]*Booster"):
+            load_estimator(path)
+
+    def test_the_trusted_types_are_the_ones_the_estimators_hold(self, bundles):
+        """Exactly: every type trusted by name is one some registered
+        estimator holds, and every one they hold is trusted."""
+        held = set()
+        for case, (_model, _X, path) in bundles.items():
+            if not _is_booster(case[1]):
+                held.update(
+                    t for t in untrusted_types(path) if not t.startswith(TRUSTED_PREFIX)
+                )
+        assert held == set(TRUSTED_TYPES)
+
+    def test_a_scikit_learn_type_the_library_never_writes_is_refused(self, tmp_path):
+        """Null case: trusting the Adam optimizer an MLP holds does not
+        trust the SGD one, which no registered estimator uses."""
+        from sklearn.neural_network import MLPRegressor
+
+        X, models = _fitted()
+        model = MLPRegressor(
+            hidden_layer_sizes=(4,), solver="sgd", max_iter=5, random_state=0
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model.fit(X, models["ridge"].predict(X))
+        path = dump_estimator(tmp_path, "mlp_sgd", model)
+        with pytest.raises(ValidationError, match="SGDOptimizer"):
+            load_estimator(path)
+
+    def test_a_registered_forest_loads_from_its_bundle(self, patched_multi_factory):
+        from standard_quant_tools.modeling.specs import (
+            EstimatorSpec,
+            ModelSpec,
+            ValidationSpec,
+        )
+
+        model_id = _train_a_model_with_spec(
+            _dataset_spec(),
+            dataset_id="ds_skops_forest",
+            model_spec=ModelSpec(
+                task="regression",
+                estimator=EstimatorSpec(
+                    type="random_forest", params={"n_estimators": 5, "max_depth": 3}
+                ),
+                validation=ValidationSpec(train_window=150, test_window=30, embargo=5),
+                random_seed=1,
+            ),
+        )
+        X = _features(model_id)
+        via_skops = load_model(model_id, format="skops")
+        assert np.array_equal(via_skops.predict(X), load_model(model_id).predict(X))
+
+
+@needs_skops
+class TestTheBundleOfAHistogramBoostingModel:
+    def test_does_not_record_the_fit_s_thread_count(self, tmp_path):
+        """The bin mapper's `n_threads` was written into `schema.json`, so
+        the same model fitted under two OpenMP limits gave two bundles."""
+        import copy
+
+        from sklearn.ensemble import HistGradientBoostingRegressor
+
+        X, models = _fitted()
+        model = HistGradientBoostingRegressor(max_iter=10, random_state=0).fit(
+            X, models["ridge"].predict(X)
+        )
+        twins = [copy.deepcopy(model) for _ in range(2)]
+        twins[0]._bin_mapper.n_threads = 2
+        twins[1]._bin_mapper.n_threads = 9
+        paths = [dump_estimator(tmp_path, f"hgb{i}", m) for i, m in enumerate(twins)]
+        assert Path(paths[0]).read_bytes() == Path(paths[1]).read_bytes()
+        assert [m._bin_mapper.n_threads for m in twins] == [2, 9]
+        restored = load_estimator(paths[0])
+        assert restored._bin_mapper.n_threads is None
+        assert np.array_equal(restored.predict(X), model.predict(X))
