@@ -251,6 +251,14 @@ def replay_decision(input_data: ReplayDecisionInput) -> ReplayDecisionResult:
     moved, the verdict is `data_changed` and the output difference is
     expected rather than suspicious.
 
+    An input recorded before data-source hashes were versioned carries the
+    earlier hash, whose value depends on the pandas version. When the
+    replayed frame reproduces it under no representation tried, the replay
+    cannot tell a revised value from a pandas difference. If those are the
+    only inputs that differ, the verdict is `data_undecided`, not
+    `data_changed`: the output moved, and the replay cannot say whether the
+    data, the code or the pandas version moved it.
+
     Nor does a different build. An output hash is bit-exact only for the
     same native build on the same instruction-set path and platform;
     elsewhere the promise is twelve significant digits. A replay that misses
@@ -281,6 +289,7 @@ def replay_decision(input_data: ReplayDecisionInput) -> ReplayDecisionResult:
         DataSourceMatch(
             symbol=match.get("symbol"),
             matches=match.get("match"),
+            undecided=bool(match.get("undecided")),
             detail=(
                 f"{match.get('start')} -> {match.get('end')} "
                 f"({match.get('interval')})"
@@ -290,8 +299,12 @@ def replay_decision(input_data: ReplayDecisionInput) -> ReplayDecisionResult:
         )
         for match in result.data_source_matches
     ]
-    checked = [m.matches for m in matches if m.matches is not None]
-    data_moved = any(m is False for m in checked)
+    missed = [m for m in matches if m.matches is False]
+    # A miss in the earlier hash form that no representation reproduces is
+    # not evidence that the data moved: the record does not say which pandas
+    # took it, and a revised value and another pandas leave the same miss.
+    data_moved = any(not m.undecided for m in missed)
+    data_undecided = any(m.undecided for m in missed)
 
     if result.output_match is None:
         verdict = "not_comparable"
@@ -301,11 +314,23 @@ def replay_decision(input_data: ReplayDecisionInput) -> ReplayDecisionResult:
         verdict = "reproduced_to_12_digits"
     elif data_moved:
         verdict = "data_changed"
+    elif data_undecided:
+        verdict = "data_undecided"
     else:
         verdict = "code_changed"
 
     notes = list(result.notes)
-    if verdict == "data_changed":
+    if verdict == "data_undecided":
+        notes.append(
+            "The output does not match, and the only inputs that no longer "
+            "hash the same are earlier-form hashes this replay cannot decide "
+            "between a revised value and a pandas difference, so it cannot "
+            "say whether the data, the code or the pandas version moved the "
+            "output. Replayed under the pandas version that wrote the "
+            "record, the input comparison no longer depends on that "
+            "difference."
+        )
+    elif verdict == "data_changed":
         notes.append(
             "The recorded inputs no longer hash the same, so a different "
             "output is expected and says nothing about the library. This is "

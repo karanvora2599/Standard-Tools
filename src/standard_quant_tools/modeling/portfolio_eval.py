@@ -49,7 +49,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from standard_quant_tools.audit.hashing import hash_dataframe
+from standard_quant_tools.audit.hashing import canonical_frame_hash
 from standard_quant_tools.backtest.portfolio_engine import run_portfolio_simulation
 from standard_quant_tools.backtest.sizing import (
     equal_weight_top_bottom,
@@ -98,6 +98,16 @@ __all__ = [
     "select_rebalance_dates",
     "transform_predictions_to_weights",
 ]
+
+#: The form of `target_weights_hash` and `equity_curve_hash`, recorded in a
+#: result's provenance as `frame_hash_version`. 2 is
+#: `audit.canonical_frame_hash`, which does not depend on the pandas
+#: version. A result without the key carries `audit.hash_dataframe`
+#: (version 1), which covers the resolution the frames' dates are stored
+#: at. Both frames are indexed by dates read from the predictions and the
+#: prices, which pandas 3 stores at `[us]` where pandas 2 stores `[ns]`, so
+#: identical weights were hashed and named differently under the two.
+FRAME_HASH_VERSION = 2
 
 # Below this, a float is treated as zero rather than as a direction. Shared
 # by every book-splitting and normalization step so "is this name long" has
@@ -999,7 +1009,12 @@ def _simulate_predictions_portfolio(
         )
     warnings.extend(extra_warnings)
 
-    weights_hash = hash_dataframe(weights)
+    # Names the artifact as well as identifying it, so it is the hash that
+    # does not depend on the pandas version (see FRAME_HASH_VERSION). A
+    # file written under the earlier digest keeps its name and loads as
+    # before; evaluating again writes the same weights once more under the
+    # new name.
+    weights_hash = canonical_frame_hash(weights)
     weights_uri = _artifacts.save_artifact(
         weights,
         run_id=run_id,
@@ -1044,7 +1059,7 @@ def _simulate_predictions_portfolio(
     )
 
     equity_curve = simulation["equity_curve"]
-    equity_hash = hash_dataframe(equity_curve.to_frame(name="equity"))
+    equity_hash = canonical_frame_hash(equity_curve.to_frame(name="equity"))
     equity_uri = _artifacts.save_artifact(
         equity_curve,
         run_id=run_id,
@@ -1073,6 +1088,7 @@ def _simulate_predictions_portfolio(
         "provenance": {
             "target_weights_hash": weights_hash,
             "equity_curve_hash": equity_hash,
+            "frame_hash_version": FRAME_HASH_VERSION,
             "task": task,
             "interval": interval,
             "provider": provider_name,

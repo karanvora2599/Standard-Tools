@@ -52,9 +52,16 @@ Given a request id:
 2. replay_decision — does it still reproduce? Report the VERDICT, not the
    boolean, and explain what it means:
      - reproduced      output and data both match
+     - reproduced_to_12_digits
+                       a bit-level miss that agrees to twelve digits, on a
+                       different build or platform. Not a defect.
      - data_changed    the inputs no longer hash the same. A different
                        output is EXPECTED and says nothing about the code.
                        Do not report this as a defect.
+     - data_undecided  only inputs hashed in the earlier, pandas-dependent
+                       form differ; the replay cannot tell a revision from
+                       a pandas difference. Report it as undecided, not as
+                       a defect or a revision.
      - code_changed    inputs identical, output differs. This is the only
                        combination that implicates the library. Compare
                        git_commit_sha across the two runs.

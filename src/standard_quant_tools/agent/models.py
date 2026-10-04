@@ -6240,8 +6240,18 @@ class DataSourceMatch(BaseModel):
         None,
         description=(
             "True when re-fetching that input reproduces the recorded hash. "
-            "False means the DATA changed underneath the decision. None "
-            "means it could not be checked."
+            "False means the DATA changed underneath the decision, unless "
+            "undecided is True. None means it could not be checked."
+        ),
+    )
+    undecided: bool = Field(
+        False,
+        description=(
+            "True when the hashes differ in the earlier form recorded before "
+            "data-source hashes were versioned, whose value depends on the "
+            "pandas version, and no representation tried reproduces it: a "
+            "revised value and a pandas difference cannot be told apart, so "
+            "the source does not count as changed data."
         ),
     )
     detail: Optional[str] = None
@@ -6279,6 +6289,7 @@ class ReplayDecisionResult(BaseModel):
         "reproduced",
         "reproduced_to_12_digits",
         "data_changed",
+        "data_undecided",
         "code_changed",
         "not_comparable",
         "failed",
@@ -6293,7 +6304,11 @@ class ReplayDecisionResult(BaseModel):
             "output hash promises across them, so it does not implicate the "
             "code. 'data_changed' the "
             "inputs no longer hash the same, so a different output is "
-            "EXPECTED and says nothing about the code. 'code_changed' the "
+            "EXPECTED and says nothing about the code. 'data_undecided' the "
+            "output differs and the only inputs that do not hash the same "
+            "are undecided (see data_source_matches[].undecided): the replay "
+            "cannot say whether the data, the code or the pandas version "
+            "moved the output. 'code_changed' the "
             "data still matches but the output does not — the only "
             "combination that implicates the library. 'not_comparable' the "
             "record cannot be checked. 'failed' the replay itself errored."

@@ -1,5 +1,68 @@
 # Changelog
 
+## A replay that cannot decide its inputs says so, a portfolio's hashes do not depend on pandas, and an external panel's refusal says whether its file moved
+
+- **`data_undecided`.** When every data source that missed in a replay was a
+  version-1 hash the replayed frame reproduces under no representation
+  tried, `replay_decision` returned `data_changed` and appended "the normal
+  consequence of a provider that does not guarantee point-in-time values"
+  after the replay's own note that it cannot tell a revision from a pandas
+  difference. It now returns `data_undecided`, with a note that the replay
+  cannot say whether the data, the code or the pandas version moved the
+  output, and without the point-in-time note. A decided change beside
+  undecided sources is `data_changed` as before; `reproduced`,
+  `reproduced_to_12_digits`, `code_changed`, `not_comparable` and `failed`
+  are decided as before.
+- **Each source says it.** Every `data_source_matches` entry of
+  `verify_replay` carries `undecided`, True for such a source; `match` stays
+  False, because the hashes differ. `replay_decision`'s `DataSourceMatch`
+  carries the same field, and an entry without it counts as decided.
+  `sqt replay` prints `undecided` beside the source and exits 1: the output
+  did not reproduce, which is all 1 says for a revision and a code change
+  alike.
+- **The tool and the auditor prompts name every verdict.**
+  `replay_decision`'s description listed reproduced, data_changed,
+  code_changed and not_comparable; it now names
+  `reproduced_to_12_digits` and `data_undecided` too, as do the four
+  provenance-auditor reference prompts under `Implementation/`, with how
+  to report each.
+- **A portfolio's hashes.** `evaluate_model_portfolio` and
+  `evaluate_predictions_portfolio` named the target-weights and equity-curve
+  artifacts after `hash_dataframe` and returned it as `target_weights_hash`
+  and `equity_curve_hash`. Both frames are indexed by dates read from the
+  predictions and the prices, which pandas 3.0.5 stores at `[us]` where
+  pandas 2.3.3 stores `[ns]`: a 24-rebalance, five-name evaluation with the
+  same Sharpe (−0.4567960804876385) under both hashed its weights
+  `67d6ec0f8c986a20` under pandas 2.3.3 and `d33ed63c2ac73301` under 3.0.5,
+  and its equity curve `5fc4cd2e0274d6aa` and `36291578256da50f`. Both
+  hashes are `canonical_frame_hash` now (`a8a5afb73c5e80d1` and
+  `ff5a542f243509fe` under both), with `frame_hash_version: 2` in
+  `provenance`. Nothing in the library reads them back but a replay's output
+  hash: a file named before keeps its name and loads as before, evaluating
+  again writes the same frames once more under the new names, and a replay
+  of an earlier evaluation record reports its output as changed, as an
+  earlier `score_model` record's does. The metrics are unchanged, and each
+  hash costs under 2 ms at the fastest decile on either pandas.
+- **An external panel's refusal says whether its file moved.**
+  `register_external_panel` recorded `panel_fingerprint`, one digest of the
+  file's name, size and modification time, and nothing read it. A
+  registration also records `panel_file_stats` now: the file count, the
+  total bytes, the newest modification time, and digests of the names, the
+  sizes and the times kept apart. A refused load of an external panel says
+  whether they still match ("The file's name, size and modification time are
+  unchanged since registration") or which moved ("the file's size changed
+  from 175 to 176 bytes and its modification time changed from … to …"; for
+  a directory, files added, removed or renamed, with both counts). After a
+  version-1 miss the check cannot decide, an unchanged file is named the
+  likelier sign of a pandas difference and a moved one of an edit; after a
+  version-2 miss, an unchanged file means an edit set its time back or the
+  file now parses differently. A registration without `panel_file_stats` is
+  compared by its fingerprint, which says whether anything moved and not
+  which. The stats are read with `stat` alone, at registration and on a
+  refusal, a second walk of the files beside the fingerprint's: 0.26 ms for
+  one file, and 0.72–1.10 s for 1,000 files against 0.72–1.04 s for the
+  fingerprint, on this machine with every core busy with other test runs.
+
 ## The search reads its dates as instants, a forest's skops bundle loads, and a model's joblib records neither padding nor a thread count
 
 - **The hyperparameter search reads a zoned panel's dates as instants.**

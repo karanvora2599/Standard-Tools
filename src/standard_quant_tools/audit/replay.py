@@ -247,7 +247,11 @@ def _compare_source(
     know) are not compared, and `match` is None.
 
     `hash_version` is the form the record's hash is in: 1, 2, or None for a
-    value that names no version this release knows.
+    value that names no version this release knows. `undecided` is True for
+    a version-1 hash that the replayed frame reproduces under none of the
+    representations tried: `match` is False, because the hashes differ, but
+    a revised value and a pandas outside the variants leave the same miss,
+    so the entry is not evidence that the data changed.
     """
     symbol, start, end, interval = key
     present = old if old is not None else new
@@ -261,6 +265,7 @@ def _compare_source(
         "match": False,
         "hash_version": _hash_version(present) if present is not None else None,
         "reproduced_with": None,
+        "undecided": False,
     }
     if old is None or new is None:
         # Fetched by only one of the two: a difference whatever the form.
@@ -276,6 +281,7 @@ def _compare_source(
             entry["match"] = True
             entry["reproduced_with"] = variant
             return entry, _RESPELLED
+        entry["undecided"] = True
         return entry, _UNDECIDED
     known = old_version in (1, DATA_SOURCE_HASH_VERSION)
     if known and old_version == _hash_version(new):

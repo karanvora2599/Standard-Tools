@@ -418,3 +418,115 @@ class TestTheVariantSearch:
         from standard_quant_tools.modeling.dataset import integrity
 
         assert integrity.legacy_hash_variant is legacy_hash_variant
+
+
+class TestTheCurrentHashIsExported:
+    def test_beside_hash_dataframe(self):
+        """`standard_quant_tools.audit` names both forms, so a caller that
+        hashes its own frames for `record_data_access` can record version
+        2 without reaching into a submodule."""
+        assert audit.canonical_frame_hash is hashing.canonical_frame_hash
+        assert audit.hash_dataframe is hashing.hash_dataframe
+        assert {"canonical_frame_hash", "hash_dataframe"} <= set(audit.__all__)
+        assert audit.canonical_frame_hash(_ticks()) == TICKS_CANONICAL
+
+
+#: The note `replay_decision` adds to a `data_changed` verdict.
+POINT_IN_TIME = "does not guarantee point-in-time values"
+
+KEY_2 = ("MSFT", "2024-01-02", "2024-01-03", "trades")
+
+
+def _write(record: Dict[str, Any]) -> None:
+    """Writes `record` into the audit trail as the writer does, so the
+    replay finds it by request id."""
+    AuditWriter().write(
+        audit.DecisionRecord(
+            timestamp_utc="2026-10-03T12:00:00+00:00",
+            cpp_available=False,
+            duration_ms=1.0,
+            **record,
+        )
+    )
+
+
+def _source(key, content_hash: str, version: Optional[int] = None) -> Dict[str, Any]:
+    entry: Dict[str, Any] = dict(
+        zip(("symbol", "start", "end", "interval"), key),
+        source="databento:XNAS.ITCH",
+        content_hash=content_hash,
+    )
+    if version is not None:
+        entry["content_hash_version"] = version
+    return entry
+
+
+class TestAnUndecidedSourceIsNotADataChange:
+    """A replay whose only differing inputs are version-1 hashes nothing
+    reproduces gets its own verdict. It was `data_changed`, and the note
+    "the normal consequence of a provider that does not guarantee
+    point-in-time values" followed the replay's own note that it cannot
+    tell a revision from a pandas difference (the CHANGELOG entry of
+    2026-10-04)."""
+
+    def test_replay_decision_says_data_undecided(self, served):
+        _write(_record(hash_dataframe(_edited()), rows=4))
+        result = tools_module.dispatch("replay_decision", {"request_id": "r1"})
+
+        assert result["verdict"] == "data_undecided"
+        (match,) = result["data_source_matches"]
+        assert match["matches"] is False and match["undecided"] is True
+        notes = "\n".join(result["notes"])
+        assert UNDECIDED in notes
+        assert "cannot say whether the data, the code or the pandas version" in notes
+        assert POINT_IN_TIME not in notes and REVISED not in notes
+
+    def test_a_decided_change_beside_it_is_still_data_changed(self, served):
+        """Null case: a version-2 hash missed too, which no pandas explains,
+        so the verdict and its note are the ones a revision always got."""
+        served["report"] = lambda: [
+            audit.record_frame_access(
+                *key, source="databento:XNAS.ITCH", frame=_ticks()
+            )
+            for key in (KEY, KEY_2)
+        ]
+        record = _record(hash_dataframe(_edited()), rows=4)
+        record["data_sources"] = [
+            _source(KEY, hash_dataframe(_edited())),
+            _source(KEY_2, canonical_frame_hash(_edited()), version=2),
+        ]
+        _write(record)
+        result = tools_module.dispatch("replay_decision", {"request_id": "r1"})
+
+        assert result["verdict"] == "data_changed"
+        undecided = {m["symbol"]: m["undecided"] for m in result["data_source_matches"]}
+        assert undecided == {"AAPL": True, "MSFT": False}
+        assert any(POINT_IN_TIME in note for note in result["notes"])
+
+    def test_an_output_that_reproduces_is_reproduced(self, served):
+        """Null case: the verdict is about the output first, as before."""
+        _write(_record(hash_dataframe(_edited()), rows=3))
+        result = tools_module.dispatch("replay_decision", {"request_id": "r1"})
+        assert result["verdict"] == "reproduced"
+        assert result["data_source_matches"][0]["undecided"] is True
+
+    def test_a_respelled_hash_is_not_undecided(self, served):
+        """Null case: a version-1 hash the other pandas's spelling
+        reproduces is the recorded data, and the output decides."""
+        _write(_record(OTHER_LEGACY, rows=4))
+        result = tools_module.dispatch("replay_decision", {"request_id": "r1"})
+        assert result["verdict"] == "code_changed"
+        (match,) = result["data_source_matches"]
+        assert match["matches"] is True and match["undecided"] is False
+
+    def test_sqt_replay_exits_1_and_marks_the_source(self, served):
+        """The output did not reproduce, which is what exit code 1 says;
+        the report marks the source the replay could not decide."""
+        from standard_quant_tools import cli
+
+        _write(_record(hash_dataframe(_edited()), rows=4))
+        report, exit_code = cli._replay("r1")
+
+        assert exit_code == 1
+        assert "match=False  undecided" in report
+        assert UNDECIDED in report

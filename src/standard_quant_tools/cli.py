@@ -7,9 +7,14 @@ Command-line interface for the audit trail's JSONL decision records
                                             whether data/output still match.
                                             Exit code: 0 = output matched,
                                             1 = output_match is False (a
-                                            confirmed mismatch), 2 = the
-                                            record has no output_hash to
-                                            compare (indeterminate).
+                                            confirmed mismatch, also when
+                                            the only inputs that differ are
+                                            undecided earlier-form hashes),
+                                            2 = the record has no
+                                            output_hash to compare
+                                            (indeterminate), 3 = matched to
+                                            twelve significant digits on a
+                                            different build or platform.
     sqt compare <request_id_a> <id_b>    — diff two records' status/output/
                                             timing/provenance and inputs.
     sqt report <request_id>              — pretty-print one record in full.
@@ -168,6 +173,7 @@ def _format_replay(result: audit.ReplayResult) -> str:
         lines.append(
             f"  data_source: {m['symbol']} {m['start']} -> {m['end']} "
             f"({m['interval']})  match={m['match']}"
+            + ("  undecided" if m.get("undecided") else "")
         )
     for note in result.notes:
         lines.append(f"  note       : {note}")
@@ -188,6 +194,13 @@ def _replay_exit_code(result: audit.ReplayResult) -> int:
     3 is not folded into 0 or 1. It is not bit-exact, so 0 would claim more
     than happened; and nothing changed in the code or the data, so 1 would
     send an automated check after a regression that is not there.
+
+    A mismatch whose only differing inputs are undecided -- earlier-form
+    hashes, which depend on the pandas version, that the replayed data
+    reproduces under no representation tried (`data_undecided` from
+    `replay_decision`) -- is 1. The output did not reproduce, which is all 1
+    says: it is also the code for a revision and for a code change, and the
+    report's notes say which, or here that the replay cannot tell.
     """
     if (
         result.output_match is False

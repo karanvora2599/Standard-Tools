@@ -31,13 +31,24 @@ recorded by a pandas whose differences are not in that list, and the
 refusal says so. The variant search is `audit.legacy_hash`, which a replay
 of a decision record recorded before its data sources were versioned uses
 too.
+
+AN EXTERNAL PANEL'S FILE. A panel registered by reference is re-read from
+the caller's file on every load, and the registration records the file's
+name, size and modification time: `panel_fingerprint`, their digest, and
+`panel_file_stats`, which keeps them apart. A refusal of such a panel says
+whether they still match. Writing to a file moves its modification time
+unless something sets it back, so an unchanged file points to a difference
+in how it was read or hashed, and a changed one to an edit.
 """
 
 from __future__ import annotations
 
+import datetime
+import hashlib
 import logging
 import platform
-from typing import Any, Dict, Mapping, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from standard_quant_tools.audit.hashing import canonical_frame_hash, hash_dataframe
 from standard_quant_tools.audit.legacy_hash import legacy_hash_variant
@@ -76,6 +87,174 @@ def build_environment() -> Dict[str, Optional[str]]:
     }
 
 
+# ── an external panel's file, as registered ─────────────────────────────
+
+
+def panel_file_stats(path: Any) -> Dict[str, Any]:
+    """
+    The names, sizes and modification times of the files behind an
+    external panel, recorded at registration as `panel_file_stats`.
+
+    `panel_fingerprint` is one digest of the same three, so it can say that
+    something moved and not what. This keeps them apart: `names`, `sizes`
+    and `mtimes` are digests of each in file-name order (relative names in
+    `/` form, so a directory hashes alike on every OS), beside the file
+    count, the total size and the newest modification time in nanoseconds.
+    The files are the ones `panel_fingerprint` covers. Each is stat'ed, and
+    none is read.
+    """
+    from standard_quant_tools.data import external as _external
+
+    root = Path(path)
+    base = root if root.is_dir() else root.parent
+    names, sizes, mtimes = hashlib.sha256(), hashlib.sha256(), hashlib.sha256()
+    files = total = 0
+    newest: Optional[int] = None
+    for file in _external._files(root):
+        try:
+            stat = file.stat()
+        except OSError:  # pragma: no cover - raced deletion
+            continue
+        for digest, part in (
+            (names, file.relative_to(base).as_posix()),
+            (sizes, str(stat.st_size)),
+            (mtimes, str(stat.st_mtime_ns)),
+        ):
+            encoded = part.encode("utf-8")
+            digest.update(len(encoded).to_bytes(8, "little"))
+            digest.update(encoded)
+        files += 1
+        total += int(stat.st_size)
+        newest = (
+            int(stat.st_mtime_ns) if newest is None else max(newest, stat.st_mtime_ns)
+        )
+    return {
+        "files": files,
+        "bytes": total,
+        "modified_ns": newest,
+        "names": names.hexdigest()[:16],
+        "sizes": sizes.hexdigest()[:16],
+        "mtimes": mtimes.hexdigest()[:16],
+    }
+
+
+def _count(value: Any) -> str:
+    return f"{value:,}" if isinstance(value, int) else "an unrecorded number of"
+
+
+def _utc(ns: Any) -> str:
+    """A modification time in nanoseconds, as UTC to the nanosecond."""
+    if not isinstance(ns, int):
+        return "an unrecorded time"
+    seconds, fraction = divmod(ns, 10**9)
+    moment = datetime.datetime.fromtimestamp(seconds, tz=datetime.timezone.utc)
+    return f"{moment:%Y-%m-%d %H:%M:%S}.{fraction:09d} UTC"
+
+
+def panel_file_state(
+    meta: Mapping[str, Any], panel_path: Any
+) -> Optional[Tuple[bool, str]]:
+    """
+    Whether an external panel's file still has the name, size and
+    modification time its registration recorded: (unchanged, a sentence
+    saying so or naming what moved). None when the registration recorded
+    neither `panel_file_stats` nor `panel_fingerprint` -- a built dataset,
+    whose panel this library wrote -- or the file cannot be stat'ed.
+
+    A registration made before `panel_file_stats` existed is compared by
+    its fingerprint alone, which says whether anything moved but not what.
+    """
+    path = Path(str(panel_path))
+    recorded = meta.get("panel_file_stats")
+    fingerprint = meta.get("panel_fingerprint")
+    try:
+        directory = path.is_dir()
+        if isinstance(recorded, Mapping):
+            now = panel_file_stats(path)
+        elif fingerprint:
+            from standard_quant_tools.data import external as _external
+
+            same = _external.fingerprint(path) == fingerprint
+        else:
+            return None
+    except OSError:
+        return None
+
+    if directory:
+        whose, what, also = "files'", "names, sizes and modification times", "their"
+    else:
+        whose, what, also = "file's", "name, size and modification time", "its"
+    unchanged = f"The {whose} {what} are unchanged since registration."
+    if not isinstance(recorded, Mapping):
+        if same:
+            return True, unchanged
+        return False, (
+            f"The {whose} {what.replace(' and ', ' or ')} changed since "
+            "registration; the registration recorded their digest alone, so "
+            "which of them is not known."
+        )
+
+    if now["names"] != recorded.get("names"):
+        return False, (
+            "Since registration, files were added to, removed from or renamed "
+            f"in {path} ({_count(recorded.get('files'))} files at registration, "
+            f"{_count(now['files'])} now)."
+        )
+    moved: List[str] = []
+    if now["sizes"] != recorded.get("sizes"):
+        then, size_now = _count(recorded.get("bytes")), _count(now["bytes"])
+        moved.append(
+            f"sizes changed ({then} bytes in all at registration, {size_now} now)"
+            if directory
+            else f"size changed from {then} to {size_now} bytes"
+        )
+    if now["mtimes"] != recorded.get("mtimes"):
+        then, time_now = _utc(recorded.get("modified_ns")), _utc(now["modified_ns"])
+        moved.append(
+            f"modification times changed (the newest {then} at registration, "
+            f"{time_now} now)"
+            if directory
+            else f"modification time changed from {then} to {time_now}"
+        )
+    if not moved:
+        return True, unchanged
+    return False, f"Since registration, the {whose} {f' and {also} '.join(moved)}."
+
+
+#: Why an unchanged name, size and modification time is a hint at all.
+_WRITES_MOVE_MTIME = (
+    "Writing to a file moves its modification time unless something sets it back, so"
+)
+
+
+def _file_note(meta: Mapping[str, Any], panel_path: Any, *, undecided: bool) -> str:
+    """For an external panel's refusal: whether its file moved since
+    registration, and what that points to. Empty for a built dataset, and
+    when the file cannot be examined: a hint never replaces the refusal."""
+    try:
+        state = panel_file_state(meta, panel_path)
+    except Exception:  # noqa: BLE001 - the refusal stands without the hint
+        logger.debug("panel file state not determined", exc_info=True)
+        return ""
+    if state is None:
+        return ""
+    unchanged, sentence = state
+    if unchanged and undecided:
+        return (
+            f" {sentence} {_WRITES_MOVE_MTIME} a pandas difference is the "
+            "likelier cause."
+        )
+    if unchanged:
+        return (
+            f" {sentence} {_WRITES_MOVE_MTIME} either an edit set it back or the "
+            "file now parses to different values, as another version of its "
+            "reader can."
+        )
+    if undecided:
+        return f" {sentence} That points to an edit rather than a pandas difference."
+    return f" {sentence}"
+
+
 # ── the check every load runs ────────────────────────────────────────────
 
 
@@ -108,7 +287,9 @@ def verify_panel_hash(
     Parquet file this library wrote for a built dataset, whose footer
     records the pandas that wrote it; None for an external panel, whose
     file was written by someone else and says nothing about the pandas
-    that hashed it.
+    that hashed it. An external panel's refusal also says whether its file
+    has the name, size and modification time recorded at registration
+    (`panel_file_state`).
     """
     import pandas as pd
 
@@ -118,6 +299,10 @@ def verify_panel_hash(
     version = int(meta.get("data_hash_version") or 1)
     external = meta.get("storage") == "external"
     rebuild = "Register the panel again." if external else "Rebuild the dataset."
+
+    def file_note(undecided: bool) -> str:
+        # Read only on the refusal path: a stat of each file behind it.
+        return _file_note(meta, panel_path, undecided=undecided) if external else ""
 
     if version == 2:
         actual = canonical_frame_hash(panel)
@@ -129,7 +314,8 @@ def verify_panel_hash(
                 "column names, their types and every value, and does not "
                 "depend on the pandas or pyarrow version, so the data has "
                 "changed since the build. Using it would record a lineage hash "
-                f"that does not describe the data actually used. {rebuild}"
+                "that does not describe the data actually used."
+                f"{file_note(False)} {rebuild}"
             )
         return
     if version != 1:
@@ -170,7 +356,7 @@ def verify_panel_hash(
             f"{stored}, found {actual}). The panel was written by pandas "
             f"{writer} and this process runs pandas {running}, so the data has "
             "changed. Using it would record a lineage hash that does not "
-            f"describe the data actually used. {rebuild}"
+            f"describe the data actually used.{file_note(False)} {rebuild}"
         )
     who = (
         f"The panel was written by pandas {writer} and this process runs "
@@ -186,7 +372,7 @@ def verify_panel_hash(
         f"{who} Re-hashing it under both versions' dtype names and datetime "
         f"resolutions does not reproduce {stored}, so either its values have "
         "changed or this pandas hashes them differently from the one that "
-        "recorded it, and this check cannot tell which. "
+        f"recorded it, and this check cannot tell which.{file_note(True)} "
         + ("Registering the panel again" if external else "Rebuilding the dataset")
         + " records a hash that does not depend on the pandas version."
     )
@@ -197,5 +383,7 @@ __all__ = [
     "build_environment",
     "legacy_hash_variant",
     "panel_data_hash",
+    "panel_file_state",
+    "panel_file_stats",
     "verify_panel_hash",
 ]

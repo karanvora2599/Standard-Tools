@@ -25,6 +25,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import uuid
 
 import numpy as np
@@ -49,7 +50,10 @@ from standard_quant_tools.modeling.agent.tools import (
     register_external_panel,
     run_model_experiment,
 )
-from standard_quant_tools.modeling.dataset.integrity import DATA_HASH_VERSION
+from standard_quant_tools.modeling.dataset.integrity import (
+    DATA_HASH_VERSION,
+    panel_file_stats,
+)
 from standard_quant_tools.modeling.registry.model_registry import load_manifest
 from standard_quant_tools.modeling.specs import (
     DatasetSpec,
@@ -162,10 +166,25 @@ def _legacy_dataset(panel: pd.DataFrame, data_hash: str, **extra) -> str:
     return dataset_id
 
 
-def _write_csv(path) -> str:
+#: 2026-10-01 12:00:00 UTC in nanoseconds: a modification time set
+#: explicitly, so a test does not depend on the file system's clock
+#: granularity (two writes within one tick share a time on some).
+REGISTERED_NS = 1_790_856_000_000_000_000
+REGISTERED_UTC = "2026-10-01 12:00:00.000000000 UTC"
+
+
+def _write_csv(path, text: str = CSV_TEXT, mtime_ns=None) -> str:
     with open(path, "w", encoding="utf-8", newline="") as handle:
-        handle.write(CSV_TEXT)
+        handle.write(text)
+    if mtime_ns is not None:
+        os.utime(path, ns=(mtime_ns, mtime_ns))
     return str(path)
+
+
+def _refusal(dataset_id: str) -> str:
+    with pytest.raises(ValidationError) as caught:
+        _load_dataset_panel(dataset_id)
+    return str(caught.value)
 
 
 def _register_csv(path):
@@ -427,6 +446,151 @@ class TestExternalPanels:
         assert (
             "The dataset does not record which pandas built it, and this process "
             f"runs pandas {pd.__version__}." in message
+        )
+
+
+class TestAnExternalRefusalSaysWhetherTheFileMoved:
+    """`register_external_panel` recorded the file's name, size and
+    modification time as `panel_fingerprint` and nothing read it, so a
+    refused external panel said nothing about whether its file had been
+    touched -- the fact that tells a pandas difference from an edit (the
+    CHANGELOG entry of 2026-10-04). A registration now also records the
+    three apart as `panel_file_stats`, and a refusal says which moved."""
+
+    def test_registration_records_the_three_apart(self, tmp_path):
+        path = _write_csv(tmp_path / "panel.csv", mtime_ns=REGISTERED_NS)
+        result = _register_csv(path)
+        meta = json.loads(_meta_path(result.dataset_id).read_text(encoding="utf-8"))
+        stats = meta["panel_file_stats"]
+        assert stats == panel_file_stats(path)
+        assert stats["files"] == 1
+        assert stats["bytes"] == len(CSV_TEXT.encode("utf-8"))
+        assert stats["modified_ns"] == REGISTERED_NS
+        assert meta["panel_fingerprint"] == result.fingerprint
+
+    def test_an_unchanged_file_points_an_undecided_refusal_at_pandas(self, tmp_path):
+        """A version-1 hash nothing reproduces, from a file nobody touched:
+        the likelier cause is the pandas, and the refusal says so."""
+        path = _write_csv(tmp_path / "panel.csv", mtime_ns=REGISTERED_NS)
+        result = _register_csv(path)
+        _rewrite_meta(
+            result.dataset_id,
+            data_hash="0" * 16,
+            data_hash_version=None,
+            built_with=None,
+        )
+        message = _refusal(result.dataset_id)
+        assert f"the panel at {path} could not be verified" in message
+        assert (
+            "The file's name, size and modification time are unchanged since "
+            "registration. Writing to a file moves its modification time unless "
+            "something sets it back, so a pandas difference is the likelier "
+            "cause." in message
+        )
+        assert message.endswith(
+            "Registering the panel again records a hash that does not depend on "
+            "the pandas version."
+        )
+
+    def test_an_edited_file_says_what_moved(self, tmp_path):
+        path = _write_csv(tmp_path / "panel.csv", mtime_ns=REGISTERED_NS)
+        result = _register_csv(path)
+        own = CSV_LEGACY_PANDAS_3 if PANDAS_3 else CSV_LEGACY_PANDAS_2
+        _rewrite_meta(
+            result.dataset_id, data_hash=own, data_hash_version=None, built_with=None
+        )
+        size = len(CSV_TEXT.encode("utf-8"))
+        _write_csv(
+            path,
+            CSV_TEXT.replace("0.1,0.5", "0.15,0.5"),
+            mtime_ns=REGISTERED_NS + 1_500_000_000,
+        )
+        message = _refusal(result.dataset_id)
+        assert (
+            f"Since registration, the file's size changed from {size} to "
+            f"{size + 1} bytes and its modification time changed from "
+            f"{REGISTERED_UTC} to 2026-10-01 12:00:01.500000000 UTC. That points "
+            "to an edit rather than a pandas difference." in message
+        )
+
+    def test_a_touched_file_names_the_time_alone(self, tmp_path):
+        """The same bytes, a later modification time: only the time moved."""
+        path = _write_csv(tmp_path / "panel.csv", mtime_ns=REGISTERED_NS)
+        result = _register_csv(path)
+        _rewrite_meta(result.dataset_id, data_hash="0" * 16)
+        os.utime(path, ns=(REGISTERED_NS, REGISTERED_NS + 1_000))
+        message = _refusal(result.dataset_id)
+        assert (
+            "Since registration, the file's modification time changed from "
+            f"{REGISTERED_UTC} to 2026-10-01 12:00:00.000001000 UTC. Register "
+            "the panel again." in message
+        )
+
+    def test_an_edit_that_keeps_size_and_time_is_still_refused(self, tmp_path):
+        """Null case for the hint: an edit of the same length with the time
+        set back leaves all three as registered. The content hash refuses
+        it, and the sentence names the edit as one explanation."""
+        path = _write_csv(tmp_path / "panel.csv", mtime_ns=REGISTERED_NS)
+        result = _register_csv(path)
+        _write_csv(path, CSV_TEXT.replace("0.1,0.5", "0.2,0.5"), mtime_ns=REGISTERED_NS)
+        message = _refusal(result.dataset_id)
+        assert f"the panel at {path} no longer matches the content hash" in message
+        assert (
+            "The file's name, size and modification time are unchanged since "
+            "registration. Writing to a file moves its modification time unless "
+            "something sets it back, so either an edit set it back or the file "
+            "now parses to different values" in message
+        )
+        assert message.endswith("Register the panel again.")
+
+    def test_a_registration_with_the_digest_alone_says_whether_it_moved(self, tmp_path):
+        """A panel registered before `panel_file_stats` existed has only
+        the digest: the refusal says whether the file moved, not which of
+        the three did."""
+        path = _write_csv(tmp_path / "panel.csv", mtime_ns=REGISTERED_NS)
+        result = _register_csv(path)
+        _rewrite_meta(
+            result.dataset_id,
+            panel_file_stats=None,
+            data_hash="0" * 16,
+            data_hash_version=None,
+            built_with=None,
+        )
+        assert "unchanged since registration" in _refusal(result.dataset_id)
+
+        _write_csv(path, mtime_ns=REGISTERED_NS + 1_000)
+        message = _refusal(result.dataset_id)
+        assert (
+            "The file's name, size or modification time changed since "
+            "registration; the registration recorded their digest alone, so "
+            "which of them is not known. That points to an edit rather than a "
+            "pandas difference." in message
+        )
+
+    def test_a_directory_names_the_files_added(self, tmp_path):
+        """A partitioned panel with a partition added since registration."""
+        directory = tmp_path / "panel"
+        directory.mkdir()
+        frame = pd.DataFrame(
+            {
+                "date": pd.to_datetime(
+                    ["2024-01-02", "2024-01-02", "2024-01-03", "2024-01-03"]
+                ),
+                "entity": ["AAA", "BBB", "AAA", "BBB"],
+                "alpha": [0.1, -0.2, 0.3, -0.4],
+                "target": [0.5, -0.5, 0.25, -0.25],
+            }
+        )
+        frame.iloc[:2].to_parquet(directory / "part-0.parquet", index=False)
+        frame.iloc[2:].to_parquet(directory / "part-1.parquet", index=False)
+        result = _register_csv(directory)
+
+        later = frame.iloc[2:].assign(date=pd.to_datetime(["2024-01-04"] * 2))
+        later.to_parquet(directory / "part-2.parquet", index=False)
+        message = _refusal(result.dataset_id)
+        assert (
+            "Since registration, files were added to, removed from or renamed "
+            f"in {directory} (2 files at registration, 3 now)." in message
         )
 
 

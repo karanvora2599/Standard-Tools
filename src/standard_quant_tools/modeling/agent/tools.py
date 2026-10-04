@@ -54,6 +54,7 @@ from ..dataset.integrity import (
     DATA_HASH_VERSION,
     build_environment,
     panel_data_hash,
+    panel_file_stats,
     verify_panel_hash,
 )
 from ..dataset.lags import parse_lag_column
@@ -587,6 +588,9 @@ def register_external_panel(
             "panel_path": str(handle.path),
             "panel_format": handle.fmt,
             "panel_fingerprint": handle.fingerprint,
+            # The same three facts kept apart, so a refused load can say
+            # which of them moved since registration, not only that one did.
+            "panel_file_stats": panel_file_stats(handle.path),
             "panel_columns": {
                 "date_column": input_data.date_column,
                 "entity_column": input_data.entity_column,

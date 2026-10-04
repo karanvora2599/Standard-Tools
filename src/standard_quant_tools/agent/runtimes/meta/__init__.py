@@ -115,7 +115,7 @@ TOOL_DEFS = [
     ),
     (
         "replay_decision",
-        "Re-run a recorded call and classify the result: reproduced, data_changed (the inputs were revised, so a different answer is expected), code_changed (inputs identical, output differs — the only case implicating the library), or not_comparable.",
+        "Re-run a recorded call and classify the result: reproduced, reproduced_to_12_digits (a bit-level miss that agrees to twelve digits on a different build), data_changed (the inputs were revised, so a different answer is expected), data_undecided (only earlier-form input hashes differ, and the replay cannot tell a revision from a pandas difference), code_changed (inputs identical, output differs — the only case implicating the library), or not_comparable.",
         ReplayDecisionInput,
     ),
     (
