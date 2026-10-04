@@ -42,14 +42,22 @@ the runtime's thread count when a fit or a prediction starts, and at their
 default they take every logical CPU. Under the PASSIVE wait policy this
 package sets on import, histogram boosting on 16 threads fitted 15,000 rows
 of 8 features in 1.5 to 1.7 s, and on one thread in 0.28 to 0.36 s, with
-the same predictions. Under the MSVC runtime (vcomp) the count set on any
-thread reaches every thread, so the limit cannot be scoped to one call --
-`threadpool_limits` on a worker thread was measured reaching the main
-thread -- and is kept process-wide and counted like the BLAS limit: the
-count in force before the first user comes back when the last one leaves,
-and a user entering while another is inside runs on the count already in
-force. The count is also set on each entering user's own thread, which is
-where a runtime that keeps it per thread (GNU libgomp) reads it.
+the same predictions. The runtimes keep that count in two different ways,
+and the limit follows each:
+
+- Under the MSVC runtime (vcomp) the count set on any thread reaches every
+  thread -- `threadpool_limits` on a worker thread was measured reaching
+  the main thread -- so it cannot be scoped to one call. It is kept
+  process-wide and counted like the BLAS limit: the count in force before
+  the first user comes back when the last one leaves, and a user entering
+  while another is inside runs on the count already in force.
+- GNU libgomp, LLVM's libomp and Intel's runtime keep it per thread, as the
+  OpenMP specification has `omp_set_num_threads` do: a count set on one
+  thread is not seen by another. Each thread sets its own on its first
+  entry and puts back its own on its last exit, so every pooled worker runs
+  under the limit and no thread is left limited after its users leave. Kept
+  process-wide there, the count of the first thread in would have stayed
+  on it whenever another thread left last.
 """
 
 from __future__ import annotations
@@ -221,32 +229,63 @@ def _set_openmp(libraries: List[Any], threads: int) -> None:
             logger.debug("OpenMP thread limit not applied: %s", exc)
 
 
+def _read_openmp(libraries: List[Any]) -> List[Tuple[Any, Optional[int]]]:
+    saved: List[Tuple[Any, Optional[int]]] = []
+    for library in libraries:
+        try:
+            saved.append((library, library.get_num_threads()))
+        except Exception as exc:  # noqa: BLE001 - never fail the caller
+            logger.debug("OpenMP thread count not read: %s", exc)
+    return saved
+
+
+def openmp_count_is_process_wide(library: Any) -> bool:
+    """Whether a runtime's thread count, set on one thread, reaches every
+    thread: MSVC's vcomp, measured. Every other runtime keeps it per thread,
+    as the OpenMP specification has `omp_set_num_threads` do."""
+    path = str(getattr(library, "filepath", "") or "")
+    name = os.path.basename(path).lower() or str(getattr(library, "prefix", "")).lower()
+    return name.startswith("vcomp")
+
+
+#: Per thread: how deep this thread is inside the limit, and its own counts
+#: for the per-thread runtimes from before its first entry.
+_omp_local = threading.local()
+
+
 @contextmanager
 def openmp_thread_limit(threads: Optional[int]) -> Iterator[None]:
     """
     Run the enclosed block with every loaded OpenMP runtime at `threads`
-    threads, restoring the process's setting when the last concurrent user
-    leaves. None or below 1 leaves the runtimes alone.
+    threads, putting each runtime's count back when its users leave. None
+    or below 1 leaves the runtimes alone.
 
-    A user entering while another is inside runs on the count the first
-    one set. The estimators this wraps give the same predictions at any
-    count, so that changes how long the block takes and nothing it returns.
+    A process-wide runtime is counted across threads: a user entering while
+    another is inside runs on the count the first one set, and the count
+    from before the first comes back when the last leaves. A per-thread
+    runtime is set and put back by each thread for itself, a nested user
+    running on its thread's outer count. The estimators this wraps give the
+    same predictions at any count, so either changes how long the block
+    takes and nothing it returns.
     """
     global _omp_users, _omp_saved, _omp_in_force
     if threads is None or int(threads) < 1:
         yield
         return
+    count = int(threads)
+    libraries = _openmp_libraries()
+    shared = [lib for lib in libraries if openmp_count_is_process_wide(lib)]
+    own = [lib for lib in libraries if not openmp_count_is_process_wide(lib)]
+
+    depth = getattr(_omp_local, "depth", 0)
+    if depth == 0:
+        _omp_local.saved = _read_openmp(own)
+        _set_openmp([library for library, _ in _omp_local.saved], count)
+    _omp_local.depth = depth + 1
     with _omp_lock:
         if _omp_users == 0:
-            libraries = _openmp_libraries()
-            saved: List[Tuple[Any, Optional[int]]] = []
-            for library in libraries:
-                try:
-                    saved.append((library, library.get_num_threads()))
-                except Exception as exc:  # noqa: BLE001 - never fail the caller
-                    logger.debug("OpenMP thread count not read: %s", exc)
-            _omp_saved = saved
-            _omp_in_force = int(threads)
+            _omp_saved = _read_openmp(shared)
+            _omp_in_force = count
         _set_openmp([library for library, _ in _omp_saved or []], _omp_in_force)
         _omp_users += 1
     try:
@@ -258,6 +297,10 @@ def openmp_thread_limit(threads: Optional[int]) -> Iterator[None]:
                 saved, _omp_saved = _omp_saved or [], None
                 _omp_in_force = None
                 _restore(saved)
+        _omp_local.depth -= 1
+        if _omp_local.depth == 0:
+            mine, _omp_local.saved = _omp_local.saved or [], None
+            _restore(mine)
 
 
 def _after_fork_in_child() -> None:

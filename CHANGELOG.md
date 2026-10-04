@@ -1,5 +1,25 @@
 # Changelog
 
+## The OpenMP limit restores each thread's own count on a runtime that keeps it per thread
+
+- **On Linux a thread could be left limited after two fits overlapped.**
+  The OpenMP limit read every runtime's count when the first user entered
+  and put it back when the last one left, which is right for MSVC's vcomp,
+  whose count set on any thread reaches every thread. GNU libgomp and LLVM's
+  libomp keep the count per thread, as the OpenMP specification has
+  `omp_set_num_threads` do: there the restore ran on whichever thread left
+  last, so the first thread in stayed at one OpenMP thread, and a pooled
+  worker that entered while another was inside was never limited. CI's
+  Linux runners caught it on all three Python versions; Windows did not.
+- **Each kind of runtime is now limited the way it keeps its count.** vcomp
+  is counted across threads as before. A per-thread runtime is set by each
+  thread on its first entry and put back by that thread on its last exit, a
+  nested user running on its thread's outer count. Which kind a runtime is
+  follows from its library (`_blas.openmp_count_is_process_wide`), and both
+  are tested on every platform with stand-in runtimes of each kind.
+  Predictions are unchanged: the estimators the limit wraps give the same
+  predictions at any thread count.
+
 ## The guides describe the headline test, the selection gate, the split screen and the dataset hash
 
 - **The modeling guide** has the run's headline test and its notes, the

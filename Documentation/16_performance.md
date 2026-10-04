@@ -377,8 +377,9 @@ prediction, and its work per region is small on a modeling fold: on a
 against 0.28–0.36 s on one thread (ACTIVE: about 0.3 s either way). The
 modeling engine therefore holds OpenMP estimators to their share of the
 budget, one thread under `"auto"` below 2,000,000 training cells, through
-`_blas.openmp_thread_limit`, a reference-counted, process-wide limit
-modelled on the BLAS one (see
+`_blas.openmp_thread_limit`, reference-counted across threads where the
+runtime's count is process-wide (vcomp) and set per thread where it is kept
+per thread (libgomp, libomp) (see
 [15_modeling.md](15_modeling.md#max_parallelism-what-the-budget-controls)).
 The manifest's environment records `OMP_WAIT_POLICY` beside the other
 thread variables.

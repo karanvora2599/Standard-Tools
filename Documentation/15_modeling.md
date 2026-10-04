@@ -2593,10 +2593,12 @@ It controls four things:
   logical CPU at their default. Under the PASSIVE wait policy this package
   sets on import, 16 threads fitted a 15,000-row, 8-feature fold in 1.5–1.7 s
   and one thread in 0.28–0.36 s, with the same predictions. Each fit and
-  prediction now runs under `openmp_thread_limit`, a process-wide,
-  reference-counted limit like the BLAS one (a per-call limit set on a worker
-  thread was measured reaching the main thread under vcomp), at the fit's
-  share; under `"auto"` that is one thread below 2,000,000 training cells
+  prediction now runs under `openmp_thread_limit` at the fit's share. Under
+  MSVC's vcomp the count set on any thread reaches every thread (a per-call
+  limit on a worker thread was measured reaching the main thread), so there
+  it is reference-counted across threads like the BLAS limit; libgomp and
+  LLVM's libomp keep the count per thread, so there each thread sets and
+  restores its own; under `"auto"` that is one thread below 2,000,000 training cells
   (rows × columns), where one thread measured faster, and the share above.
   On a 30-name daily equity panel (31,680 rows, 8 features) a
   hist_gradient_boosting run went from 15–17 s to about 4 s.

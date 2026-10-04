@@ -7,8 +7,11 @@ installed -- start an OpenMP team on every logical CPU for each fit and
 prediction, whatever the budget said. Under the PASSIVE wait policy this
 package sets on import, sixteen threads fitted a 15,000-row fold about five
 times slower than one, with the same predictions. Each fit and prediction
-now runs under a process-wide, reference-counted limit at the fit's share of
-the budget: one thread under 'auto' below 2,000,000 training cells.
+now runs under a reference-counted limit at the fit's share of the budget:
+one thread under 'auto' below 2,000,000 training cells. A runtime that
+keeps its count per thread (libgomp, libomp) is limited and restored on each
+thread; MSVC's vcomp, whose count reaches every thread, is counted across
+threads.
 """
 
 import threading
@@ -111,6 +114,15 @@ class TestTheLimit:
         assert _openmp_threads() == openmp
 
     def test_the_last_concurrent_user_restores(self, openmp):
+        """On the runtimes loaded here. A process-wide runtime (vcomp) holds
+        the limit for the main thread while the worker is still inside; a
+        per-thread one (libgomp, libomp) gives the main thread its own count
+        back as soon as it leaves. Either way every thread ends where it
+        began."""
+        shared = any(
+            _blas.openmp_count_is_process_wide(library)
+            for library in _blas._openmp_libraries()
+        )
         inside = threading.Barrier(2)
         leave = threading.Event()
         seen = []
@@ -125,12 +137,108 @@ class TestTheLimit:
         with _blas.openmp_thread_limit(1):
             inside.wait()
             seen.append(_openmp_threads())
-        # The worker is still inside: the limit holds.
         seen.append(_openmp_threads())
         leave.set()
         worker.join()
         seen.append(_openmp_threads())
-        assert seen == [1, 1, openmp]
+        assert seen == [1, 1 if shared else openmp, openmp]
+
+
+class _PerThreadRuntime:
+    """A runtime that keeps its count per thread, as libgomp does."""
+
+    filepath = "/usr/lib/libgomp-a34b3233.so.1"
+
+    def __init__(self, default):
+        self._default = default
+        self._local = threading.local()
+
+    def get_num_threads(self):
+        return getattr(self._local, "count", self._default)
+
+    def set_num_threads(self, count):
+        self._local.count = count
+
+
+class _ProcessWideRuntime:
+    """A runtime whose count, set on any thread, reaches every thread, as
+    MSVC's vcomp does."""
+
+    filepath = r"C:\Windows\System32\vcomp140.dll"
+
+    def __init__(self, default):
+        self.count = default
+
+    def get_num_threads(self):
+        return self.count
+
+    def set_num_threads(self, count):
+        self.count = count
+
+
+class TestBothKindsOfRuntime:
+    """The two ways a runtime keeps its count, on every platform. Kept
+    process-wide for a per-thread runtime, the limit was set only on the
+    first thread in and put back only on the last thread out: on Linux the
+    main thread stayed at one thread after a concurrent fit, and a pooled
+    worker after the first was never limited at all."""
+
+    def _concurrent(self, monkeypatch, runtime):
+        monkeypatch.setattr(_blas, "_openmp_libraries", lambda: [runtime])
+        inside = threading.Barrier(2)
+        leave = threading.Event()
+        seen = {}
+
+        def user():
+            with _blas.openmp_thread_limit(1):
+                seen["worker inside"] = runtime.get_num_threads()
+                inside.wait()
+                leave.wait()
+            seen["worker after"] = runtime.get_num_threads()
+
+        worker = threading.Thread(target=user)
+        worker.start()
+        with _blas.openmp_thread_limit(1):
+            inside.wait()
+            seen["main inside"] = runtime.get_num_threads()
+        seen["main while worker inside"] = runtime.get_num_threads()
+        leave.set()
+        worker.join()
+        seen["main after"] = runtime.get_num_threads()
+        return seen
+
+    def test_a_per_thread_runtime_is_limited_and_restored_on_each_thread(
+        self, monkeypatch
+    ):
+        runtime = _PerThreadRuntime(default=8)
+        assert not _blas.openmp_count_is_process_wide(runtime)
+        assert self._concurrent(monkeypatch, runtime) == {
+            "worker inside": 1,
+            "main inside": 1,
+            "main while worker inside": 8,
+            "main after": 8,
+            "worker after": 8,
+        }
+
+    def test_a_process_wide_runtime_is_counted_across_threads(self, monkeypatch):
+        runtime = _ProcessWideRuntime(default=8)
+        assert _blas.openmp_count_is_process_wide(runtime)
+        assert self._concurrent(monkeypatch, runtime) == {
+            "worker inside": 1,
+            "main inside": 1,
+            "main while worker inside": 1,
+            "main after": 8,
+            "worker after": 8,
+        }
+
+    def test_nesting_on_one_thread_keeps_the_outer_count(self, monkeypatch):
+        for runtime in (_PerThreadRuntime(default=8), _ProcessWideRuntime(default=8)):
+            monkeypatch.setattr(_blas, "_openmp_libraries", lambda: [runtime])
+            with _blas.openmp_thread_limit(2):
+                with _blas.openmp_thread_limit(5):
+                    assert runtime.get_num_threads() == 2
+                assert runtime.get_num_threads() == 2
+            assert runtime.get_num_threads() == 8
 
 
 class TestTheShare:
