@@ -180,6 +180,11 @@ class TestModelingDispatch:
             "predict_survival_curve",
             "list_models",
             "list_datasets",
+            # What one dataset holds and how it was built -- each column's
+            # catalog id, parameters and alias -- the counterpart of
+            # inspect_model. Without it an agent holding a column name
+            # asked get_dataset_metadata, which describes a provider.
+            "inspect_dataset",
             "compare_models",
             "check_leakage",
             "validate_model_spec",

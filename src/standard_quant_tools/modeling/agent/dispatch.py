@@ -10,6 +10,7 @@ DecisionRecord.input payload) without a parallel audit implementation.
 from typing import Any, Dict
 
 from standard_quant_tools._jsonsafe import sanitize_for_json
+from standard_quant_tools.agent.runtimes._inputs import build_input
 from standard_quant_tools.audit.dispatch import (
     _forget_last_request_id,
     _run_and_record,
@@ -30,7 +31,10 @@ def modeling_dispatch(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, An
 
     Raises:
         ValueError: unknown tool name.
-        pydantic.ValidationError: arguments don't match the tool's input schema.
+        pydantic.ValidationError: arguments don't match the tool's input
+            schema. An unknown or missing argument's message says what the
+            tool takes and which tool takes the argument instead; the error
+            types and locations are pydantic's own.
     """
     # A call refused before it runs writes no record; clear the previous
     # call's id so last_request_id() does not name it.
@@ -41,7 +45,7 @@ def modeling_dispatch(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, An
             f"{sorted(MODELING_TOOL_DISPATCH.keys())}"
         )
     fn, input_model = MODELING_TOOL_DISPATCH[tool_name]
-    model_instance = input_model(**arguments)
+    model_instance = build_input(tool_name, input_model, arguments)
     # Same JSON-safety boundary agent.tools.dispatch applies. Modeling
     # results genuinely produce non-finite values -- a classification AUC on
     # a single-class fold, HistGradientBoosting's absent feature importance,

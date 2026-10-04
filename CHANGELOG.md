@@ -1,5 +1,83 @@
 # Changelog
 
+## A refused argument says where it belongs, and a dataset's column names resolve through the dataset
+
+- **A refusal of an unknown or missing argument names the tool that takes
+  it.** In one live modeling session seven first calls were refused with
+  pydantic's "Extra inputs are not permitted" or "Field required", and five
+  went to a tool whose sibling takes exactly what was sent —
+  `get_dataset_metadata(dataset_id=...)`, `get_feature_drift` without
+  `feature`, `score_model(model_id=...)`,
+  `estimate_backtest_overfitting(model_id=...)` — with nothing in the
+  refusal pointing there. Every dispatcher (`Runtime.dispatch`,
+  `agent.tools.dispatch`, `modeling_dispatch`, `feature_dispatch`) and
+  `validate_tool_call` now build the input through `build_input`. An unknown
+  argument's message says what the tool takes, the nearest argument name
+  (`as_of_date` → "Did you mean as_of?"), and for an id — `dataset_id`,
+  `model_id`, `model_ids`, `predictions_ref`, `symbol`, `ref` — the tools in
+  the same runtime that take it, or else the runtimes that do, read off the
+  dispatch tables. A missing `feature` on a single-feature feature_lab tool
+  names its all-feature screen, and `score_model` without `as_of` names
+  `inspect_model`. Six curated entries cover the cases where the answer is a
+  judgement, and a test checks that every name they use is a real tool or
+  argument.
+- **The refusal's structure is unchanged.** The same
+  `pydantic.ValidationError`, title and errors in the same order, each
+  error's `type` and `loc` pydantic's own — pinned for all 238 tools. Only
+  those two messages change. MCP and Carbon forward the text as it is. An
+  accepted call costs 0.07 µs more per construction (0.99 → 1.06 µs); a
+  refusal 0.01–0.07 ms before, 0.01–0.39 ms after, the top of the range
+  being the dispatch-table scan for an id.
+- **`estimate_feature_warmup` takes a `dataset_id` or `model_id`.** It
+  prices the features a built dataset or a registered model records, read
+  from the dataset's hash-verified `dataset_spec.json` or the model's
+  verified spec copy, without reading the panel: every column, or the ones
+  named by column name, at the parameters, interval and calendar they were
+  built with. An unknown name is refused with the dataset's columns, a
+  contradicting `interval` or `calendar` is refused naming both, and an
+  external panel is refused by name. Without an id a bare string is a
+  catalog id at its default parameters. On the live dataset: 126 bars
+  binding on `mom_126`, 188 to converge binding on `macdh`, 272.5 calendar
+  days — identical to passing its eight spec dicts — in 2.3 ms (4.6 ms by
+  `model_id`). A call with spec dicts is bit-identical, pinned by the
+  SHA-256 of three whole results.
+- **`check_leakage` resolves names through the dataset.**
+  `feature_ids=["mom_126"]` with the live dataset answered `safe: false`,
+  "not in the feature registry", for market.momentum at 126 bars; it is now
+  declared-checked under `market.momentum` and screened as `mom_126`, and is
+  safe. `feature_ids=["market.momentum"]` skipped the screen because no
+  column carries the catalog id; it is now screened through `mom_20` and
+  `mom_126`. Omitting `feature_ids` with a dataset checked the whole
+  30-feature registry; it now checks the dataset's 8 features (2.20 s → 2.10
+  s, both spent on the screen). An external panel's columns declare no
+  temporal support, so it is screened only, under the new `scope` value
+  `empirical_only`, instead of producing a "not in the feature registry"
+  finding per column. With a dataset the spec is now checked against its
+  recorded hash. Without a dataset nothing changes. An audit replay of an
+  earlier call that passed a dataset_id and no feature_ids now reports a
+  changed result.
+- **New tool `inspect_dataset`**, the counterpart of `inspect_model`: each
+  column's FeatureSpec (catalog id, parameters, alias, lags and their
+  columns), the target and horizon, the requested universe beside the
+  entities the panel holds and the feed for each, the requested and realised
+  span, rows, dates, provider, interval, calendar, missing-data policy, the
+  rows each column cost, the warnings recorded at build, and `price_jumps`,
+  `bars_adjusted`, `data_hash_version` and `built_with` where recorded. It
+  reads the two JSON files with the spec verified and never the panel: 1.9
+  ms on the 31,680-row live dataset, whose panel takes 16 ms to read and
+  hash. The library holds 238 tools, the modeling runtime 38.
+- **Descriptions.** `get_dataset_metadata` says it describes a provider for
+  one symbol, not a dataset built by `build_model_dataset`, and names
+  `inspect_dataset`; `score_model` says it fetches bars for every name in
+  `universe` through `as_of`, and that a registered model's out-of-sample
+  metrics need no fetch and are in `inspect_model`;
+  `estimate_backtest_overfitting` says it needs two or more configurations
+  and that `compare_models` compares registered models.
+- **One spec check.** `run_model_experiment`'s check of `dataset_spec.json`
+  against its recorded hash moved unchanged into
+  `modeling/agent/dataset_records.py`, which the three tools above share;
+  its refusal text is identical.
+
 ## A model run tests its headline against the null, says what its other numbers mean, and spends the budget it was given
 
 - **The headline metric is tested, and a run says when it does not beat

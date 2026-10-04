@@ -1936,9 +1936,9 @@ class TestUserVisibleCountsAreReal:
 
         runtimes = _build()
         assert len(runtimes) == 10
-        assert sum(len(r.tool_names) for r in runtimes.values()) == 237
-        assert len(build_catalog()) == 237
-        # 237 minus the 37 modeling and 11 feature_lab tools, which are
+        assert sum(len(r.tool_names) for r in runtimes.values()) == 238
+        assert len(build_catalog()) == 238
+        # 238 minus the 38 modeling and 11 feature_lab tools, which are
         # deliberately outside the analysis facade.
         assert len(TOOL_CATEGORY) == 189
 

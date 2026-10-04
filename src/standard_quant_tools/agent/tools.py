@@ -38,6 +38,7 @@ from standard_quant_tools.agent.runtimes import meta as _meta
 from standard_quant_tools.agent.runtimes import microstructure as _microstructure
 from standard_quant_tools.agent.runtimes import portfolio as _portfolio
 from standard_quant_tools.agent.runtimes import research as _research
+from standard_quant_tools.agent.runtimes._inputs import build_input
 from standard_quant_tools.agent.runtimes.backtest import (
     analyze_parameter_decay,
     analyze_trade_clustering,
@@ -370,7 +371,9 @@ def dispatch(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
     logger.debug("[dispatch] → %s  args=%s", tool_name, list(arguments.keys()))
     t0 = time.perf_counter()
     try:
-        result = audit._run_and_record(tool_name, fn, model_cls(**arguments))
+        result = audit._run_and_record(
+            tool_name, fn, build_input(tool_name, model_cls, arguments)
+        )
     except Exception as exc:
         logger.error("[dispatch] ✗ %s  error=%s", tool_name, exc)
         raise

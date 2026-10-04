@@ -217,14 +217,16 @@ TOOL_DEFS = [
     ),
     (
         "get_dataset_metadata",
-        "What the active provider GUARANTEES about the data it serves: "
-        "whether prices are adjusted, whether the universe is "
+        "What the active provider GUARANTEES about the data it serves for "
+        "one symbol: whether prices are adjusted, whether the universe is "
         "survivorship-free, whether values are point-in-time, and which "
         "timezone stamps them. Read this before trusting a backtest over "
         "history, because a provider that is not point-in-time will hand you "
         "restated values under their original dates. `notes` carries what "
         "the booleans cannot -- which feed answers which window, and what is "
-        "wrong with it.",
+        "wrong with it. This is a property of the provider, not of a dataset "
+        "built by build_model_dataset; inspect_dataset in the modeling "
+        "runtime describes one of those.",
         DatasetMetadataInput,
     ),
     (

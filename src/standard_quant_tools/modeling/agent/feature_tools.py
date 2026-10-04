@@ -1483,4 +1483,8 @@ def feature_dispatch(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
             f"{sorted(FEATURE_TOOL_DISPATCH)}"
         )
     fn, model = entry
-    return sanitize_for_json(_run_and_record(name, fn, model(**arguments)))
+    from standard_quant_tools.agent.runtimes._inputs import build_input
+
+    return sanitize_for_json(
+        _run_and_record(name, fn, build_input(name, model, arguments))
+    )

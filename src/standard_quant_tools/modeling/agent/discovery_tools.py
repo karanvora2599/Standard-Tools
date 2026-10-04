@@ -76,7 +76,7 @@ from ..features.params import (
     resolved_warmup,
 )
 from ..features.registry import get_feature
-from ..specs import EstimatorSpec
+from ..specs import EstimatorSpec, FeatureSpec
 from ..tasks import TASKS
 from .discovery_models import (
     CalibrationDescription,
@@ -538,7 +538,11 @@ ESTIMATE_FEATURE_WARMUP_DESCRIPTION = (
     "because their freshness is a staleness bound on records rather than a "
     "count of bars. This is the pre-build form of the question "
     "explain_dataset_row_loss answers afterwards, once a build has already "
-    "been paid for. Unknown feature ids and invalid lags are refused here "
+    "been paid for. Pass dataset_id or model_id instead to price what a "
+    "built dataset or a registered model records -- every column, or the "
+    "ones named by column name -- at the parameters, interval and calendar "
+    "it was built with, read from its verified spec without reading the "
+    "panel. Unknown feature ids and invalid lags are refused here "
     "exactly as the dataset builder would refuse them. Fetches nothing."
 )
 
@@ -586,15 +590,138 @@ def _calendar_days(
     return bars / sessions_a_year * _DAYS_PER_YEAR
 
 
+def _recorded_spec(
+    input_data: EstimateFeatureWarmupInput,
+) -> Tuple[str, Dict[str, Any]]:
+    """(what it is, the recorded DatasetSpec) for a dataset_id or model_id.
+
+    A dataset's spec is checked against the hash its build recorded; a
+    model's is the model's own verified copy, the one score_model rebuilds
+    features from. Either way the panel is not read.
+    """
+    from ..registry.model_registry import load_dataset_spec
+    from .dataset_records import is_external, read_dataset_meta, verified_dataset_spec
+
+    if input_data.dataset_id is not None:
+        what = f"dataset {input_data.dataset_id!r}"
+        meta, directory = read_dataset_meta(input_data.dataset_id)
+        if is_external(meta):
+            raise ValidationError(
+                f"{what} is an external panel registered by "
+                "register_external_panel: its columns were computed outside "
+                "this library, so there is no feature definition to price "
+                "and no warm-up this library can know. inspect_dataset "
+                "reports its columns, rows and span."
+            )
+        return what, verified_dataset_spec(input_data.dataset_id, meta, directory)
+    what = f"model {input_data.model_id!r}"
+    spec = load_dataset_spec(input_data.model_id)
+    if spec.get("provider") == "external":
+        raise ValidationError(
+            f"{what} was trained on an external panel registered by "
+            "register_external_panel: its columns were computed outside this "
+            "library, so there is no feature definition to price and no "
+            "warm-up this library can know."
+        )
+    return what, spec
+
+
+def _features_to_price(
+    input_data: EstimateFeatureWarmupInput,
+) -> Tuple[List[FeatureSpec], str, Optional[str]]:
+    """The FeatureSpecs, interval and calendar the estimate is made for.
+
+    Without an id this is the input as given, a bare name becoming a catalog
+    id at its default parameters -- so a call made with spec dicts is
+    priced exactly as it always was. With one, names are the recorded
+    dataset's columns and the recorded interval and calendar apply.
+    """
+    if input_data.dataset_id is None and input_data.model_id is None:
+        features = []
+        for item in input_data.features or []:
+            if isinstance(item, FeatureSpec):
+                features.append(item)
+                continue
+            try:
+                get_feature(item)
+            except ValidationError as exc:
+                raise ValidationError(
+                    f"{exc} A dataset's column name -- an alias such as "
+                    f"{item!r} may be -- is resolved through dataset_id or "
+                    "model_id, which read the parameters it was built with."
+                ) from None
+            features.append(FeatureSpec(id=item))
+        return features, input_data.interval, input_data.calendar
+
+    what, spec = _recorded_spec(input_data)
+    recorded = [FeatureSpec(**feature) for feature in spec.get("features") or []]
+    by_name = {feature.output_name: feature for feature in recorded}
+
+    if input_data.features is None:
+        features = recorded
+    else:
+        features = []
+        for item in input_data.features:
+            if isinstance(item, FeatureSpec):
+                # A spec given beside an id is priced as given, on the
+                # recorded interval: what adding it to this dataset would
+                # cost.
+                features.append(item)
+            elif item in by_name:
+                features.append(by_name[item])
+            else:
+                built_from = [f.output_name for f in recorded if f.id == item]
+                raise ValidationError(
+                    f"{item!r} is not a column of {what}. Its columns are "
+                    f"{list(by_name)}"
+                    + (
+                        f"; {item!r} is the catalog id {built_from} were "
+                        "built from, so name those"
+                        if built_from
+                        else ""
+                    )
+                    + ". Pass a spec dict to price a feature the dataset does "
+                    "not have."
+                )
+
+    recorded_interval = spec.get("interval") or "1d"
+    recorded_calendar = spec.get("calendar")
+    if (
+        "interval" in input_data.model_fields_set
+        and input_data.interval != recorded_interval
+    ):
+        raise ValidationError(
+            f"interval={input_data.interval!r} contradicts {what}, which was "
+            f"built at interval={recorded_interval!r}. Its features were "
+            "computed on those bars, so their warm-up is counted in them. "
+            "Omit interval, or pass spec dicts without an id to price the "
+            "same features at another interval."
+        )
+    calendar = recorded_calendar
+    if input_data.calendar is not None:
+        asked = _calendar.validate_calendar_name(
+            input_data.calendar, "estimate_feature_warmup.calendar"
+        )
+        if recorded_calendar is not None and asked != recorded_calendar:
+            raise ValidationError(
+                f"calendar={input_data.calendar!r} contradicts {what}, which "
+                f"was built with calendar={recorded_calendar!r}. Omit "
+                "calendar to use the recorded one."
+            )
+        calendar = asked
+    return features, recorded_interval, calendar
+
+
 def estimate_feature_warmup(
     input_data: EstimateFeatureWarmupInput,
 ) -> EstimateFeatureWarmupResult:
     """Bars of history this feature spec consumes before its first row."""
+    features, interval, calendar = _features_to_price(input_data)
     warnings: List[str] = []
     per_feature: Dict[str, FeatureWarmup] = {}
     point_in_time: List[str] = []
 
-    for spec in input_data.features:
+    for spec in features:
         # The registry's refusal and the parameter validator's, unchanged:
         # an id or a window this tool accepts is one build_model_dataset
         # accepts, and there is no second opinion about either here.
@@ -661,7 +788,7 @@ def estimate_feature_warmup(
     # The deepest lag across the WHOLE spec, charged once: the panel
     # starts where its last column becomes computable, not once per
     # feature that asked for history.
-    deepest = int(deepest_lag(input_data.features))
+    deepest = int(deepest_lag(features))
     bars_required = int(max_lookback + deepest)
 
     # The same total at the bars each feature needs to stop depending on
@@ -676,16 +803,13 @@ def estimate_feature_warmup(
         name for name, entry in from_bars.items() if entry.converged > entry.resolved
     )
 
-    calendar = input_data.calendar
     if calendar is not None:
         calendar = _calendar.validate_calendar_name(
             calendar, "estimate_feature_warmup.calendar"
         )
-    days = _calendar_days(bars_required, input_data.interval, calendar, warnings)
+    days = _calendar_days(bars_required, interval, calendar, warnings)
     # The conversion's caveat, if any, was stated once above.
-    days_converged = _calendar_days(
-        bars_required_converged, input_data.interval, calendar, []
-    )
+    days_converged = _calendar_days(bars_required_converged, interval, calendar, [])
     if unconverged:
         shown = ", ".join(
             f"{name} ({from_bars[name].resolved} -> {from_bars[name].converged})"

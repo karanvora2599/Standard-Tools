@@ -122,6 +122,7 @@ _MODEL_RESEARCH_TOOLS = [
     # question, and they return named fields rather than a nested report
     # this agent would otherwise have to describe in prose.
     "list_datasets",
+    "inspect_dataset",
     "check_leakage",
     "validate_model_spec",
     "estimate_feature_warmup",
@@ -842,6 +843,11 @@ check_leakage: ask whether a feature set is temporally safe BEFORE
 spending a dataset build on it.
 list_datasets: every panel already built, newest first. Reach for this
 before rebuilding something that exists.
+inspect_dataset: what one built dataset holds -- each column's catalog id,
+parameters and alias, the target and horizon, the entities, the span and
+the warnings recorded at build -- read from its records without loading
+the panel. A column name such as an alias is what check_leakage and
+estimate_feature_warmup take with that dataset_id.
 validate_model_spec: check a ModelSpec before an experiment is spent on
 it — that the estimator exists for the task, that its parameters are
 accepted, and how many fits the grid implies once it multiplies through

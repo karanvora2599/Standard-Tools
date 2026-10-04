@@ -68,6 +68,12 @@ from ..registry.model_registry import load_manifest, load_monitoring_reference
 from ..registry.package import PackageVerification, verify_model_package
 from ..scoring import score_model as _score_model
 from ..specs import TASKS, DatasetSpec, FeatureSpec, TargetSpec, targets_for_task
+from .dataset_records import (
+    is_external,
+    read_dataset_meta,
+    recorded_features,
+    verified_dataset_spec,
+)
 from .dataset_tools import (  # noqa: F401
     ExplainRowLossInput,
     explain_dataset_row_loss,
@@ -102,11 +108,14 @@ from .models import (
     CheckLeakageResult,
     CompareModelsInput,
     CompareModelsResult,
+    DatasetColumn,
     DatasetSummary,
     EvaluateModelPortfolioInput,
     EvaluateModelPortfolioResult,
     FeatureCatalogEntry,
     FeatureDriftRow,
+    InspectDatasetInput,
+    InspectDatasetResult,
     InspectModelInput,
     InspectModelResult,
     JoinPointInTimeInput,
@@ -751,15 +760,7 @@ def _load_dataset_meta(dataset_id: str):
     built". That sentence is only true because the hash was checked, so
     that tool keeps paying for it.
     """
-    directory = _artifacts.run_dir(dataset_id)
-    meta_path = directory / "dataset_meta.json"
-    if not meta_path.exists():
-        raise ValidationError(
-            f"no dataset with dataset_id={dataset_id!r} — "
-            "dataset_meta.json is written last, so its absence also means a "
-            "previous build_model_dataset call did not complete."
-        )
-    return _artifacts.load_json(str(meta_path)), directory
+    return read_dataset_meta(dataset_id)
 
 
 def _load_dataset_panel(dataset_id: str):
@@ -852,29 +853,7 @@ def run_model_experiment(
     # verifier recomputes with THAT version, so an old dataset is not
     # refused for having been built under an older form of the check.
     spec_hash_version = int(meta.get("spec_hash_version", 1))
-    spec_dict = _artifacts.load_json(str(directory / "dataset_spec.json"))
-    if stored_spec_hash is not None:
-        actual_spec_hash = dataset_spec_hash(
-            DatasetSpec(**spec_dict), version=spec_hash_version
-        )
-        if actual_spec_hash != stored_spec_hash:
-            raise ValidationError(
-                f"dataset {input_data.dataset_id!r}: dataset_spec.json no longer matches "
-                f"the hash recorded when it was built (expected {stored_spec_hash}, found "
-                f"{actual_spec_hash}, hash version {spec_hash_version}). The panel was "
-                "built from the original spec, so training would register a model whose "
-                "bundled feature definitions differ from the data it learned on — rebuild "
-                "the dataset instead. "
-                + (
-                    "An UPGRADE can also cause this for a version-1 hash without "
-                    "anything being edited: that form covered every field of the "
-                    "spec, so a release that added one changed it for every dataset "
-                    "persisted earlier. Rebuilding records a version-2 hash, which "
-                    "excludes fields nobody set and survives the next such release."
-                    if spec_hash_version == 1
-                    else ""
-                )
-            )
+    spec_dict = verified_dataset_spec(input_data.dataset_id, meta, directory)
 
     dataset = {
         "panel": panel,
@@ -1835,12 +1814,29 @@ def check_leakage(input_data: CheckLeakageInput) -> CheckLeakageResult:
     was literally the five-bar forward return (findings D19); the screen
     flags it at IC 1.000. Without a dataset the result says its `safe`
     rests on declarations only.
+
+    NAMES ARE RESOLVED THROUGH THE DATASET. A dataset's columns are its
+    features' OUTPUT names -- the alias where one was given -- while the
+    declared check reads the catalog. Checking the requested name against
+    the catalog directly reported `mom_126` (market.momentum at 126 bars)
+    as "not in the feature registry", `safe: False`, for a feature that is
+    in it; and a catalog id skipped the screen, because no column carries
+    that name. So with a dataset a column name is declared-checked under
+    the catalog id its spec records and screened as itself, a catalog id is
+    screened through every column built from it, and omitting feature_ids
+    checks the dataset's own features rather than the whole registry. An
+    external panel's columns have no catalog definition, so it is screened
+    only. Without a dataset nothing changes. See the CHANGELOG entry of
+    2026-10-04.
     """
     from standard_quant_tools.modeling.dataset.leakage import (
         PointInTimeViolation,
         check_point_in_time_safety,
     )
     from standard_quant_tools.modeling.features.registry import get_feature
+
+    if input_data.dataset_id is not None:
+        return _check_leakage_on_dataset(input_data)
 
     ids = input_data.feature_ids
     if ids is None:
@@ -1879,95 +1875,364 @@ def check_leakage(input_data: CheckLeakageInput) -> CheckLeakageResult:
             )
         )
 
-    coverage = {}
-    screen: Dict[str, Dict[str, Any]] = {}
-    scope = "declared_temporal_support_only"
-    if input_data.dataset_id is not None:
-        from standard_quant_tools.agent.runtimes._json_safe import finite_or_none
-        from standard_quant_tools.modeling.analysis.feature_report import (
-            lead_lag_ic_curve,
-        )
-
-        panel, meta, _directory = _load_dataset_panel(input_data.dataset_id)
-        coverage = {
-            key: meta[key]
-            for key in ("rows", "start_date", "end_date", "warnings")
-            if key in meta
-        }
-        notes.append(
-            "Dataset coverage is what the build RECORDED. It confirms the "
-            "panel is the one that was built; it does not re-derive whether "
-            "each value was available on its own date."
-        )
-        # The empirical screen, on the panel as built: a feature whose IC
-        # peaks sharply at shift zero and falls away on both sides is
-        # reading its own answer, whatever its declaration says.
-        columns = [f for f in (meta.get("feature_ids") or []) if f in panel.columns]
-        if input_data.feature_ids is not None:
-            wanted = set(input_data.feature_ids)
-            columns = [f for f in columns if f in wanted]
-        if "target" not in panel.columns:
-            notes.append(
-                "The dataset carries no target column, so the empirical "
-                "lead-lag screen cannot run on it; `safe` rests on the "
-                "declared temporal support alone."
-            )
-        elif not columns:
-            notes.append(
-                "None of the requested features is a column of this dataset, "
-                "so the empirical screen had nothing to test; `safe` rests on "
-                "the declared temporal support alone."
-            )
-        else:
-            scope = "declared_and_empirical"
-            for column in columns:
-                try:
-                    curve = lead_lag_ic_curve(panel, column)
-                except ValidationError as exc:
-                    screen[column] = {
-                        "flagged": False,
-                        "reason": f"not screened: {exc}",
-                    }
-                    continue
-                screen[column] = {
-                    "ic_at_zero": finite_or_none(curve["ic_at_zero"]),
-                    "peak_ratio": finite_or_none(curve["peak_ratio"]),
-                    "persistence": finite_or_none(curve["persistence"]),
-                    "flagged": bool(curve["flagged"]),
-                    "reason": curve["reason"],
-                }
-                if curve["flagged"]:
-                    findings.append(
-                        LeakageFinding(
-                            feature_id=column,
-                            temporal_support="empirical",
-                            problem=(
-                                f"lead-lag screen: {curve['reason']} (IC at "
-                                f"shift 0 {curve['ic_at_zero']:+.4f})"
-                            ),
-                        )
-                    )
-            notes.append(
-                f"The empirical lead-lag screen ran on {len(columns)} feature "
-                "column(s) of the built panel. It is a screen, not a proof: a "
-                "leak below the IC floor, or in a feature too persistent to "
-                "judge, passes it (each column's verdict is in `screen`)."
-            )
-    else:
-        notes.append(
-            "No dataset_id: `safe` rests on each feature's DECLARED temporal "
-            "support only. A feature whose declaration is wrong -- one that "
-            "reads its own target -- passes this check; supply a dataset_id "
-            "to run the empirical lead-lag screen on the built panel."
-        )
+    notes.append(
+        "No dataset_id: `safe` rests on each feature's DECLARED temporal "
+        "support only. A feature whose declaration is wrong -- one that "
+        "reads its own target -- passes this check; supply a dataset_id "
+        "to run the empirical lead-lag screen on the built panel."
+    )
 
     return CheckLeakageResult(
         n_features_checked=len(ids),
+        safe=not findings,
+        scope="declared_temporal_support_only",
+        findings=findings,
+        screen={},
+        dataset_coverage={},
+        notes=notes,
+    )
+
+
+def _check_leakage_on_dataset(input_data: CheckLeakageInput) -> CheckLeakageResult:
+    """`check_leakage` with a dataset: names resolved through its spec, the
+    declared check on the catalog ids behind them, the screen on its
+    columns."""
+    from standard_quant_tools.agent.runtimes._json_safe import finite_or_none
+    from standard_quant_tools.modeling.analysis.feature_report import (
+        lead_lag_ic_curve,
+    )
+    from standard_quant_tools.modeling.dataset.leakage import (
+        PointInTimeViolation,
+        check_point_in_time_safety,
+    )
+    from standard_quant_tools.modeling.features.registry import get_feature
+
+    dataset_id = input_data.dataset_id
+    requested = input_data.feature_ids
+    if requested is not None and not requested:
+        raise ValidationError(
+            "check_leakage: there is no feature to check, and an empty set "
+            "is 'safe' only vacuously. List the feature ids to check."
+        )
+    panel, meta, directory = _load_dataset_panel(dataset_id)
+    external = is_external(meta)
+    columns = [f for f in (meta.get("feature_ids") or []) if f in panel.columns]
+
+    # Output name -> its recorded FeatureSpec. A lag column belongs to the
+    # feature it lags. An external panel records no catalog definitions.
+    spec_of: Dict[str, FeatureSpec] = {}
+    if not external:
+        spec_of = {
+            feature.output_name: feature
+            for feature in recorded_features(
+                verified_dataset_spec(dataset_id, meta, directory)
+            )
+        }
+
+    def spec_for(column: str) -> Optional[FeatureSpec]:
+        if column in spec_of:
+            return spec_of[column]
+        lagged = parse_lag_column(column)
+        return spec_of.get(lagged[0]) if lagged else None
+
+    id_of = {c: spec.id for c in columns if (spec := spec_for(c)) is not None}
+
+    findings: List[LeakageFinding] = []
+    notes: List[str] = []
+    # (name reported, catalog id) pairs for the declared check, and the
+    # panel columns the screen runs on, both in request order.
+    declared: List[tuple] = []
+    to_screen: List[str] = []
+    resolved: List[str] = []
+    declared_only: List[str] = []
+    if requested is None:
+        names = list(spec_of) if not external else list(columns)
+        for name in names:
+            if not external:
+                declared.append((name, spec_of[name].id))
+        to_screen = list(columns)
+        notes.append(
+            f"No feature_ids: checked the {len(names)} feature(s) dataset "
+            f"{dataset_id!r} was built with, not the whole feature registry."
+        )
+    else:
+        names = list(requested)
+        for name in names:
+            if name in columns or name in spec_of:
+                # A column name: declared under the catalog id its spec
+                # records, screened as itself.
+                spec = spec_for(name)
+                if spec is not None:
+                    declared.append((name, spec.id))
+                    if spec.id != name:
+                        resolved.append(f"{name} -> {spec.id}")
+                elif not external:
+                    declared.append((name, name))
+                if name in columns:
+                    to_screen.append(name)
+                continue
+            built = [c for c in columns if id_of.get(c) == name]
+            if built:
+                # A catalog id: declared once, screened through every column
+                # built from it.
+                declared.append((name, name))
+                to_screen.extend(built)
+                resolved.append(f"{name} -> {built}")
+                continue
+            if external:
+                findings.append(
+                    LeakageFinding(
+                        feature_id=name,
+                        temporal_support="unknown",
+                        problem=(
+                            f"not a column of dataset {dataset_id!r}, whose "
+                            f"columns are {columns}."
+                        ),
+                    )
+                )
+                continue
+            # Neither a column nor a catalog id this dataset was built from:
+            # checked against the catalog alone, as without a dataset.
+            declared.append((name, name))
+            declared_only.append(name)
+
+    definitions = []
+    seen_ids = set()
+    for name, feature_id in declared:
+        try:
+            definition = get_feature(feature_id)
+        except Exception as exc:
+            problem = f"not in the feature registry: {exc}"
+            if name in declared_only:
+                declared_only.remove(name)
+                problem = (
+                    f"not a column of dataset {dataset_id!r} (its columns are "
+                    f"{list(spec_of)}) and not in the feature registry: {exc}"
+                )
+            findings.append(
+                LeakageFinding(
+                    feature_id=name, temporal_support="unknown", problem=problem
+                )
+            )
+            continue
+        if definition.id not in seen_ids:
+            seen_ids.add(definition.id)
+            definitions.append(definition)
+    try:
+        check_point_in_time_safety(definitions)
+    except PointInTimeViolation as exc:
+        findings.append(
+            LeakageFinding(
+                feature_id="(set)",
+                temporal_support="violation",
+                problem=str(exc),
+            )
+        )
+    if resolved:
+        notes.append(
+            f"Resolved through dataset {dataset_id!r}'s recorded spec "
+            "(column -> catalog id it is declared-checked under, or catalog "
+            f"id -> the columns screened for it): {'; '.join(resolved)}."
+        )
+    if declared_only and to_screen:
+        notes.append(
+            f"{declared_only} are not columns of dataset {dataset_id!r}: each "
+            "was checked against its declared temporal support only."
+        )
+    if external:
+        notes.append(
+            f"Dataset {dataset_id!r} is an external panel registered by "
+            "register_external_panel. Its columns were computed outside this "
+            "library and declare no temporal support, so the declared check "
+            "does not apply and `safe` rests on the empirical screen alone."
+        )
+
+    coverage = {
+        key: meta[key]
+        for key in ("rows", "start_date", "end_date", "warnings")
+        if key in meta
+    }
+    notes.append(
+        "Dataset coverage is what the build RECORDED. It confirms the "
+        "panel is the one that was built; it does not re-derive whether "
+        "each value was available on its own date."
+    )
+
+    # The empirical screen, on the panel as built: a feature whose IC peaks
+    # sharply at shift zero and falls away on both sides is reading its own
+    # answer, whatever its declaration says.
+    to_screen = list(dict.fromkeys(to_screen))
+    screen: Dict[str, Dict[str, Any]] = {}
+    scope = "declared_temporal_support_only"
+    if "target" not in panel.columns:
+        notes.append(
+            "The dataset carries no target column, so the empirical "
+            "lead-lag screen cannot run on it; `safe` rests on the "
+            "declared temporal support alone."
+        )
+    elif not to_screen:
+        notes.append(
+            "None of the requested features is a column of this dataset, "
+            "so the empirical screen had nothing to test; `safe` rests on "
+            "the declared temporal support alone."
+        )
+    else:
+        scope = "empirical_only" if external else "declared_and_empirical"
+        for column in to_screen:
+            try:
+                curve = lead_lag_ic_curve(panel, column)
+            except ValidationError as exc:
+                screen[column] = {
+                    "flagged": False,
+                    "reason": f"not screened: {exc}",
+                }
+                continue
+            screen[column] = {
+                "ic_at_zero": finite_or_none(curve["ic_at_zero"]),
+                "peak_ratio": finite_or_none(curve["peak_ratio"]),
+                "persistence": finite_or_none(curve["persistence"]),
+                "flagged": bool(curve["flagged"]),
+                "reason": curve["reason"],
+            }
+            if curve["flagged"]:
+                findings.append(
+                    LeakageFinding(
+                        feature_id=column,
+                        temporal_support="empirical",
+                        problem=(
+                            f"lead-lag screen: {curve['reason']} (IC at "
+                            f"shift 0 {curve['ic_at_zero']:+.4f})"
+                        ),
+                    )
+                )
+        notes.append(
+            f"The empirical lead-lag screen ran on {len(to_screen)} feature "
+            "column(s) of the built panel. It is a screen, not a proof: a "
+            "leak below the IC floor, or in a feature too persistent to "
+            "judge, passes it (each column's verdict is in `screen`)."
+        )
+    if external and not screen and not findings:
+        # Nothing declared and nothing screened: `safe` would be vacuous.
+        raise ValidationError(
+            f"check_leakage: dataset {dataset_id!r} is an external panel, "
+            "whose columns have no declared temporal support, and the "
+            "empirical screen could not run on it, so nothing was checked "
+            "and 'safe' would hold only vacuously."
+        )
+
+    return CheckLeakageResult(
+        n_features_checked=len(names),
         safe=not findings,
         scope=scope,
         findings=findings,
         screen=screen,
         dataset_coverage=coverage,
+        notes=notes,
+    )
+
+
+def inspect_dataset(input_data: InspectDatasetInput) -> InspectDatasetResult:
+    """
+    What one dataset holds and how it was built: the counterpart of
+    `inspect_model`.
+
+    A dataset's definition was reachable only in pieces: `list_datasets`
+    gives counts and a span, `explain_dataset_row_loss` the row loss, and
+    the features a column was computed from -- its catalog id, its
+    parameters, its alias -- nowhere, so an agent holding `mom_126` asked
+    `get_dataset_metadata`, which describes a data provider for one symbol
+    and refused the dataset_id. Everything here is in the two JSON files
+    the build wrote. The spec is verified against its recorded hash; the
+    panel is not read or hashed, which is what keeps this to milliseconds:
+    every tool that USES the panel verifies it against `data_hash` itself.
+
+    Fields other builds add later (`price_jumps`, `bars_adjusted`,
+    `data_hash_version`, `built_with`) are read with `.get`, so a dataset
+    built before they existed reports None rather than failing. See the
+    CHANGELOG entry of 2026-10-04.
+    """
+    dataset_id = input_data.dataset_id
+    meta, directory = read_dataset_meta(dataset_id)
+    spec = verified_dataset_spec(dataset_id, meta, directory)
+    external = is_external(meta)
+
+    panel_columns = list(meta.get("feature_ids") or [])
+    columns = []
+    for feature in recorded_features(spec):
+        name = feature.output_name
+        lag_columns = [
+            column
+            for column in panel_columns
+            if (parse_lag_column(column) or (None,))[0] == name
+        ]
+        columns.append(
+            DatasetColumn(
+                name=name,
+                id=feature.id,
+                params=dict(feature.params),
+                alias=feature.alias,
+                lags=list(feature.lags),
+                lag_columns=lag_columns,
+            )
+        )
+
+    target = dict(spec.get("target") or {})
+    notes = [
+        "Read from dataset_meta.json and dataset_spec.json; the spec matches "
+        "the hash recorded at build. The panel was not read or hashed: "
+        "run_model_experiment, analyze_features, check_leakage and the "
+        "feature_lab tools verify it against data_hash before using it."
+    ]
+    source: Dict[str, Any] = {}
+    if external:
+        source = {
+            "path": meta.get("panel_path"),
+            "format": meta.get("panel_format"),
+            "fingerprint": meta.get("panel_fingerprint"),
+            "columns": meta.get("panel_columns") or {},
+            "label": meta.get("source"),
+        }
+        notes.append(
+            "An external panel: its columns were computed outside this "
+            "library, so each column's id is its own name with no catalog "
+            "definition behind it. estimate_feature_warmup does not apply, "
+            "check_leakage screens it without a declared check, and "
+            "score_model cannot rebuild its features."
+        )
+
+    return InspectDatasetResult(
+        dataset_id=dataset_id,
+        storage="external" if external else "built",
+        provider=meta.get("provider", spec.get("provider")),
+        interval=meta.get("interval", spec.get("interval")),
+        calendar=spec.get("calendar"),
+        calendar_adopted_from_venue=meta.get("calendar_adopted_from_venue"),
+        benchmark=spec.get("benchmark"),
+        columns=columns,
+        target=target,
+        target_id=meta.get("target_id"),
+        horizon=target.get("horizon"),
+        labels=list(meta.get("targets") or []),
+        universe=list(spec.get("universe") or []),
+        entities=list(meta.get("entities") or []),
+        data_sources=dict(meta.get("data_sources") or {}),
+        start=spec.get("start"),
+        end=spec.get("end"),
+        start_date=meta.get("start_date"),
+        end_date=meta.get("end_date"),
+        rows=meta.get("rows"),
+        n_dates=meta.get("n_dates"),
+        missing=dict(spec.get("missing") or {}),
+        drop_attribution=dict(meta.get("drop_attribution") or {}),
+        warnings=list(meta.get("warnings") or []),
+        price_jumps=meta.get("price_jumps"),
+        bars_adjusted=meta.get("bars_adjusted"),
+        data_hash=meta.get("data_hash"),
+        data_hash_version=meta.get("data_hash_version"),
+        built_with=meta.get("built_with"),
+        spec_hash=meta.get("spec_hash"),
+        spec_hash_version=meta.get("spec_hash_version"),
+        source=source,
         notes=notes,
     )
 
@@ -3337,7 +3602,10 @@ _MODELING_TOOL_DEFS: List[tuple] = [
         "universe as of a date. The step that turns a fitted model into "
         "something a backtest can consume, and the one where point-in-time "
         "discipline matters most: the `as_of` date is what stops the model "
-        "seeing features that did not exist yet. Raw probabilities from a "
+        "seeing features that did not exist yet. It fetches bars for every "
+        "name in `universe` through `as_of`, so it costs a data fetch; a "
+        "registered model's out-of-sample metrics need none and are in "
+        "inspect_model. Raw probabilities from a "
         "tree ensemble are NOT calibrated, so a 0.9 threshold may select no "
         "rows at all -- check the distribution before thresholding.",
         ScoreModelInput,
@@ -3433,6 +3701,24 @@ _MODELING_TOOL_DEFS: List[tuple] = [
         ListDatasetsInput,
     ),
     (
+        "inspect_dataset",
+        "Describe one dataset built by build_model_dataset or registered by "
+        "register_external_panel -- the counterpart of inspect_model. "
+        "Returns each column's FeatureSpec (catalog id, parameters, alias, "
+        "lags), the target and its horizon, the requested universe beside "
+        "the entities the panel holds and the feed that answered for each, "
+        "the requested and realised span, rows and dates, provider, "
+        "interval, calendar, missing-data policy, the rows each column cost, "
+        "and the warnings recorded at build. Reads the two JSON files the "
+        "build wrote, with the spec checked against its recorded hash; the "
+        "panel is not read or hashed, so the cost does not grow with it "
+        "(1.9 ms on a 31,680-row dataset whose panel takes 16 ms to read and "
+        "hash). "
+        "list_datasets lists dataset ids; get_dataset_metadata describes a "
+        "data provider, not a dataset.",
+        InspectDatasetInput,
+    ),
+    (
         "compare_models",
         "Rank registered models side by side on their out-of-sample "
         "metrics, or -- with method='paired' -- test whether one is actually "
@@ -3451,7 +3737,11 @@ _MODELING_TOOL_DEFS: List[tuple] = [
         "check_leakage",
         "Ask whether a set of features is temporally safe to fit on — "
         "before building a dataset with them. Optionally reports a built "
-        "dataset's recorded point-in-time coverage too.",
+        "dataset's recorded point-in-time coverage too, and runs an "
+        "empirical lead-lag screen on its columns. With a dataset_id, a "
+        "column name such as an alias is checked under the catalog id it "
+        "was built from, and omitting feature_ids checks that dataset's "
+        "own features.",
         CheckLeakageInput,
     ),
     (
@@ -3865,6 +4155,7 @@ MODELING_TOOL_DISPATCH = {
     "attest_model_package": (attest_model_package, AttestModelPackageInput),
     "monitor_model": (monitor_model, MonitorModelInput),
     "list_datasets": (list_datasets, ListDatasetsInput),
+    "inspect_dataset": (inspect_dataset, InspectDatasetInput),
     "compare_models": (compare_models, CompareModelsInput),
     "check_leakage": (check_leakage, CheckLeakageInput),
     "analyze_features": (analyze_features, AnalyzeFeaturesInput),

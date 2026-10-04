@@ -78,6 +78,8 @@ from standard_quant_tools.audit.dispatch import (
     _run_and_record,
 )
 
+from ._inputs import build_input
+
 #: runtime name -> the TOOL_CATEGORY values it owns. The grouping rule is
 #: "could one agent plausibly be scoped to this for a whole session", which
 #: is why screening sits with analysis (you screen in order to analyze) and
@@ -361,7 +363,9 @@ class Runtime:
         if tool_name not in self.dispatch_table:
             raise ValueError(self._out_of_scope_message(tool_name))
         fn, model_cls = self.dispatch_table[tool_name]
-        return sanitize_for_json(_run_and_record(tool_name, fn, model_cls(**arguments)))
+        return sanitize_for_json(
+            _run_and_record(tool_name, fn, build_input(tool_name, model_cls, arguments))
+        )
 
     __call__ = dispatch
 

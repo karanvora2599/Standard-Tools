@@ -515,7 +515,9 @@ VALIDATION_TOOL_DEFS = [
         "means the grid is being fitted to noise. Reports the median pairwise "
         "correlation between configurations, because a hundred settings "
         "correlated at 0.99 are one strategy and the PBO on them is "
-        "meaningless.",
+        "meaningless. Needs two or more configurations in trial_returns, one "
+        "return series each; compare_models in the modeling runtime compares "
+        "registered models.",
         PBOInput,
     ),
     (

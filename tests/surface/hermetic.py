@@ -482,7 +482,10 @@ def publish_fixtures(directory: str) -> Dict[str, Any]:
     step("request_ids_2", lambda: _call("meta", "list_stress_scenarios", {}))
     fx["request_id_2"] = last_request_id()
 
-    # A dataset and two models: the route every modeling tool needs.
+    # A dataset and two models: the route every modeling tool needs. One
+    # column is aliased, as a real multi-horizon spec's are, so every tool
+    # that takes a column name is probed with a name the catalog does not
+    # know -- the shape `check_leakage` once reported as unsafe.
     fx["dataset_spec"] = {
         "universe": SYMBOLS[:4],
         "start": "2019-01-02",
@@ -490,7 +493,11 @@ def publish_fixtures(directory: str) -> Dict[str, Any]:
         "features": [
             {"id": "technical.rsi"},
             {"id": "risk.rolling_beta"},
-            {"id": "risk.realized_volatility"},
+            {
+                "id": "risk.realized_volatility",
+                "params": {"period": 20},
+                "alias": "rvol_20",
+            },
         ],
         "target": {"horizon": 5},
         "benchmark": "SPY",
@@ -818,7 +825,7 @@ def _hand_written(
     if tool == "compare_feature_sets":
         return {
             "left": ["technical.rsi"],
-            "right": ["risk.rolling_beta", "risk.realized_volatility"],
+            "right": ["risk.rolling_beta", "rvol_20"],
         }
     if tool == "estimate_corwin_schultz_spread":
         px = [
@@ -873,7 +880,12 @@ def _hand_written(
             "task": "regression",
         }
     if tool == "estimate_feature_warmup":
-        return {"features": [{"id": "technical.rsi"}, {"id": "risk.rolling_beta"}]}
+        # Priced on the published dataset's interval; a model_id beside the
+        # dataset_id is refused, so only one of the two is kept.
+        return {
+            "features": [{"id": "technical.rsi"}, {"id": "risk.rolling_beta"}],
+            "model_id": _DELETE,
+        }
     if tool == "monitor_model":
         return {
             "predictions_uri": (fx.get("model_1") or {}).get("oos_predictions_uri"),

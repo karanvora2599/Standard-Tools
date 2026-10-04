@@ -1614,6 +1614,7 @@ def validate_tool_call(input_data: ValidateToolCallInput) -> ValidateToolCallRes
     """
     from pydantic import ValidationError as PydanticValidationError
 
+    from standard_quant_tools.agent.runtimes._inputs import build_input
     from standard_quant_tools.agent.tools import _TOOL_DISPATCH
     from standard_quant_tools.modeling.agent import MODELING_TOOL_DISPATCH
     from standard_quant_tools.modeling.agent.feature_tools import (
@@ -1637,7 +1638,7 @@ def validate_tool_call(input_data: ValidateToolCallInput) -> ValidateToolCallRes
     normalized: Dict[str, Any] = {}
 
     try:
-        instance = model_cls(**input_data.arguments)
+        instance = build_input(input_data.tool_name, model_cls, input_data.arguments)
         normalized = instance.model_dump()
     except PydanticValidationError as exc:
         for error in exc.errors():

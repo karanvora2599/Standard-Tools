@@ -1106,6 +1106,166 @@ class InspectModelResult(BaseModel):
     data: Dict[str, Any]
 
 
+# ── inspect_dataset ─────────────────────────────────────────────────────
+
+
+class InspectDatasetInput(BaseModel):
+    # An argument this tool does not take is REJECTED, not ignored.
+    model_config = ConfigDict(extra="forbid")
+
+    dataset_id: str = Field(
+        ...,
+        description=(
+            "A dataset built by build_model_dataset or registered by "
+            "register_external_panel; list_datasets lists them."
+        ),
+    )
+
+
+class DatasetColumn(BaseModel):
+    name: str = Field(
+        ...,
+        description=(
+            "The column's name in the panel: the feature's alias where it "
+            "has one, its catalog id otherwise. The name check_leakage, "
+            "estimate_feature_warmup and the feature_lab tools take."
+        ),
+    )
+    id: str = Field(
+        ...,
+        description=(
+            "The catalog id the column was computed from. For an external "
+            "panel, the column's own name: it has no catalog definition."
+        ),
+    )
+    params: Dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "The parameter overrides it was built with, as recorded; a "
+            "parameter not listed took the catalog default."
+        ),
+    )
+    alias: Optional[str] = None
+    lags: List[int] = Field(default_factory=list)
+    lag_columns: List[str] = Field(
+        default_factory=list,
+        description="The extra columns its lags added, `<name>__lag<k>`.",
+    )
+
+
+class InspectDatasetResult(BaseModel):
+    dataset_id: str
+    storage: Literal["built", "external"] = Field(
+        ...,
+        description=(
+            "'built' by build_model_dataset from a provider's bars, or "
+            "'external': registered by register_external_panel, read from "
+            "the file it names on every load and never copied."
+        ),
+    )
+    provider: Optional[str] = None
+    interval: Optional[str] = None
+    calendar: Optional[str] = None
+    calendar_adopted_from_venue: Optional[str] = Field(
+        None,
+        description=(
+            "The venue code the calendar was inferred from, when none was "
+            "given and every universe key named that venue."
+        ),
+    )
+    benchmark: Optional[str] = None
+    columns: List[DatasetColumn] = Field(
+        default_factory=list,
+        description="One entry per feature, in the panel's column order.",
+    )
+    target: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="The TargetSpec as recorded: type, horizon and its parameters.",
+    )
+    target_id: Optional[str] = None
+    horizon: Optional[int] = Field(
+        None, description="Bars ahead the primary label looks."
+    )
+    labels: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "Every label an external panel was registered with (name, "
+            "column, horizon, type); run_model_experiment selects one with "
+            "`target`. Empty for a built dataset and a single-label panel."
+        ),
+    )
+    universe: List[str] = Field(
+        default_factory=list, description="The universe the spec asked for."
+    )
+    entities: List[str] = Field(
+        default_factory=list, description="The entities the panel holds."
+    )
+    data_sources: Dict[str, str] = Field(
+        default_factory=dict,
+        description="The feed that answered for each entity. Empty when not recorded.",
+    )
+    start: Optional[str] = Field(None, description="The span the spec asked for.")
+    end: Optional[str] = None
+    start_date: Optional[str] = Field(
+        None, description="The first date the panel holds, after warm-up and alignment."
+    )
+    end_date: Optional[str] = None
+    rows: Optional[int] = None
+    n_dates: Optional[int] = None
+    missing: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="The missing-data policy the panel was built under.",
+    )
+    drop_attribution: Dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Rows lost to alignment, per column: n_missing and "
+            "n_sole_missing (the rows dropping that column alone would give "
+            "back). explain_dataset_row_loss reads the same record."
+        ),
+    )
+    warnings: List[str] = Field(
+        default_factory=list,
+        description="The warnings recorded when the dataset was built or registered.",
+    )
+    price_jumps: Any = Field(
+        None,
+        description=(
+            "Split-sized close-to-close moves found in the bars at build, as "
+            "recorded. None for a dataset built before builds recorded them."
+        ),
+    )
+    bars_adjusted: Any = Field(
+        None,
+        description=(
+            "Whether the provider reported its bars as split-adjusted, as "
+            "recorded. None when not recorded."
+        ),
+    )
+    data_hash: Optional[str] = None
+    data_hash_version: Any = Field(
+        None, description="The form of data_hash, as recorded. None when not recorded."
+    )
+    built_with: Any = Field(
+        None,
+        description=(
+            "Library versions the build ran under, as recorded. None when "
+            "not recorded."
+        ),
+    )
+    spec_hash: Optional[str] = None
+    spec_hash_version: Optional[int] = None
+    source: Dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "For an external panel: the file it reads (path, format, "
+            "fingerprint), its column mapping and the source label it was "
+            "registered with. Empty for a built dataset."
+        ),
+    )
+    notes: List[str] = Field(default_factory=list)
+
+
 # ── analyze_features ────────────────────────────────────────────────────
 
 
@@ -1680,15 +1840,24 @@ class CheckLeakageInput(BaseModel):
     feature_ids: Optional[List[str]] = Field(
         None,
         description=(
-            "Feature ids to check for temporal safety, at least one. Omit to "
-            "check every feature in the registry."
+            "Features to check for temporal safety, at least one. Without a "
+            "dataset_id these are catalog ids, and omitting them checks every "
+            "feature in the registry. With one, a name may also be one of the "
+            "dataset's columns (its output name: the alias where it has one), "
+            "checked under the catalog id its spec records and screened as "
+            "itself; a catalog id is screened through every column built from "
+            "it; and omitting them checks the dataset's own features."
         ),
     )
     dataset_id: Optional[str] = Field(
         None,
         description=(
             "Also report that dataset's point-in-time coverage — how much "
-            "of the panel is genuinely as-of rather than back-filled."
+            "of the panel is genuinely as-of rather than back-filled — and "
+            "run the empirical lead-lag screen on its columns. For an "
+            "external panel registered by register_external_panel the "
+            "screen is the whole check: its columns declare no temporal "
+            "support."
         ),
     )
 
@@ -1721,11 +1890,14 @@ class CheckLeakageResult(BaseModel):
         "dataset_id this rests on each feature's DECLARED temporal support, "
         "and a feature that reads its own target passes that check.",
     )
-    scope: Literal["declared_temporal_support_only", "declared_and_empirical"] = Field(
+    scope: Literal[
+        "declared_temporal_support_only", "declared_and_empirical", "empirical_only"
+    ] = Field(
         "declared_temporal_support_only",
         description="What `safe` rests on: the registry's declarations alone, "
         "or those plus the empirical lead-lag screen run on the built panel "
-        "(a dataset_id was supplied and the panel carries a target).",
+        "(a dataset_id was supplied and the panel carries a target), or the "
+        "screen alone for an external panel, whose columns declare nothing.",
     )
     findings: List[LeakageFinding] = Field(default_factory=list)
     screen: Dict[str, Dict[str, Any]] = Field(

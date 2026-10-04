@@ -4,9 +4,9 @@ answer BEFORE anything is built or fitted.
 
 WHY THESE ARE A MODULE PAIR. `discovery_tools.py` needs none of
 `tools.py`'s private helpers -- it reads registries, bounds and a
-calendar, and touches no panel and no manifest -- so its models live
-beside it rather than in `models.py`, the way `dataset_tools.py` and
-`portfolio_models.py` do. The seam is the point: nothing here can be
+calendar, and at most a dataset's or model's recorded spec, never a
+panel -- so its models live beside it rather than in `models.py`, the way
+`dataset_tools.py` and `portfolio_models.py` do. The seam is the point: nothing here can be
 broken by an edit to the tool file that every other modeling tool
 shares.
 
@@ -32,9 +32,9 @@ See the CHANGELOG entry of 2026-09-21 for why each was added.
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..specs import FeatureSpec
 from .models import Stat
@@ -427,15 +427,39 @@ class FeatureWarmup(BaseModel):
 
 
 class EstimateFeatureWarmupInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", protected_namespaces=())
 
-    features: List[FeatureSpec] = Field(
-        ...,
+    features: Optional[List[Union[FeatureSpec, str]]] = Field(
+        None,
         min_length=1,
         description=(
-            "The feature specs to price, exactly as DatasetSpec.features "
-            "would carry them -- id, params, alias and lags. Nothing is "
-            "fetched and nothing is built."
+            "The features to price. Each is a spec exactly as "
+            "DatasetSpec.features would carry it -- id, params, alias and "
+            "lags -- or a name. With dataset_id or model_id a name is one of "
+            "that dataset's columns (its output name: the alias where it has "
+            "one), priced at the parameters it was built with, and omitting "
+            "features prices every column; without one a name is a catalog "
+            "id at its default parameters. Nothing is fetched and nothing "
+            "is built."
+        ),
+    )
+    dataset_id: Optional[str] = Field(
+        None,
+        description=(
+            "Price the features a built dataset records, read from its "
+            "dataset_spec.json after checking it against the hash the build "
+            "recorded; its interval and calendar are used. The panel is not "
+            "read. An external panel registered by register_external_panel "
+            "is refused: its columns have no catalog definition to price."
+        ),
+    )
+    model_id: Optional[str] = Field(
+        None,
+        description=(
+            "Price the features a registered model was trained on, read from "
+            "the model's own verified copy of its dataset spec -- the "
+            "definition score_model rebuilds features from. At most one of "
+            "dataset_id and model_id."
         ),
     )
     interval: str = Field(
@@ -444,7 +468,9 @@ class EstimateFeatureWarmupInput(BaseModel):
             "The bar interval these features would be computed on. Every "
             "lookback counts BARS of this interval, so window=252 is a year "
             "at '1d' and about six weeks at '1h' -- which is what makes the "
-            "calendar-day estimate below interval-dependent."
+            "calendar-day estimate below interval-dependent. With dataset_id "
+            "or model_id the recorded interval is used, and a different one "
+            "passed here is refused."
         ),
     )
     calendar: Optional[str] = Field(
@@ -454,9 +480,25 @@ class EstimateFeatureWarmupInput(BaseModel):
             "DatasetSpec.calendar takes. Turns bars into calendar days with "
             "the venue's own session count instead of the 252 convention, "
             "and is REQUIRED for that conversion at an intraday interval, "
-            "where bars per session is a property of the venue."
+            "where bars per session is a property of the venue. With "
+            "dataset_id or model_id the recorded calendar is used; one passed "
+            "here is refused if it differs, and used if none was recorded."
         ),
     )
+
+    @model_validator(mode="after")
+    def _one_source_of_features(self) -> "EstimateFeatureWarmupInput":
+        if self.dataset_id is not None and self.model_id is not None:
+            raise ValueError(
+                "pass dataset_id or model_id, not both: each names a recorded "
+                "set of features, and two sets would be priced as one."
+            )
+        if self.features is None and self.dataset_id is None and self.model_id is None:
+            raise ValueError(
+                "nothing to price: pass features, or a dataset_id or model_id "
+                "to price the features it records."
+            )
+        return self
 
 
 class EstimateFeatureWarmupResult(BaseModel):

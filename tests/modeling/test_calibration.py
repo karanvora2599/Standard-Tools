@@ -253,7 +253,8 @@ class TestNoNewTools:
         # rather than how wrong on average, and to 24 with
         # attach_model_outcomes (which realized outcome these predictions
         # are answerable to) and backtest_model_signal (the verified route
-        # from a model to a backtest). What this test guards
-        # is the two names above: a phase-4 capability must still arrive
-        # through the registry and the spec, never as a tool.
-        assert len(MODELING_TOOL_DISPATCH) == 37
+        # from a model to a backtest), and to 38 with inspect_dataset
+        # (what one dataset holds, the counterpart of inspect_model). What
+        # this test guards is the two names above: a phase-4 capability must
+        # still arrive through the registry and the spec, never as a tool.
+        assert len(MODELING_TOOL_DISPATCH) == 38

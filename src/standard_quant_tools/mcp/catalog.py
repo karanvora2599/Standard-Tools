@@ -1,7 +1,7 @@
 """
 The tool catalog: which tools this server exposes, and what each one costs.
 
-WHY EXPOSURE IS A POLICY AND NOT A LIST. The ten runtimes hold 237 tools
+WHY EXPOSURE IS A POLICY AND NOT A LIST. The ten runtimes hold 238 tools
 whose input schemas and descriptions total about 541 KB. An MCP client
 fetches the tool list once at connect and carries it for the whole session,
 so exposing everything spends roughly 138,000 tokens of every conversation
@@ -24,7 +24,7 @@ newest category. Run `sqt-mcp --print-budget` for the current table;
 
 THE RUNTIMES STAY APART. Each entry records which RUNTIME it came from, and
 `dispatch_for()` returns that runtime's dispatch function. The names happen
-not to collide (237 tools, 237 unique names), so one flat lookup would work --
+not to collide (238 tools, 238 unique names), so one flat lookup would work --
 and would be exactly the merge the library declined to make.
 
 There were two registries when this module was written and there are ten
