@@ -121,8 +121,9 @@ jobs:
     # libasan path, incompatible flag combination) doesn't block unrelated
     # PRs. Flip this to false once confirmed working. Its C++ suite has run
     # green; its Python step aborted in ASan's __cxa_throw wrapper until
-    # libstdc++ was preloaded with the runtime (see that step), a change no
-    # run has confirmed yet.
+    # libstdc++ was preloaded with the runtime (see that step). With it
+    # the step ran the whole suite (13,236 passed), and its one failure
+    # was a benchmark's speed assertion, which instrumentation defeats.
     continue-on-error: true
 
     steps:
@@ -205,7 +206,9 @@ jobs:
         run: |
           export LD_PRELOAD="$(gcc -print-file-name=libasan.so):$(gcc -print-file-name=libstdc++.so.6)"
           echo "LD_PRELOAD=$LD_PRELOAD"
-          pytest -m "not integration and not slow" --tb=short -q -s
+          # Benchmarks assert speed ratios, which the instrumentation
+          # changes: a kernel that is 2x its fallback measured 1.02x here.
+          pytest -m "not integration and not slow and not benchmark" --tb=short -q -s
 
   parity-check-on-ci-completion:
     name: C++ extension (best-effort parity check after CI)

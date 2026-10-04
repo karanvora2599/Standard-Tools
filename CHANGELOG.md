@@ -1,5 +1,15 @@
 # Changelog
 
+## The sanitizer job deselects benchmarks
+
+- **The ASan/UBSan job's Python step runs the whole suite.** With
+  libstdc++ preloaded after the ASan runtime (the change of 2026-10-04) it
+  ran for the first time: 13,236 passed, and its one failure was the
+  pooled-IC kernel's speed assertion, which measured 1.02x where 1.2x is
+  expected; the instrumentation slows the kernel and leaves the pandas
+  fallback it is compared with almost untouched. The job now deselects
+  `benchmark`, as CI's other legs do.
+
 ## The guides describe the gap-aware SAR and ATR, the replayable hashes, the overlap lag and the 3:2 screen, and mutation testing kills all 21 mutations
 
 - **Mutation testing was re-run in full**, for the first time since the
