@@ -79,11 +79,11 @@ because the order is the point.
 | `score_model` | `model_id` + `as_of` + `universe` → predictions, persisted as a Parquet artifact and published as a predictions reference (`predictions_ref`) that `attach_model_outcomes` and `convert_reference` read, with `interval_stats` when the model carries a conformal band and a warning when that band is wider than the cross-section's spread. It fetches bars for every name in `universe` through `as_of`; a registered model's out-of-sample metrics need no fetch and are in `inspect_model` |
 | `attach_model_outcomes` | `model_id`, or a predictions reference + `dataset_id` → the predictions joined to the realized target and published as a reference `score_predictions` reads. Refuses a multi-horizon panel rather than guessing its label, and returns the `horizon` to pass on. This is what makes an ensemble's reference scoreable |
 | `backtest_model_signal` | `model_id` → the model's out-of-sample predictions as a `signal_panel` reference for `run_signal_panel_backtest`, through the VERIFIED branch of the bridge: the task comes from the manifest (there is no `task` argument to get wrong), the predictions file is checked against the hash the manifest recorded, and a cpcv model is refused by name with the walk-forward remedy |
-| `score_predictions` | a predictions reference → accuracy metrics, cross-sectional IC and ICIR, a predict-the-mean baseline, `prediction_turnover` (the bridge between an IC and a net-of-cost P&L), and an effective sample size adjusted for overlapping forward returns and for outcomes that move together across entities, with the two bounds it lies between. Pass `train_mean`: without it the baseline is the TEST set's own mean, whose R2 is zero by construction — an oracle no forecaster could have met. A `train_mean` off the outcomes' scale (one whose baseline error is past the float range) is refused by name rather than scored as an infinite baseline |
+| `score_predictions` | a predictions reference → accuracy metrics, cross-sectional IC and ICIR, a predict-the-mean baseline, `beats_null` and a `headline` block (the test a run makes of its own headline, on these predictions: the mean per-date rank IC against zero by a Newey-West t at max(2 × `horizon`, the Andrews bandwidth), or an AUC or concordance against 0.5), `prediction_turnover` (the bridge between an IC and a net-of-cost P&L), and an effective sample size adjusted for overlapping forward returns and for outcomes that move together across entities, with the two bounds it lies between. `beats_baseline` compares r2 with the constant, which on a ranked label judges the predictions' scale and not their order: read `beats_null` for the headline. Pass `train_mean`: without it the baseline is the TEST set's own mean, whose R2 is zero by construction — an oracle no forecaster could have met. A `train_mean` off the outcomes' scale (one whose baseline error is past the float range) is refused by name rather than scored as an infinite baseline |
 | `evaluate_model_portfolio` | `model_id` + `PredictionTransformSpec` + `PortfolioSimSpec` → OOS predictions turned into target weights and simulated as one shared-cash account, returning Sharpe/drawdown/turnover/exposure plus a persisted weights artifact |
 | `evaluate_predictions_portfolio` | a predictions reference (an ensemble, an external alpha, a scored run) + `task` + the same `PredictionTransformSpec` and `PortfolioSimSpec` → the same simulation as `evaluate_model_portfolio`, inheriting interval, provider, calendar and window from a `dataset_id` or taking them explicitly. Provenance names the reference and its producer, not a model id, and says so |
 | `score_prediction_intervals` | a predictions reference carrying quantile or `lower`/`upper` columns → whether the intervals cover: pinball loss per quantile, the crossing rate, and coverage against the nominal level, pooled or `by` date or entity, because a band that covered 97% in calm and 62% in a selloff is one pooled number away from looking fine. These metrics used to run inside the engine's fold loop and be averaged into one number |
-| `compare_signals` | three modes: two prediction references (`paired`, a block bootstrap on the per-date IC difference), two per-date IC series (`ic_series`, with the Newey-West variance beside the naive one), or a set of p-values from anywhere (`adjust`, under Holm, Bonferroni or Benjamini-Hochberg). Always says that this controls the error of THESE tests and not for the candidates having been selected on the same sample, which is `run_reality_check`'s job |
+| `compare_signals` | three modes: two prediction references (`paired`, a block bootstrap on the per-date IC difference), two per-date IC series (`ic_series`, with the Newey-West variance beside the naive one, at the headline's lag for `horizon` unless `hac_lag` is given), or a set of p-values from anywhere (`adjust`, under Holm, Bonferroni or Benjamini-Hochberg). Always says that this controls the error of THESE tests and not for the candidates having been selected on the same sample, which is `run_reality_check`'s job |
 | `predict_survival_curve` | `model_id` + `as_of` + `universe` (+ `times`) → the survival curve a survival model learned, per entity, and the horizon at which it crosses one half, under every gate `score_model` enforces. The experiment kept the integrated Brier score and discarded the matrix; `score_model` returns the risk. Honest that the level is the baseline's and that a median past the grid is unknown, not never |
 | `attest_model_package` | `model_id` (+ `public_key_path`) → whether the registered package verifies: every hashed file against its digest, and the manifest's signature, REQUIRED by default. The library's own default is permissive, so an unsigned in-house model stays mirrorable and inspectable; an attestation that passed an unsigned package would reproduce the defect it exists to close, since deleting a signature is easier than forging one. A valid signature under an unpinned key proves the manifest and the signature were written together, not that anyone you trust wrote them, and the result says so |
 | `list_remote_models` | a store URL (or `SQT_MODEL_MIRROR_URL`) → the model ids the mirror holds; an unknown scheme is refused naming the ones that work |
@@ -113,7 +113,7 @@ typed fields for **one** question:
 | `screen_feature_significance` | `dataset_id` (+ features, permutations, null) → the permutation test for every feature at once: each feature's rank IC, p-value, `null_mean` and `null_p95_abs`, and `honest_floor`, the largest `null_p95_abs`. It is not a `min_abs_rank_ic` for `select_features`: it applies the widest null to every feature and reads every date, holdout included. A draw budget bounds the cost, with the ceiling declared in the limits |
 | `screen_feature_stability` | `dataset_id` (+ features, blocks, reference) → drift and IC stability for every feature at once, with a per-block PSI curve against the first block or the previous one, so a feature that is no longer the same measurement is visible without knowing its name in advance |
 | `run_feature_ablation` | `dataset_id` + `ModelSpec` → refit without each feature in turn, reporting what each was worth by `metric`. Its default is the task's headline metric — `cs_rank_ic_mean` for regression and ranking, `auc` for classification, `cs_concordance_mean` for survival — not the alphabetically first metric, which for a regression was the 0/1 flag `baseline_is_oracle` and made every contribution 0.0 |
-| `select_features` | `dataset_id` → a chosen set, selected on the first `1 - holdout_fraction` of the dates (or through `selection_end`): one representative per redundancy cluster, an optional IC floor, then a permutation test of each representative on the selection window (`significance`, default `"entity_shuffle"`, `alpha` 0.05), with each selected feature's IC on the held-out dates beside its selection IC and a recorded reason for every exclusion (an `insignificant` drop carries its p-value). `significance="none"` returns the selection as it was before the test. The clusters it resolved, each drop's `duplicate_of`, the VIFs, the condition number and `collinear_features` come back with it (the correlation matrix behind `include_correlation`), so `get_feature_redundancy` need not be run a second time for the same panel |
+| `select_features` | `dataset_id` → a chosen set, selected on the first `1 - holdout_fraction` of the dates (or through `selection_end`) less their last `embargo_dates` (the target horizon by default, so no label the selection reads ends inside the holdout; `0` keeps the old window): one representative per redundancy cluster, an optional IC floor, then a permutation test of each representative on the selection window (`significance`, default `"entity_shuffle"`, `alpha` 0.05; `correction="bh"` passes on Benjamini-Hochberg adjusted p-values instead), with each selected feature's IC on the held-out dates beside its selection IC and a recorded reason for every exclusion (an `insignificant` drop carries its p-value). `significance="none"` returns the selection as it was before the test. The clusters it resolved, each drop's `duplicate_of`, the VIFs, the condition number and `collinear_features` come back with it (the correlation matrix behind `include_correlation`), so `get_feature_redundancy` need not be run a second time for the same panel |
 | `compare_feature_sets` | `dataset_id` + two sets → per-set IC and collinearity, what is unique to each, and the delta. Both sets are summarised on every date unless `holdout_fraction` (or `selection_end`) holds dates out, and the result's `warnings` say so: at fraction 0 every IC in it is in-sample by construction, a comparison between the sets rather than an estimate of either one's out-of-sample strength. A feature the dataset lacks is refused before anything is computed, naming every missing feature in the order given, so the refusal reads the same in every process |
 
 Every feature list these tools take (`features` here and on
@@ -274,13 +274,20 @@ each cluster representative against an entity-shuffle permutation null on
 its selection window (`significance`, default `"entity_shuffle"`, at
 `alpha` 0.05) and drops what does not reach it as `insignificant`, with the
 p-value. It records a reason for every exclusion. On the live panel it
-keeps beta_60 and rvol_20 and drops the other six (p 0.28–0.89); before the
+keeps beta_60 and rvol_20 and drops the other six (p 0.28–0.91); before the
 test, a call with no arguments kept all eight. `significance="none"`
-returns that old selection, with a warning. The p-values are not corrected
-for the number of features tested, and the warning says how many noise
-alone would pass; with E entities the null has E! assignments, so at four
-or fewer (at the default `alpha`) the result says the test cannot reliably
-reach it. **It does not read
+returns that old selection, with a warning. By default the p-values are not
+corrected for the number of features tested, and the warning says how many
+noise alone would pass. `correction="bh"` passes a representative on its
+Benjamini-Hochberg adjusted p-value instead, returned as
+`selection_p_value_adjusted`, which bounds the expected share of the kept
+features that noise kept; it keeps a subset of what the uncorrected gate
+keeps, and on the live panel the same two (adjusted p 0.020 each). Holm is
+not offered: a permutation p-value is at least 1/(n_permutations + 1),
+1/201 at the default, and Holm's first step needs one below alpha/m, so at
+`alpha` 0.05 beyond ten features it can pass nothing. With E entities the
+null has E! assignments, so at four or fewer (at the default `alpha`) the
+result says the test cannot reliably reach it. **It does not read
 the whole panel either.** Redundancy and the IC floor used to be measured
 over every date, holdout included, so a walk-forward run on the selected
 features started biased: the top five of sixty pure-noise columns chosen
@@ -292,6 +299,17 @@ through `selection_end`, and the result carries `selection_window`,
 feature's `holdout_ic` — the number to believe, since the selection IC
 chose the features and is optimistic by construction. `holdout_fraction=0`
 selects on everything, and the warning says so.
+
+**Nor does it read labels that end in the holdout.** A label dated on one
+of the selection window's last h dates looks h bars forward, into the
+dates the holdout is scored on. `embargo_dates`, the target horizon by
+default, drops that many dates from the end of the selection window and
+records them as `embargo_window`; the holdout is unchanged. On the live
+panel's 5-day label the window ends 2025-06-10 instead of 2025-06-17 (736
+dates instead of 741), the five dates dropped carry exactly the 150 rows
+whose `label_end_date` falls in the holdout, and the selection is the same
+two features: selection ICs move by at most 0.0023 and p-values by at most
+0.075. `embargo_dates=0` returns the old window to the bit.
 
 **A statistic that comes back as `null` was not computed.** That is not the
 same as zero: a panel with too few entities per date has no cross-section,
@@ -688,7 +706,7 @@ to build the dataset:
 | `point_in_time=False` | The provider does not guarantee historical values are never revised, so a feature computed today may differ from what was observable on its label date. The per-feature PIT gate checks the FORMULA; it cannot see revisions in the underlying series. |
 | `survivorship_free=False` | Delisted securities are not queryable, so any universe of currently-listed symbols is a survivors-only sample. Backtested returns are biased upward and walk-forward validation does not correct for it. |
 | `adjusted=False` | The provider serves unadjusted bars (Databento). A dividend is a price drop on its ex-date, so return targets are price returns, not the total returns an adjusting provider gives; a split is a price fall, which the price-jump screen names. |
-| `PRICE JUMPS` | A close-to-close move beyond 35% in the bars the dataset was built from, named after the split ratio it is within 10% of, with the labels that span it and the rows carrying a feature computed across it; worded by the provider's `adjusted` flag. See [Splits in unadjusted bars](#splits-in-unadjusted-bars). |
+| `PRICE JUMPS` | A close-to-close move beyond 35%, or a fall of 26% to 35% the size of a 3:2 split, in the bars the dataset was built from, named after the split ratio it is within 10% of, with the labels that span it and the rows carrying a feature computed across it; worded by the provider's `adjusted` flag. See [Splits in unadjusted bars](#splits-in-unadjusted-bars). |
 | `DECLARED SPLITS` / `DECLARED SPLIT NOT SEEN` / `DECLARED SPLIT OUTSIDE THE BARS` | What `DatasetSpec.corporate_actions` did: the splits adjusted; a declared split whose ex-date bar does not move by about its ratio (applied as declared); one outside the fetched bars (changed nothing). |
 | partial history | A symbol covers materially less than the universe's date range — it listed inside the window, or stopped early. It is weighted far less than its presence in `universe` suggests. |
 | requested start/end unavailable | The window that came back is shorter than the one asked for, before any feature lookback is consumed. |
@@ -717,8 +735,9 @@ feature rows read one, and masking those rows took ridge's rank IC from
 
 **The screen.** `build_model_dataset` screens every entity's bars — and the
 benchmark's, when a feature reads the benchmark — for close-to-close moves
-beyond 35%, the backtest's threshold (`constants.SPLIT_SCREEN_THRESHOLD`,
-one object read by both). Each move is named after the split ratio it is
+beyond 35%, the backtest's threshold (`constants.SPLIT_SCREEN_THRESHOLD`),
+and for falls within 10% on a log scale of a 3:2 split (26% to 35%) — one
+rule, `_split_screen.screen_moves`, run by both screens. Each move is named after the split ratio it is
 within 10% of on a log scale (3:2, 2:1, 3:1, 4:1, 5:1, 8:1, 10:1, 15:1,
 20:1, 25:1, 30:1, 40:1, 50:1, or a reverse of one;
 `data.quality.detect_split_like_moves`) and counted: the labels dated
@@ -741,7 +760,9 @@ The screen reads the bars and the finished panel and writes neither, so
 live panel it costs about 7 ms of a 0.8 s build. Under `adjusted=True` the
 warning calls each move a genuine move or a bad print. A genuine −90% day
 reads exactly like a 10:1 split, so a named ratio is consistency, not
-proof, and a 3:2 split moves −33%, below the threshold, and is not seen.
+proof, and a genuine −30% day reads like a 3:2 split: on GARCH-t(4) series
+at 2%, 3% and 4% daily volatility the 3:2 band named an ordinary fall once
+per 75, 22 and 9 name-years.
 For a target computed across each date's entities
 (`forward_return_rank`, `forward_return_market_neutral`) the warning adds
 the other rows on the spanning labels' dates: on the live-shaped panel 397
@@ -770,7 +791,9 @@ not adjusted.
 - A declared split whose ex-date bar does not move within 10% of its ratio
   is applied as declared and named (`DECLARED SPLIT NOT SEEN`). Declared
   one session late, the real −90% stays in the bars, a move of about +900%
-  follows it, and the screen names both.
+  follows it, and the screen names both; a 3:2 split declared a session
+  late has both of its moves named too, the −33% left in the bars and the
+  +50% the adjustment makes.
 - A split at or before the first bar, or after the last, changes nothing
   and says so (`DECLARED SPLIT OUTSIDE THE BARS`).
 - An empty table (the default) stays out of `spec_hash`, so a dataset built
@@ -1071,6 +1094,13 @@ tool refuses to guess.
 
 Supply `label_end_column` as well for a label that can end early — a triple
 barrier — so the purge uses the real end rather than the nominal horizon.
+
+A `date` column and a label-end column must both carry a time zone or
+neither: a panel with one of each is refused when the run is planned,
+because a naive time read as UTC can be hours away from the zone it was
+recorded in, and the purge would miss a row whose label ends on the first
+test date. Two columns in different zones are accepted; they compare as
+instants.
 
 ### One row per entity and date
 
@@ -1712,7 +1742,12 @@ both backends: an infinity has no quantile to winsorize to and no z-score,
 and where it sat in a quantile's interpolation bracket the native kernel
 answered `+inf` and pandas `NaN` (either way every transformed value came
 out `-inf` or `NaN`). `build_model_dataset` already refuses infinite
-features, so this only reaches a frame handed to the fit directly.
+features, so this only reaches a frame handed to the fit directly. The
+`winsorize` and `zscore` registry steps — what a non-default pipeline
+names, such as `winsorize(0.05, 0.95)` or `zscore` alone — refuse an
+infinity the same way, at fit with the same message and at transform in
+the rows being transformed. The default pair runs the fused path, which
+clips an infinity in the rows it applies to, as it always has.
 
 ### What the metrics mean
 
@@ -1812,7 +1847,11 @@ with 0.5 as points. `validation_report["headline"]` keeps `metric`,
 `hac_lag`, `ic_autocorrelation_lag1` and `beats_null` (null when untested);
 it persists with the manifest and shows in
 `inspect_model(view="validation")`, and a manifest written before it has
-none.
+none. `score_predictions` runs the same test on any predictions reference
+and returns it as `beats_null` and `headline`, its sentences worded for
+scored rather than out-of-sample dates; on a registered model's
+predictions passed through `attach_model_outcomes` and scored at the
+label's `horizon` it reproduces the run's block.
 
 **r² below its baseline, explained.** `baseline_r2` is the training-fold
 mean predicted for every test row. r² can be no larger than the squared
@@ -2602,6 +2641,14 @@ It controls four things:
   (rows × columns), where one thread measured faster, and the share above.
   On a 30-name daily equity panel (31,680 rows, 8 features) a
   hist_gradient_boosting run went from 15–17 s to about 4 s.
+  `score_model` and `survival_curves` predict under the same limit, at the
+  count the run gives one fit of the scored matrix on the budget it
+  recorded (`validation_report["fits"]["max_parallelism"]`): one thread
+  under `"auto"` for a one-date score, the budget when it is a number. A
+  30-row, 8-feature hist_gradient_boosting score measured a median
+  5.0–9.2 ms on all 16 threads and 0.75–0.93 ms on one, the same
+  predictions to the bit. An estimator that does not run on OpenMP is left
+  alone.
 
 `validation_report["fits"]` says what ran: `max_parallelism` as asked,
 `fold_workers`, and `fold_parallel_limit` — `"budget"`,
@@ -2625,8 +2672,9 @@ forest carries no budget and its `model.joblib` is the same at every
 budget: on the same panel, the random forest at `"auto"` (8 folds side by
 side) reproduced the budget-1 run's every content hash in 18–19 s instead
 of 79–94 s. hist_gradient_boosting and XGBoost predict the same bits at 1,
-4 and 16 threads; hist_gradient_boosting's pickle differs, because its bin
-mapper records the thread count. LightGBM's fit can differ in the last bits
+4 and 16 threads; hist_gradient_boosting's `model.joblib` and `model.skops`
+differ, because its bin mapper records the thread count (see [The skops
+bundle](#the-skops-bundle)). LightGBM's fit can differ in the last bits
 with its thread count (4e-19 on a 160,000-row fit, none on 25,000 rows),
 and it ignores the OpenMP runtime's count when its `n_jobs` is unset, so it
 is handed its share explicitly, one included; under `"auto"` it fits on one
@@ -2996,7 +3044,15 @@ matrix (`RankingAdapter.prepare` returns the reordered index with the
 reordered `X`), and the weights, the calibration and the adapters are
 defined on it. Each adapter declares the `input_kind` its estimators
 consume; `tabular` is the one kind today, reported by
-`list_modeling_capabilities`.
+`list_modeling_capabilities`. The dates and label ends are `datetime64`: a
+timezone-aware column's are its UTC instants, so an index read off a panel
+in New York or Tokyo holds the same values as one read off the same panel
+converted to UTC. They order, compare, group and subtract as the zoned
+timestamps would, which is all the purge, the weights, the calibration and
+the adapters do with them; a calendar label is read off the frame, in its
+own zone, since a calendar date read off the index is the UTC date. A
+custom preprocessing step sees `FoldContext.dates` the same way; before
+2026-10-04 both were an object array of zoned timestamps on a zoned panel.
 
 No `RepresentationSpec` was added. A one-valued field would churn every
 persisted `ModelSpec` for no behaviour, and what a shared representation
@@ -3391,6 +3447,19 @@ cannot serialize everything (a booster holding a native handle, say) —
 registration then keeps joblib alone, `formats` says `["joblib"]`, and
 asking for the bundle is refused rather than answered with the joblib.
 
+The same model writes the same bundle. As `skops.io.dump` writes it, an
+archive dates every member with the wall clock, stores each array under its
+object's memory address and each bytes value under a random UUID, and a
+tree's node records carry seven padding bytes each, whatever the allocator
+left; two identical runs therefore wrote different `model.skops` files and
+the manifest's hash for it never reproduced. Registration rewrites the
+archive before saving it: ids numbered in the order `schema.json` first
+names them, members renamed to match, padding zeroed, every member dated
+1980-01-01. What loads from it is unchanged, and a bundle written before
+loads as it always did. A histogram-boosting model records the OpenMP
+thread count it was fitted with, in both formats, so its bytes agree only
+between runs with the same thread setting.
+
 ### A registry that reaches another machine
 
 Two operations make the store protocol a registry across machines rather
@@ -3510,8 +3579,12 @@ against the code it was trained on.
 > runtime from outside the repo.
 
 Score artifacts are **content-addressed**: the filename carries a digest of
-the predictions, returned as `predictions_hash`. An identical re-score
-resolves to the same path (idempotent, no proliferation), while any change
+the predictions, returned as `predictions_hash`. The digest is
+`audit.canonical_frame_hash`, so identical predictions get the same name
+under pandas 2 and pandas 3; a file named before 2026-10-04 by the earlier
+`hash_dataframe` digest keeps its name and loads as before, and the first
+re-score since writes the same predictions once more under the new name.
+An identical re-score resolves to the same path (idempotent, no proliferation), while any change
 in the predictions writes a new path and leaves the recorded one intact.
 The name used to cover only (date, universe) and was written with
 `overwrite=True`, so re-scoring after a provider revised its data replaced
@@ -3723,16 +3796,22 @@ and the result's note says so rather than letting the adjustment imply it.
 `compare_signals` is the same machinery off the registry: two prediction
 references compared `paired` on the per-date IC difference, two per-date IC
 series compared `ic_series` with the Newey-West variance beside the naive
-one, or a bare set of p-values from anywhere adjusted under Holm,
+one, at `hac_lag` or else the headline's lag for the `horizon` passed, or a
+bare set of p-values from anywhere adjusted under Holm,
 Bonferroni or Benjamini-Hochberg. It carries the same caveat, because the
 caveat is about the sample and not about where the numbers came from.
 
 **Where the task has a loss with units, a Diebold-Mariano test** on the
 per-date loss differential is reported too: squared error for a regressor,
-Brier for a classifier, with a Newey-West variance at the label horizon
-and the Harvey-Leybourne-Newbold small-sample correction. A ranker's score
-has no scale, so it has no loss and the IC difference carries the
-comparison alone.
+Brier for a classifier, with a Newey-West variance at the lag a run's
+headline is tested at, max(2h, ⌊4(n/100)^(2/9)⌋) capped at n − 1, and the
+Harvey-Leybourne-Newbold small-sample correction at the label horizon. The
+lag was h − 1; on 4,000 simulated loss differentials of a 5-bar overlap
+over 504 dates that rejected a true zero 11.3% of the time at a nominal 5%,
+against 7.9% at lag 10. On the live panel random forest against ridge
+moved from t −2.18 (p 0.030) to t −1.74 (p 0.082). A ranker's score has no
+scale, so it has no loss and the IC difference carries the comparison
+alone.
 
 ```
 model_id         mean_reference  mean_candidate  difference   95% interval          verdict
@@ -4271,6 +4350,20 @@ five native kernels followed.
 End to end, `run_experiment` against the pure-Python path: **1.92×/2.05×**
 pooled, **1.59×/1.82×** cross-sectional, **2.23×/2.55×** weighted, at
 200/500 entities.
+
+The dates were the next half of a run. `to_numpy()` on a timezone-aware
+date column builds a `pd.Timestamp` per row, and a ridge walk-forward run
+on a 31,680-row, 30-name daily panel made 58 such calls — the sample
+index, the preprocessing context, the plan, the fold loop — for 0.85 s of
+its 1.52 s under the profiler, before the sorts and searches the object
+arrays slowed down. Those columns are now read as their UTC instants
+(`datetime_values`). Warm, median of five runs on a 16-thread machine, on
+pandas 3.0 the ridge run went from 2.2–2.8 s to 0.36–0.49 s (1.55–1.74 s
+to 0.32–0.38 s on pandas 2.3), a ridge cpcv run from 5.7–6.9 s to
+1.1–1.3 s, and a hist_gradient_boosting run from 4.5–6.1 s to 2.7–3.4 s,
+with every recorded output and content hash unchanged. A hyperparameter
+search still converts its training window's dates inside
+`search_best_params`.
 
 ### The ceiling, stated before the method
 

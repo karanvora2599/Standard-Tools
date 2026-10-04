@@ -1,5 +1,27 @@
 # Changelog
 
+## The guides describe the gap-aware SAR and ATR, the replayable hashes, the overlap lag and the 3:2 screen, and mutation testing kills all 21 mutations
+
+- **Mutation testing was re-run in full**, for the first time since the
+  README's "21 of 21 killed" was written: 20 were killed and one survived.
+  Forcing the block bootstrap to an IID resample, whatever `block_size`
+  said, passed the suite, because the bootstrap tests compare against
+  `block_indices` itself and agree with it either way. Two tests now hold
+  `block_indices` to its structure — a resample is whole runs of
+  consecutive observations, and a block longer than the series is the
+  series — and the mutation is killed. 21 of 21 again.
+- **The guides** cover the Parabolic SAR and the simple ATR reading NaN
+  as a gap, the inline finiteness tests and the SAR's speed, the
+  versioned data-source hashes and how replay compares them, `sqt audit
+  repair-tail` on a torn chain index, the reproducible `model.skops`, the
+  Diebold-Mariano lag, the `select_features` embargo and Benjamini-Hochberg
+  correction, `score_predictions`' `beats_null`, the yfinance info
+  failures, the panel `source`, the 3:2 screen, the dates read as instants
+  and the scoring thread limit. The MCP context-budget tables are
+  regenerated: 585,336 schema bytes across the 238 tools.
+- **The README and the testing guide count the tests**: 15,012 collected,
+  14,851 passing with the extension and `SQT_EXPECT_NATIVE=1`.
+
 ## A run reads its dates as instants, a score predicts under the OpenMP limit, and two steps refuse an infinity
 
 - **A timezone-aware date column is no longer boxed into a Timestamp per

@@ -56,6 +56,12 @@ long bars with an `entity` column, which is what indicator and backtest work
 wants. Fetching the wrong one means the consumer rebuilds it, which is the
 waste this runtime exists to remove.
 
+**`source` picks the provider for a universe too.** `fetch_ohlcv_panel` and
+`fetch_returns_panel` build the provider `source` names, as `fetch_ohlcv`
+does; they used to ask the default whatever `source` said, so
+`source='databento'` published Yahoo's bars. Without `source` the default
+is built as before.
+
 **A reference names one value, also under concurrency.** Publishing to a
 `(run_id, name)` that is taken is refused (`overwrite=True` is the deliberate
 exception), and the refusal holds when two agents race: the value and the
@@ -92,7 +98,8 @@ that outlasted the provider's own retries, raised or chained as
 `VendorUnavailableError` — is refused as `VendorUnavailableError`, naming
 the dataset and status it knows and saying that dropping a symbol will not
 help and the batch should be run again later. It used to carry the same
-advice to drop a symbol.
+advice to drop a symbol. The refusal names the source that failed
+(`source='databento'`, or the default source, `'yfinance'`).
 
 **A bar the provider dropped, or one still trading, is named per symbol.**
 Every provider drops a bar with no Close — the row a vendor lists for the

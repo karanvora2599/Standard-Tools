@@ -163,7 +163,7 @@ that most often causes the disconnect.
 
 ## Choosing what to serve
 
-The 238 tools cost about **569 KB of schema, ~146,000 tokens**, held for the
+The 238 tools cost about **572 KB of schema, ~146,000 tokens**, held for the
 whole session. That is the constraint the whole design manages, so this is
 the first decision, not a tuning knob.
 
@@ -186,23 +186,23 @@ sqt-mcp --print-budget
 
 ```
 runtime              tools    bytes   ~tokens
-modeling                38  185,475    46,368
+modeling                38  186,377    46,594
 backtest                35   88,403    22,100
 research                42   63,867    15,966
-feature_lab             11   45,445    11,361
+feature_lab             11   47,186    11,796
 delta_one               18   45,178    11,294
 data                    21   37,374     9,343
 portfolio               19   37,268     9,317
 microstructure          17   31,620     7,905
 meta                    25   24,976     6,244
 derivatives             12   23,087     5,771
-all                    238  582,693   145,673
+all                    238  585,336   146,334
 
-  a client is served ONE runtime: modeling is the most expensive at 185,475 bytes (32% of the total).
+  a client is served ONE runtime: modeling is the most expensive at 186,377 bytes (32% of the total).
 
 category             tools    bytes   ~tokens
-modeling                38  185,475    46,368
-feature_lab             11   45,445    11,361
+modeling                38  186,377    46,594
+feature_lab             11   47,186    11,796
 delta_one               18   45,178    11,294
 backtest_validation     21   41,295    10,323
 backtest_execution      12   39,562     9,890
@@ -219,7 +219,7 @@ screener                 2    2,716       679
 ```
 
 **The total is a number nobody pays.** The row that matters is the runtime
-a client is actually served, and the most expensive of those is 181 KB at
+a client is actually served, and the most expensive of those is 182 KB at
 full detail — 32% of the whole surface.
 
 There is deliberately **no fixed per-runtime limit**. There was one, at
@@ -290,18 +290,18 @@ sqt-mcp --runtime backtest --tool-detail thin    # 19 KB, all thinned
 A **thinned** tool is still listed and still callable. What it loses is its
 argument schema: the listing carries the name, one line of purpose, and an
 instruction to call `describe_tool` for the rest. Measured across the whole
-surface, that is 539 bytes a tool against 2,754 — **80% smaller**.
+surface, that is 539 bytes a tool against 2,765 — **80% smaller**.
 
 `auto` is the mode worth using. It thins the **most expensive** tools and
 stops as soon as the runtime fits `--detail-budget` (32 KB by default):
 
 | runtime | full | `auto` | thinned by `auto` | thin |
 |---|---:|---:|---:|---:|
-| `modeling` | 194 KB | 43 KB | 20 | 21 KB |
+| `modeling` | 195 KB | 43 KB | 20 | 21 KB |
 | `backtest` | 94 KB | 43 KB | 15 | 19 KB |
 | `research` | 72 KB | 44 KB | 12 | 21 KB |
 | `delta_one` | 50 KB | 39 KB | 3 | 10 KB |
-| `feature_lab` | 48 KB | 27 KB | 1 | 7 KB |
+| `feature_lab` | 50 KB | 29 KB | 1 | 7 KB |
 | `data` | 42 KB | 38 KB | 1 | 12 KB |
 | `portfolio` | 42 KB | 38 KB | 1 | 11 KB |
 | `microstructure` | 36 KB | 36 KB | 0 | 10 KB |

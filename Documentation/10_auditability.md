@@ -86,7 +86,7 @@ produces a record like:
   "input": {"symbol": "AAPL", "start_date": "2022-01-01", "end_date": "2022-06-01", "...": "..."},
   "data_sources": [
     {"symbol": "AAPL", "start": "2022-01-01", "end": "2022-06-01", "interval": "1d",
-     "source": "live_fetch", "content_hash": "1d975f555f10aeb8", "fetch_ms": 6421.337}
+     "source": "live_fetch", "content_hash": "1d975f555f10aeb8", "content_hash_version": 2, "fetch_ms": 6421.337}
   ],
   "cpp_available": false,
   "native_build": "absent",
@@ -226,10 +226,14 @@ answered by two datasets. Failed calls still produce a record —
 > each column's logical kind (`float64`, `int`, `bool`, `string`,
 > `timestamp[ns, UTC]` and the like) instead of `str(dtype)`, so the same data hashes
 > alike under pandas 2 and pandas 3. Modeling datasets use it (see
-> [15_modeling.md](15_modeling.md#the-package-is-content-addressed-and-verified)).
-> The `content_hash` values in `data_sources` still come from
-> `hash_dataframe`, so a replay under a different pandas version can report
-> a data-source mismatch for unchanged data.
+> [15_modeling.md](15_modeling.md#the-package-is-content-addressed-and-verified)),
+> and so does every data source recorded since 2026-10-04: each entry carries
+> `content_hash_version: 2` beside its `content_hash`. Every shipped provider
+> reports through `audit.record_frame_access`, which takes the frame and
+> hashes it this way; a caller that hashes its own frames passes
+> `content_hash_version` to `record_data_access`. An entry without the
+> key holds `hash_dataframe` (version 1) and is never rewritten; replay
+> checks it in its own form (see [Replay verification](#replay-verification)).
 
 ### Where the time went: `fetch_ms` and `compute_ms`
 
@@ -335,8 +339,9 @@ beside the day (see [`sqt audit repair-tail`](#sqt-audit-repair-tail)). By
 hand: copy the day file somewhere safe, truncate it to that byte (the end of
 its last complete line), and run `sqt verify`. The fragment was never a
 whole record, so no record is lost by removing it. A torn last line of the
-chain index is refused the same way; the command repairs day files only, so
-that refusal names the manual cut.
+chain index — what a crash leaves while the writer appends a new day's index
+entry, before that day's first record — is refused the same way and names
+the same command, which cuts it under the index's lock.
 A last line that parses to something other than a record (`[1,2,3]`, a
 number, bytes that are not UTF-8) is refused as corruption too; it used to
 escape as an unrelated exception that the fail-open policy swallowed.
@@ -695,6 +700,22 @@ mismatch, rather than being silently left out just because the replay
 never touched it. Comparing only `set(new_sources)` against the original
 would have hidden exactly this case.
 
+Each data source is compared in the form its record took. An entry with
+`content_hash_version: 2` is compared with the replayed frame's
+`canonical_frame_hash`, which does not depend on the pandas version, so a
+miss means the data changed. An entry without the key holds
+`hash_dataframe`, which does; it is compared with the replayed frame's
+`hash_dataframe` as read, then with text columns spelled `object`, `str` or
+`string` and datetime columns and a datetime index at `[ns]`, `[us]`,
+`[ms]` or `[s]`. A match there sets `reproduced_with` (for example `text
+spelled str`) and is unchanged data. A miss under every variant is reported
+as undecided: the record does not say which pandas wrote it, so the check
+cannot tell a revision from a pandas difference, and the note says so
+rather than blaming the provider. Every entry carries `hash_version`;
+`match` is `null` when the record and the replay hashed in forms that
+cannot be compared (an unversioned digest from a provider outside the
+library against a versioned one).
+
 Note that `verify_replay` re-executes the tool function directly (not
 through `dispatch()`), so it does not itself write a new decision record.
 ### Replaying modeling records
@@ -940,7 +961,7 @@ sqt hold <date> [--reason TEXT]      # legal/retention hold on a calendar day
 sqt release-hold <date>              # remove a hold
 sqt gc [--confirm]                   # delete day files past retention (dry-run by default)
 sqt seal <date>                      # chmod a day file read-only (not WORM)
-sqt audit repair-tail [date] [--confirm]  # show (or cut, keeping it in a side file) the newest day's torn final record
+sqt audit repair-tail [date] [--confirm]  # show (or cut, keeping it in a side file) the torn final line of the newest day or the chain index
 sqt export --start D --end D --out F # package a date range into an auditor-ready zip
 sqt keygen [--out DIR]                # generate an Ed25519 keypair (local dev only)
 sqt anchor <date> [--key PATH]        # sign a checkpoint for a calendar day
@@ -1047,6 +1068,17 @@ The day is then byte for byte what it was before the interrupted write, and
 the trail verification printed after the cut matches the one before it.
 The side file is not a day file: no reader of the trail, the verifier
 included, takes it for one.
+
+It examines the chain index as well. A crash while the writer appends a new
+day's index entry leaves `_chain_index.jsonl` ending in a fragment and the
+day with no file; the command shows it as `_chain_index.jsonl ends in a
+torn entry: …` and with `--confirm` cuts it the same way, keeping the bytes
+in `_chain_index.jsonl.torn-<UTC time>-<id>`. When both files end in a torn
+line, both are cut, and the index's lock is taken before the day's. Both
+files are examined before either is touched: damage a cut-short write does
+not leave, in either file (a damaged line in the middle of the index
+included), refuses the whole command and leaves both as they were. When
+neither ends in a torn line, the refusal says what each ends in.
 
 It refuses, naming why and changing nothing, when the final line is a
 complete record (a record that lost only its newline included — the writer

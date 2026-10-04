@@ -29,7 +29,7 @@ the size named:
 | `rolling_hurst` (n = 2 000, window = 200, step = 1) | **274×** (4.64s → 17ms) | — | Same — the standout number in this table, and it holds up under real measurement. |
 | `rsi` (n = 2 115, raw kernel) | **0.97–1.05×** (tied) | 1109ms → 1.2ms first call | Re-measured at the raw kernel, without the wrapper. 0.78–0.99× before the per-bar loop was rewritten; see the fourth finding below. |
 | `adx` (n = 2 115, raw kernel) | **0.94–0.99×** (tied) | 1110ms → 1.2ms first call | Was **0.25–0.33×** — a quarter to a third of numba's speed at every size from 2k to 2M bars — until the per-bar loop was rewritten; see the fourth finding below. |
-| `parabolic_sar` (n = 2 000) | **1.1×** (essentially tied) | ~similar order to ADX | |
+| `parabolic_sar` (raw kernel, 200k–2M bars) | **1.19–1.45×** | ~similar order to ADX | Was 0.82–0.92× from 20k to 2M bars: MSVC compiled the new-extreme update to a branch that went either way from bar to bar. See the fifth finding below. |
 | `wilder_atr` (n = 2 115, raw kernel) | **0.92–1.00×** (tied) | | Was **0.24–0.29×** before the same rewrite. |
 | `bollinger_bands` (n = 2 000) | **1.6×** | | |
 | `stochastic_oscillator` (n = 2 000) | **2.6×** | | |
@@ -95,7 +95,30 @@ largest; `c ? x : 0.0` on doubles became a conditional jump mispredicted on
 about every other bar; and `std::isfinite` became a call into the C runtime
 DLL, three per bar. Rewritten without any of them, the kernels are level
 with numba and every output is bit-identical to the previous build. The
-build guide's section on adding a C++ feature lists the three patterns.
+build guide's section on adding a C++ feature lists the three patterns,
+with the fourth from the finding below.
+
+**A fifth honest finding: the same call into the C runtime was still in
+seven kernels, and the Parabolic SAR had the branch.** `std::isfinite` and
+`std::isnan` are a call to `_dclass` in the CRT DLL under MSVC, once per
+value. Replaced with `numerics::is_finite` / `is_nan` in the per-bar and
+per-row loops, and in the two numerics helpers Bollinger and
+`rolling_beta` call per bar, with every output bit-identical (min of 7
+interleaved runs, one thread): `bollinger_bands` 1.35–1.65×,
+`stochastic_oscillator` 1.14–1.78×, `rolling_beta` 1.68–2.51×,
+`run_portfolio_simulation` with daily rebalancing 1.07–1.42×,
+`cross_sectional_correlation` 1.41–1.51× (Pearson) and 1.05–1.09×
+(Spearman), `standardize_by_date` 1.03–1.07×, `implied_volatility_batch`
+1.01–1.16×. `fit_preprocess_stats`, `rank_by_date`, `permutation_null_ic`
+and `rolling_factor_loadings`, where a sort or a QR dominates, measured
+within noise and keep the library call. The Parabolic SAR's gap was a
+branch: `if (high > ep) { ep = high; af = min(af + step, af_max); }`
+compiled to a jump that goes either way unpredictably, where numba's LLVM
+emits selects. Written as a max and an add of a masked step, the kernel
+runs at 1.19–1.45× of numba from 200k to 2M bars where it ran at
+0.82–0.92×, with the previous build's bits. The numba fallback pays for
+its new gap test: 0.83× its previous speed at 2k bars, 0.93× at 200k and
+0.99× at 2M.
 
 Raw C++-only (no Python involved) numbers from `tests/cpp/bench_hurst.cpp` and `tests/cpp/bench_backtest.cpp`, run via `ctest`:
 

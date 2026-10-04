@@ -2414,7 +2414,7 @@ equity_curve = load_artifact(result.equity_curve_uri).squeeze("columns")
 | `costs` | `CostSummary` | `turnover` (position changed, summed over bars, in units of the signal), `realized_cost_pct` (the commission and slippage the engine actually charged, `turnover × (commission_pct + slippage_pct)`), `total_commission_pct`, `total_slippage_pct`, `total_cost_pct` (sums of per-bar cost drag as a fraction of capital, not dollarized), `num_trades` |
 | `equity_curve_uri`, `trades_uri` | `str`, `str?` | Parquet file paths from `backtest/artifacts.py`'s `save_artifact` — load with `load_artifact(uri)`. `trades_uri` is `None` when the strategy never traded |
 | `equity_curve_ref`, `trades_ref` | `str?` | Typed handoff references (`sqt://equity_curve/...`) for the same two artifacts. Prefer these over the `*_uri` fields when passing the curve to another tool: a reference carries a content kind, so a tool expecting something else refuses it by name instead of failing on the contents |
-| `warnings` | `List[str]` | The engine's own warnings first — the split screen (a bar-to-bar move beyond 35%, phrased by the provider's `adjusted` flag) and the `fill_price` caveat — then the tool's, e.g. too few trades to draw reliable conclusions |
+| `warnings` | `List[str]` | The engine's own warnings first — the split screen (a bar-to-bar move beyond 35%, or a fall of 26% to 35% the size of a 3:2 split, phrased by the provider's `adjusted` flag) and the `fill_price` caveat — then the tool's, e.g. too few trades to draw reliable conclusions |
 | `validation_status` | `str` | `"ok"` or `"warning"` (currently: `< 5` trades) |
 
 **Artifact storage:** `SQT_RUNS_DIR` (default

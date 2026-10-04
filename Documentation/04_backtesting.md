@@ -356,8 +356,10 @@ rather than deep inside dispatch.
 compounds every close-to-close return, so LRCX's 10:1 split reported
 buy-and-hold at **−62%** against +276% true, and a short held through it
 printed a fictitious +93%. `run_strategy` now screens every bar-to-bar move
-beyond 35% (`SPLIT_SCREEN_THRESHOLD`) and emits a `SPLIT SCREEN` warning
-naming the dates and the moves. `run_portfolio_simulation` runs the same
+beyond 35% (`SPLIT_SCREEN_THRESHOLD`), and every fall within 10% on a log
+scale of a 3:2 split's −33% (26% to 35%, below the threshold), and emits a
+`SPLIT SCREEN` warning naming the dates and the moves; a bar named only for
+its 3:2 size says "near a 3:2 split". `run_portfolio_simulation` runs the same
 screen (one helper, `backtest/screens.py`) over every ticker that ever
 carries a weight, prefixing the ticker; it too takes `adjusted=` or reads
 each frame's `attrs`. It used to have none: a 10:1 split in one of two held
@@ -372,9 +374,11 @@ its total-loss guard. The warning travels in `result["warnings"]` like the
 fill caveat, so it reaches every tool built on the engine;
 `run_backtest_compact` used to build its own warning list from scratch and
 now starts from the engine's. The threshold is
-`constants.SPLIT_SCREEN_THRESHOLD`, one object read by this screen and by
-the dataset build's (`data.quality.detect_split_like_moves`);
-`backtest.screens.SPLIT_SCREEN_THRESHOLD` still resolves to it.
+`constants.SPLIT_SCREEN_THRESHOLD` (`backtest.screens.SPLIT_SCREEN_THRESHOLD`
+still resolves to it), and the rule is one function,
+`_split_screen.screen_moves`, which the dataset build's screen
+(`data.quality.detect_split_like_moves`) also runs, so the two name the
+same bars. The screen only warns: nothing is adjusted.
 
 **Validation:** `run_strategy` raises `ValidationError` if `initial_capital`
 isn't finite and `> 0`, if `commission_pct`/`slippage_pct` isn't finite

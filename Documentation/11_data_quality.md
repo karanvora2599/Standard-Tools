@@ -186,13 +186,18 @@ same signature, so this is a lead, not a proven defect either.
 **`detect_split_like_moves(close, threshold=0.35)`** — the split screen the
 backtest and the dataset build run, as records. It lists every
 Close-to-Close move beyond `threshold` (default `SPLIT_SCREEN_THRESHOLD`,
-in `standard_quant_tools.constants`) with its `date`, `close_move`,
-`split_ratio` and `ratio_error`. `split_ratio` is the listed ratio (3:2 to
+in `standard_quant_tools.constants`), and every fall within 10% on a log
+scale of a 3:2 split (26.3% to 39.7%) however far below `threshold`, with
+its `date`, `close_move`, `split_ratio` and `ratio_error`. `split_ratio` is the listed ratio (3:2 to
 50:1, or a reverse) that the price ratio across the bar is within 10% of on
 a log scale, else `None`, in new shares per old share — the unit
 `DatasetSpec.corporate_actions` takes. `ratio_error` is the log distance to
 the nearest listed ratio. Consistency is not proof: a −90% day reads like a
-10:1 split, and a 3:2 split (−33%) is below the default threshold.
+10:1 split and a −30% day like a 3:2 split. 4:3 and 5:4 are not named below
+the threshold: their bands reach down to falls of 17% and 12%, where
+ordinary moves are common (on GARCH-t(4) series at 2–4% daily volatility a
+4:3 band named an ordinary fall once per 14 to 2 name-years, against once
+per 75 to 9 for 3:2).
 
 ---
 

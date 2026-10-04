@@ -20,26 +20,32 @@ not `_sqt_core` is built.
 |---|---|---|
 | `period`/`window` > 0 | all periodised indicators | `ValidationError`. `macd` additionally requires `fast < slow` — an inverted pair is a sign-flipped indicator, not an error the arithmetic would show. `bollinger_bands` requires `period >= 2` (see below). |
 | Equal input lengths | multi-series indicators (`adx`, `atr`, `wilder_atr`, `williams_r`, `parabolic_sar`, `vwap`, `mfi`) | `ValidationError` naming the actual lengths. |
-| No ±inf (NaN is a missing bar) | `rsi`, `adx`, `wilder_atr`, `bollinger_bands`, `stochastic_oscillator`, `technical_indicators_panel`; the fused path of `get_technical_analysis` | `ValidationError` naming the column (and, on the panel, the ticker) and how many infinite values it holds. NaN is not refused: it is a missing bar, read the same way on both backends — see [Missing bars](#missing-bars). |
-| Finite (no NaN/Inf) | `atr`, `parabolic_sar` | `ValidationError` reporting how many non-finite values were found. |
+| No ±inf (NaN is a missing bar) | `rsi`, `adx`, `wilder_atr`, `atr`, `parabolic_sar`, `bollinger_bands`, `stochastic_oscillator`, `technical_indicators_panel`; the fused path of `get_technical_analysis` | `ValidationError` naming the column (and, on the panel, the ticker) and how many infinite values it holds. NaN is not refused: it is a missing bar, read the same way on both backends — see [Missing bars](#missing-bars). |
 
 ### Missing bars
 
-One rule for the five indicators with a native kernel, at every door (the
-single-series function, the panel, the fused path) and on both backends:
+One rule for every indicator with a native kernel and for the simple `atr`,
+at every door (the single-series function, the panel, the fused path) and
+on both backends:
 
-- **NaN is a missing bar.** The Wilder recursions — `rsi`, `wilder_atr`,
-  `adx` — **skip** it: the result is the indicator of the series with that
-  bar dropped, reported back at the bars that remain, and NaN at the bar
-  itself. A change, a true range or a directional move is measured against
-  the last *present* bar. A recursion has no window to wait out, so the
-  alternatives were to let the NaN into its state (every later value NaN) or
-  to read it as an unchanged price (a fabricated flat bar); both happened
-  before, depending on the backend and on where the gap fell. The windowed
-  indicators — `bollinger_bands`, `stochastic_oscillator` — are NaN for
-  every window that holds the missing bar and resume at the first one that
-  does not (pandas' `rolling(min_periods=period)`); a missing close blanks
-  `%K` at its own bar only, and `%D` over the windows holding that `%K`.
+- **NaN is a missing bar.** The recursions — `rsi`, `wilder_atr`, `adx` and
+  the `parabolic_sar` state machine — **skip** it: the result is the
+  indicator of the series with that bar dropped, reported back at the bars
+  that remain, and NaN at the bar itself. A change, a true range, a
+  directional move or the SAR's two prior lows (highs) are measured against
+  the last *present* bars, and the SAR's trend, extreme point and
+  acceleration factor carry across the gap. A recursion has no window to
+  wait out, so the alternatives were to let the NaN into its state (every
+  later value NaN) or to read it as an unchanged price (a fabricated flat
+  bar); both happened before, depending on the backend and on where the gap
+  fell. The windowed indicators — `bollinger_bands`,
+  `stochastic_oscillator` and the simple `atr` — are NaN for every window
+  that holds the missing bar and resume at the first one that does not
+  (pandas' `rolling(min_periods=period)`); a missing close blanks `%K` at
+  its own bar only, and `%D` over the windows holding that `%K`. The simple
+  `atr` averages Wilder's true range: a bar with a NaN high, low or close
+  has none, and the next present bar's is measured against the last present
+  close.
 - **±inf is refused.** An infinity is not a price. A window's mean and
   range mean nothing with one in it, and a recursion cannot skip what it
   has already absorbed: `inf - inf` is NaN on the next smoothing step, so
@@ -52,7 +58,11 @@ Before this rule the single-series functions refused NaN outright while the
 panel answered it, so the same universe was refused without the extension
 and answered with it. The native kernels and the Python fallbacks now
 implement the rule operation for operation, pinned against each other in
-`tests/cpp_bindings/test_missing_bar_parity.py`.
+`tests/cpp_bindings/test_missing_bar_parity.py`. `parabolic_sar` and the
+simple `atr` kept refusing NaN until the CHANGELOG entry of 2026-10-04, so
+a universe with one missing bar had no SAR or `atr_simple` column on either
+panel path; they now read it the same way, pinned in the same test file and
+in `tests/cpp_bindings/test_parabolic_sar_bit_identity.py`.
 
 Two of these were genuine safety fixes rather than ergonomics, and are worth
 knowing about if you call the kernels in unusual ways:
@@ -180,6 +190,14 @@ isn't finite, if `af_start <= 0`, if `af_step < 0`, if `af_max <= 0`, or if
 `af_max < af_start` — a nonsensical AF combination otherwise produced a
 meaningless SAR series silently.
 
+**Missing bars:** a bar with a NaN high or low is skipped. `SAR` and
+`Trend` are NaN there; the SAR, extreme point, acceleration factor and
+trend carry across it, and the two prior lows (highs, when falling) that
+cap the SAR are those of the two previous present bars, so the result is
+the SAR of the series with the bar dropped. The series starts rising at its
+first present bar. The native kernel and the Numba fallback return the same
+bits. ±inf is refused.
+
 ### Williams %R
 
 Momentum oscillator ranging from −100 to 0. Below −80 = oversold; above −20 = overbought.
@@ -265,6 +283,12 @@ df['ATR'] = atr(df['High'], df['Low'], df['Close'], period=14)
 entry_price = float(df['Close'].iloc[-1])
 stop_loss = entry_price - 2 * float(df['ATR'].iloc[-1])
 ```
+
+**Missing bars:** a bar with a NaN high, low or close has no true range,
+and the next present bar's true range is measured against the last present
+close (Wilder's rule). The ATR is NaN for every `period`-bar window that
+holds a missing bar and resumes `period` bars after it. With every bar
+present the result is unchanged. ±inf is refused.
 
 ### Wilder's ATR *(C++ extension)*
 

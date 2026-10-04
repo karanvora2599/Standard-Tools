@@ -922,18 +922,24 @@ cmake --build build --config Release
 
 ### Per-element loops under MSVC
 
-Three ways of writing a hot loop compile to a call or an unpredictable
+Four ways of writing a hot loop compile to a call or an unpredictable
 branch under MSVC (not under GCC, Clang or clang-cl), and together they cost
 the Wilder kernels up to 4×:
 
-- `std::isfinite` is a call to `_dclass` in the C runtime DLL. Use
-  `sqt::numerics::is_finite`.
+- `std::isfinite` and `std::isnan` are a call to `_dclass` in the C runtime
+  DLL. Use `sqt::numerics::is_finite` and `sqt::numerics::is_nan`.
 - `std::max({a, b, c})` is an out-of-line `max_element` that branches per
   comparison. Nest a by-value two-argument max, as `true_range()` in
   `indicators.cpp` does.
 - `c ? x : 0.0` on doubles with a data-dependent `c` is a conditional jump.
   Write `x > 0.0 ? x : 0.0`, which compiles to `maxsd`, or a mask select
   like `zero_unless()`.
+- A conditional update of loop state on a data-dependent test —
+  `if (x > m) { m = x; a = std::min(a + step, cap); }` — is a conditional
+  jump; numba's LLVM turns the same lines into selects. Write the first
+  update as a by-value max and the second as an add of
+  `zero_unless(test, step)` before the cap where that is exact, as
+  `parabolic_sar_into` does.
 
 Check with `dumpbin /disasm` on the built module. Where a numba fallback
 exists, time the raw kernel against it: a native kernel slower than its

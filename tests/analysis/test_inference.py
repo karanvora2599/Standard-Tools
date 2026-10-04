@@ -412,3 +412,29 @@ class TestDecomposeReturns:
         assert result["n_positive"] + result["n_negative"] <= result["n_observations"]
         assert 0 <= result["win_rate"] <= 1
         assert result["mean_win"] > 0 > result["mean_loss"]
+
+
+class TestTheBlockBootstrapKeepsItsBlocks:
+    """`block_indices`, which every block bootstrap here draws through, held
+    to its structure rather than to its own output. An IID resample returned
+    under its name keeps none of the serial correlation the block bootstrap
+    exists to preserve, and the bootstrap tests compare against the same
+    function, so they agree with it either way: mutation testing found that
+    such a resample survived the suite (see the CHANGELOG entry of
+    2026-10-04)."""
+
+    def test_a_resample_is_whole_runs_of_consecutive_observations(self):
+        from standard_quant_tools._resampling import block_indices
+
+        n, block_size = 250, 10
+        indices = block_indices(n, block_size, np.random.default_rng(7))
+        assert len(indices) == n
+        runs = indices.reshape(-1, block_size)
+        assert (np.diff(runs, axis=1) == 1).all()
+        assert ((runs[:, 0] >= 0) & (runs[:, -1] < n)).all()
+
+    def test_a_block_longer_than_the_series_is_the_series(self):
+        from standard_quant_tools._resampling import block_indices
+
+        indices = block_indices(12, 50, np.random.default_rng(3), target=30)
+        assert indices.tolist() == (list(range(12)) * 3)[:30]

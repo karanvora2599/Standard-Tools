@@ -142,7 +142,7 @@ the run that introduced it, 6,514 passed and 519 skipped — the extra skips
 are the parity and benchmark tests that `importorskip` the extension,
 correctly — and it took 11:22 against 6:54, which is the compiled path's
 contribution measured at suite scale rather than per kernel. The suite is
-14,658 tests now (14,497 passed, 83 skipped with the extension and `SQT_EXPECT_NATIVE=1`, in 10:39 to 25:04 on the same machine depending on its load), so
+15,012 tests now (14,851 passed, 83 skipped with the extension and `SQT_EXPECT_NATIVE=1`, in 10:39 to 25:04 on the same machine depending on its load), so
 that pair of clocks is a ratio to re-measure, not a figure to quote.
 
 ### Why this is a testing concern and not a packaging one
