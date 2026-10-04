@@ -12,7 +12,7 @@ installed. They are listed from a static declaration so this document is
 the same on every machine; `list_modeling_capabilities` reports which of
 them the running install actually has.
 
-## Features (30)
+## Features (31)
 
 | id | scope | temporal | lookback | requires | default params | description |
 |---|---|---|---|---|---|---|
@@ -37,7 +37,8 @@ them the running install actually has.
 | `risk.rolling_drawdown` | entity | pit_safe | 252 | Close | `window=252` | Drawdown of Close from its trailing `window`-bar peak (0 at a new high, negative otherwise). |
 | `statistical.hurst` | entity | pit_safe | 200 | Close | `method='dfa'`, `window=200` | Rolling Hurst exponent — >0.55 trending, <0.45 mean-reverting. |
 | `technical.adx` | entity | pit_safe | 14 | High, Low, Close | `period=14` | Average Directional Index — trend strength, unsigned. |
-| `technical.macd_histogram` | entity | pit_safe | 26 | Close | `fast=12`, `signal=9`, `slow=26` | MACD histogram (MACD line minus its signal line) — trend-momentum divergence. |
+| `technical.macd_histogram` | entity | pit_safe | 26 | Close | `fast=12`, `signal=9`, `slow=26` | MACD histogram (MACD line minus its signal line) — trend-momentum divergence. In price units, so its scale follows each name's price level and changes at a split; technical.macd_histogram_pct is the same quantity divided by Close. |
+| `technical.macd_histogram_pct` | entity | pit_safe | 26 | Close | `fast=12`, `signal=9`, `slow=26` | MACD histogram divided by Close — the histogram as a fraction of price, comparable across names. A split disturbs it only until the smoothers forget the bars before it (188 bars at the defaults), where the raw histogram's scale changes for good. NaN where Close is not positive. |
 | `technical.rsi` | entity | pit_safe | 14 | Close | `period=14` | Relative Strength Index — momentum oscillator, 0-100. |
 | `technical.stochastic_k` | entity | pit_safe | 14 | High, Low, Close | `d_period=3`, `k_period=14` | Stochastic oscillator %K — momentum vs. recent high-low range, 0-100. |
 | `technical.williams_r` | entity | pit_safe | 14 | High, Low, Close | `period=14` | Williams %R momentum oscillator, -100 (oversold) to 0 (overbought). |
@@ -57,7 +58,7 @@ Parameter values are bounded as well as named; see [15_modeling.md](15_modeling.
 | classification | `hist_gradient_boosting` | `sklearn.ensemble._hist_gradient_boosting.gradient_boosting.HistGradientBoostingClassifier` | `learning_rate`, `max_depth`, `max_iter` | sample weights, probabilities |
 | classification | `logistic` | `sklearn.linear_model._logistic.LogisticRegression` | `C`, `fit_intercept`, `l1_ratio`, `max_iter`, `penalty`, `solver` | sample weights, probabilities, coefficients |
 | classification | `mlp` | `standard_quant_tools.modeling.estimators.neural.PanelMLPClassifier` | `alpha`, `early_stopping`, `learning_rate_init`, `max_iter`, `n_hidden_layers`, `n_hidden_units`, `random_state` | probabilities |
-| classification | `random_forest` | `sklearn.ensemble._forest.RandomForestClassifier` | `max_depth`, `n_estimators` | sample weights, probabilities, importances |
+| classification | `random_forest` | `sklearn.ensemble._forest.RandomForestClassifier` | `max_depth`, `max_features`, `max_samples`, `min_samples_leaf`, `n_estimators` | sample weights, probabilities, importances |
 | classification | `sgd` | `standard_quant_tools.modeling.estimators.online.ProbabilisticSGDClassifier` | `alpha`, `eta0`, `fit_intercept`, `l1_ratio`, `learning_rate`, `loss`, `max_iter`, `penalty`, `random_state`, `tol` | sample weights, probabilities, coefficients |
 | regression | `elastic_net` | `sklearn.linear_model._coordinate_descent.ElasticNet` | `alpha`, `fit_intercept`, `l1_ratio`, `max_iter` | sample weights, coefficients |
 | regression | `gradient_boosting` | `sklearn.ensemble._gb.GradientBoostingRegressor` | `learning_rate`, `max_depth`, `n_estimators` | sample weights, importances |
@@ -68,7 +69,7 @@ Parameter values are bounded as well as named; see [15_modeling.md](15_modeling.
 | regression | `mlp` | `standard_quant_tools.modeling.estimators.neural.PanelMLPRegressor` | `alpha`, `early_stopping`, `learning_rate_init`, `max_iter`, `n_hidden_layers`, `n_hidden_units`, `random_state` |  |
 | regression | `quantile` | `sklearn.linear_model._quantile.QuantileRegressor` | `alpha`, `fit_intercept`, `quantile`, `solver` | sample weights, coefficients, quantiles (`quantile`) |
 | regression | `quantile_gradient_boosting` | `standard_quant_tools.modeling.estimators.boosting.QuantileGradientBoostingRegressor` | `alpha`, `learning_rate`, `max_depth`, `n_estimators` | sample weights, importances, quantiles (`alpha`) |
-| regression | `random_forest` | `sklearn.ensemble._forest.RandomForestRegressor` | `max_depth`, `n_estimators` | sample weights, importances |
+| regression | `random_forest` | `sklearn.ensemble._forest.RandomForestRegressor` | `max_depth`, `max_features`, `max_samples`, `min_samples_leaf`, `n_estimators` | sample weights, importances |
 | regression | `ridge` | `sklearn.linear_model._ridge.Ridge` | `alpha`, `fit_intercept`, `max_iter` | sample weights, coefficients |
 | regression | `sgd` | `sklearn.linear_model._stochastic_gradient.SGDRegressor` | `alpha`, `eta0`, `fit_intercept`, `l1_ratio`, `learning_rate`, `loss`, `max_iter`, `penalty`, `random_state`, `tol` | sample weights, coefficients |
 | survival | `cox_ph` | `standard_quant_tools.modeling.estimators.survival.CoxPHRegressor` | `alpha`, `max_iter`, `tol` | sample weights, coefficients |

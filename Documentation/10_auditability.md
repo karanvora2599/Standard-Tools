@@ -221,6 +221,16 @@ answered by two datasets. Failed calls still produce a record —
 > abbreviating `...` repr, so two large arrays differing only in the middle
 > hashed identically. That path is not reachable from any decision record.)
 
+> `audit.hashing.canonical_frame_hash` is the pandas-independent sibling of
+> `hash_dataframe`: it covers the same names, types and values, but records
+> each column's logical kind (`float64`, `int`, `bool`, `string`,
+> `timestamp[ns, UTC]` and the like) instead of `str(dtype)`, so the same data hashes
+> alike under pandas 2 and pandas 3. Modeling datasets use it (see
+> [15_modeling.md](15_modeling.md#the-package-is-content-addressed-and-verified)).
+> The `content_hash` values in `data_sources` still come from
+> `hash_dataframe`, so a replay under a different pandas version can report
+> a data-source mismatch for unchanged data.
+
 ### Where the time went: `fetch_ms` and `compute_ms`
 
 `duration_ms` is end to end, so a slow call could not say whether the
@@ -690,7 +700,7 @@ through `dispatch()`), so it does not itself write a new decision record.
 ### Replaying modeling records
 
 There are three tool registries, not one: the 189-tool analysis surface,
-`MODELING_TOOL_DISPATCH` (37 entries) and `FEATURE_TOOL_DISPATCH` (11), the
+`MODELING_TOOL_DISPATCH` (38 entries) and `FEATURE_TOOL_DISPATCH` (11), the
 latter two deliberately kept separate — see
 [15_modeling.md](15_modeling.md). `verify_replay` resolves the record's
 `tool_name` against **all three** in turn, so a `run_model_experiment`,

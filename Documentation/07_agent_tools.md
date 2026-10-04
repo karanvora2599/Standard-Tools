@@ -56,7 +56,7 @@ print(result)  # plain dict, JSON-ready
 
 ## Tool Registry
 
-`get_agent_tools()` returns **189 tool definitions** in the format both OpenAI and Anthropic expect. (That is the analysis surface; the separate `modeling` and `feature_lab` runtimes add 37 and 11 more, for 237 in total — see [15_modeling.md](15_modeling.md) and [19_runtimes.md](19_runtimes.md).) The schemas are derived automatically from Pydantic — no manual JSON authoring.
+`get_agent_tools()` returns **189 tool definitions** in the format both OpenAI and Anthropic expect. (That is the analysis surface; the separate `modeling` and `feature_lab` runtimes add 38 and 11 more, for 238 in total — see [15_modeling.md](15_modeling.md) and [19_runtimes.md](19_runtimes.md).) The schemas are derived automatically from Pydantic — no manual JSON authoring.
 
 ```python
 from standard_quant_tools.agent import get_agent_tools

@@ -22,7 +22,7 @@ tool #190 would make the ambiguity problem worse, not better.
 
 So `standard_quant_tools.modeling` is a **second registry**:
 `modeling.agent.get_modeling_tools()` / `modeling.agent.modeling_dispatch()`,
-with exactly 37 tools, never merged into `agent.get_agent_tools()` /
+with exactly 38 tools, never merged into `agent.get_agent_tools()` /
 `agent.TOOL_CATEGORY`. It reuses this codebase's existing indicator/analysis
 math, the Parquet artifact store (`backtest.artifacts`), and the audit
 pipeline (`audit.dispatch._run_and_record`) — the shared deterministic
@@ -34,7 +34,7 @@ core stays one thing; only the agent-facing vocabulary is separate.
            ┌──────────────┴──────────────┐
            │                              │
      agent.get_agent_tools()      modeling.agent.get_modeling_tools()
-    (189 tools, 8 runtimes)      (37 tools, one pipeline)
+    (189 tools, 8 runtimes)      (38 tools, one pipeline)
            │                              │
            └──────────────┬───────────────┘
                           │
@@ -44,7 +44,7 @@ core stays one thing; only the agent-facing vocabulary is separate.
 
 ---
 
-## The 37 modeling tools
+## The 38 modeling tools
 
 The runtime is one ordered pipeline: **describe → build → check → fit →
 inspect → score**. The table follows that order rather than alphabetical,
@@ -52,30 +52,31 @@ because the order is the point.
 
 | Tool | Input → Output |
 |---|---|
-| `list_modeling_capabilities` | → tasks (split into `fitted` and `no_estimator_installed`, so a task whose only estimators are optional libraries this install lacks is not advertised as fittable), estimators and what each supports (sample weights, probabilities, query groups, coefficients, importances), features, validation schemes, preprocessing, weighting, and which optional libraries are installed. `targets` splits into **`buildable`** (the six `build_model_dataset` can derive from a Close series) and **`external_only`** (the twelve that are functions of the book, of orders or of fills, and arrive through `register_external_panel`) — it used to list all eighteen flat, which is a worse place to overstate than a tool is, since an agent reads this INSTEAD of trying things. Each target's detail also says whether it is `censored` (a survival label that needs an `event_column` on `register_external_panel`) and `cross_sectional` (defined against the date's other entities, so degenerate on a one-name universe), what columns it `requires`, and its `param_schema`. A `calibration` section names the three methods and says the per-estimator importance flags describe the UNCALIBRATED estimator: calibration wraps the model in `CalibratedClassifierCV`, which exposes neither coefficients nor importances, and the run warns when that makes `feature_importance_summary` NaN |
+| `list_modeling_capabilities` | → tasks (split into `fitted` and `no_estimator_installed`, so a task whose only estimators are optional libraries this install lacks is not advertised as fittable), estimators and what each supports (sample weights, probabilities, query groups, coefficients, importances), what one fit of each costs (`fit_cost`: low/medium/high) and what sets its cores (`threads`: one/budget/openmp), features, validation schemes, preprocessing, weighting, and which optional libraries are installed. `targets` splits into **`buildable`** (the six `build_model_dataset` can derive from a Close series) and **`external_only`** (the twelve that are functions of the book, of orders or of fills, and arrive through `register_external_panel`) — it used to list all eighteen flat, which is a worse place to overstate than a tool is, since an agent reads this INSTEAD of trying things. Each target's detail also says whether it is `censored` (a survival label that needs an `event_column` on `register_external_panel`) and `cross_sectional` (defined against the date's other entities, so degenerate on a one-name universe), what columns it `requires`, and its `param_schema`. A `calibration` section names the three methods and says the per-estimator importance flags describe the UNCALIBRATED estimator: calibration wraps the model in `CalibratedClassifierCV`, which exposes neither coefficients nor importances, and the run warns when that makes `feature_importance_summary` NaN |
 | `list_features` | optional category filter → the feature catalog (id, description, params, temporal_support, scope, lookback, and for a point-in-time feature the `frame_kind` and `fields` it reads, which is how an agent learns that `fundamental.*` needs `provider="polygon"`) |
-| `check_leakage` | a feature set → whether it is temporally safe to fit on, from each feature's declared temporal support, answered **before** a dataset is built with it; with a `dataset_id`, the empirical lead-lag screen also runs on the built panel, and `scope` says which of the two `safe` rests on. `feature_ids=[]` is refused, with or without a `dataset_id`: an empty set passes every check vacuously, and used to come back `safe: true`. Omit it to check the whole registry |
+| `check_leakage` | a feature set → whether it is temporally safe to fit on, from each feature's declared temporal support, answered **before** a dataset is built with it; with a `dataset_id`, the empirical lead-lag screen also runs on the built panel, and `scope` says which of the two `safe` rests on. With a `dataset_id` the names are read through the dataset: a column name (an alias such as `mom_126`) is checked under the catalog id its spec records and screened as itself, a catalog id is screened through every column built from it, and omitting `feature_ids` checks the dataset's own features. An external panel's columns declare nothing, so it is screened only and `scope` is `empirical_only`. `feature_ids=[]` is refused, with or without a `dataset_id`: an empty set passes every check vacuously, and used to come back `safe: true`. Without a `dataset_id`, omit it to check the whole registry |
 | `build_model_dataset` | `DatasetSpec` → fetches OHLCV, computes features + target, persists a Parquet panel, returns a `dataset_id` |
 | `register_external_panel` | a Parquet/CSV feature matrix computed ELSEWHERE → a `dataset_id`, without copying it. Declares one label or SEVERAL, each with its own horizon, so one panel serves a whole horizon curve. A file holding an (entity, date) pair twice is refused. The path must lie in the runs directory or a directory listed in `SQT_EXTERNAL_DIRS` |
 | `build_model_ensemble` | several `model_id`s → one combined `sqt://predictions` reference, from their OUT-OF-SAMPLE series only. Reports the pairwise correlation that says whether it was worth building, and `correlation_basis` saying whether that correlation was taken on ranks or on levels. The reference carries no realized outcome, so `score_predictions` refuses it directly — run it through `attach_model_outcomes` first, which the description and a run-time warning both say |
 | `analyze_model_errors` | a `model_id` → where its errors are, by entity, period, prediction decile and any feature's decile, plus whether its SCALE is right. The question an R2 cannot answer |
 | `list_datasets` | → every built panel, newest first, with row/entity/feature counts and date span |
+| `inspect_dataset` | `dataset_id` → what one dataset holds, the counterpart of `inspect_model`: each column's FeatureSpec (catalog id, parameter overrides, alias, lags and the lag columns they added), the target and its horizon, the requested universe beside the entities the panel holds and the feed that answered for each, the requested and realised span, rows, dates, provider, interval, calendar, missing-data policy, `drop_attribution`, the warnings recorded at build, and `price_jumps`, `bars_adjusted`, `data_hash_version` and `built_with` where the build recorded them. Reads `dataset_meta.json` and `dataset_spec.json`, the spec checked against its recorded hash; the panel is not read or hashed (1.9 ms on a 31,680-row dataset whose panel takes 16 ms to read and hash). An external panel reports `storage: "external"` and the file it reads |
 | `analyze_features` | `dataset_id` → per-feature coverage, turnover, IC/ICIR, decile spread and monotonicity, redundancy clusters, and a lead-lag causality screen. The overview, as one nested report |
 | `explain_dataset_row_loss` | `dataset_id` → which column cost which rows, with `n_sole_missing` beside `n_missing`. The second is the actionable one: a 252-day feature behind a 500-day one has `n_missing` in the hundreds of thousands and `n_sole_missing` of zero, so removing it gives back nothing. `per_entity_rows_dropped` answers the other half — a warning fires when one name carries most of the loss, which is a universe problem rather than a feature one |
 | `validate_pit_records` | point-in-time records → whether they are joinable, checked before anything is joined |
 | `join_point_in_time` | `dataset_id` + records → each panel row gets the most recent record **available by then**, never the one describing that date |
 | `validate_model_spec` | `ModelSpec` → that the estimator exists for the task, that its parameters are accepted, how many fits the spec implies once a search grid multiplies through every fold, and whether that is under the spec's `budget.max_fits`; with a `dataset_id`, a universe whose keys resolve to one provider symbol is refused here, before any fetch, and a calendar the build adopted from the universe's venue is named in `warnings` |
 | `plan_model_experiment` | `dataset_id` + `ModelSpec` → the split before the fit: every fold's train and test spans, the rows the purge removes, the inner folds the window supports (zero when it is too short, and that fold is then priced at one fit), the fits per estimator that quantiles and conformal blocks multiply, the fold hashes `run_model_experiment` will reproduce, and the candidate grid on request. Over budget is reported with `within_budget=False`, not refused; the run still refuses |
-| `estimate_feature_warmup` | a list of `FeatureSpec` (+ interval, calendar) → how many bars the panel burns before its first complete row: each feature's lookback RESOLVED from its requested parameters rather than the catalog's default (`market.momentum` at a 900-bar lookback is 900 bars, not 20) plus the deepest lag, with the binding feature named and a calendar-day estimate. Beside it, `converged` per feature and `bars_required_converged` / `calendar_days_converged` in total: the history after which a recursive feature (RSI, ATR, ADX, MACD, Parabolic SAR) no longer depends on where it started — 139 bars for RSI(14), whose first output is at 14. That second number is the one `score_model(lookback_days=)` needs |
+| `estimate_feature_warmup` | a list of `FeatureSpec` (+ interval, calendar), or a `dataset_id` / `model_id` whose recorded spec is priced — every column, or the ones named by column name, at the interval and calendar it was built with (a contradicting `interval` or `calendar` is refused naming both; an external panel is refused by name) → how many bars the panel burns before its first complete row: each feature's lookback RESOLVED from its requested parameters rather than the catalog's default (`market.momentum` at a 900-bar lookback is 900 bars, not 20) plus the deepest lag, with the binding feature named and a calendar-day estimate. Beside it, `converged` per feature and `bars_required_converged` / `calendar_days_converged` in total: the history after which a recursive feature (RSI, ATR, ADX, MACD, Parabolic SAR) no longer depends on where it started — 139 bars for RSI(14), whose first output is at 14. That second number is the one `score_model(lookback_days=)` needs |
 | `preview_sample_weights` | `dataset_id` + `WeightingSpec` → the weight distribution the engine would fit under (percentiles, max/min ratio, the share on the newest decile) and its Kish effective sample size beside the one every OOS metric is reported against — overlap-adjusted along time and design-effect-adjusted across entities, with its floor (dates / horizon), ceiling (rows / horizon) and the labels' cross-sectional correlation — which measure different things |
 | `preview_preprocessing` | `dataset_id` + `PreprocessingSpec` → each step's columns in and out on a by-date split of the panel, the state shape the engine produces, the explained variance of a whitening step, and the two traps that used to surface only inside a fit: `pca_whiten` refuses NaN and more components than columns, and `missing_indicator` doubles the width |
 | `describe_estimator` | optional `task` and `name` → the bounds behind every parameter name the capability report lists bare (the 2,000-tree ceiling and why, the 4,096 leaves, the solver-by-penalty matrix, the losses with no probability, `n_hidden_units` rather than `hidden_layer_sizes`), the compatibility notes, the calibration options, and with `include_unavailable` the optional estimators this machine lacks. Sized to one estimator; the unfiltered payload is tens of kilobytes and says so |
 | `describe_exchange_calendar` | optional `calendar` and `interval` → the venues the calendar library knows and, for one, its sessions per year, session length and bars per session, with the same refusal `DatasetSpec.calendar` gives an unknown code |
-| `run_model_experiment` | `dataset_id` + `ModelSpec` → walk-forward fit + validate + register, returns a `model_id` + out-of-sample metrics |
+| `run_model_experiment` | `dataset_id` + `ModelSpec` → walk-forward fit + validate + register, returns a `model_id` + out-of-sample metrics, the headline metric tested against what a model with no skill scores (see [What the metrics mean](#what-the-metrics-mean)), and `notes` for a number that reads as a failure and is not |
 | `list_models` | → every registered model, newest first, with task, estimator, headline OOS metric and source dataset |
 | `inspect_model` | `model_id` + `view` (`summary` \| `feature_importance` \| `validation` \| `lineage` \| `provenance`) → that slice of the registered model's manifest. `provenance` is the slice no other view returned: the information cutoff `score_model` gates `as_of` on, the conformal band the artifact carries (the precondition for `uncertainty_scaled`), the feature provenance enforced at scoring time, the content hashes, the monitoring references, and a diff of the environment the model was trained in against the current one |
 | `compare_models` | several `model_id`s → ranked side by side on their out-of-sample metrics |
-| `score_model` | `model_id` + `as_of` + `universe` → predictions, persisted as a Parquet artifact and published as a predictions reference (`predictions_ref`) that `attach_model_outcomes` and `convert_reference` read, with `interval_stats` when the model carries a conformal band and a warning when that band is wider than the cross-section's spread |
+| `score_model` | `model_id` + `as_of` + `universe` → predictions, persisted as a Parquet artifact and published as a predictions reference (`predictions_ref`) that `attach_model_outcomes` and `convert_reference` read, with `interval_stats` when the model carries a conformal band and a warning when that band is wider than the cross-section's spread. It fetches bars for every name in `universe` through `as_of`; a registered model's out-of-sample metrics need no fetch and are in `inspect_model` |
 | `attach_model_outcomes` | `model_id`, or a predictions reference + `dataset_id` → the predictions joined to the realized target and published as a reference `score_predictions` reads. Refuses a multi-horizon panel rather than guessing its label, and returns the `horizon` to pass on. This is what makes an ensemble's reference scoreable |
 | `backtest_model_signal` | `model_id` → the model's out-of-sample predictions as a `signal_panel` reference for `run_signal_panel_backtest`, through the VERIFIED branch of the bridge: the task comes from the manifest (there is no `task` argument to get wrong), the predictions file is checked against the hash the manifest recorded, and a cpcv model is refused by name with the walk-forward remedy |
 | `score_predictions` | a predictions reference → accuracy metrics, cross-sectional IC and ICIR, a predict-the-mean baseline, `prediction_turnover` (the bridge between an IC and a net-of-cost P&L), and an effective sample size adjusted for overlapping forward returns and for outcomes that move together across entities, with the two bounds it lies between. Pass `train_mean`: without it the baseline is the TEST set's own mean, whose R2 is zero by construction — an oracle no forecaster could have met. A `train_mean` off the outcomes' scale (one whose baseline error is past the float range) is refused by name rather than scored as an infinite baseline |
@@ -104,15 +105,15 @@ typed fields for **one** question:
 | Tool | Input → Output |
 |---|---|
 | `profile_feature` | `dataset_id` + `feature` → coverage, turnover, autocorrelation, IC/ICIR, quantile spread and monotonicity for ONE feature |
-| `get_feature_redundancy` | `dataset_id` → clusters with a representative each, the drop list, VIF and condition number |
+| `get_feature_redundancy` | `dataset_id` → clusters (pairs joined at \|r\| ≥ `cluster_threshold`) with a representative each, the drop list, VIF and condition number, and `collinear_features`: every feature with VIF ≥ 5 (or infinite, for an exact linear combination) with the features that explain it. Warns at VIF 5 and 10, when a high-VIF feature is in no cluster, and at a condition number of 1000 |
 | `get_feature_ic_decay` | `dataset_id` + `feature` → the lead-lag IC curve as ordered points, with the peak named |
 | `get_feature_drift` | `dataset_id` + `feature` → PSI, two-sample KS and the IC computed separately either side of a date |
 | `get_feature_regime_stability` | `dataset_id` + `feature` → IC per **contiguous** time block, never shuffled, plus sign consistency |
-| `run_feature_permutation_test` | `dataset_id` + `feature` → two-sided empirical p-value against a circular-shift null that keeps each entity's serial correlation (`null="within_date"` is still available), with the per-date IC's lag-1 autocorrelation beside it |
-| `screen_feature_significance` | `dataset_id` (+ features, permutations, null) → the permutation floor over the whole panel: each feature's rank IC, p-value and `null_p95_abs`, and `honest_floor`, their maximum, which is the `min_abs_rank_ic` this panel supports; a naive threshold keeps features that noise produces one time in twenty. A draw budget bounds the cost, with the ceiling declared in the limits |
+| `run_feature_permutation_test` | `dataset_id` + `feature` → two-sided empirical p-value against a circular-shift null that keeps each entity's serial correlation (default), an entity-shuffle null that hands each entity's whole series to another entity (`null="entity_shuffle"`), or the within-date shuffle (`null="within_date"`); with the null's mean, spread and 95th percentile of \|IC\|, and the per-date IC's lag-1 autocorrelation |
+| `screen_feature_significance` | `dataset_id` (+ features, permutations, null) → the permutation test for every feature at once: each feature's rank IC, p-value, `null_mean` and `null_p95_abs`, and `honest_floor`, the largest `null_p95_abs`. It is not a `min_abs_rank_ic` for `select_features`: it applies the widest null to every feature and reads every date, holdout included. A draw budget bounds the cost, with the ceiling declared in the limits |
 | `screen_feature_stability` | `dataset_id` (+ features, blocks, reference) → drift and IC stability for every feature at once, with a per-block PSI curve against the first block or the previous one, so a feature that is no longer the same measurement is visible without knowing its name in advance |
-| `run_feature_ablation` | `dataset_id` + `ModelSpec` → refit without each feature in turn, reporting what each was worth |
-| `select_features` | `dataset_id` → a chosen set, selected on the first `1 - holdout_fraction` of the dates (or through `selection_end`), each selected feature's IC on the held-out dates beside its selection IC, and a recorded reason for every exclusion. The clusters it resolved, each drop's `duplicate_of`, the VIFs and the condition number come back with it (the correlation matrix behind `include_correlation`), so `get_feature_redundancy` need not be run a second time for the same panel |
+| `run_feature_ablation` | `dataset_id` + `ModelSpec` → refit without each feature in turn, reporting what each was worth by `metric`. Its default is the task's headline metric — `cs_rank_ic_mean` for regression and ranking, `auc` for classification, `cs_concordance_mean` for survival — not the alphabetically first metric, which for a regression was the 0/1 flag `baseline_is_oracle` and made every contribution 0.0 |
+| `select_features` | `dataset_id` → a chosen set, selected on the first `1 - holdout_fraction` of the dates (or through `selection_end`): one representative per redundancy cluster, an optional IC floor, then a permutation test of each representative on the selection window (`significance`, default `"entity_shuffle"`, `alpha` 0.05), with each selected feature's IC on the held-out dates beside its selection IC and a recorded reason for every exclusion (an `insignificant` drop carries its p-value). `significance="none"` returns the selection as it was before the test. The clusters it resolved, each drop's `duplicate_of`, the VIFs, the condition number and `collinear_features` come back with it (the correlation matrix behind `include_correlation`), so `get_feature_redundancy` need not be run a second time for the same panel |
 | `compare_feature_sets` | `dataset_id` + two sets → per-set IC and collinearity, what is unique to each, and the delta. Both sets are summarised on every date unless `holdout_fraction` (or `selection_end`) holds dates out, and the result's `warnings` say so: at fraction 0 every IC in it is in-sample by construction, a comparison between the sets rather than an estimate of either one's out-of-sample strength. A feature the dataset lacks is refused before anything is computed, naming every missing feature in the order given, so the refusal reads the same in every process |
 
 Every feature list these tools take (`features` here and on
@@ -155,7 +156,7 @@ own worker for the same reason.
 `Implementation/{Anthropic,OpenAI,Gemini}/Agent_Model_Builder.py` runs the
 whole pipeline as a single agent, on all three providers. It is the one
 example script that does not use the 189-tool surface: it passes
-`registry="modeling"` to `run_agent()`, which loads all thirty-seven
+`registry="modeling"` to `run_agent()`, which loads all thirty-eight
 schemas and `modeling_dispatch` together.
 
 It also skips the category router, deliberately. Routing exists to narrow
@@ -181,7 +182,7 @@ impossible to register a model that was never walk-forward validated.
 inspection tools, for the same reason `get_rally_signal` returns five
 signal fields in one call instead of six tools.
 
-The count has grown from five to thirty-seven, and the invariant was never
+The count has grown from five to thirty-eight, and the invariant was never
 the count — it is that **every tool is a decision the agent makes, not a
 step it merely executes**. Choosing features is a decision
 (`analyze_features`); so is choosing a model against what is actually
@@ -201,12 +202,25 @@ Eleven tools now ask one question each, with typed answers. They compute
 almost nothing new; what changed is that the answers have a shape, and that
 the shape leaves room for a recommendation rather than a table:
 
-- **`get_feature_redundancy` names which feature to keep.** RSI, 20-day
-  momentum, MACD and stochastic are one momentum cluster, not four
-  independent sources of alpha — and a panel that treats them as four sizes
-  positions as though it had diversified. The representative is the member
+- **`get_feature_redundancy` names which feature to keep, and what VIF sees
+  that pairs do not.** RSI, 20-day momentum, MACD and stochastic can form
+  one momentum cluster rather than four independent sources of alpha —
+  and a panel that treats them as four sizes positions as though it had
+  diversified — but whether they do is a property of the panel. On the
+  live panel of 2026-10-03, rsi_14 and pctb_20 correlated at 0.87 and no
+  pair of the eight features reached 0.9. The representative is the member
   with the strongest |rank IC|, tie-broken alphabetically so the drop list
-  is reproducible.
+  is reproducible. Clusters join pairs, so a feature that several others
+  explain together is in none of them. `collinear_features` lists every
+  feature with VIF ≥ 5, with the features behind it (strongest partial
+  correlation first, the shortest list reaching 90% of its R², at most
+  five) and the VIF its strongest pair alone would give. On the live panel
+  rsi_14 had VIF 7.46 against 4.18 from pctb_20 alone, beside an empty
+  `redundant_features`, and the warnings now say why. A singular
+  correlation matrix reports an infinite condition number and an infinite
+  VIF (null) for the features in the exact combination; it used to report
+  VIFs below 1. The condition-number warning is drawn at 1000 in every
+  tool.
 - **`get_feature_drift` separates two failures that look alike.** A feature
   can drift in distribution while keeping its IC (rescale it) or hold its
   distribution while losing its IC (the edge is gone). Reporting one of them
@@ -232,12 +246,21 @@ the shape leaves room for a recommendation rather than a table:
   observed IC kept such a row while the null dropped it, so the two were
   computed on different rows (replace it with NaN to drop the row from
   both).
-  Its `null_p95_abs` is that one feature's floor; the floor for a whole
-  panel is the **maximum** of them, which is what
-  `screen_feature_significance` returns as `honest_floor` and what
-  `select_features(min_abs_rank_ic=...)` should be given. A threshold set
-  from a single feature keeps whatever noise produces one time in twenty
-  across the rest of the panel.
+  `null="entity_shuffle"` hands each entity's whole series to another
+  entity, one permutation for every date. It keeps the serial correlation
+  too, and also breaks a static cross-sectional tilt that the circular
+  shift keeps: a feature whose ranking of the entities barely moves keeps
+  most of its IC when its series is rolled in time. beta_60's
+  circular-shift null centres at +0.041 against an observed +0.051
+  (p 0.070); its entity-shuffle null centres at +0.003 (p 0.005).
+  `null_mean` shows where each null is centred. The two-sided p counts
+  draws at least as far from zero as the observed IC, which, against an
+  off-centre null, is not the distance from the null's centre.
+  `screen_feature_significance` runs the test over every feature. Its
+  `honest_floor`, the largest `null_p95_abs`, is not a floor for
+  `select_features`: it applies the widest null to every feature, it reads
+  the holdout, and on the live panel it kept 0 of 8 while the same screen
+  called rvol_20 significant.
 - **`screen_feature_stability` asks the drift question without a name.**
   `get_feature_drift` and `get_feature_regime_stability` need a feature to
   ask about; the screen runs both over every feature at once, with a
@@ -246,8 +269,18 @@ the shape leaves room for a recommendation rather than a table:
 
 `select_features` deliberately has no greedy search. A selector scored on
 the panel it selects from manufactures overfit that looks like evidence, and
-an agent handed that output cannot tell. It drops duplicates and the
-unmeasurable, and records a reason for every exclusion. **It does not read
+an agent handed that output cannot tell. It drops duplicates, then tests
+each cluster representative against an entity-shuffle permutation null on
+its selection window (`significance`, default `"entity_shuffle"`, at
+`alpha` 0.05) and drops what does not reach it as `insignificant`, with the
+p-value. It records a reason for every exclusion. On the live panel it
+keeps beta_60 and rvol_20 and drops the other six (p 0.28–0.89); before the
+test, a call with no arguments kept all eight. `significance="none"`
+returns that old selection, with a warning. The p-values are not corrected
+for the number of features tested, and the warning says how many noise
+alone would pass; with E entities the null has E! assignments, so at four
+or fewer (at the default `alpha`) the result says the test cannot reliably
+reach it. **It does not read
 the whole panel either.** Redundancy and the IC floor used to be measured
 over every date, holdout included, so a walk-forward run on the selected
 features started biased: the top five of sixty pure-noise columns chosen
@@ -414,6 +447,14 @@ to be a table here, and the table said 21 entries when the registry held
   came before it. Zero volume is NaN, not `−inf`.
 - `risk.atr_pct` is Wilder's ATR ÷ Close, since raw ATR is a price level.
   A non-positive Close yields NaN rather than ±inf.
+- `technical.macd_histogram_pct` is the MACD histogram ÷ Close. The
+  histogram is a difference of EMAs of price, so it is in price units: on
+  the live 30-name panel its standard deviation ran from 0.23 (KO) to 22.4
+  (GOOGL), a rank of it sorted names by price level as much as by momentum,
+  and a split changes its scale for good. `technical.macd_histogram` is
+  unchanged (its implementation hash is its function's source, which
+  `score_model` checks); its description now says it is in price units. A
+  non-positive Close gives NaN, as for `risk.atr_pct`.
 - `risk.bollinger_pct_b` is %B, Close's position within the bands. A flat
   window collapses both bands onto the mean, where %B is 0.5 (the middle
   band) rather than 0/0.
@@ -646,6 +687,9 @@ to build the dataset:
 |---|---|
 | `point_in_time=False` | The provider does not guarantee historical values are never revised, so a feature computed today may differ from what was observable on its label date. The per-feature PIT gate checks the FORMULA; it cannot see revisions in the underlying series. |
 | `survivorship_free=False` | Delisted securities are not queryable, so any universe of currently-listed symbols is a survivors-only sample. Backtested returns are biased upward and walk-forward validation does not correct for it. |
+| `adjusted=False` | The provider serves unadjusted bars (Databento). A dividend is a price drop on its ex-date, so return targets are price returns, not the total returns an adjusting provider gives; a split is a price fall, which the price-jump screen names. |
+| `PRICE JUMPS` | A close-to-close move beyond 35% in the bars the dataset was built from, named after the split ratio it is within 10% of, with the labels that span it and the rows carrying a feature computed across it; worded by the provider's `adjusted` flag. See [Splits in unadjusted bars](#splits-in-unadjusted-bars). |
+| `DECLARED SPLITS` / `DECLARED SPLIT NOT SEEN` / `DECLARED SPLIT OUTSIDE THE BARS` | What `DatasetSpec.corporate_actions` did: the splits adjusted; a declared split whose ex-date bar does not move by about its ratio (applied as declared); one outside the fetched bars (changed nothing). |
 | partial history | A symbol covers materially less than the universe's date range — it listed inside the window, or stopped early. It is weighted far less than its presence in `universe` suggests. |
 | requested start/end unavailable | The window that came back is shorter than the one asked for, before any feature lookback is consumed. |
 | PCA intersection | Universe-scope features need a complete cross-section, so one short history truncates the panel *for every entity*. The warning names the entity whose removal recovers the most dates — computed, not inferred from the latest start, which on a universe where every name starts together named whichever came first — with its bar range and the count recovered, or says that no single symbol binds. |
@@ -658,6 +702,95 @@ than errors: promoting them to a hard failure would make the runtime
 unusable against its own default data source while teaching the caller
 nothing. The list is empty for a provider making both guarantees over
 aligned daily histories, so a non-empty one means something.
+
+### Splits in unadjusted bars
+
+Databento serves the prices the venue published and says so
+(`get_metadata().adjusted` is `False`); every other shipped provider
+adjusts. Every label and feature here is computed from raw Close, so on
+unadjusted bars a 10:1 split is a −90% bar: a label whose horizon spans it
+and every feature whose window or smoother reaches back across it read it
+as a return. A live 2022–2026 panel of 30 names spanned six splits (AMZN
+and GOOGL 20:1, TSLA and WMT 3:1, NVDA and AVGO 10:1): 25 labels and 1,131
+feature rows read one, and masking those rows took ridge's rank IC from
+0.0090 to 0.0196 (random masks of the same size: 0.0075 ± 0.0041).
+
+**The screen.** `build_model_dataset` screens every entity's bars — and the
+benchmark's, when a feature reads the benchmark — for close-to-close moves
+beyond 35%, the backtest's threshold (`constants.SPLIT_SCREEN_THRESHOLD`,
+one object read by both). Each move is named after the split ratio it is
+within 10% of on a log scale (3:2, 2:1, 3:1, 4:1, 5:1, 8:1, 10:1, 15:1,
+20:1, 25:1, 30:1, 40:1, 50:1, or a reverse of one;
+`data.quality.detect_split_like_moves`) and counted: the labels dated
+before it whose `label_end_date` is on or after it, and the panel rows
+carrying a feature computed across it — from the move through each
+feature's converged warm-up (`resolved_warmup`, the number
+`estimate_feature_warmup` reports) plus its deepest lag, on the bars of the
+series that moved. A universe-scope feature reads every entity's returns,
+so one entity's move counts every entity's rows; a benchmark move counts
+every entity's rows for the features that read the benchmark. One
+`PRICE JUMPS` warning names the first six and counts the rest.
+`dataset_meta.json` records each move under `price_jumps`, and records
+`bars_adjusted`: the flag as resolved — the provider's metadata, else the
+frames' `attrs["adjusted"]` when every frame carries one and they agree,
+else `null`. Both keys are written on every build, and an empty
+`price_jumps` means screened and clean.
+
+The screen reads the bars and the finished panel and writes neither, so
+`data_hash` and `spec_hash` are what they were; on bars shaped like the
+live panel it costs about 7 ms of a 0.8 s build. Under `adjusted=True` the
+warning calls each move a genuine move or a bad print. A genuine −90% day
+reads exactly like a 10:1 split, so a named ratio is consistency, not
+proof, and a 3:2 split moves −33%, below the threshold, and is not seen.
+For a target computed across each date's entities
+(`forward_return_rank`, `forward_return_market_neutral`) the warning adds
+the other rows on the spanning labels' dates: on the live-shaped panel 397
+rank labels changed when the splits were adjusted, 25 of them the labels
+that span a split.
+
+**Declaring a split.** No corporate-actions source feeds the builder, so
+the caller says where a split falls:
+`corporate_actions=[{"entity": "NVDA", "ex_date": "2024-06-10", "split_ratio": 10}]`.
+`split_ratio` is new shares per old share (1.5 for 3:2, 0.1 for a 1:10
+reverse split); `ex_date` is the first session priced after the split.
+Before any feature or label is computed, the entity's bars dated before the
+ex-date have Open, High, Low and Close divided by the ratio and Volume
+multiplied by it — back-adjustment, the units an adjusting provider gives —
+and the benchmark's too when it is that entity. A declared build equals a
+build from hand-adjusted bars bit for bit. The screen then runs on the
+adjusted bars and no longer names those dates; a `DECLARED SPLITS` note
+lists what was adjusted and the raw move into each ex-date. Dividends are
+not adjusted.
+
+- The entity must be in the universe. The ratio must be positive, finite
+  and not 1. The ex-date must be a date. One split per entity and ex-date.
+  The list is kept in (entity, ex_date) order.
+- Refused, naming each entity and date, when the provider reports
+  `adjusted=True` (before the fetch when `get_metadata` says so).
+- A declared split whose ex-date bar does not move within 10% of its ratio
+  is applied as declared and named (`DECLARED SPLIT NOT SEEN`). Declared
+  one session late, the real −90% stays in the bars, a move of about +900%
+  follows it, and the screen names both.
+- A split at or before the first bar, or after the last, changes nothing
+  and says so (`DECLARED SPLIT OUTSIDE THE BARS`).
+- An empty table (the default) stays out of `spec_hash`, so a dataset built
+  before the field existed hashes as before.
+
+**At scoring.** `score_model` rebuilds from the model's bundled spec, so the
+same table adjusts the scoring bars (keeping the splits of the entities
+being scored); a split declared after the training window is applied once a
+scoring window contains it. A move the scored rows read is a warning:
+"NVDA: a -90% close-to-close move on 2024-06-10 (within 4% of a 10:1 split)
+is inside the 188 bars this score's features read, and the provider reports
+adjusted=False, so the score reads the split as a return." A move only
+earlier rows read is not mentioned. On the live-shaped bars, a model
+trained through 2024-03-28 and scored on 2024-07-31 gave three such
+warnings (WMT, NVDA, AVGO); the same model with the six splits declared
+gave none.
+
+**Datasets built before the screen.** A Databento dataset whose metadata
+has no `price_jumps` key gets one line in `run_model_experiment`'s manifest
+dataset warnings saying it was never screened.
 
 ### What alignment dropped, and why
 
@@ -708,6 +841,12 @@ question before one is paid for: each feature's lookback **resolved from
 the parameters actually requested** rather than the catalog's default
 (`market.momentum` at `lookback=900` burns 900 bars, not 20), plus the
 deepest lag, with the binding feature named and a calendar-day estimate.
+Given a `dataset_id` or `model_id` instead of spec dicts, it prices the
+features that dataset or model records, read from the hash-verified spec
+without loading the panel, and takes column names (aliases) to narrow
+them: on the live 30-name dataset, 126 bars binding on `mom_126` and
+188 to converge binding on `macdh`, identical to passing its eight spec
+dicts, in 2.3 ms.
 
 That total is where the panel can **start**. It is not enough history for a
 recursive feature's value to stop depending on where the history started:
@@ -725,7 +864,7 @@ the start value's weight is below `warmup_tolerance` (1e-4) — and
 | Feature (default params) | first output (`resolved`) | `converged` |
 |---|---|---|
 | `technical.rsi` (14), `risk.atr_pct` (14) | 14 | 139 = 14 + 125 |
-| `technical.macd_histogram` (12, 26, 9) | 26 | 188 = 26 + 120 + 42 |
+| `technical.macd_histogram` (12, 26, 9), `technical.macd_histogram_pct` | 26 | 188 = 26 + 120 + 42 |
 | `technical.adx` (14) | 14 | 187 = 28 + 159 |
 | `market.psar_trend` | 1 | 100 |
 | every finite-window feature | its window | the same |
@@ -904,10 +1043,16 @@ at registration and again on every load. A panel registered under a wider
 **Integrity is not weakened by that.** The engine loads the panel whole
 either way, so the content hash is computed on the loaded frame rather than
 on the file, and an externally referenced panel is verified on every load
-exactly as strictly as a built one. What changes is the failure mode: an
-edited file fails loudly with a hash mismatch, and a moved or deleted one
-stops loading. A built panel could never do either, because this library
-owned it.
+exactly as strictly as a built one. The file is parsed again on each load,
+under whichever pandas is running — a CSV's dates come back
+`datetime64[ns]` under pandas 2 and `datetime64[s]` under pandas 3, its
+text `object` under one and `str` under the other — so the hash recorded is
+the one that does not see those differences (see [The package is
+content-addressed and
+verified](#the-package-is-content-addressed-and-verified)). What changes is
+the failure mode: an edited file fails loudly with a hash mismatch that
+names the file, and a moved or deleted one stops loading. A built panel
+could never do either, because this library owned it.
 
 ### The horizon is required
 
@@ -1229,6 +1374,34 @@ run of it produced signed coefficient importance; it reports
 `engine.run_experiment` refuses any estimator type not in this registry —
 no arbitrary `sklearn` import, no `exec()`. An LLM builds a declarative
 `ModelSpec`; the engine decides exactly how it executes.
+
+**What a fit costs.** `list_modeling_capabilities` gives each estimator a
+`fit_cost` class and a `threads` kind, declared where it is registered
+(`register_estimator(..., cost=EstimatorCost(fit_cost, threads))`) and
+explained once under `estimator_cost`. The classes come from one default
+fit on a 15,030-row, 8-feature window of a daily equity panel on 16
+logical cores, the OpenMP estimators on one thread: **low** under 0.05 s
+(linear, ridge, lasso, elastic_net, huber, logistic, sgd), **medium**
+0.1–1 s (hist_gradient_boosting, lightgbm, xgboost, the rankers, cox_ph,
+the xgboost survival models, the regression mlp), **high** 2–11 s
+(random_forest, 11.1 s as a regressor, gradient_boosting,
+quantile_gradient_boosting, quantile, the classification mlp). A
+walk-forward experiment fits once per fold and once on the whole panel, so
+a high-cost estimator over 8 folds of that size spends 20 s to two minutes
+fitting at a budget of 1. `threads` says what sets the cores one fit uses:
+`one`, `budget` (its own `n_jobs`, given its share of the budget) or
+`openmp` (see [`max_parallelism`](#max_parallelism-what-the-budget-controls)).
+
+The forest allowlist also takes `max_features`, `max_samples` and
+`min_samples_leaf`, the parameters that decide what a forest costs besides
+its size (on one fold of a 30-name daily equity panel, 200 trees of depth
+6, `max_features=0.33` fitted 2.58× faster and `max_samples=0.5` 1.67×).
+Absent, each is scikit-learn's own default, so a spec that names none of
+them fits the forest it always did. `max_features` and `max_samples` are
+shares — a float such as `0.33`, or `"sqrt"`/`"log2"` for `max_features` —
+and a whole number is refused, because scikit-learn reads an int there as a
+count and `max_features=1` is one feature per split. `min_samples_leaf` is
+a count.
 
 ### Sequence models, and why there is no TCN
 
@@ -1614,6 +1787,45 @@ concatenated and the dispersion computed once over the whole OOS window.
 The per-fold versions stay in `validation_report`, where they answer the
 different question of how each individual fold did.
 
+**Is the headline more than noise?** A run tests its headline metric — the
+one `compare_models` and `list_models` rank its task by — against what a
+model with no skill scores, and warns when it does not beat it. For a
+regression or ranking model that is `cs_rank_ic_mean`, tested with a
+Newey-West t on the pooled per-date rank-IC series (under `cpcv`, each
+date's mean across the paths that tested it), two-sided at 5%. The lag is
+max(2h, ⌊4(n/100)^(2/9)⌋), capped at n − 1, with h the target horizon and
+n the tested dates. Not h − 1: the daily ICs of an h-day label share up to
+h − 1 days of outcome, so their autocorrelation falls roughly linearly to
+zero at lag h, and Bartlett weights cut at h − 1 discount it a second time,
+recovering 68% of the long-run variance for a 5-day label (85% at 2h); a
+simulation of the h − 1 rule rejected a true zero 9.6% of the time at a
+nominal 5%. On a 30-name daily equity panel, all three models were
+indistinguishable from zero: ridge 0.0090 (t 0.30, p 0.768),
+hist_gradient_boosting 0.0240 (t 1.79, p 0.074; t 2.67 if the daily ICs,
+whose lag-1 autocorrelation is 0.45, are read as independent), random
+forest 0.0022 (t 0.10). With fewer than 10 tested dates the warning says
+the headline was not tested; significantly below zero, it says the
+predictions order the names in reverse and what the negated ordering
+scored. Classification compares `auc`, and survival `cs_concordance_mean`,
+with 0.5 as points. `validation_report["headline"]` keeps `metric`,
+`null`, `value`, `n_dates`, `t_stat`, `t_stat_uncorrected`, `p_value`,
+`hac_lag`, `ic_autocorrelation_lag1` and `beats_null` (null when untested);
+it persists with the manifest and shows in
+`inspect_model(view="validation")`, and a manifest written before it has
+none.
+
+**r² below its baseline, explained.** `baseline_r2` is the training-fold
+mean predicted for every test row. r² can be no larger than the squared
+correlation between prediction and label, so on a label ranked within each
+date — whose baseline is zero by construction — a correlation of 0.02
+between prediction and label caps r² at 0.0004, and a prediction more
+dispersed than that correlation supports scores below zero. Whenever r² is
+below `baseline_r2`, the run's `notes` say so with the fold count and the
+ceiling (the test-row-weighted mean of each fold's squared `ic`), and name
+the headline as the number to read. `notes` is always present on a
+`run_model_experiment` result, for a number that reads as a failure and is
+not.
+
 ### Fold accounting
 
 `validation_report` (also surfaced by `inspect_model(view="validation")`)
@@ -1668,12 +1880,17 @@ from a positive one of the same size.
 All three signed keys are **NaN for tree estimators**, whose
 `feature_importances_` are non-negative by construction and carry no
 direction — deliberately NaN rather than a plausible default, so "no sign
-information exists" cannot be misread as "the sign was stable". Exact-zero
-coefficients (routine under L1) are excluded from `sign_consistency` rather
-than counted as agreeing with either side. They are also NaN for every
-feature on a run with `estimator.calibration != "none"`:
-`CalibratedClassifierCV` exposes neither coefficients nor importances, and
-the run warns by name rather than letting the NaNs read as a broken model.
+information exists" cannot be misread as "the sign was stable". An
+estimator with neither coefficients nor importances — `hist_gradient_boosting`
+— reports NaN for every key. Either way the run's `notes` say which keys
+are null by construction, point at the capability flags that predict it,
+and name `run_feature_ablation` as the way to measure what a feature is
+worth to that model; `validation_report["importance_source"]` is
+`coefficients`, `feature_importances` or `none`. Exact-zero coefficients
+(routine under L1) are excluded from `sign_consistency` rather than
+counted as agreeing with either side. Every key is also NaN on a run with
+`estimator.calibration != "none"`: `CalibratedClassifierCV` exposes
+neither coefficients nor importances, and that run warns by name instead.
 
 Each row is labelled as well as keyed: a `technical.rsi__lag3` column is
 reported as "technical.rsi at lag 3", so the lag expansion is readable
@@ -2306,8 +2523,13 @@ entry only when every step in the pipeline is `column_wise` *and* the
 pipeline kept its column set; a PCA whitening is not column-wise, a
 missingness indicator adds columns, and both miss and refit, which is the
 honest answer rather than an approximate one. `validation_report["cache"]`
-records the run's `hits`, `misses` and `projections`, whether the cache
-was `shared`, and whether the pipeline was `projectable`.
+records the preprocessing work the run did (`misses`) and reused (`hits`,
+from an earlier candidate of its own inner search) and whether the cache
+was `shared`. A run given a shared cache also reports `projections`, the
+folds read off a wider run's matrices, and `projectable`, whether its
+pipeline allows that; `run_model_experiment` keeps its cache private, so
+neither applies to it, and the two used to read as a reuse that failed on
+every call.
 
 **What it saves depends on what the pipeline costs.** Measured on a
 synthetic 20-feature panel, ridge, leave-one-out ablation (21 experiments)
@@ -2331,39 +2553,85 @@ A persistent, cross-process cache is deliberately not built. The plan's
 hashes make one possible, and orchestration is the layer above this
 library.
 
-### `max_parallelism`: what the knob controls
+### `max_parallelism`: what the budget controls
 
-`budget.max_parallelism` was not built with the rest of the budget,
-because nothing in the engine ran in parallel and no registered
-estimator read `n_jobs`: the knob would have controlled nothing. It
-controls three things now:
+`budget.max_parallelism` is `"auto"` by default, or a whole number from 1
+to 64. `"auto"` is `SQT_NUM_THREADS` when set, else the CPUs the process
+may run on (`os.sched_getaffinity` where the platform has it, else
+`os.cpu_count()`), at most 64, read once when the run starts. A run reports
+the budget as asked: a recorded call is replayed by comparing its output on
+whatever machine checks it, so no machine's count may enter it. The count
+it resolved to is the manifest's `environment.threads.auto_parallelism`.
+1 keeps every fit sequential and on one thread; it was the default before
+2026-10-04.
 
-- **Grid and random search candidates are scored on threads.** The first
-  candidate runs alone, so each inner fold's preprocessing is fitted once
-  and cached before anything reads it; every remaining (candidate, fold)
-  pair is then scored side by side, and the scores are gathered in spec
-  order whatever order the threads finish in.
-- **Estimators that accept `n_jobs` receive it** — a random forest, a
-  booster — unless the spec's params set it themselves. An estimator
-  whose constructor has no `n_jobs` is built as before.
+It controls four things:
+
 - **Walk-forward folds fit side by side.** Without a search,
-  `gradient_boosting` and `random_forest` fit their folds on up to
-  `max_parallelism` threads, each fold's estimator getting
-  `max_parallelism // folds-in-flight` jobs so the total never exceeds the
-  budget. Folds are prepared and recorded in fold order whatever order the
-  fits finish in, and the full-panel refit runs alone at the whole budget.
-  A 71,070-row `gradient_boosting(150, depth 3)` experiment with 14 folds
-  ran 2.1× faster at 4 or 8 than at 1, with every recorded output
-  identical. Other estimators already use every core, or have sums that
-  depend on the thread count, and keep the sequential loop.
+  `gradient_boosting` and `random_forest` fit their folds on up to the
+  budget's threads, each fold's estimator getting `budget // folds-in-flight`
+  jobs so the total never exceeds it. Folds are prepared and recorded in
+  fold order whatever order the fits finish in, and the full-panel refit
+  runs alone at the whole budget. A 71,070-row
+  `gradient_boosting(150, depth 3)` experiment with 14 folds ran 2.1× faster
+  at 4 or 8 than at 1, with every recorded output identical. Every other
+  estimator fits one fold at a time whatever the budget says: the OpenMP
+  boosters spread one fit over their share instead (below), and a linear
+  model fits a fold in a fraction of a second.
+- **Grid and random search candidates are scored on threads.** The first
+  candidate runs alone, so each inner fold's preprocessing is fitted once and
+  cached; every remaining (candidate, fold) pair is then scored on
+  min(budget, pairs) workers, each candidate's estimator getting
+  `budget // workers` threads — the fold rule. Each candidate used to get the
+  whole budget inside a pool of budget-many workers: a forest grid at a
+  budget of 4 ran sixteen tree builders.
+- **Estimators that take `n_jobs` receive their share** — a random forest,
+  LightGBM, XGBoost — unless the spec's params set it themselves. An
+  estimator whose constructor has no `n_jobs` is built as before.
+- **OpenMP estimators are held to their share.** hist_gradient_boosting,
+  LightGBM and XGBoost start an OpenMP team per fit and prediction, on every
+  logical CPU at their default. Under the PASSIVE wait policy this package
+  sets on import, 16 threads fitted a 15,000-row, 8-feature fold in 1.5–1.7 s
+  and one thread in 0.28–0.36 s, with the same predictions. Each fit and
+  prediction now runs under `openmp_thread_limit`, a process-wide,
+  reference-counted limit like the BLAS one (a per-call limit set on a worker
+  thread was measured reaching the main thread under vcomp), at the fit's
+  share; under `"auto"` that is one thread below 2,000,000 training cells
+  (rows × columns), where one thread measured faster, and the share above.
+  On a 30-name daily equity panel (31,680 rows, 8 features) a
+  hist_gradient_boosting run went from 15–17 s to about 4 s.
 
-The result does not depend on it: the same spec at 1 and at 4 threads
-selects the same parameters with the same candidate scores, which is the
-property the test pins. The TPE search stays sequential on purpose — a
-parallel optuna study changes which trials the sampler has seen when it
-proposes the next one, and a search whose winner depends on thread timing
-is not a search anyone can reproduce. The search report and the
-`fits` block of the validation report carry the value that ran.
+`validation_report["fits"]` says what ran: `max_parallelism` as asked,
+`fold_workers`, and `fold_parallel_limit` — `"budget"`,
+`"estimator fits one fold at a time"`, `"search"`, `"n_jobs set in params"`,
+`"one fold"`, or null when every fold ran side by side. Under `"auto"`,
+where the budget decides, they read `"auto"` and `"budget"` and the count
+is min(`auto_parallelism`, folds). The search report carries the budget as
+asked too.
+
+**The numbers do not depend on it.** Candidates and folds keep their spec
+order whatever order they finish in: the same spec at 1 and at 4 threads
+selects the same parameters with the same candidate scores. A random forest
+builds each tree from a seed drawn before any thread starts, so its fit is
+the same at any `n_jobs`; its predictions were not, because above one job
+scikit-learn adds the trees' outputs in thread-finish order — at a budget of
+16 over 8 folds, 5,798 of 15,120 out-of-sample predictions differed from the
+budget-1 run in the last bits. Every forest is now put back on one thread
+after its fit (the forests inside a `CalibratedClassifierCV` included),
+before it predicts, reports importances or is written down, so the deployed
+forest carries no budget and its `model.joblib` is the same at every
+budget: on the same panel, the random forest at `"auto"` (8 folds side by
+side) reproduced the budget-1 run's every content hash in 18–19 s instead
+of 79–94 s. hist_gradient_boosting and XGBoost predict the same bits at 1,
+4 and 16 threads; hist_gradient_boosting's pickle differs, because its bin
+mapper records the thread count. LightGBM's fit can differ in the last bits
+with its thread count (4e-19 on a 160,000-row fit, none on 25,000 rows),
+and it ignores the OpenMP runtime's count when its `n_jobs` is unset, so it
+is handed its share explicitly, one included; under `"auto"` it fits on one
+thread below the threshold on every machine. The TPE search stays
+sequential on purpose — a parallel optuna study changes which trials the
+sampler has seen when it proposes the next one, and a search whose winner
+depends on thread timing is not a search anyone can reproduce.
 
 Every fit on a pool — folds side by side or search candidates side by side,
 the first candidate included — runs on one BLAS thread. Before, each worker
@@ -2377,6 +2645,11 @@ refit keep the process's BLAS setting. The numbers are identical at 1 and at
 4, checked bit for bit on a 150-feature ridge search. `SQT_BLAS_THREADS`
 sets another count, or 0 to leave BLAS alone (see
 [16_performance.md](16_performance.md#runtime-defaults-openmp-wait-policy-and-blas-threads)).
+
+A `random_forest` run that will build every tree on one core — an explicit
+budget of 1, or `"auto"` on a one-CPU process — on a panel of at least
+10,000 rows says what a budget buys, in `warnings`, and fits the forest it
+was asked to fit.
 
 ---
 
@@ -2412,12 +2685,13 @@ works at the extremes and not in the middle. That is worth knowing before it
 goes into a linear model.
 
 **Redundancy** — pairwise correlation, VIF from the inverse correlation
-matrix, condition number, and near-duplicate clusters. An agent that puts
-RSI, the stochastic oscillator, 20-day momentum and MACD into one model has
-not supplied four pieces of evidence; it has supplied roughly one, four
-times. Every importance-style diagnostic then splits that one signal across
-four columns and reports each as modest — which reads as several weak
-findings rather than one strong one.
+matrix, condition number, `collinear` (every feature with VIF ≥ 5 and what
+explains it), and near-duplicate clusters. An agent that puts RSI, the
+stochastic oscillator, 20-day momentum and MACD into one model may not have
+supplied four pieces of evidence; on some panels it has supplied roughly
+one, four times. Every importance-style diagnostic then splits that one
+signal across four columns and reports each as modest — which reads as
+several weak findings rather than one strong one.
 
 ### The leakage screen
 
@@ -2461,7 +2735,17 @@ the five-bar forward return came back `safe=True` with no findings. With a
 built panel; a flagged column is a finding with
 `temporal_support="empirical"`, `screen` carries every column's verdict,
 and `scope` says what `safe` rests on — `declared_temporal_support_only`
-without a dataset, `declared_and_empirical` with one.
+without a dataset, `declared_and_empirical` with one, and `empirical_only`
+for an external panel, whose columns declare no temporal support and used
+to come back as one "not in the feature registry" finding each. With a
+dataset the names resolve through its recorded spec, checked against its
+hash: `feature_ids=["mom_126"]` on the live dataset answered `safe: false`,
+"not in the feature registry", for `market.momentum` at 126 bars, and is
+now declared-checked under `market.momentum` and screened as `mom_126`;
+`feature_ids=["market.momentum"]` skipped the screen because no column
+carries the catalog id, and is now screened through `mom_20` and
+`mom_126`. Omitting `feature_ids` with a dataset checks the dataset's
+own features rather than the whole registry.
 
 ### One horizon, for now
 
@@ -2918,6 +3202,33 @@ trained on the original panel — whose hash still matched — and registered a
 model that would score every future prediction with different feature
 definitions.
 
+**The panel's hash does not depend on the pandas version.** `data_hash`
+was `audit.hash_dataframe`, which covers each column's `str(dtype)`;
+pandas 3 prints text as `str` where pandas 2 prints `object`, and parses a
+date string to `datetime64[s]` where pandas 2 gives `[ns]`, so a dataset
+built under one was refused under the other — by every tool that loads a
+dataset, `run_model_experiment`, `analyze_features`, `check_leakage` and
+the `sqt://dataset/{dataset_id}` resource among them — although nothing had
+changed. Datasets record `data_hash_version` now. Version 2, which every
+dataset built or registered today records, is
+`audit.hashing.canonical_frame_hash`: the same column names, logical types
+and values, hashed through bytes that are the same under every pandas. Beside it, `built_with` records the
+python, pandas, numpy and pyarrow that built the panel. A dataset without
+the key holds a version-1 hash, which is kept as it is — manifests and fold
+node hashes carry it — and verified as read or, on a miss, with its text
+spelled `object`, `str` or `string` and its datetimes at another resolution
+that holds the same instants. A refusal says which case it is: a version-2
+mismatch means the data changed; a version-1 miss under the pandas that
+wrote the panel means the same; a version-1 miss under a different or
+unrecorded pandas cannot tell an edit from a pandas difference, says so,
+and names both versions. Rebuilding records version 2. The model manifest
+records `dataset_hash_version` beside `dataset_hash`, and
+`inspect_model(view="lineage")` shows it. Re-running a ridge model on a
+dataset built under pandas 3.0.5 under pandas 2.3.3 records the same
+dataset hash and the same eight fold node hashes; its predictions differed
+from the pandas-3 run by at most 7.2e-16 (numpy and scikit-learn differed
+too). On the 31,680-row live panel the canonical hash takes 3.0–4.8 ms.
+
 **Persisted JSON is strict.** `save_json` used Python's default
 `allow_nan=True`, which writes bare `NaN` / `Infinity` tokens that are not
 valid JSON per RFC 8259. The runtime legitimately produces NaN — AUC on a
@@ -3146,6 +3457,12 @@ the entity *was* present.
   `max_staleness_days` rejects the call when the gap is too large; it is
   opt-in, since how much staleness is still decision-useful is a property of
   the strategy, not something `score_model` can pick for you.
+
+**A UTC-stamped panel scores.** Databento's daily bars are UTC midnights, so
+its panels' dates are zone-aware, and the staleness subtraction against a
+date-only `as_of` raised `TypeError` for every such model; it is now taken
+on one clock. A scoring window that contains a split in unadjusted bars is
+covered under [Splits in unadjusted bars](#splits-in-unadjusted-bars).
 
 **A different scoring universe is allowed — unless a universe-scope feature
 says otherwise.** `factors.pca_loading` and `factors.pca_factor_return` are

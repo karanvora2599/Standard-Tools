@@ -371,7 +371,10 @@ is wrong through. The pass is free: the engine already walks every bar for
 its total-loss guard. The warning travels in `result["warnings"]` like the
 fill caveat, so it reaches every tool built on the engine;
 `run_backtest_compact` used to build its own warning list from scratch and
-now starts from the engine's.
+now starts from the engine's. The threshold is
+`constants.SPLIT_SCREEN_THRESHOLD`, one object read by this screen and by
+the dataset build's (`data.quality.detect_split_like_moves`);
+`backtest.screens.SPLIT_SCREEN_THRESHOLD` still resolves to it.
 
 **Validation:** `run_strategy` raises `ValidationError` if `initial_capital`
 isn't finite and `> 0`, if `commission_pct`/`slippage_pct` isn't finite

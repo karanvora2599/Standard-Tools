@@ -45,7 +45,7 @@ shipped, generalized to the rest of the surface.
 | `backtest` | 35 | `backtest_execution`, `backtest_validation`, `custom_signal` | Run a strategy, and establish how much of the result is real. Does not build portfolios. |
 | `meta` | 25 | `discovery`, `provenance` | Questions about the library, the session and what a data source can promise — never about a market. |
 | `portfolio` | 19 | `portfolio_risk` | Turn a view into a position and price what it costs. |
-| `modeling` | 37 | (one ordered pipeline) | Build, validate and score a model, and join point-in-time records onto its panel. Lives in `modeling/agent`. |
+| `modeling` | 38 | (one ordered pipeline) | Build, validate and score a model, and join point-in-time records onto its panel. Lives in `modeling/agent`. |
 | `microstructure` | 17 | `microstructure` | What the market will charge you to trade — measured from ticks, or estimated from bars. |
 | `derivatives` | 12 | `derivatives` | What an option is worth and what holding it does to you. Takes quotes as arguments; there is no options provider. |
 | `delta_one` | 18 | `delta_one` | Which instrument is the cheapest way to own or hedge an exposure: carry, basis, curves, rolls, hedge sizing and instrument comparison. Takes quotes as arguments; there is no futures provider. |
@@ -135,7 +135,7 @@ The floor is checked on both sides. At the split `feature_lab` landed at
 nine and `modeling` kept fourteen; neither number was a coincidence — the
 split was sequenced so that both would clear 8, and the existing floor test
 would have failed the moment either did not. They hold eleven and
-thirty-seven now.
+thirty-eight now.
 
 **A split is a breaking change**, so the move is recorded. An agent scoped
 to `modeling` that calls `profile_feature` gets:
@@ -157,7 +157,7 @@ a changelog nobody reads, embedded in an error message everybody does.
 `sqt-mcp --runtime research` serves that runtime and nothing else — the
 same partition, over the protocol. This is not only a context-budget
 decision, though the budget forced it: at roughly 1,730 bytes per tool over
-the wire the session ceiling buys about 104 tools and the library has 237,
+the wire the session ceiling buys about 104 tools and the library has 238,
 so the whole surface stopped fitting in one session well before it stopped
 growing.
 
@@ -332,7 +332,7 @@ Two `meta` tools exist because of the same concern the runtimes address.
 
 `describe_tool` reports one tool's arguments, result fields, owning runtime,
 and whether calling it fetches or writes. The alternative was loading all
-237 schemas — which is exactly what the MCP category budget exists to avoid,
+238 schemas — which is exactly what the MCP category budget exists to avoid,
 so a narrowly-scoped agent could not learn about a tool it had heard of
 without paying for every tool it had not. It answers for any runtime,
 because describing a tool is not calling it.
@@ -361,6 +361,30 @@ open at the boundary where a *model* chooses the argument names.
 Result models stay permissive: the library constructs those from its own
 values, and tightening them would only turn a forward-compatible field
 addition into a crash.
+
+### A refusal says where the argument belongs
+
+Rejecting an argument is half the answer. Pydantic's text for one is "Extra
+inputs are not permitted" ("Field required" for a missing one), which says
+neither what the tool takes nor which tool takes what was sent; in one live
+modeling session five of seven refused first calls went to a tool whose
+sibling takes exactly that argument. Every dispatcher — `Runtime.dispatch`,
+`agent.tools.dispatch`, `modeling_dispatch`, `feature_dispatch` — and
+`validate_tool_call` build the input through `build_input`, which rewrites
+two messages and nothing else. An unknown argument names what the tool
+takes, the nearest argument name (`as_of_date` → `as_of`), and for an id
+(`dataset_id`, `model_id`, `model_ids`, `predictions_ref`, `symbol`, `ref`)
+the tools in the same runtime that take it, or else the runtimes that have
+one, read off the dispatch tables. A missing `feature` on a single-feature
+`feature_lab` tool names its all-feature screen, and `score_model` without
+`as_of` names `inspect_model`. A short curated table covers the cases where
+the answer is a judgement: `get_dataset_metadata(dataset_id=...)` points at
+`inspect_dataset`, `estimate_backtest_overfitting(model_id=...)` at
+`compare_models`, and a test checks that every name the table uses is a
+real tool or argument. The exception is still a `pydantic.ValidationError`
+with the same title and errors, each with its `type` and `loc`, pinned for
+every tool, so code that branches on them is unaffected and the MCP server
+forwards the text as it is. An accepted call costs 0.07 µs more.
 
 ---
 

@@ -1,5 +1,21 @@
 # Changelog
 
+## The guides describe the headline test, the selection gate, the split screen and the dataset hash
+
+- **The modeling guide** has the run's headline test and its notes, the
+  `"auto"` budget and what it controls, what one fit of each estimator
+  costs, the significance gate in `select_features`, `collinear_features`,
+  the split screen and declared splits under "Splits in unadjusted bars",
+  the pandas-independent dataset hash, `inspect_dataset`, and the names
+  `check_leakage` and `estimate_feature_warmup` now resolve through a
+  dataset. The data-quality, backtesting, auditability, performance and
+  runtimes guides carry the changes in their own areas.
+- **Every tool count reads 238**, the modeling runtime 38. The MCP context
+  budget tables were stale for every runtime and are regenerated: 582,693
+  schema bytes across the 238 tools, the modeling runtime 185,475.
+- **The README and the testing guide count the tests**: 14,658 collected,
+  14,497 passing with the extension and `SQT_EXPECT_NATIVE=1`.
+
 ## A refused argument says where it belongs, and a dataset's column names resolve through the dataset
 
 - **A refusal of an unknown or missing argument names the tool that takes

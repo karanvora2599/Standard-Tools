@@ -2,7 +2,7 @@
 
 Thirty-two high-level agentic tools that compose the library's existing primitives into single, LLM-callable operations. Each collapses a multi-step reasoning workflow into one structured function call with a Pydantic output model.
 
-> **See also:** [07_agent_tools.md](07_agent_tools.md) covers the 14 core tools (including `run_buy_and_hold` and `compare_strategies`), `dispatch()` wiring, and the cross-field validation rules. The full catalogue — all 189 tools `get_agent_tools()` returns, plus the modeling and feature-lab runtimes, 237 in all — is [20_tool_index.md](20_tool_index.md), generated from the live registry; [19_runtimes.md](19_runtimes.md) explains the ten execution boundaries they are split across. The tools below are the backtest, portfolio and analytics slice, in depth.
+> **See also:** [07_agent_tools.md](07_agent_tools.md) covers the 14 core tools (including `run_buy_and_hold` and `compare_strategies`), `dispatch()` wiring, and the cross-field validation rules. The full catalogue — all 189 tools `get_agent_tools()` returns, plus the modeling and feature-lab runtimes, 238 in all — is [20_tool_index.md](20_tool_index.md), generated from the live registry; [19_runtimes.md](19_runtimes.md) explains the ten execution boundaries they are split across. The tools below are the backtest, portfolio and analytics slice, in depth.
 
 ---
 

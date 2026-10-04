@@ -37,16 +37,16 @@ categorization only ever needs to be correct in one place.
 ## Three registries, ten runtimes
 
 Everything above concerns the 189-tool analysis and backtest surface. There
-are two more: `standard_quant_tools.modeling.agent`, 37 tools, and the
+are two more: `standard_quant_tools.modeling.agent`, 38 tools, and the
 11-tool `feature_lab` runtime — neither of which the library merges into the
-first, see [15_modeling.md](15_modeling.md) for why. 189 + 37 + 11 is the
-237-tool whole surface. The example implementations keep the same
+first, see [15_modeling.md](15_modeling.md) for why. 189 + 38 + 11 is the
+238-tool whole surface. The example implementations keep the same
 separation, and it shows up in three places:
 
 | | Analysis registry | Modeling registry |
 |---|---|---|
 | Module | `standard_quant_tools.agent` | `standard_quant_tools.modeling.agent` |
-| Size | 189 tools, 13 categories, 8 runtimes | 37 tools, one ordered pipeline |
+| Size | 189 tools, 13 categories, 8 runtimes | 38 tools, one ordered pipeline |
 | Narrowing | `route_request()` → `categories=` | nothing to narrow — the pipeline runs in sequence |
 | Single-agent script | `Agent_*.py` (eleven of the thirteen; the data runtime has no script of its own yet) | `Agent_Model_Builder.py`; `Agent_Model_Backtester.py` spans both |
 | Workers | 13 | 2 (`model_research`, `model_builder`), plus `feature_lab` on its own runtime |
@@ -55,7 +55,7 @@ Each `_agent_utils.py` names a registry once and gets that registry's tool
 schemas **and** its dispatch function together:
 
 ```python
-run_agent(..., registry="modeling")     # 37 tools, modeling_dispatch
+run_agent(..., registry="modeling")     # 38 tools, modeling_dispatch
 run_agent(..., registry="analysis")     # 189 tools, dispatch  (the default)
 ```
 
@@ -296,7 +296,7 @@ worker registry — there is no second list that can drift out of sync.
 
 **The two modeling workers are split differently, because there is nothing
 to derive them from.** The modeling runtime has no category taxonomy — it
-is thirty-seven tools in one ordered pipeline — so the split is by pipeline
+is thirty-eight tools in one ordered pipeline — so the split is by pipeline
 *stage*, written out explicitly in `worker_agents.py` and then checked by
 the coverage test the same way `_tools_for()` is:
 
@@ -305,7 +305,7 @@ _MODEL_RESEARCH_TOOLS = ["list_modeling_capabilities", "list_features",
                          "build_model_dataset", "register_external_panel",
                          "estimate_feature_warmup", "plan_model_experiment",
                          "preview_sample_weights", "preview_preprocessing",
-                         "describe_estimator", ...]        # 17, up to the dataset
+                         "describe_estimator", ...]        # 18, up to the dataset
 _MODEL_BUILDER_TOOLS  = ["run_model_experiment", "inspect_model",
                          "score_model", "backtest_model_signal",
                          "promote_model", "attest_model_package", ...]  # 20, after it

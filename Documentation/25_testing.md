@@ -142,7 +142,7 @@ the run that introduced it, 6,514 passed and 519 skipped — the extra skips
 are the parity and benchmark tests that `importorskip` the extension,
 correctly — and it took 11:22 against 6:54, which is the compiled path's
 contribution measured at suite scale rather than per kernel. The suite is
-14,054 tests now (13,894 passed, 82 skipped with the extension and `SQT_EXPECT_NATIVE=1`, in 10:39 to 25:04 on the same machine depending on its load), so
+14,658 tests now (14,497 passed, 83 skipped with the extension and `SQT_EXPECT_NATIVE=1`, in 10:39 to 25:04 on the same machine depending on its load), so
 that pair of clocks is a ratio to re-measure, not a figure to quote.
 
 ### Why this is a testing concern and not a packaging one
@@ -278,7 +278,7 @@ fixtures, with the unchanged baselines as the null case.
 **Inputs are synthesized from the schema**, not hand-written. A hand-written
 fixture list covers the tools that existed when it was written — which makes
 the newest tools, where the bugs are, precisely the ones never fuzzed. All
-237 tools get a valid baseline and ten mutation families per numeric
+238 tools get a valid baseline and ten mutation families per numeric
 argument: empty, single-element, all-identical, all-zero, NaN, infinity,
 1e300, 1e-300, negated, truncated.
 
@@ -293,7 +293,7 @@ six modeling tools. The floor guard that was supposed to notice asked for
 tools of headroom for the gap to grow in.
 
 `EXPECTED_UNSYNTHESIZABLE` declares every absence with its reason, and is at
-present EMPTY -- every one of the 237 tools is synthesizable, so every
+present EMPTY -- every one of the 238 tools is synthesizable, so every
 one is fuzzed. Two guards hold it that way: an undeclared gap fails, and a declared gap
 that has since been fixed also fails, so the list cannot become a place
 exemptions accumulate. The floor is expressed against the live surface

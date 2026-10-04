@@ -27,7 +27,7 @@ scoping an MCP session -- see [18_mcp.md](18_mcp.md).
 Two tools (`run_backtest_optimization`, `scan_pairs`) are long-running and
 are served only with `--enable-long-running`. A default MCP session is also
 scoped to four categories rather than all of them, so it advertises 58 of the
-237 below; `--runtime all --enable-long-running` serves every one.
+238 below; `--runtime all --enable-long-running` serves every one.
 
 
 ## The runtimes
@@ -35,7 +35,7 @@ scoped to four categories rather than all of them, so it advertises 58 of the
 | Runtime | Tools | Schema cost | Categories | Deep documentation |
 |---|---:|---:|---|---|
 | `research` | 42 | 62 KB | `screener`, `analysis`, `quant_research` | [08_analysis.md](08_analysis.md), [23_inference.md](23_inference.md) |
-| `modeling` | 37 | 173 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
+| `modeling` | 38 | 181 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
 | `backtest` | 35 | 86 KB | `backtest_execution`, `backtest_validation`, `custom_signal` | [04_backtesting.md](04_backtesting.md), [24_overfitting.md](24_overfitting.md) |
 | `meta` | 25 | 24 KB | `discovery`, `provenance` | [27_meta.md](27_meta.md), [10_auditability.md](10_auditability.md) |
 | `data` | 21 | 36 KB | *(one surface)* | [26_data.md](26_data.md) |
@@ -43,8 +43,8 @@ scoped to four categories rather than all of them, so it advertises 58 of the
 | `delta_one` | 18 | 44 KB | *(one surface)* | [28_delta_one.md](28_delta_one.md) |
 | `microstructure` | 17 | 31 KB | *(one surface)* | [22_microstructure.md](22_microstructure.md) |
 | `derivatives` | 12 | 23 KB | *(one surface)* | [21_derivatives.md](21_derivatives.md) |
-| `feature_lab` | 11 | 38 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
-| **Total** | **237** | | | |
+| `feature_lab` | 11 | 44 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
+| **Total** | **238** | | | |
 
 ---
 
@@ -406,7 +406,7 @@ Combine several registered models into one prediction series, and publish it as 
 
 #### `check_leakage`
 
-Ask whether a set of features is temporally safe to fit on — before building a dataset with them. Optionally reports a built dataset's recorded point-in-time coverage too.
+Ask whether a set of features is temporally safe to fit on — before building a dataset with them. Optionally reports a built dataset's recorded point-in-time coverage too, and runs an empirical lead-lag screen on its columns. With a dataset_id, a column name such as an alias is checked under the catalog id it was built from, and omitting feature_ids checks that dataset's own features.
 
 *No required arguments.*  
 **Optional:** `feature_ids`, `dataset_id`
@@ -441,10 +441,10 @@ List the exchange calendars this installation knows, and resolve one into the nu
 
 #### `estimate_feature_warmup`
 
-How many bars of history a feature spec burns before its first usable row, at the parameters you are actually requesting. The catalog's lookback is a static number recorded against a feature's DEFAULT parameters, so it is simply wrong the moment a window is overridden: market.momentum is catalogued at 20 bars and consumes 900 when asked for lookback=900, and statistical.hurst is catalogued at 200 and consumes 500 at window=500. This reports declared beside resolved for every feature, names the one that BINDS (the only one worth shortening), adds the deepest lag on top -- lags are warm-up too, charged once at the deepest -- and converts the total into calendar days, which is the unit score_model's lookback_days is given in. That argument has no default that can be right for every spec: too small and scoring refuses with an empty panel, and nothing in the library derived it. Beside the total, bars_required_converged: the history after which a RECURSIVE feature (RSI, ATR, ADX, MACD, Parabolic SAR -- EMA and Wilder smoothers carry their start value forward) no longer depends on where the history started, 139 bars for RSI(14) against a first output at 14. That is what a scoring window must cover for the scored values to be the trained ones, given in calendar days as calendar_days_converged. Point-in-time features contribute nothing and are named, because their freshness is a staleness bound on records rather than a count of bars. This is the pre-build form of the question explain_dataset_row_loss answers afterwards, once a build has already been paid for. Unknown feature ids and invalid lags are refused here exactly as the dataset builder would refuse them. Fetches nothing.
+How many bars of history a feature spec burns before its first usable row, at the parameters you are actually requesting. The catalog's lookback is a static number recorded against a feature's DEFAULT parameters, so it is simply wrong the moment a window is overridden: market.momentum is catalogued at 20 bars and consumes 900 when asked for lookback=900, and statistical.hurst is catalogued at 200 and consumes 500 at window=500. This reports declared beside resolved for every feature, names the one that BINDS (the only one worth shortening), adds the deepest lag on top -- lags are warm-up too, charged once at the deepest -- and converts the total into calendar days, which is the unit score_model's lookback_days is given in. That argument has no default that can be right for every spec: too small and scoring refuses with an empty panel, and nothing in the library derived it. Beside the total, bars_required_converged: the history after which a RECURSIVE feature (RSI, ATR, ADX, MACD, Parabolic SAR -- EMA and Wilder smoothers carry their start value forward) no longer depends on where the history started, 139 bars for RSI(14) against a first output at 14. That is what a scoring window must cover for the scored values to be the trained ones, given in calendar days as calendar_days_converged. Point-in-time features contribute nothing and are named, because their freshness is a staleness bound on records rather than a count of bars. This is the pre-build form of the question explain_dataset_row_loss answers afterwards, once a build has already been paid for. Pass dataset_id or model_id instead to price what a built dataset or a registered model records -- every column, or the ones named by column name -- at the parameters, interval and calendar it was built with, read from its verified spec without reading the panel. Unknown feature ids and invalid lags are refused here exactly as the dataset builder would refuse them. Fetches nothing.
 
-**Required:** `features`  
-**Optional:** `interval`, `calendar`
+*No required arguments.*  
+**Optional:** `features`, `dataset_id`, `model_id`, `interval`, `calendar`
 
 #### `evaluate_model_portfolio`
 
@@ -463,6 +463,12 @@ Evaluate ANY published predictions reference as a shared-cash portfolio: transfo
 #### `explain_dataset_row_loss`
 
 Which column cost which training rows, and which are free to drop. Reports n_missing beside n_sole_missing, and the second is the actionable one: a 252-day feature sitting behind a 500-day one has n_missing in the hundreds of thousands and n_sole_missing of zero, so removing it gives back nothing. Reading only the first number produces a decision that feels informed and changes nothing, which is why "you lost 44% of the data" is not an answer.
+
+**Required:** `dataset_id`
+
+#### `inspect_dataset`
+
+Describe one dataset built by build_model_dataset or registered by register_external_panel -- the counterpart of inspect_model. Returns each column's FeatureSpec (catalog id, parameters, alias, lags), the target and its horizon, the requested universe beside the entities the panel holds and the feed that answered for each, the requested and realised span, rows and dates, provider, interval, calendar, missing-data policy, the rows each column cost, and the warnings recorded at build. Reads the two JSON files the build wrote, with the spec checked against its recorded hash; the panel is not read or hashed, so the cost does not grow with it (1.9 ms on a 31,680-row dataset whose panel takes 16 ms to read and hash). list_datasets lists dataset ids; get_dataset_metadata describes a data provider, not a dataset.
 
 **Required:** `dataset_id`
 
@@ -496,7 +502,7 @@ Which features this library can build, what each one measures, and what it costs
 
 #### `list_modeling_capabilities`
 
-What this modeling runtime can do: tasks, estimators and the capabilities of each (sample weights, probabilities, query groups, coefficients, feature importance), features, target types, validation schemes, preprocessing and weighting options, and which optional libraries are installed. Call this before choosing a model rather than assuming an estimator is available.
+What this modeling runtime can do: tasks, estimators and the capabilities of each (sample weights, probabilities, query groups, coefficients, feature importance), features, target types, validation schemes, preprocessing and weighting options, which optional libraries are installed, and what one fit of each estimator costs (`fit_cost`) and what sets its cores (`threads`). Call this before choosing a model rather than assuming an estimator is available.
 
 *No required arguments.*  
 **Optional:** `include_estimators`
@@ -573,14 +579,14 @@ Register a feature matrix computed OUTSIDE this library -- by a C++ pipeline ove
 
 #### `run_model_experiment`
 
-Fit + walk-forward validate + register a model from a persisted dataset.
+Fit + walk-forward validate + register a model from a persisted dataset. Returns `warnings` (including when the headline metric does not beat its null) and `notes` (what an r2 below baseline or a null importance block means).
 
 **Required:** `dataset_id`, `spec`  
 **Optional:** `target`
 
 #### `score_model`
 
-Run a registered model forward and get its predictions for a universe as of a date. The step that turns a fitted model into something a backtest can consume, and the one where point-in-time discipline matters most: the `as_of` date is what stops the model seeing features that did not exist yet. Raw probabilities from a tree ensemble are NOT calibrated, so a 0.9 threshold may select no rows at all -- check the distribution before thresholding.
+Run a registered model forward and get its predictions for a universe as of a date. The step that turns a fitted model into something a backtest can consume, and the one where point-in-time discipline matters most: the `as_of` date is what stops the model seeing features that did not exist yet. It fetches bars for every name in `universe` through `as_of`, so it costs a data fetch; a registered model's out-of-sample metrics need none and are in inspect_model. Raw probabilities from a tree ensemble are NOT calibrated, so a 0.9 threshold may select no rows at all -- check the distribution before thresholding.
 
 **Required:** `model_id`, `as_of`, `universe`  
 **Optional:** `lookback_days`, `max_staleness_days`, `universe_policy`
@@ -743,7 +749,7 @@ Run one strategy under several cost assumptions on a single fetched signal serie
 
 #### `estimate_backtest_overfitting`
 
-PBO: how often the configuration that wins in-sample loses out-of-sample, across every equal split of the period. It measures your SELECTION PROCEDURE, not the strategy -- 0.5 means picking the in-sample best is no better than picking at random, and above 0.5 means the grid is being fitted to noise. Reports the median pairwise correlation between configurations, because a hundred settings correlated at 0.99 are one strategy and the PBO on them is meaningless.
+PBO: how often the configuration that wins in-sample loses out-of-sample, across every equal split of the period. It measures your SELECTION PROCEDURE, not the strategy -- 0.5 means picking the in-sample best is no better than picking at random, and above 0.5 means the grid is being fitted to noise. Reports the median pairwise correlation between configurations, because a hundred settings correlated at 0.99 are one strategy and the PBO on them is meaningless. Needs two or more configurations in trial_returns, one return series each; compare_models in the modeling runtime compares registered models.
 
 **Required:** `trial_returns`  
 **Optional:** `n_splits`
@@ -1144,7 +1150,7 @@ Fetch individual trades and publish them as a tick_tape reference, for the micro
 
 #### `get_dataset_metadata`
 
-What the active provider GUARANTEES about the data it serves: whether prices are adjusted, whether the universe is survivorship-free, whether values are point-in-time, and which timezone stamps them. Read this before trusting a backtest over history, because a provider that is not point-in-time will hand you restated values under their original dates. `notes` carries what the booleans cannot -- which feed answers which window, and what is wrong with it.
+What the active provider GUARANTEES about the data it serves for one symbol: whether prices are adjusted, whether the universe is survivorship-free, whether values are point-in-time, and which timezone stamps them. Read this before trusting a backtest over history, because a provider that is not point-in-time will hand you restated values under their original dates. `notes` carries what the booleans cannot -- which feed answers which window, and what is wrong with it. This is a property of the provider, not of a dataset built by build_model_dataset; inspect_dataset in the modeling runtime describes one of those.
 
 **Required:** `symbol`  
 **Optional:** `source`, `interval`
@@ -1691,28 +1697,28 @@ Two feature sets measured on the same panel, with the cost of the difference att
 
 #### `get_feature_drift`
 
-Whether a feature is still the same measurement, and still predicts, either side of a date. Returns PSI and a two-sample KS for the distribution, plus the IC computed separately on each half. The two fail differently and need different fixes: distribution drift with a stable IC is a preprocessing problem, while a stable distribution with a collapsed IC means the edge is gone.
+Whether a feature is still the same measurement, and still predicts, either side of a date. Returns PSI and a two-sample KS for the distribution, plus the IC computed separately on each half. The two fail differently and need different fixes: distribution drift with a stable IC is a preprocessing problem, while a stable distribution with a collapsed IC means the edge is gone. screen_feature_stability runs this for every feature at once, with a per-block drift curve.
 
 **Required:** `dataset_id`, `feature`  
 **Optional:** `split_date`, `method`
 
 #### `get_feature_ic_decay`
 
-How one feature's IC behaves when the feature is displaced in time. Answers two questions: whether it leaks (an IC that spikes at shift 0 and collapses on both sides already contains the answer) and whether it is tradeable (how much IC survives one bar of staleness). Returns the curve as ordered points with the peak named.
+How one feature's IC behaves when the feature is displaced in time. Answers two questions: whether it leaks (an IC that spikes at shift 0 and collapses on both sides already contains the answer) and whether it is tradeable (how much IC survives one bar of staleness). Returns the curve as ordered points with the peak named. analyze_features returns the same curve for every feature at once, under report.leakage.
 
 **Required:** `dataset_id`, `feature`  
 **Optional:** `max_shift`, `method`
 
 #### `get_feature_redundancy`
 
-Which features are restatements of one another, and which one to keep. RSI, 20-day momentum, MACD and stochastic are one momentum cluster, not four independent sources of alpha. Returns each cluster with a representative chosen by strongest rank IC, the drop list already worked out, and the collinearity diagnostics (VIF, condition number) that say whether linear coefficients on this panel mean anything.
+Which features are restatements of one another, and which one to keep. RSI, 20-day momentum, MACD and stochastic can form one momentum cluster rather than four independent sources of alpha; whether they do is a property of the panel. Returns each cluster (pairs joined at |r| >= cluster_threshold) with a representative chosen by strongest rank IC, the drop list already worked out, the VIF per feature and the condition number, and collinear_features: every feature with VIF at or above 5 -- which the pairwise clusters cannot see when several features explain it together -- with the features that explain it. Warns at VIF 5 (note) and 10 (action), when a high-VIF feature is in no cluster, and at a condition number of 1000. A singular correlation matrix is reported as one: infinite condition number and infinite VIF (null) for the features in the exact combination.
 
 **Required:** `dataset_id`  
 **Optional:** `features`, `cluster_threshold`
 
 #### `get_feature_regime_stability`
 
-The feature's IC inside each of several CONTIGUOUS time blocks, never shuffled -- a feature's usual problem is that it worked in one regime, and interleaved folds average exactly that away. Returns per-block IC plus sign consistency against the full-sample IC. Read both: consistent sign with collapsing magnitude is decay, and sign consistency stays at 1.0 through it.
+The feature's IC inside each of several CONTIGUOUS time blocks, never shuffled -- a feature's usual problem is that it worked in one regime, and interleaved folds average exactly that away. Returns per-block IC plus sign consistency against the full-sample IC. Read both: consistent sign with collapsing magnitude is decay, and sign consistency stays at 1.0 through it. screen_feature_stability runs this for every feature at once.
 
 **Required:** `dataset_id`, `feature`  
 **Optional:** `n_blocks`, `method`
@@ -1733,14 +1739,14 @@ Refit the model without each feature in turn and report what each one was worth.
 
 #### `run_feature_permutation_test`
 
-How often noise on THIS panel produces an IC as large as the observed one, in either direction. Shuffles the feature within each date, which states the null exactly -- the feature carries no cross-sectional information within a date -- and returns a TWO-SIDED empirical p-value, so a strongly negative IC is significant rather than ignored. null_p95_abs is the IC this panel yields from noise alone 5% of the time, which is the defensible floor for select_features(min_abs_rank_ic=...). Cost is linear in n_permutations.
+How often a null drawn from THIS panel produces an IC as far from zero as the observed one, for one feature. The default null (null='circular_shift') rolls each entity's feature series in time by a random offset: the link to the target is broken and the feature's serial correlation kept, but so is each entity's average level, so a feature whose ranking of the entities barely moves can have a null centred far from zero -- read null_mean. null='entity_shuffle' hands each entity's whole series to another entity, which keeps the serial correlation and breaks that tilt too (select_features' default test; needs at least 4-5 entities). null='within_date' shuffles within each date and over-rejects on autocorrelated features. Returns a TWO-SIDED empirical p-value, so a strongly negative IC counts, plus the null's mean, spread and 95th percentile of |IC|. Cost is linear in n_permutations. screen_feature_significance runs this test over every feature at once.
 
 **Required:** `dataset_id`, `feature`  
 **Optional:** `n_permutations`, `method`, `random_seed`, `null`
 
 #### `screen_feature_significance`
 
-The IC floor this panel supports, for EVERY candidate feature at once. select_features(min_abs_rank_ic=...) takes a number, and the number an agent picks is usually 0.02 because 0.02 sounds small -- whether it is small is a property of the panel. This permutes each feature and returns honest_floor, the largest null_p95_abs across them: the |IC| this panel yields from noise alone 5% of the time. On a twelve-name panel a 0.02 floor kept four features of ten and the measured floor of 0.0694 kept none. Per feature: IC, two-sided p-value, that feature's own null and the per-date IC autocorrelation that says which null is calibrated. Cost is features x n_permutations draws at about 1.6 ms each, counted before the first shuffle and REFUSED past max_draws rather than truncated. Warns with the floor sentence and how many features each floor keeps, with the within_date caveat on autocorrelated features, and with the family-wise sentence -- twenty features at alpha 0.05 deliver one significant result from noise.
+run_feature_permutation_test for EVERY candidate feature at once, and the noise level the widest null sets. Per feature: IC, two-sided p-value, that feature's own null (null_mean and null_p95_abs) and the per-date IC autocorrelation that says which null is calibrated. honest_floor is the largest null_p95_abs across the features: on a twelve-name panel a 0.02 floor kept four features of ten and an honest_floor of 0.0694 kept none. It is not a min_abs_rank_ic for select_features -- it applies the widest null to every feature and reads every date, holdout included; select_features runs its own test on its selection window. null='circular_shift' (default), 'entity_shuffle' or 'within_date'. Cost is features x n_permutations draws, about 50 ns a panel row each under circular_shift (1.3-1.4 ms on a 31,680-row panel) and less under the other two, counted before the first shuffle and REFUSED past max_draws rather than truncated. Warns with the floor sentence and how many features each floor keeps, with the within_date caveat on autocorrelated features, and with the family-wise sentence -- twenty features at alpha 0.05 deliver one significant result from noise.
 
 **Required:** `dataset_id`  
 **Optional:** `features`, `n_permutations`, `method`, `null`, `random_seed`, `max_draws`
@@ -1754,7 +1760,7 @@ Every feature's drift and every feature's regime dependence in one pass: PSI and
 
 #### `select_features`
 
-Choose a feature set from a built dataset: keep one feature per redundancy cluster, drop what falls below an IC floor, and return a reason for every exclusion. Deliberately has no greedy search -- a selector scored on the panel it selects from manufactures overfit that looks like evidence. Redundancy is resolved before the IC floor, because a cluster is one signal and the question is whether THAT signal clears the floor. The redundancy work comes back with the answer -- the clusters get_feature_redundancy would return, the keeper each duplicate was dropped for, VIF and condition number -- so the diagnostics need no second call.
+Choose a feature set from a built dataset: keep one feature per redundancy cluster, apply an optional IC floor, drop what does not pass a permutation test against the target, and return a reason for every exclusion. The test (significance='entity_shuffle', default) runs on the selection window only, before the holdout is read: each cluster representative's mean rank IC against the same feature series handed to randomly permuted entities, kept at p < alpha (0.05); drops are reason 'insignificant' with their p-value, and selection_p_value carries every tested p. On the live panel it kept 2 of 8. 'circular_shift' is the screen's null; 'none' keeps every non-redundant feature above the floor, as before the test existed, and warns. Needs at least 4-5 entities. Deliberately has no greedy search -- a selector scored on the panel it selects from manufactures overfit that looks like evidence. Redundancy is resolved before the floor and the test, because a cluster is one signal. The redundancy work comes back with the answer -- the clusters get_feature_redundancy would return, the keeper each duplicate was dropped for, VIF, condition number and collinear_features -- so the diagnostics need no second call.
 
 **Required:** `dataset_id`  
-**Optional:** `features`, `cluster_threshold`, `min_abs_rank_ic`, `max_features`, `selection_end`, `holdout_fraction`, `include_correlation`
+**Optional:** `features`, `cluster_threshold`, `min_abs_rank_ic`, `max_features`, `significance`, `alpha`, `n_permutations`, `random_seed`, `max_draws`, `selection_end`, `holdout_fraction`, `include_correlation`

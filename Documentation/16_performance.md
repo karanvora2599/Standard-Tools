@@ -370,6 +370,19 @@ log line says so rather than a warning; import this package first to avoid
 it. The variable is process-wide, so scikit-learn's OpenMP and child
 processes inherit it.
 
+**scikit-learn's OpenMP pays for PASSIVE where nothing holds it back.**
+hist_gradient_boosting starts a team on every logical CPU for each fit and
+prediction, and its work per region is small on a modeling fold: on a
+15,000-row, 8-feature fold 16 sleeping-then-waking threads took 1.5–1.7 s
+against 0.28–0.36 s on one thread (ACTIVE: about 0.3 s either way). The
+modeling engine therefore holds OpenMP estimators to their share of the
+budget, one thread under `"auto"` below 2,000,000 training cells, through
+`_blas.openmp_thread_limit`, a reference-counted, process-wide limit
+modelled on the BLAS one (see
+[15_modeling.md](15_modeling.md#max_parallelism-what-the-budget-controls)).
+The manifest's environment records `OMP_WAIT_POLICY` beside the other
+thread variables.
+
 **The library's own matrix factorizations run on one BLAS thread.** OpenBLAS
 defaults to one thread per logical CPU, which is slower for
 covariance-sized matrices: `eigh` at 235 assets takes 2.6× as long on 16

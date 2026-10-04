@@ -66,7 +66,8 @@ precisely so that claim becomes visible and checkable, not implicit.
 `adjusted=False`.** It serves what the venue published, so a split is a
 real -50% bar; every other provider reports `True`. Read it before running
 `detect_price_jumps` over a Databento frame, where an unadjusted corporate
-action is a finding rather than a false positive.
+action is a finding rather than a false positive. The dataset build reads
+it: see [15_modeling.md, *Splits in unadjusted bars*](15_modeling.md#splits-in-unadjusted-bars).
 
 ---
 
@@ -181,6 +182,17 @@ closes at the exact same price for multiple consecutive sessions).
 Close-to-Close moves exceeding `threshold`, a proxy for an unadjusted
 split/dividend or a data error. A genuinely volatile session produces the
 same signature, so this is a lead, not a proven defect either.
+
+**`detect_split_like_moves(close, threshold=0.35)`** — the split screen the
+backtest and the dataset build run, as records. It lists every
+Close-to-Close move beyond `threshold` (default `SPLIT_SCREEN_THRESHOLD`,
+in `standard_quant_tools.constants`) with its `date`, `close_move`,
+`split_ratio` and `ratio_error`. `split_ratio` is the listed ratio (3:2 to
+50:1, or a reverse) that the price ratio across the bar is within 10% of on
+a log scale, else `None`, in new shares per old share — the unit
+`DatasetSpec.corporate_actions` takes. `ratio_error` is the log distance to
+the nearest listed ratio. Consistency is not proof: a −90% day reads like a
+10:1 split, and a 3:2 split (−33%) is below the default threshold.
 
 ---
 
