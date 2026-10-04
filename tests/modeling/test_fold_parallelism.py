@@ -113,7 +113,8 @@ def _recorded(result, drop_hashes=()):
         k: v for k, v in result.items() if k not in ("model_id", "oos_predictions_uri")
     }
     report = dict(out["validation_report"])
-    report["fits"] = {k: v for k, v in report["fits"].items() if k != "max_parallelism"}
+    varied = ("max_parallelism", "fold_workers", "fold_parallel_limit")
+    report["fits"] = {k: v for k, v in report["fits"].items() if k not in varied}
     out["validation_report"] = report
     out["oos_predictions"] = _artifacts.load_artifact(result["oos_predictions_uri"])
     hashes = dict(load_manifest(result["model_id"]).content_hashes)
@@ -149,9 +150,13 @@ class TestFoldWorkers:
         spec = _spec("gradient_boosting", params, budget, **spec_kwargs)
         return _fold_workers(spec, estimator_cls, n_folds)
 
-    def test_the_default_budget_is_the_sequential_loop(self):
-        assert ComputeBudgetSpec().max_parallelism == 1
+    def test_a_budget_of_one_is_the_sequential_loop(self):
         assert self._workers(GradientBoostingRegressor, 1) == 1
+
+    def test_the_default_budget_is_auto(self):
+        """'auto' since the CHANGELOG entry of 2026-10-04: the CPUs the
+        process may use, or SQT_NUM_THREADS."""
+        assert ComputeBudgetSpec().max_parallelism == "auto"
 
     def test_boosting_and_forests_run_side_by_side_up_to_the_budget(self):
         assert self._workers(GradientBoostingRegressor, 4) == 4
@@ -186,16 +191,13 @@ class TestIdenticalAtOneAndN:
 
     def test_random_forest_regression(self):
         """At least as many folds as the budget, so each fold's forest runs at
-        n_jobs=1, which sums its trees in order. The deployed forest is refit
-        after the folds at n_jobs=max_parallelism, as it always was, so its
-        pickle carries that parameter and is left out of the comparison."""
+        n_jobs=1. The deployed forest is refit after the folds on the whole
+        budget and put back on one thread before it is written down (see
+        the CHANGELOG entry of 2026-10-04), so its pickle is compared too."""
         dataset = _dataset()
         one = run_experiment(dataset, _spec("random_forest", RF, 1), "ds")
         four = run_experiment(dataset, _spec("random_forest", RF, 4), "ds")
-        _same(
-            _recorded(one, drop_hashes=("model.joblib",)),
-            _recorded(four, drop_hashes=("model.joblib",)),
-        )
+        _same(_recorded(one), _recorded(four))
 
     def test_calibrated_classification(self):
         dataset = _dataset(classification=True)

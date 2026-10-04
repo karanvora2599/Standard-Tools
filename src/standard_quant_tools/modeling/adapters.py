@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import dataclass
-from typing import Any, ClassVar, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -175,6 +175,26 @@ class ModelAdapter:
     #: for rankers, whose output is invariant to any monotone rescale — the
     #: reason R2 and MAE are not reported for them.
     score_has_scale: ClassVar[bool] = True
+    #: The out-of-sample metric a run of this task is judged on: the one
+    #: `run_model_experiment` tests against its null, `list_models` and
+    #: `compare_models` rank by, and `run_feature_ablation` compares when
+    #: the caller names none. One map, here, so the four cannot disagree.
+    headline: ClassVar[str] = ""
+    #: Read in order when a manifest predates the headline -- the
+    #: cross-sectional family arrived after the pooled metrics.
+    headline_fallbacks: ClassVar[Tuple[str, ...]] = ()
+    #: The value a model with no skill scores on the headline.
+    headline_null: ClassVar[Optional[float]] = None
+    #: The per-date series (a `fold_ic` key) whose pooled mean IS the
+    #: headline, which is what lets it be tested with a serial-correlation
+    #: correction. None for a headline that is not a mean over dates, which
+    #: is compared with its null as a point.
+    headline_series: ClassVar[Optional[str]] = None
+
+    @classmethod
+    def headline_metrics(cls) -> Tuple[str, ...]:
+        """The headline, then its fallbacks."""
+        return (cls.headline, *cls.headline_fallbacks)
 
     def prepare(
         self,
@@ -271,6 +291,14 @@ class ModelAdapter:
 
 class RegressionAdapter(ModelAdapter):
     task = "regression"
+    # The per-date cross-sectional rank IC, not the pooled `ic`: a model
+    # with no cross-sectional skill can post a pooled IC above 0.9 by
+    # following the market factor. The fallbacks are for manifests written
+    # before the cross-sectional family existed.
+    headline = "cs_rank_ic_mean"
+    headline_fallbacks = ("rank_ic", "ic", "r2")
+    headline_null = 0.0
+    headline_series = "cs_rank_ic"
 
     def metrics(self, model_spec, estimator, X, y_true, score, dates, train_y):
         return regression_metrics(y_true, score, dates=dates, train_y=train_y)
@@ -278,6 +306,9 @@ class RegressionAdapter(ModelAdapter):
 
 class ClassificationAdapter(ModelAdapter):
     task = "classification"
+    headline = "auc"
+    headline_fallbacks = ("roc_auc", "accuracy")
+    headline_null = 0.5
 
     def score(self, estimator: Any, X: pd.DataFrame) -> np.ndarray:
         """
@@ -307,6 +338,10 @@ class RankingAdapter(ModelAdapter):
     task = "ranking"
     needs_groups = True
     score_has_scale = False
+    headline = "cs_rank_ic_mean"
+    headline_fallbacks = ("ndcg_at_10", "ndcg_at_5")
+    headline_null = 0.0
+    headline_series = "cs_rank_ic"
 
     def prepare(self, model_spec, index, X, y, weights) -> FitArrays:
         """
@@ -375,6 +410,11 @@ class SurvivalAdapter(ModelAdapter):
 
     task = "survival"
     score_has_scale = False
+    # Whether the risk scores ordered the durations right, per date first
+    # and pooled second.
+    headline = "cs_concordance_mean"
+    headline_fallbacks = ("concordance",)
+    headline_null = 0.5
 
     def prepare(self, model_spec, index, X, y, weights) -> FitArrays:
         return FitArrays(
@@ -431,3 +471,10 @@ def get_adapter(task: str) -> ModelAdapter:
 
 def available_tasks() -> List[str]:
     return sorted(_ADAPTERS)
+
+
+def headline_metrics(task: str) -> Tuple[str, ...]:
+    """The headline metric of `task`, then its fallbacks; empty for a task
+    with no adapter."""
+    adapter = _ADAPTERS.get(task)
+    return adapter.headline_metrics() if adapter is not None else ()

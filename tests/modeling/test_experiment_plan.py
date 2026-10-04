@@ -443,7 +443,11 @@ class TestTheBudget:
             "final_search": 3 * 2,
             "candidates_per_fold": 3,
             "max_fits": planned,
-            "max_parallelism": 1,
+            # The budget as asked, 'auto' by default, and the folds a
+            # ridge fits one at a time whatever it says.
+            "max_parallelism": "auto",
+            "fold_workers": 1,
+            "fold_parallel_limit": "estimator fits one fold at a time",
         }
 
     def test_validate_model_spec_reports_the_plan_and_the_ceiling(

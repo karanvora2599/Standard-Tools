@@ -533,7 +533,9 @@ _OTHER_SETTINGS: Tuple[_Setting, ...] = (
         effect=(
             "A thread cap recorded in a run's environment fingerprint. "
             "Unset is recorded as unset: 'no cap was set' is a different "
-            "environment from 'capped at one'."
+            "environment from 'capped at one'. It is also what a model "
+            "budget of max_parallelism='auto' resolves to (else the CPUs "
+            "the process may use, at most 64)."
         ),
         resolve=_num_threads_value,
     ),

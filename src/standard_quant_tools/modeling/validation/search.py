@@ -186,6 +186,27 @@ def n_search_candidates(search_spec: Any) -> int:
     return int(size)
 
 
+def search_pool_workers(
+    method: str, n_candidates: int, n_inner_folds: int, max_parallelism: int
+) -> int:
+    """
+    The threads a search scores its candidates on: 1 when it scores them
+    one at a time (a budget of one, a single candidate, a tpe search, or
+    no inner fold), else the budget or the (candidate, inner fold) pairs
+    left after the first candidate fills the cache, whichever is fewer.
+
+    The same rule the walk-forward folds use, so that a candidate's
+    estimator can be given `max_parallelism // workers` threads of its own
+    and the threads in use never exceed the budget. Each candidate used to
+    get the whole budget as its `n_jobs` inside a pool of budget-many
+    workers: a random-forest grid at budget 4 ran sixteen tree builders.
+    """
+    budget = int(max_parallelism)
+    if method == "tpe" or budget <= 1 or n_candidates <= 1 or n_inner_folds < 1:
+        return 1
+    return int(max(1, min(budget, (n_candidates - 1) * n_inner_folds)))
+
+
 def rank_turnover(
     predictions: np.ndarray, dates: np.ndarray, entities: np.ndarray
 ) -> float:
@@ -344,6 +365,7 @@ def search_best_params(
     label_end: Optional[np.ndarray] = None,
     purge_basis: Optional[str] = None,
     max_parallelism: int = 1,
+    reported_parallelism: Any = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
     Choose estimator parameters using only `train_frame`.
@@ -373,6 +395,12 @@ def search_best_params(
     `purge_basis` is how the report names those label ends -- the engine
     passes 'label_end_derived_from_horizon' when it derived them -- and
     defaults to 'label_end'.
+
+    `max_parallelism` is the thread count the candidates are scored on
+    (see `search_pool_workers`); `reported_parallelism` is what the report
+    says it was, which the engine sets to the budget as the spec asked for
+    it -- 'auto' rather than the machine's CPU count, so the report reads
+    the same on every machine. Defaults to `max_parallelism`.
     """
     if label_end is not None and len(label_end) != len(train_frame):
         raise ValidationError(
@@ -458,7 +486,10 @@ def search_best_params(
         candidates = list(search_candidates(search_spec, random_seed))
         merged_candidates = [{**base_params, **params} for params in candidates]
         n_folds = len(inner_frames)
-        if int(max_parallelism) > 1 and len(merged_candidates) > 1:
+        workers = search_pool_workers(
+            search_spec.method, len(merged_candidates), n_folds, int(max_parallelism)
+        )
+        if workers > 1:
             # The first candidate runs alone, so each inner fold's
             # preprocessing is fitted once and cached before anything
             # reads it; every remaining (candidate, fold) pair is then
@@ -471,7 +502,7 @@ def search_best_params(
             jobs = [
                 (c, i) for c in range(1, len(merged_candidates)) for i in range(n_folds)
             ]
-            with ThreadPoolExecutor(max_workers=int(max_parallelism)) as pool:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
                 rest = list(
                     pool.map(
                         lambda job: score_fold(merged_candidates[job[0]], job[1]), jobs
@@ -512,7 +543,11 @@ def search_best_params(
         "scoring": search_spec.scoring,
         "n_candidates": len(results),
         "n_inner_folds": len(fold_masks),
-        "max_parallelism": int(max_parallelism),
+        "max_parallelism": (
+            int(max_parallelism)
+            if reported_parallelism is None
+            else reported_parallelism
+        ),
         "turnover_penalty": float(getattr(search_spec, "turnover_penalty", 0.0)),
         "embargo": int(embargo),
         # Per inner fold. Zero everywhere means the training window
@@ -643,4 +678,5 @@ __all__ = [
     "require_optuna",
     "search_best_params",
     "search_candidates",
+    "search_pool_workers",
 ]

@@ -34,6 +34,22 @@ definition. Two known gaps: an OpenBLAS built on OpenMP keeps its thread
 count per calling thread, so a limit set on one thread does not reach the
 others; and a caller changing the BLAS thread count from another thread
 while a user is inside is overwritten when the last user leaves.
+
+`openmp_thread_limit(n)` is the same reference-counted limit for the OpenMP
+runtimes instead of the BLAS: the threads scikit-learn's histogram gradient
+boosting, LightGBM and XGBoost start for one fit or prediction. Those read
+the runtime's thread count when a fit or a prediction starts, and at their
+default they take every logical CPU. Under the PASSIVE wait policy this
+package sets on import, histogram boosting on 16 threads fitted 15,000 rows
+of 8 features in 1.5 to 1.7 s, and on one thread in 0.28 to 0.36 s, with
+the same predictions. Under the MSVC runtime (vcomp) the count set on any
+thread reaches every thread, so the limit cannot be scoped to one call --
+`threadpool_limits` on a worker thread was measured reaching the main
+thread -- and is kept process-wide and counted like the BLAS limit: the
+count in force before the first user comes back when the last one leaves,
+and a user entering while another is inside runs on the count already in
+force. The count is also set on each entering user's own thread, which is
+where a runtime that keeps it per thread (GNU libgomp) reads it.
 """
 
 from __future__ import annotations
@@ -68,7 +84,7 @@ def _get_controller() -> Optional[Any]:
     numpy and scipy each bundle their own OpenBLAS; a controller only sees the
     libraries loaded when it was created, so scipy.linalg is imported first.
     Only the BLAS libraries are selected: an OpenMP runtime's thread count is
-    not this module's to set or put back.
+    set and put back by `openmp_thread_limit` alone.
     """
     global _controller, _unavailable
     if _controller is not None or _unavailable:
@@ -156,15 +172,108 @@ def single_threaded_blas() -> Iterator[None]:
                 _restore(saved)
 
 
+_omp_lock = threading.Lock()
+_omp_users = 0
+#: Each OpenMP runtime with its thread count from before the first user.
+_omp_saved: Optional[List[Tuple[Any, Optional[int]]]] = None
+#: The count the first user set, which later users run on.
+_omp_in_force: Optional[int] = None
+
+
+#: The OpenMP runtimes last found, and how many Python modules were loaded
+#: when they were looked for.
+_omp_found: Optional[Tuple[int, List[Any]]] = None
+
+
+def _openmp_libraries() -> List[Any]:
+    """The OpenMP runtimes loaded in this process.
+
+    Looked for again whenever a Python module has been imported since the
+    last look: an estimator library that brings its own runtime may load
+    after the first fit, and a controller sees only the libraries present
+    when it was made. Looking costs 3 to 6 ms, which a hyperparameter search
+    scoring thousands of candidates would otherwise pay on every one.
+    """
+    global _omp_found
+    import sys
+
+    loaded = len(sys.modules)
+    if _omp_found is not None and _omp_found[0] == loaded:
+        return _omp_found[1]
+    try:
+        from threadpoolctl import ThreadpoolController
+
+        libraries = list(
+            ThreadpoolController().select(user_api="openmp").lib_controllers
+        )
+    except Exception as exc:  # noqa: BLE001 - absent or broken: no limit
+        logger.debug("OpenMP thread limit unavailable: %s", exc)
+        libraries = []
+    _omp_found = (len(sys.modules), libraries)
+    return libraries
+
+
+def _set_openmp(libraries: List[Any], threads: int) -> None:
+    for library in libraries:
+        try:
+            library.set_num_threads(threads)
+        except Exception as exc:  # noqa: BLE001 - never fail the caller
+            logger.debug("OpenMP thread limit not applied: %s", exc)
+
+
+@contextmanager
+def openmp_thread_limit(threads: Optional[int]) -> Iterator[None]:
+    """
+    Run the enclosed block with every loaded OpenMP runtime at `threads`
+    threads, restoring the process's setting when the last concurrent user
+    leaves. None or below 1 leaves the runtimes alone.
+
+    A user entering while another is inside runs on the count the first
+    one set. The estimators this wraps give the same predictions at any
+    count, so that changes how long the block takes and nothing it returns.
+    """
+    global _omp_users, _omp_saved, _omp_in_force
+    if threads is None or int(threads) < 1:
+        yield
+        return
+    with _omp_lock:
+        if _omp_users == 0:
+            libraries = _openmp_libraries()
+            saved: List[Tuple[Any, Optional[int]]] = []
+            for library in libraries:
+                try:
+                    saved.append((library, library.get_num_threads()))
+                except Exception as exc:  # noqa: BLE001 - never fail the caller
+                    logger.debug("OpenMP thread count not read: %s", exc)
+            _omp_saved = saved
+            _omp_in_force = int(threads)
+        _set_openmp([library for library, _ in _omp_saved or []], _omp_in_force)
+        _omp_users += 1
+    try:
+        yield
+    finally:
+        with _omp_lock:
+            _omp_users -= 1
+            if _omp_users == 0:
+                saved, _omp_saved = _omp_saved or [], None
+                _omp_in_force = None
+                _restore(saved)
+
+
 def _after_fork_in_child() -> None:
     """A forked child starts with no users. The threads that were inside
     the limit in the parent do not exist here, so their exits would never
     come, and a lock held by one of them at the fork would never be
-    released. BLAS keeps whatever thread count the parent had at the fork."""
-    global _lock, _users, _saved
+    released. BLAS and OpenMP keep whatever thread counts the parent had at
+    the fork."""
+    global _lock, _users, _saved, _omp_lock, _omp_users, _omp_saved, _omp_in_force
     _lock = threading.Lock()
     _users = 0
     _saved = None
+    _omp_lock = threading.Lock()
+    _omp_users = 0
+    _omp_saved = None
+    _omp_in_force = None
 
 
 if hasattr(os, "register_at_fork"):
@@ -175,5 +284,6 @@ __all__ = [
     "BLAS_THREADS_ENV",
     "DEFAULT_BLAS_THREADS",
     "blas_thread_limit",
+    "openmp_thread_limit",
     "single_threaded_blas",
 ]

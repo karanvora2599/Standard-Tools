@@ -24,13 +24,19 @@ from .bounds import (
     EstimatorParamSchema,
     ParamBound,
 )
-from .registry import register_estimator
+from .registry import EstimatorCost, register_estimator
+
+# One default fit on a 15,030-row, 8-feature window of a daily panel, 16
+# logical cores: linear 0.002 s, ridge 0.001 s, lasso and elastic_net
+# 0.0015 s, huber 0.028 s. See EstimatorCost.
+_LOW = EstimatorCost("low", "one")
 
 register_estimator(
     "regression",
     "linear",
     LinearRegression,
     EstimatorParamSchema(bounds={"fit_intercept": FIT_INTERCEPT}),
+    cost=_LOW,
 )
 register_estimator(
     "regression",
@@ -39,6 +45,7 @@ register_estimator(
     EstimatorParamSchema(
         bounds={"alpha": ALPHA, "fit_intercept": FIT_INTERCEPT, "max_iter": MAX_ITER}
     ),
+    cost=_LOW,
 )
 register_estimator(
     "regression",
@@ -47,6 +54,7 @@ register_estimator(
     EstimatorParamSchema(
         bounds={"alpha": ALPHA, "fit_intercept": FIT_INTERCEPT, "max_iter": MAX_ITER}
     ),
+    cost=_LOW,
 )
 register_estimator(
     "regression",
@@ -60,6 +68,7 @@ register_estimator(
             "max_iter": MAX_ITER,
         }
     ),
+    cost=_LOW,
 )
 
 __all__ = ["LEARNING_RATE", "MAX_DEPTH", "N_ESTIMATORS"]
@@ -99,4 +108,5 @@ register_estimator(
             "max_iter": MAX_ITER,
         }
     ),
+    cost=_LOW,
 )

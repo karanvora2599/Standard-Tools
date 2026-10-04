@@ -21,7 +21,10 @@ from . import calendar as _calendar
 from .adapters import available_tasks, get_adapter
 from .estimators.registry import (
     ESTIMATOR_REGISTRY,
+    FIT_COSTS,
+    THREAD_KINDS,
     allowed_params,
+    estimator_cost,
     quantile_support,
 )
 from .features.registry import list_features as _list_features
@@ -100,11 +103,30 @@ def _task_report() -> Dict[str, Any]:
     }
 
 
+#: What `fit_cost` and `threads` mean in the capability report. The
+#: classes were read off one default fit of every registered estimator on
+#: a training window of a 30-name daily equity panel; see `EstimatorCost`.
+ESTIMATOR_COST_NOTE = (
+    "`fit_cost` is the time one fit takes, by class, measured at each "
+    "estimator's defaults on a 15,030-row, 8-feature training window of a "
+    "daily equity panel on 16 logical cores, the OpenMP estimators on one "
+    "thread: low under 0.05 s, medium 0.1 to 1 s, high 2 to 11 s. A "
+    "walk-forward experiment makes one fit per fold and one on the whole "
+    "panel, so a high-cost estimator over 8 folds of that size spends from "
+    "20 s to two minutes fitting at budget.max_parallelism=1. `threads` is "
+    "what sets the cores one fit uses: 'one' (one core whatever the budget), "
+    "'budget' (the estimator's n_jobs, given the fit's share of "
+    "budget.max_parallelism) or 'openmp' (the OpenMP runtime, held to the "
+    "fit's share)."
+)
+
+
 def estimator_capabilities() -> List[Dict[str, Any]]:
     """One entry per (task, estimator) actually available in this install."""
     out: List[Dict[str, Any]] = []
     for (task, name), cls in sorted(ESTIMATOR_REGISTRY.items()):
         support = quantile_support(task, name)
+        cost = estimator_cost(task, name)
         entry: Dict[str, Any] = {
             "name": name,
             "class": f"{cls.__module__}.{cls.__qualname__}",
@@ -113,6 +135,14 @@ def estimator_capabilities() -> List[Dict[str, Any]]:
             # estimator can fit one; None otherwise. What decides whether
             # `ModelSpec.quantiles` can be asked of it.
             "quantile_param": support.param if support is not None else None,
+            # What one fit costs and what sets its cores, as declared at
+            # registration; see `estimator_cost` below for the classes.
+            # None for an estimator registered without a declaration.
+            # Without them the report gave an agent choosing an estimator
+            # no way to tell that one random_forest fit costs about ten
+            # thousand ridge fits (11.1 s against 0.001 s, measured).
+            "fit_cost": cost.fit_cost if cost is not None else None,
+            "threads": cost.threads if cost is not None else None,
         }
         try:
             entry.update(get_adapter(task).capabilities(cls))
@@ -149,6 +179,13 @@ def modeling_capabilities() -> Dict[str, Any]:
         # reason: an agent reads this instead of trying things.
         "tasks": _task_report(),
         "estimators": estimator_capabilities(),
+        # What `estimators[*].fit_cost` and `threads` mean, said once
+        # beside the list rather than repeated in every entry.
+        "estimator_cost": {
+            "fit_cost": list(FIT_COSTS),
+            "threads": list(THREAD_KINDS),
+            "note": ESTIMATOR_COST_NOTE,
+        },
         "features": {
             "count": len(features),
             "by_namespace": dict(sorted(by_namespace.items())),

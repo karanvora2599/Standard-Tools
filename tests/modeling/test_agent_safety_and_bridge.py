@@ -149,8 +149,13 @@ class TestRegistryOverwriteProtection:
             )
 
     def test_explicit_overwrite_allowed_then_restored(self):
+        from standard_quant_tools.modeling.estimators.registry import estimator_cost
+
         key = ("regression", "ridge")
         original_cls = ESTIMATOR_REGISTRY[key]
+        # Restored with the rest of the registration, so later tests see
+        # the ridge every other test sees.
+        original_cost = estimator_cost(*key)
         schema = EstimatorParamSchema(bounds={"alpha": ParamBound("float", 0.0, 10.0)})
         try:
             register_estimator(
@@ -177,6 +182,7 @@ class TestRegistryOverwriteProtection:
                     }
                 ),
                 overwrite=True,
+                cost=original_cost,
             )
         validate_params("regression", "ridge", {"alpha": 1e6})
 

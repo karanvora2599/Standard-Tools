@@ -1063,17 +1063,30 @@ def screen_feature_stability(
     )
 
 
-def _first_numeric_metric(metrics):
+def _first_numeric_metric(metrics, task=None):
     """
-    The metric to compare when the caller did not name one.
+    The metric to compare when the caller did not name one: the task's
+    headline (`ModelAdapter.headline`, then its fallbacks), the metric
+    run_model_experiment tests and list_models ranks by.
 
-    Deterministic rather than arbitrary: sorted, so two runs on the same
-    dataset compare the same thing. The chosen name is echoed in the result,
-    because an ablation ranked on a metric the caller did not choose and
-    cannot see is a table of numbers with no stated meaning.
+    It used to be the alphabetically first finite metric, which for a
+    regression is `baseline_is_oracle` -- a 0/1 flag that is 0.0 with or
+    without any feature -- so every ablation reported every contribution
+    as 0.0 and "no feature made a positive contribution". The sorted rule
+    remains for a task with no headline among the baseline's metrics.
+    The chosen name is echoed in the result, because an ablation ranked on
+    a metric the caller did not choose and cannot see is a table of
+    numbers with no stated meaning.
     """
     import math
 
+    from standard_quant_tools.modeling.adapters import headline_metrics
+
+    for name in headline_metrics(task) if task else ():
+        value = metrics.get(name)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            if math.isfinite(float(value)):
+                return name
     for name in sorted(metrics):
         value = metrics[name]
         if isinstance(value, (int, float)) and not isinstance(value, bool):
@@ -1177,7 +1190,7 @@ def run_feature_ablation(input_data: FeatureAblationInput) -> FeatureAblationRes
         )["oos_metrics"]
 
     baseline_metrics = _fit(features)
-    metric = input_data.metric or _first_numeric_metric(baseline_metrics)
+    metric = input_data.metric or _first_numeric_metric(baseline_metrics, spec.task)
     baseline = _metric_value(baseline_metrics, metric)
 
     without = {}

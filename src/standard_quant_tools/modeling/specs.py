@@ -8,7 +8,8 @@ tool surface.
 """
 
 import math
-from typing import Annotated, ClassVar, Dict, List, Literal, Optional
+import os
+from typing import Annotated, ClassVar, Dict, List, Literal, Optional, Union
 
 import pandas as pd
 from pydantic import (
@@ -1432,6 +1433,34 @@ class RankingSpec(BaseModel):
         return self
 
 
+#: The environment variable `max_parallelism="auto"` reads first. The same
+#: cap the native kernels read, so one setting bounds both.
+NUM_THREADS_ENV = "SQT_NUM_THREADS"
+
+
+def auto_parallelism() -> int:
+    """
+    What `max_parallelism="auto"` resolves to in this process.
+
+    `SQT_NUM_THREADS` when set to a whole number above zero; otherwise the
+    CPUs this process may run on -- its affinity mask where the platform
+    reports one, else the machine's logical CPU count -- capped at the
+    budget's ceiling of 64. Unset, blank or 0 means no cap, as it does for
+    the native kernels. Read when a run starts, so a run reports the count
+    it ran on even if the variable changes later.
+    """
+    from standard_quant_tools._env import env_int
+
+    requested = env_int(NUM_THREADS_ENV, 0, minimum=0)
+    if requested:
+        return int(min(requested, MAX_PARALLELISM_CEILING))
+    try:
+        available = len(os.sched_getaffinity(0))  # type: ignore[attr-defined]
+    except (AttributeError, OSError):
+        available = os.cpu_count() or 1
+    return int(max(1, min(available, MAX_PARALLELISM_CEILING)))
+
+
 class ComputeBudgetSpec(BaseModel):
     """
     The most an experiment may cost, checked before it costs anything.
@@ -1459,24 +1488,43 @@ class ComputeBudgetSpec(BaseModel):
             "validate_model_spec reports the count without running."
         ),
     )
-    max_parallelism: int = Field(
-        1,
-        ge=1,
-        le=MAX_PARALLELISM_CEILING,
+    max_parallelism: Union[
+        Literal["auto"], Annotated[int, Field(ge=1, le=MAX_PARALLELISM_CEILING)]
+    ] = Field(
+        "auto",
         description=(
-            "Threads that score grid and random search candidates side by "
-            "side, and the n_jobs handed to any estimator whose constructor "
-            "accepts it and whose params do not set it. Without a search, "
-            "gradient_boosting and random_forest also fit their walk-forward "
-            "folds side by side on up to this many threads, each fold's "
-            "estimator then getting this value divided by the folds in "
-            "flight, so the total stays within it. 1 keeps every fit "
-            "sequential. The result does not depend on it: candidates and "
-            "folds keep their spec order whatever order they finish in, and "
-            "the TPE search stays sequential because a parallel study "
-            "changes which trials the sampler has seen."
+            "Threads one experiment may use: 'auto' (the default) or a whole "
+            "number from 1 to 64. 'auto' is SQT_NUM_THREADS when that is set, "
+            "else the CPUs this process may run on, at most 64; the run "
+            "reports 'auto' as asked, and the model's manifest records the "
+            "count it resolved to under environment.threads. The budget "
+            "scores grid and random search candidates side by side, each "
+            "candidate's estimator getting the budget divided by the "
+            "candidates in flight; without a search, fits gradient_boosting "
+            "and random_forest folds side by side, each fold's estimator "
+            "getting the budget divided by the folds in flight; and caps the "
+            "OpenMP threads of hist_gradient_boosting, lightgbm and xgboost "
+            "at the fit's share -- one thread under 'auto' for a fit below "
+            "2,000,000 training cells (rows x features), where one thread "
+            "was measured faster. The linear models fit one fold at a time "
+            "whatever it says. 1 keeps every fit sequential and on one "
+            "thread. The numbers a run reports do not depend on it: "
+            "candidates and folds keep their spec order whatever order they "
+            "finish in, a random forest predicts on one thread whatever it "
+            "was fitted on, and the TPE search stays sequential because a "
+            "parallel study changes which trials the sampler has seen. The "
+            "exception is LightGBM, whose fit can differ in the last bits "
+            "with its thread count; under 'auto' that is one thread below "
+            "2,000,000 training cells on every machine."
         ),
     )
+
+    def resolved_max_parallelism(self) -> int:
+        """The thread count this budget means here: the integer as given,
+        or `auto_parallelism()` for 'auto'."""
+        if self.max_parallelism == "auto":
+            return auto_parallelism()
+        return int(self.max_parallelism)
 
 
 class ConformalSpec(BaseModel):

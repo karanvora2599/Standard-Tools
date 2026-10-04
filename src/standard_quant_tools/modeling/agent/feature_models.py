@@ -1390,8 +1390,10 @@ class FeatureAblationInput(BaseModel):
     )
     metric: Optional[str] = Field(
         None,
-        description="Which OOS metric to compare. Defaults to the first "
-        "finite numeric metric the baseline reports, and the chosen name is "
+        description="Which OOS metric to compare. Defaults to the task's "
+        "headline metric -- cs_rank_ic_mean for regression and ranking, auc "
+        "for classification, cs_concordance_mean for survival, the metric "
+        "list_models and compare_models rank by -- and the chosen name is "
         "echoed back.",
     )
     max_fits: int = Field(

@@ -653,8 +653,17 @@ class TestTheExperimentResultKeepsTheEnginesWarnings:
         result = run_model_experiment(
             RunModelExperimentInput(dataset_id=dataset_id, spec=_ridge())
         )
-        # An uncalibrated ridge has nothing to caveat, so the null case is
-        # an empty list -- the point is that it ARRIVES, not that it is
-        # full. The engine's key is the same object either way.
-        assert result.warnings == []
+        # The point is that the field ARRIVES. On this random-walk panel an
+        # uncalibrated ridge has one caveat: a rank IC no different from
+        # zero, which the run tests and says (see the CHANGELOG entry of
+        # 2026-10-04). It is the only one, and the test that decided it
+        # travels in validation_report.headline.
         assert isinstance(result.warnings, list)
+        headline = result.validation_report["headline"]
+        assert headline["metric"] == "cs_rank_ic_mean"
+        assert headline["beats_null"] is False
+        assert len(result.warnings) == 1
+        assert result.warnings[0].startswith("cs_rank_ic_mean is ")
+        assert "Newey-West" in result.warnings[0]
+        # `notes` arrives beside it, always a list.
+        assert isinstance(result.notes, list)

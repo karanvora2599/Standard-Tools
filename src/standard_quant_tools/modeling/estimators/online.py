@@ -43,7 +43,7 @@ from sklearn.linear_model import SGDClassifier, SGDRegressor
 from standard_quant_tools.error import ValidationError
 
 from .bounds import ALPHA, FIT_INTERCEPT, MAX_ITER, EstimatorParamSchema, ParamBound
-from .registry import register_estimator
+from .registry import EstimatorCost, register_estimator
 
 #: How the step size shrinks as fitting proceeds.
 _LEARNING_RATE = ParamBound(
@@ -143,6 +143,9 @@ register_estimator(
         bounds={**_SHARED, "loss": _LOSS_REGRESSION},
         compatibility=(_elasticnet_needs_a_ratio,),
     ),
+    # One default fit on a 15,030-row, 8-feature window, 16 logical
+    # cores: 0.0065 s. See EstimatorCost.
+    cost=EstimatorCost("low", "one"),
 )
 
 
@@ -198,6 +201,8 @@ register_estimator(
         bounds={**_SHARED, "loss": _LOSS_CLASSIFICATION},
         compatibility=(_elasticnet_needs_a_ratio,),
     ),
+    # 0.040 s on the same window.
+    cost=EstimatorCost("low", "one"),
 )
 
 __all__ = ["ProbabilisticSGDClassifier", "SGDRegressor"]

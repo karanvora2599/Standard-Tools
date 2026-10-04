@@ -206,8 +206,10 @@ class ModelManifest(BaseModel):
     monitoring: Dict[str, Any] = Field(default_factory=dict)
     # What COMPUTED this model: Python, numpy, pandas, scikit-learn, scipy,
     # the optional boosters, the BLAS numpy was built against, whether the
-    # native extension was loaded and current, and the thread caps in
-    # force -- see registry/environment.py. `git_commit_sha` says what
+    # native extension was loaded and current, the thread caps and OpenMP
+    # wait policy in force, and `threads.auto_parallelism`, the count a
+    # budget of 'auto' resolved to, which the run's own report gives as
+    # 'auto' -- see registry/environment.py. `git_commit_sha` says what
     # source created a model; two machines at the same commit can differ on
     # every one of these, and the differences show up as coefficients that
     # agree to four digits rather than twelve. Empty for a manifest written

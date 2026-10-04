@@ -35,6 +35,38 @@ class QuantileSupport(NamedTuple):
 
 _QUANTILE_SUPPORT: Dict[Tuple[str, str], QuantileSupport] = {}
 
+#: The classes `EstimatorCost.fit_cost` may name, and what sets the cores
+#: one fit uses. See `EstimatorCost`.
+FIT_COSTS = ("low", "medium", "high")
+THREAD_KINDS = ("one", "budget", "openmp")
+
+
+class EstimatorCost(NamedTuple):
+    """
+    What one fit of an estimator costs, declared where it is registered.
+
+    `fit_cost` is a class -- 'low', 'medium' or 'high' -- read off one fit
+    at the estimator's defaults on a 15,030-row, 8-feature training window
+    of a daily equity panel on 16 logical cores, an OpenMP estimator on
+    the one thread budget 'auto' gives a fit of that size: low under
+    0.05 s, medium 0.1 to 1 s, high 2 to 11 s. None when it was not
+    measured. `threads` is
+    what sets the cores one fit uses: 'one' (a single core, whatever the
+    budget), 'budget' (the estimator's own `n_jobs`, handed the fit's share
+    of `budget.max_parallelism`), or 'openmp' (the OpenMP runtime, held to
+    the fit's share by the engine).
+
+    Declared rather than measured at run time because the capability report
+    is what an agent reads before choosing an estimator, and a timing taken
+    then would describe whatever else the machine was doing.
+    """
+
+    fit_cost: Optional[str]
+    threads: str
+
+
+_COSTS: Dict[Tuple[str, str], EstimatorCost] = {}
+
 
 def register_estimator(
     task: str,
@@ -44,6 +76,7 @@ def register_estimator(
     *,
     overwrite: bool = False,
     quantile: Optional[QuantileSupport] = None,
+    cost: Optional[EstimatorCost] = None,
 ) -> None:
     """
     Add an estimator to the allowlist.
@@ -55,8 +88,14 @@ def register_estimator(
     sits beside: an accidental re-registration could swap the class behind
     an established name with no error.
 
+    `cost` is what one fit costs and what sets its cores (see
+    `EstimatorCost`); an estimator registered without one reports
+    `fit_cost` and `threads` as None and is fitted with no thread limit
+    beyond its own `n_jobs`.
+
     Raises:
-        ValidationError: (task, name) already registered and overwrite=False.
+        ValidationError: (task, name) already registered and overwrite=False,
+        or a `cost` naming a class or thread kind that does not exist.
     """
     key = (task, name)
     if key in ESTIMATOR_REGISTRY and not overwrite:
@@ -64,12 +103,31 @@ def register_estimator(
             f"estimator (task={task!r}, name={name!r}) is already registered — pass "
             "overwrite=True to replace it, or choose a different name."
         )
+    if cost is not None and (
+        (cost.fit_cost is not None and cost.fit_cost not in FIT_COSTS)
+        or cost.threads not in THREAD_KINDS
+    ):
+        raise ValidationError(
+            f"estimator (task={task!r}, name={name!r}): cost={tuple(cost)!r} "
+            f"must name fit_cost in {list(FIT_COSTS)} or None, and threads in "
+            f"{list(THREAD_KINDS)}."
+        )
     ESTIMATOR_REGISTRY[key] = cls
     _PARAM_SCHEMAS[key] = schema
     if quantile is not None:
         _QUANTILE_SUPPORT[key] = quantile
     else:
         _QUANTILE_SUPPORT.pop(key, None)
+    if cost is not None:
+        _COSTS[key] = cost
+    else:
+        _COSTS.pop(key, None)
+
+
+def estimator_cost(task: str, name: str) -> Optional[EstimatorCost]:
+    """What one fit of this estimator costs and what sets its cores, or
+    None when its registration did not say."""
+    return _COSTS.get((task, name))
 
 
 def quantile_support(task: str, name: str) -> Optional[QuantileSupport]:

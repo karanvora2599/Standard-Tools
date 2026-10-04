@@ -39,16 +39,20 @@ PACKAGES = (
 )
 
 #: Thread caps read by numpy's BLAS, by numba and by this package's own
-#: kernels, and the BLAS limit this package applies to its own small
-#: factorizations (whose last bits depend on it). Unset is recorded as None
-#: rather than skipped: "no cap was set" is a different environment from
-#: "capped at one".
+#: kernels, the BLAS limit this package applies to its own small
+#: factorizations (whose last bits depend on it), and the OpenMP wait
+#: policy, which this package sets to PASSIVE on import unless the caller
+#: set it and which made scikit-learn's 16-thread histogram boosting about
+#: six times slower than one thread on a 15,000-row fold. Unset is recorded
+#: as None rather than skipped: "no cap was set" is a different environment
+#: from "capped at one".
 THREAD_VARIABLES = (
     "OMP_NUM_THREADS",
     "MKL_NUM_THREADS",
     "OPENBLAS_NUM_THREADS",
     "SQT_NUM_THREADS",
     "SQT_BLAS_THREADS",
+    "OMP_WAIT_POLICY",
 )
 
 
@@ -107,8 +111,26 @@ def environment_fingerprint() -> Dict[str, Any]:
         "threads": {
             **{name: os.environ.get(name) for name in THREAD_VARIABLES},
             "cpu_count": os.cpu_count(),
+            # What `budget.max_parallelism='auto'` resolves to in this
+            # process: SQT_NUM_THREADS, else the CPUs it may run on, at
+            # most 64. A run under 'auto' reports 'auto' -- its tool output
+            # must read the same on every machine -- and this is where the
+            # count it ran on is kept: the folds that ran side by side are
+            # min(this, folds) and each fit's share follows from it.
+            "auto_parallelism": _auto_parallelism(),
         },
     }
+
+
+def _auto_parallelism() -> Optional[int]:
+    """`specs.auto_parallelism()`, or None when the setting it reads is
+    unusable -- the fingerprint describes the process and never fails."""
+    try:
+        from ..specs import auto_parallelism
+
+        return auto_parallelism()
+    except Exception:  # noqa: BLE001 - absence is the answer, not an error
+        return None
 
 
 def _flatten(mapping: Any, prefix: str = "") -> Dict[str, Any]:

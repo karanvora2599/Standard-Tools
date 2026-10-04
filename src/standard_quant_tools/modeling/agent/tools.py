@@ -43,6 +43,7 @@ from typing import Any, Dict, List, Optional
 from standard_quant_tools.error import ValidationError
 
 from .. import artifacts as _artifacts
+from ..adapters import available_tasks, headline_metrics
 from ..analysis import build_feature_report
 from ..assets import fetch_plan
 from ..capabilities import modeling_capabilities
@@ -1354,23 +1355,17 @@ def backtest_model_signal(
 #: regression R2 against a classification AUC would produce an ordering
 #: that looks meaningful and is not, so tasks are ranked separately.
 #:
-#: The per-date cross-sectional rank IC leads for the two score tasks. It
-#: used to be the POOLED `ic`, which 15_modeling.md's own "What the metrics
-#: mean" section says conflates ranking names against each other with
-#: tracking the market's level across days -- a model with no
+#: Read off the task's adapter (`ModelAdapter.headline` and its
+#: fallbacks), the one map `run_model_experiment` tests against its null
+#: and `run_feature_ablation` compares by default, so the four cannot
+#: disagree. The per-date cross-sectional rank IC leads for the two score
+#: tasks. It used to be the POOLED `ic`, which 15_modeling.md's own "What
+#: the metrics mean" section says conflates ranking names against each
+#: other with tracking the market's level across days -- a model with no
 #: cross-sectional skill can post a pooled IC above 0.9 by following the
-#: market factor. Ranking regression models by that number ordered them on
-#: the thing the engine leads its report with telling you to ignore. The
-#: later entries are fallbacks for manifests written before the
-#: cross-sectional family existed.
-_HEADLINE_METRIC = {
-    "regression": ("cs_rank_ic_mean", "rank_ic", "ic", "r2"),
-    "classification": ("auc", "roc_auc", "accuracy"),
-    "ranking": ("cs_rank_ic_mean", "ndcg_at_10", "ndcg_at_5"),
-    # A risk score is judged on whether it ordered the durations right,
-    # per date first, pooled second.
-    "survival": ("cs_concordance_mean", "concordance"),
-}
+#: market factor. The later entries are fallbacks for manifests written
+#: before the cross-sectional family existed.
+_HEADLINE_METRIC = {task: headline_metrics(task) for task in available_tasks()}
 
 
 def _headline(task: str, metrics: dict, preferred=None):
@@ -3330,7 +3325,10 @@ _MODELING_TOOL_DEFS: List[tuple] = [
     ),
     (
         "run_model_experiment",
-        "Fit + walk-forward validate + register a model from a persisted dataset.",
+        "Fit + walk-forward validate + register a model from a persisted "
+        "dataset. Returns `warnings` (including when the headline metric does "
+        "not beat its null) and `notes` (what an r2 below baseline or a null "
+        "importance block means).",
         RunModelExperimentInput,
     ),
     (
@@ -3360,9 +3358,11 @@ _MODELING_TOOL_DEFS: List[tuple] = [
         "What this modeling runtime can do: tasks, estimators and the "
         "capabilities of each (sample weights, probabilities, query groups, "
         "coefficients, feature importance), features, target types, "
-        "validation schemes, preprocessing and weighting options, and which "
-        "optional libraries are installed. Call this before choosing a model "
-        "rather than assuming an estimator is available.",
+        "validation schemes, preprocessing and weighting options, which "
+        "optional libraries are installed, and what one fit of each estimator "
+        "costs (`fit_cost`) and what sets its cores (`threads`). Call this "
+        "before choosing a model rather than assuming an estimator is "
+        "available.",
         ListModelingCapabilitiesInput,
     ),
     (

@@ -179,6 +179,96 @@ def newey_west_variance(values: np.ndarray, lag: int) -> float:
     return variance / n
 
 
+#: Fewer finite dates than this and a headline is not tested against its
+#: null: a long-run variance read off a handful of dates is not an
+#: estimate of anything. The same floor `compare_ic_series` refuses at.
+MIN_HEADLINE_DATES = 10
+
+
+def andrews_lag(n_dates: int) -> int:
+    """The rule-of-thumb Bartlett bandwidth for `n_dates` observations,
+    floor(4 * (n / 100) ** (2/9)): 5 at 504 dates, 4 at 100."""
+    if n_dates < 1:
+        return 0
+    return int(math.floor(4.0 * (float(n_dates) / 100.0) ** (2.0 / 9.0)))
+
+
+def headline_lag(n_dates: int, horizon: Optional[int]) -> int:
+    """
+    The Newey-West lag a run's headline is tested at: max(2h, the Andrews
+    bandwidth), capped at `n_dates - 1`, with h the target horizon. Without
+    a horizon, the Andrews bandwidth alone.
+
+    WHY 2h AND NOT h - 1. Daily ICs of an h-day forward-return label share
+    up to h - 1 days of outcome, so their autocorrelation falls roughly
+    linearly to zero at lag h, and the overlap contributes a long-run
+    variance of h times the daily one. Bartlett weights cut off at lag
+    h - 1 discount those same autocorrelations a second time and recover
+    1 + 2 * sum_{k<h} (1 - k/h)^2 of the h: 3.4 of 5, 68%, for a 5-day
+    label. A selection-side simulation of the plain h - 1 rule rejected a
+    true zero mean 9.6% of the time at a nominal 5%. At lag 2h the same
+    weights recover 4.27 of 5 (85%), and the Andrews term keeps the lag
+    growing with the sample for a short horizon whose ICs persist for
+    other reasons.
+    """
+    n = int(n_dates)
+    if n < 2:
+        return 0
+    lag = andrews_lag(n)
+    if horizon is not None and int(horizon) > 0:
+        lag = max(lag, 2 * int(horizon))
+    return int(min(lag, n - 1))
+
+
+def mean_vs_null_test(
+    values: Any, *, null: float = 0.0, lag: int = 0
+) -> Dict[str, Any]:
+    """
+    Whether the mean of a serially correlated series differs from `null`.
+
+    The t statistic divides the mean's distance from `null` by the square
+    root of `newey_west_variance(values, lag)`; the p-value is two-sided
+    under the normal approximation. `t_stat_uncorrected` is the same
+    statistic at lag 0 -- the series read as independent -- reported beside
+    it so a reader can see how much the correction moved it, and
+    `autocorrelation_lag1` is the plainest sign of why. Non-finite values
+    are dropped first. With fewer than two values, or no variance, the
+    statistics are NaN rather than a number that means nothing.
+    """
+    x = np.asarray(values, dtype=np.float64)
+    x = x[np.isfinite(x)]
+    n = int(x.size)
+    nan = float("nan")
+    out: Dict[str, Any] = {
+        "n": n,
+        "mean": float(x.mean()) if n else nan,
+        "null": float(null),
+        "lag": int(lag),
+        "t_stat": nan,
+        "t_stat_uncorrected": nan,
+        "p_value": nan,
+        "autocorrelation_lag1": nan,
+    }
+    if n < 2:
+        return out
+    centered = x - x.mean()
+    denominator = float(np.dot(centered, centered))
+    if denominator > 0.0:
+        out["autocorrelation_lag1"] = float(
+            np.dot(centered[1:], centered[:-1]) / denominator
+        )
+    distance = float(x.mean()) - float(null)
+    variance = newey_west_variance(x, int(lag))
+    if math.isfinite(variance) and variance > 0.0:
+        t_stat = distance / math.sqrt(variance)
+        out["t_stat"] = float(t_stat)
+        out["p_value"] = float(math.erfc(abs(t_stat) / math.sqrt(2.0)))
+    plain = newey_west_variance(x, 0)
+    if math.isfinite(plain) and plain > 0.0:
+        out["t_stat_uncorrected"] = float(distance / math.sqrt(plain))
+    return out
+
+
 def diebold_mariano(
     loss_a: pd.Series, loss_b: pd.Series, *, lag: int = 0
 ) -> Dict[str, Any]:
@@ -431,12 +521,16 @@ def paired_comparison(
 
 __all__ = [
     "COMPARISON_METRICS",
+    "MIN_HEADLINE_DATES",
     "REQUIRED_COLUMNS",
+    "andrews_lag",
     "bh_adjust",
     "bonferroni_adjust",
     "compare_ic_series",
     "diebold_mariano",
+    "headline_lag",
     "holm_adjust",
+    "mean_vs_null_test",
     "newey_west_variance",
     "paired_comparison",
 ]

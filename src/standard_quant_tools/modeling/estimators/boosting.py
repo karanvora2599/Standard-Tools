@@ -40,7 +40,14 @@ from .bounds import (
     EstimatorParamSchema,
     ParamBound,
 )
-from .registry import QuantileSupport, register_estimator
+from .registry import EstimatorCost, QuantileSupport, register_estimator
+
+# One default fit on a 15,030-row, 8-feature window of a daily panel, 16
+# logical cores, the OpenMP boosters on one thread: lightgbm 0.60 s
+# regression / 0.53 s classification, xgboost 0.23 s / 0.19 s, both
+# rankers 0.64 s, quantile 4.8 s (a linear program over every row),
+# quantile_gradient_boosting 3.0 s. See EstimatorCost.
+_OPENMP_MEDIUM = EstimatorCost("medium", "openmp")
 
 logger = logging.getLogger(__name__)
 
@@ -137,8 +144,15 @@ def _register_lightgbm() -> bool:
         # The quantile objective beside the quantile itself; the engine
         # sets both, one fit per requested quantile.
         quantile=QuantileSupport("alpha", {"objective": "quantile"}),
+        cost=_OPENMP_MEDIUM,
     )
-    register_estimator("classification", "lightgbm", LGBMClassifier, _LIGHTGBM)
+    register_estimator(
+        "classification",
+        "lightgbm",
+        LGBMClassifier,
+        _LIGHTGBM,
+        cost=_OPENMP_MEDIUM,
+    )
     return True
 
 
@@ -153,8 +167,11 @@ def _register_xgboost() -> bool:
         XGBRegressor,
         _XGBOOST,
         quantile=QuantileSupport("quantile_alpha", {"objective": "reg:quantileerror"}),
+        cost=_OPENMP_MEDIUM,
     )
-    register_estimator("classification", "xgboost", XGBClassifier, _XGBOOST)
+    register_estimator(
+        "classification", "xgboost", XGBClassifier, _XGBOOST, cost=_OPENMP_MEDIUM
+    )
     return True
 
 
@@ -264,14 +281,26 @@ def _register_rankers() -> None:
     try:
         from lightgbm import LGBMRanker
 
-        register_estimator("ranking", "lightgbm_ranker", LGBMRanker, _RANKER_LGBM)
+        register_estimator(
+            "ranking",
+            "lightgbm_ranker",
+            LGBMRanker,
+            _RANKER_LGBM,
+            cost=_OPENMP_MEDIUM,
+        )
         registered = True
     except ImportError:
         pass
     try:
         from xgboost import XGBRanker
 
-        register_estimator("ranking", "xgboost_ranker", XGBRanker, _RANKER_XGB)
+        register_estimator(
+            "ranking",
+            "xgboost_ranker",
+            XGBRanker,
+            _RANKER_XGB,
+            cost=_OPENMP_MEDIUM,
+        )
         registered = True
     except ImportError:
         pass
@@ -299,6 +328,7 @@ def _register_quantile() -> None:
         QuantileRegressor,
         _QUANTILE_LINEAR,
         quantile=QuantileSupport("quantile", {}),
+        cost=EstimatorCost("high", "one"),
     )
     register_estimator(
         "regression",
@@ -306,6 +336,7 @@ def _register_quantile() -> None:
         QuantileGradientBoostingRegressor,
         _QUANTILE_GB,
         quantile=QuantileSupport("alpha", {}),
+        cost=EstimatorCost("high", "one"),
     )
 
 

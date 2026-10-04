@@ -13,8 +13,9 @@ leakage discipline.
 """
 
 import inspect
+import math
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -25,7 +26,7 @@ from sklearn.ensemble import (
     RandomForestRegressor,
 )
 
-from standard_quant_tools._blas import single_threaded_blas
+from standard_quant_tools._blas import openmp_thread_limit, single_threaded_blas
 from standard_quant_tools.error import ValidationError
 
 from . import artifacts as _artifacts
@@ -33,6 +34,7 @@ from .adapters import _exposes_coefficients, accepts_missing, get_adapter
 from .cache import FoldCache, column_wise_pipeline
 from .dataset.alignment import LABEL_END_COL
 from .estimators.registry import (
+    estimator_cost,
     get_estimator_class,
     quantile_estimators,
     quantile_support,
@@ -50,6 +52,12 @@ from .preprocessing import (
 from .registry.model_registry import new_model_id, save_model
 from .samples import SampleIndex
 from .specs import TASKS, ModelSpec, targets_for_task
+from .validation.comparison import (
+    MIN_HEADLINE_DATES,
+    andrews_lag,
+    headline_lag,
+    mean_vs_null_test,
+)
 from .validation.conformal import conformal_radius, held_out_residuals
 from .validation.diagnostics import fold_feature_importance, summarize_importance
 from .validation.distributional import distributional_metrics, quantile_column
@@ -72,9 +80,11 @@ from .validation.ranking import (
 )
 from .validation.search import (
     grid_duplicates_warning,
+    inner_fold_count,
     n_search_candidates,
     require_optuna,
     search_best_params,
+    search_pool_workers,
 )
 from .validation.survival import EVENT_COL, survival_labels
 from .validation.walk_forward import build_splitter, contiguous_runs
@@ -297,6 +307,263 @@ def _calibration_importance_warning(
     ]
 
 
+def _importance_source(per_fold: List[Any]) -> str:
+    """
+    Where `feature_importance_summary` came from: 'coefficients' when a
+    fold's estimator exposed `coef_`, 'feature_importances' when one
+    exposed non-negative importances, 'none' when no fold exposed either
+    and every number in the summary is NaN.
+    """
+    if any(fold.signed for fold in per_fold):
+        return "coefficients"
+    for fold in per_fold:
+        if any(math.isfinite(v) for v in fold.values.values()):
+            return "feature_importances"
+    return "none"
+
+
+def _importance_note(
+    model_spec: ModelSpec,
+    estimator_cls: Any,
+    summary: Dict[str, Dict[str, float]],
+    headline: str,
+) -> List[str]:
+    """
+    One sentence for an uncalibrated run whose estimator has no `coef_`,
+    saying which parts of `feature_importance_summary` are null by
+    construction and where to measure what a feature is worth instead.
+
+    The predicates are the capability report's own (`_exposes_coefficients`
+    and `feature_importances_` on the class), so the sentence and the flags
+    it points at cannot disagree; and it is said only when the summary
+    really is null where the sentence says, so an estimator that sets its
+    importances during the fit is not told it has none. A calibrated run
+    has its own warning, `_calibration_importance_warning`.
+
+    A null block without a word read as a failed fit: hist_gradient_boosting
+    returned 40 of 40 importance fields null and random_forest 24 of 40.
+    """
+    if getattr(model_spec.estimator, "calibration", "none") != "none":
+        return []
+    if not summary or _exposes_coefficients(estimator_cls):
+        return []
+    entries = list(summary.values())
+    name = estimator_cls.__name__
+    estimator = model_spec.estimator.type
+    pointer = (
+        f"run_feature_ablation with metric='{headline}' measures what each "
+        "feature is worth to this model by refitting without it."
+    )
+    if not hasattr(estimator_cls, "feature_importances_"):
+        if all(not math.isfinite(e.get("mean", math.nan)) for e in entries):
+            return [
+                "feature_importance_summary is null for every feature by "
+                f"construction, not because the fit failed: {name} exposes "
+                "neither coef_ nor feature_importances_, as "
+                f"list_modeling_capabilities reports for {estimator} "
+                "(exposes_coefficients false, exposes_feature_importance "
+                f"false). {pointer}"
+            ]
+        return []
+    signed = ("signed_mean", "signed_std", "sign_consistency")
+    if all(
+        not math.isfinite(e.get(key, math.nan)) for e in entries for key in signed
+    ) and any(math.isfinite(e.get("mean", math.nan)) for e in entries):
+        return [
+            "feature_importance_summary carries mean and std for every "
+            "feature and null signed_mean, signed_std and sign_consistency, "
+            f"by construction: {name}'s feature_importances_ are non-negative "
+            "and carry no direction, as list_modeling_capabilities reports "
+            f"for {estimator} (exposes_coefficients false, "
+            "exposes_feature_importance true). mean says how much the fitted "
+            "trees relied on a feature, not which way it moves the "
+            f"prediction; {pointer}"
+        ]
+    return []
+
+
+def _r2_note(
+    oos_metrics: Dict[str, float],
+    fold_metrics: List[Dict[str, float]],
+    fold_weights: List[float],
+    headline: str,
+) -> List[str]:
+    """
+    Why r2 sits below its baseline, said whenever it does.
+
+    r2 can be no larger than the squared correlation between prediction and
+    label: the best rescaling of the predictions reaches it and any other
+    falls short. So the ceiling is each fold's squared pooled `ic`,
+    averaged with the weights the folds' r2 are averaged with (their test
+    rows). On a cross-sectionally ranked label the baseline is zero by
+    construction and that ceiling was 0.002 to 0.005 on a 30-name daily
+    equity panel: every model there reported a negative r2 beside a
+    positive rank IC, and nothing said which of the two to read.
+    """
+    r2 = oos_metrics.get("r2")
+    baseline = oos_metrics.get("baseline_r2")
+    if r2 is None or baseline is None:
+        return []
+    if not (math.isfinite(r2) and math.isfinite(baseline)) or r2 >= baseline:
+        return []
+    below = sum(
+        1
+        for m in fold_metrics
+        if math.isfinite(m.get("r2", math.nan))
+        and math.isfinite(m.get("baseline_r2", math.nan))
+        and m["r2"] < m["baseline_r2"]
+    )
+    squares = np.array([m.get("ic", math.nan) ** 2 for m in fold_metrics])
+    weights = np.asarray(fold_weights, dtype=float)
+    usable = np.isfinite(squares) & (weights > 0)
+    ceiling = (
+        float(np.average(squares[usable], weights=weights[usable]))
+        if usable.any()
+        else math.nan
+    )
+    which = "a negative r2" if r2 < 0 else "an r2 below the baseline's"
+    bound = (
+        f", {ceiling:.4f} averaged over these folds" if math.isfinite(ceiling) else ""
+    )
+    return [
+        f"r2 is {r2:.4f} against baseline_r2 {baseline:.4f}, the "
+        "training-fold mean predicted for every row, and below it in "
+        f"{below} of {len(fold_metrics)} folds. r2 can be no larger than the "
+        "square of each fold's correlation between prediction and label"
+        f"{bound}, so {which} says the predictions are more dispersed, or "
+        "further from the label's level, than that correlation supports: as "
+        "values they did worse than the constant, and as an ordering they "
+        f"are measured by {headline}, not by r2."
+    ]
+
+
+def _lag_reason(lag: int, n_dates: int, horizon: "int | None") -> str:
+    """Why the headline test used the lag it did, as a clause."""
+    if lag >= n_dates - 1 and lag < max(andrews_lag(n_dates), 2 * (horizon or 0)):
+        return ", one less than the number of dates"
+    if horizon and lag == 2 * int(horizon):
+        return f", twice the {int(horizon)}-day label horizon"
+    return f", the Andrews bandwidth for {n_dates:,} dates"
+
+
+def _headline_report(
+    adapter: Any,
+    task: str,
+    oos_metrics: Dict[str, float],
+    series: "pd.Series | None",
+    horizon: "int | None",
+) -> "Tuple[Dict[str, Any], List[str]]":
+    """
+    The headline metric against what a model with no skill scores, and the
+    warning when it does not beat it.
+
+    For a headline that is the mean of a per-date series (the
+    cross-sectional rank IC of a regression or a ranker) the test is a
+    Newey-West t on the pooled series -- under cpcv, each date's mean across
+    the paths that tested it -- at `headline_lag`, two-sided at 5%. For one
+    that is not (a classifier's AUC, a survival model's concordance) it is
+    a point comparison with 0.5. Measured on a 30-name daily equity panel,
+    none of sixteen recorded runs beat zero at 5% (ridge t 0.31, hist
+    gradient boosting t 1.82 at lag 5, random forest t 0.10), and every run
+    had reported the headline with nothing to say so.
+    """
+    metric = adapter.headline
+    null = adapter.headline_null
+    value = oos_metrics.get(metric)
+    block: Dict[str, Any] = {
+        "metric": metric,
+        "null": null,
+        "value": None if value is None else float(value),
+        "n_dates": None,
+        "t_stat": None,
+        "t_stat_uncorrected": None,
+        "p_value": None,
+        "hac_lag": None,
+        "ic_autocorrelation_lag1": None,
+        "beats_null": None,
+    }
+    if value is None or null is None or not math.isfinite(value):
+        return block, []
+    rank_by = (
+        f"{metric} is the metric compare_models and list_models rank {task} "
+        "models by."
+    )
+
+    if adapter.headline_series is None:
+        beats = bool(value > null)
+        block["beats_null"] = beats
+        if beats:
+            return block, []
+        what = (
+            "the predicted probabilities did not separate the classes"
+            if task == "classification"
+            else "the risk scores did not order the durations"
+        )
+        return block, [
+            f"{metric} is {value:.4f}, at or below the {null} a random "
+            f"ordering scores: out of sample, {what}. {rank_by}"
+        ]
+
+    values = (
+        series.to_numpy(dtype=np.float64)
+        if series is not None
+        else np.empty(0, dtype=np.float64)
+    )
+    n = int(np.isfinite(values).sum())
+    block["n_dates"] = n
+    if n < MIN_HEADLINE_DATES:
+        return block, [
+            f"{metric} is {value:.4f} over {n} out-of-sample date(s), fewer than "
+            f"the {MIN_HEADLINE_DATES} a Newey-West test needs, so whether it "
+            "differs from zero was not tested."
+        ]
+    lag = headline_lag(n, horizon)
+    test = mean_vs_null_test(values, null=float(null), lag=lag)
+    block.update(
+        {
+            "t_stat": test["t_stat"],
+            "t_stat_uncorrected": test["t_stat_uncorrected"],
+            "p_value": test["p_value"],
+            "hac_lag": lag,
+            "ic_autocorrelation_lag1": test["autocorrelation_lag1"],
+        }
+    )
+    t_stat, p_value = test["t_stat"], test["p_value"]
+    if not (math.isfinite(t_stat) and math.isfinite(p_value)):
+        return block, [
+            f"{metric} is {value:.4f} over {n:,} out-of-sample dates whose daily "
+            "values do not vary, so whether it differs from zero was not "
+            "tested."
+        ]
+    beats = bool(p_value < 0.05 and t_stat > 0)
+    block["beats_null"] = beats
+    if beats:
+        return block, []
+    variance = (
+        f"t = {t_stat:.2f}, two-sided p = {p_value:.3f}, from a Newey-West "
+        f"variance at lag {lag}{_lag_reason(lag, n, horizon)}"
+    )
+    if p_value < 0.05:
+        return block, [
+            f"{metric} is {value:.4f} over {n:,} out-of-sample dates, below "
+            f"zero by more than noise explains: {variance}. The predictions "
+            "order the names in reverse: ranking by the negated prediction "
+            f"would have scored {-value:+.4f} on these dates. {rank_by}"
+        ]
+    autocorrelation = test["autocorrelation_lag1"]
+    plain = test["t_stat_uncorrected"]
+    independent = (
+        f" The daily values have lag-1 autocorrelation {autocorrelation:.2f}; "
+        f"read as independent, the same series gives t = {plain:.2f}."
+        if math.isfinite(autocorrelation) and math.isfinite(plain)
+        else ""
+    )
+    return block, [
+        f"{metric} is {value:.4f} over {n:,} out-of-sample dates and is not "
+        f"distinguishable from zero: {variance}.{independent} {rank_by}"
+    ]
+
+
 #: Panel rows from which a `gradient_boosting` run is pointed at
 #: `hist_gradient_boosting`. See `_gradient_boosting_advice` for why here.
 _GRADIENT_BOOSTING_ADVICE_ROWS = 10_000
@@ -349,14 +616,76 @@ def _gradient_boosting_advice(model_spec: ModelSpec, n_rows: int) -> List[str]:
     ]
 
 
+#: Panel rows from which a one-thread `random_forest` run is told what a
+#: budget would buy it. The `gradient_boosting` threshold, for the same
+#: reason: below it a forest's fits take about a second each and the
+#: sentence would be noise.
+_RANDOM_FOREST_ADVICE_ROWS = 10_000
+
+
+def _random_forest_advice(model_spec: ModelSpec, n_rows: int, budget: int) -> List[str]:
+    """
+    Said once, at the top of a `random_forest` run that will build every
+    tree on one core on a panel large enough for that to be where the
+    run's time goes.
+
+    A forest's trees are independent, so its `n_jobs` builds them side by
+    side, and the folds of a walk-forward experiment fit side by side
+    too; at a budget of one neither happens. The budget defaults to
+    'auto', so this is a spec that asked for 1, or a machine that gives
+    the process one CPU. Measured on a 30-name daily equity panel (31,680
+    rows, 8 features, 16 logical cores shared with other work; 200 trees
+    of depth 6, 8 folds and the refit): 71 to 124 s at budget 1, 18.1 to
+    18.9 s at 'auto' with every content hash of the budget-1 run, and
+    hist_gradient_boosting at its defaults 3.9 to 7.9 s at 'auto'. The
+    same 10,000-row threshold as `_gradient_boosting_advice`.
+
+    Guidance, never a substitution, as for gradient boosting.
+    """
+    if model_spec.estimator.type != "random_forest":
+        return []
+    if budget > 1 or "n_jobs" in model_spec.estimator.params:
+        return []
+    if n_rows < _RANDOM_FOREST_ADVICE_ROWS:
+        return []
+    setting = (
+        "budget.max_parallelism='auto', which is one thread on this machine,"
+        if model_spec.budget.max_parallelism == "auto"
+        else "budget.max_parallelism=1"
+    )
+    return [
+        f"random_forest on a {n_rows:,}-row panel at {setting} builds every "
+        "tree on one core, and at this size that is where the run's time "
+        "goes. On a 31,680-row, 8-feature panel on 16 logical cores, 200 "
+        "trees of depth 6 took 71 to 124 s for 8 walk-forward folds and the "
+        "refit, 97% of it building trees; at budget.max_parallelism='auto' "
+        "the same experiment took 18 to 19 s with the same predictions, and "
+        "hist_gradient_boosting at its defaults took 4 to 8 s. It is a "
+        "different model, so it was not substituted: this run fitted "
+        "random_forest as specified."
+    ]
+
+
 def _instantiate(
-    cls: Any, params: Dict[str, Any], random_seed: int, n_jobs: Optional[int] = None
+    cls: Any,
+    params: Dict[str, Any],
+    random_seed: int,
+    n_jobs: Optional[int] = None,
+    *,
+    exact_n_jobs: bool = False,
 ) -> Any:
     """
     Build an estimator from its params, plus what the run supplies: the
     seed, and -- for a constructor that accepts `n_jobs` and params that
     do not set it -- the budget's parallelism. An estimator whose
     signature has neither is built from its params alone.
+
+    `n_jobs` of 1 is left to the constructor's default, which for
+    scikit-learn is one thread, unless `exact_n_jobs`: an OpenMP booster
+    reads its default as every core. LightGBM ignores the OpenMP runtime's
+    thread count when its n_jobs is unset -- measured on 400,000 x 20 rows,
+    9.4 CPU-seconds in 2.4 s under a one-thread limit -- so its share is
+    handed to it explicitly, one included.
     """
     sig = inspect.signature(cls.__init__)
     kwargs = dict(params)
@@ -364,7 +693,7 @@ def _instantiate(
         kwargs["random_state"] = random_seed
     if (
         n_jobs
-        and int(n_jobs) > 1
+        and (int(n_jobs) > 1 or exact_n_jobs)
         and "n_jobs" in sig.parameters
         and "n_jobs" not in kwargs
     ):
@@ -382,10 +711,22 @@ def _instantiate(
 #: process start-up and copying each fold's matrices).
 #:
 #: Every other estimator keeps its folds one at a time. Histogram
-#: boosting, LightGBM and XGBoost already spread one fit over every core,
-#: and some of their sums depend on the thread count; the linear models fit
-#: a fold in a fraction of a second through BLAS, whose reductions are not
-#: promised to be independent of the threads running beside them.
+#: boosting, LightGBM and XGBoost spread one fit over OpenMP threads,
+#: which `openmp_thread_limit` holds to the fit's share of the budget, and
+#: folds side by side would not overlap anyway: the GIL is held between
+#: their parallel regions. Histogram boosting's predictions do not depend
+#: on its thread count in scikit-learn 1.9 (measured bit-identical at one
+#: and at sixteen threads), but its pickle does -- the bin mapper records
+#: the count it was fitted with -- so `model.joblib` differs between two
+#: thread counts while every number a run reports agrees. XGBoost's
+#: predictions measured identical at 1, 4 and 16 threads too; LightGBM's
+#: agreed on a 25,000-row fit and differed in the last bits (4e-19) on a
+#: 160,000-row one, so under 'auto' -- one thread below 2,000,000 training
+#: cells -- its numbers on such a panel no longer depend on the machine,
+#: and above that they follow the budget as they did before. The linear
+#: models fit a fold in a fraction of a second through BLAS, whose
+#: reductions are not promised to be independent of the threads running
+#: beside them.
 _FOLD_PARALLEL_ESTIMATORS = frozenset(
     {
         GradientBoostingClassifier,
@@ -395,41 +736,173 @@ _FOLD_PARALLEL_ESTIMATORS = frozenset(
     }
 )
 
+#: Why folds ran one at a time, or side by side up to the budget, as
+#: `validation_report["fits"]["fold_parallel_limit"]` names it.
+FOLD_LIMIT_BUDGET = "budget"
+FOLD_LIMIT_ESTIMATOR = "estimator fits one fold at a time"
+FOLD_LIMIT_N_JOBS = "n_jobs set in params"
+FOLD_LIMIT_SEARCH = "search"
+FOLD_LIMIT_ONE_FOLD = "one fold"
 
-def _fold_workers(model_spec: ModelSpec, estimator_cls: Any, n_folds: int) -> int:
+
+def _fold_schedule(
+    model_spec: ModelSpec,
+    estimator_cls: Any,
+    n_folds: int,
+    budget: Optional[int] = None,
+) -> "Tuple[int, Optional[str]]":
     """
-    How many walk-forward folds run side by side: up to
-    `budget.max_parallelism` for an estimator in `_FOLD_PARALLEL_ESTIMATORS`,
-    else 1, which is the sequential loop exactly as it always ran.
+    How many walk-forward folds run side by side, and what limited it:
+    up to the budget for an estimator in `_FOLD_PARALLEL_ESTIMATORS`, else
+    1, which is the sequential loop exactly as it always ran. `budget` is
+    the resolved thread count; None resolves the spec's.
+
+    The limit is None when every fold ran side by side; otherwise, in the
+    order checked: `FOLD_LIMIT_ONE_FOLD`, `FOLD_LIMIT_ESTIMATOR`,
+    `FOLD_LIMIT_N_JOBS` (the caller chose that parallelism, and it would
+    multiply with this one), `FOLD_LIMIT_SEARCH` (the search spends the
+    budget scoring its candidates side by side inside each fold), and
+    `FOLD_LIMIT_BUDGET` (fewer threads than folds, a budget of one
+    included).
 
     Folds beside each other share the budget: each fold's estimators get
-    n_jobs = max_parallelism // workers, so the threads in use never exceed
-    it, and with at least as many folds as the budget that is n_jobs=1.
+    n_jobs = budget // workers, so the threads in use never exceed it.
     Before, the budget reached only an estimator's own n_jobs, which a
     gradient booster does not have: its folds ran one at a time on one
-    core whatever the budget said.
-
-    A random forest above n_jobs=1 adds its trees' predictions in whatever
-    order its own threads finish, so the last bits of its predictions were
-    never reproducible at a budget above 1 (measured: n_jobs=8 against
-    n_jobs=1, not bit-identical). Folds at n_jobs=1 add them in order, so
-    with at least as many folds as the budget a forest's numbers are now
-    exactly its max_parallelism=1 numbers. The full-panel refit still runs
-    alone, after the folds, at the whole budget.
-
-    Also 1 when the spec sets the estimator's `n_jobs` itself (the caller
-    chose that parallelism, and it would multiply with this one), and when
-    a hyperparameter search runs: the search already spends the budget
-    scoring its candidates side by side inside each fold.
+    core whatever the budget said. A random forest fits on its share of
+    threads -- each tree from a seed drawn before any thread starts, so the
+    fit does not depend on them -- and predicts on one, which adds its
+    trees in order (see `_predict_on_one_thread`); so its numbers are its
+    budget-1 numbers at any budget.
     """
-    budget = int(model_spec.budget.max_parallelism)
-    if budget <= 1 or n_folds < 2:
-        return 1
+    if budget is None:
+        budget = model_spec.budget.resolved_max_parallelism()
+    budget = int(budget)
+    if n_folds < 2:
+        return 1, FOLD_LIMIT_ONE_FOLD
     if estimator_cls not in _FOLD_PARALLEL_ESTIMATORS:
-        return 1
-    if "n_jobs" in model_spec.estimator.params or model_spec.search is not None:
-        return 1
-    return min(budget, n_folds)
+        return 1, FOLD_LIMIT_ESTIMATOR
+    if "n_jobs" in model_spec.estimator.params:
+        return 1, FOLD_LIMIT_N_JOBS
+    if model_spec.search is not None:
+        return 1, FOLD_LIMIT_SEARCH
+    workers = max(1, min(budget, n_folds))
+    return workers, (FOLD_LIMIT_BUDGET if workers < n_folds else None)
+
+
+def _fold_workers(
+    model_spec: ModelSpec,
+    estimator_cls: Any,
+    n_folds: int,
+    budget: Optional[int] = None,
+) -> int:
+    """How many walk-forward folds run side by side; see `_fold_schedule`."""
+    return _fold_schedule(model_spec, estimator_cls, n_folds, budget)[0]
+
+
+#: Training cells (rows x columns) below which an OpenMP estimator fits on
+#: one thread under budget 'auto'. Measured on hist_gradient_boosting under
+#: the PASSIVE wait policy this package sets: a 15,000-row, 8-feature fold
+#: fitted in 0.28 to 0.36 s on one thread and 1.5 to 1.7 s on sixteen, with
+#: the same predictions, while at 1,000,000 x 8 rows one thread was 1.5x
+#: slower than sixteen. The crossing is near 2,000,000 cells. An explicit
+#: budget is taken as asked.
+_OPENMP_ONE_THREAD_CELLS = 2_000_000
+
+
+def _fit_threads(
+    threads_kind: Optional[str],
+    budget_asked: Any,
+    share: int,
+    n_cells: int,
+) -> "Tuple[int, Optional[int]]":
+    """
+    (the n_jobs one fit's constructor is handed, the OpenMP thread count it
+    runs under) for a fit given `share` threads of the budget.
+
+    An OpenMP estimator gets the same count for both: one thread under
+    'auto' below `_OPENMP_ONE_THREAD_CELLS` training cells, else its share.
+    Every other estimator is handed its share as n_jobs, which reaches only
+    a constructor that takes it, and runs under no OpenMP limit.
+    """
+    share = max(1, int(share))
+    if threads_kind != "openmp":
+        return share, None
+    if budget_asked == "auto" and n_cells < _OPENMP_ONE_THREAD_CELLS:
+        return 1, 1
+    return share, share
+
+
+def _reported_fold_schedule(
+    budget_asked: Any, workers: int, limit: Optional[str]
+) -> Dict[str, Any]:
+    """
+    `fold_workers` and `fold_parallel_limit` as the tool output reports
+    them: the folds that ran side by side and what limited it.
+
+    Under budget 'auto' the count depends on the machine wherever the
+    budget decides it, and a recorded run is replayed by comparing its
+    output on whatever machine checks it -- so there it reads 'auto',
+    limited by 'budget', and the count is min(the resolved budget, folds),
+    with the resolved budget in the manifest's
+    `environment.threads.auto_parallelism`. A limit that is not the
+    budget's -- the estimator, a search, n_jobs in params, a single fold --
+    is the same on every machine and is reported with its count of 1.
+    """
+    if budget_asked == "auto" and limit in (FOLD_LIMIT_BUDGET, None):
+        return {"fold_workers": "auto", "fold_parallel_limit": FOLD_LIMIT_BUDGET}
+    return {"fold_workers": int(workers), "fold_parallel_limit": limit}
+
+
+def _cache_report(
+    after: Dict[str, int], before: Dict[str, int], shared: bool, projectable: bool
+) -> Dict[str, Any]:
+    """The cache block of `validation_report`: hits, misses and whether the
+    cache was shared, plus projections and projectability for a shared one
+    -- the only kind that can project."""
+    report: Dict[str, Any] = {
+        key: after[key] - before[key] for key in ("hits", "misses")
+    }
+    report["shared"] = shared
+    if shared:
+        report["projections"] = after["projections"] - before["projections"]
+        report["projectable"] = projectable
+    return report
+
+
+def _forests_in(estimator: Any) -> List[Any]:
+    """The scikit-learn forests inside a fitted estimator: itself, and the
+    per-fold clones a `CalibratedClassifierCV` fitted around it."""
+    found: List[Any] = []
+    if isinstance(estimator, (RandomForestClassifier, RandomForestRegressor)):
+        found.append(estimator)
+    for calibrated in getattr(estimator, "calibrated_classifiers_", None) or ():
+        found.extend(_forests_in(getattr(calibrated, "estimator", None)))
+    return found
+
+
+def _predict_on_one_thread(estimator: Any) -> None:
+    """
+    Put every forest inside a fitted estimator back on its constructor's
+    n_jobs (None, one thread), so that it predicts, reports importances and
+    pickles the same at any budget.
+
+    A random forest fits its trees side by side from seeds drawn up front,
+    so its fit does not depend on n_jobs; its predictions do. Above one
+    job, scikit-learn adds the trees' outputs in whatever order its threads
+    finish, and the last bits followed: at a budget of 16 over 8 folds,
+    5,798 of 15,120 out-of-sample predictions differed from the budget-1
+    run (by up to 1.7e-13 relative), and two budget-16 runs differed from
+    each other. The deployed forest kept n_jobs at the budget, so its
+    pickle -- and `score_model` -- depended on the budget too. Predicting on
+    one thread costs little: prediction is a small share of a forest's fit.
+
+    The allowlist admits no `n_jobs`, so any n_jobs above one on a forest
+    here is the budget's.
+    """
+    for forest in _forests_in(estimator):
+        if forest.n_jobs not in (None, 1):
+            forest.set_params(n_jobs=None)
 
 
 def _run_folds_side_by_side(
@@ -768,6 +1241,11 @@ def _fit(
     consecutive per-query counts and ASSUME the rows are already ordered by
     group without checking, which is why the caller sorts by date first and
     group_sizes() verifies the ordering rather than trusting it.
+
+    Every fit in a run comes through here -- each fold's, each search
+    candidate's, each quantile and conformal fit's, and the refit's -- so
+    this is where a forest fitted on several threads is put back on one
+    before anything predicts with it (see `_predict_on_one_thread`).
     """
     kwargs: Dict[str, Any] = {}
     if weights is not None:
@@ -776,6 +1254,7 @@ def _fit(
         kwargs["group"] = group
     if not kwargs:
         estimator.fit(X, y)
+        _predict_on_one_thread(estimator)
         return
     try:
         estimator.fit(X, y, **kwargs)
@@ -787,6 +1266,7 @@ def _fit(
             "or an estimator that supports weighted fitting; for group, use a "
             "task='ranking' estimator."
         ) from exc
+    _predict_on_one_thread(estimator)
 
 
 def _fit_quantile_models(
@@ -796,6 +1276,7 @@ def _fit_quantile_models(
     model_spec: ModelSpec,
     arrays: Any,
     n_jobs: Optional[int] = None,
+    exact_n_jobs: bool = False,
 ) -> Dict[float, Any]:
     """
     One estimator per requested quantile, fitted on the same rows and
@@ -803,8 +1284,11 @@ def _fit_quantile_models(
     set and its fixed objective switched on. The point estimator is left
     exactly as it was: `prediction` is the base fit, and the quantiles
     stand beside it. `n_jobs` defaults to the budget's parallelism; a fold
-    fitted beside others passes its own share.
+    fitted beside others passes its own share, and `exact_n_jobs` is
+    `_instantiate`'s.
     """
+    if n_jobs is None:
+        n_jobs = model_spec.budget.resolved_max_parallelism()
     models: Dict[float, Any] = {}
     for q in model_spec.quantiles:
         quantile_params = {**params, **support.fixed, support.param: float(q)}
@@ -812,7 +1296,8 @@ def _fit_quantile_models(
             estimator_cls,
             quantile_params,
             model_spec.random_seed,
-            n_jobs=model_spec.budget.max_parallelism if n_jobs is None else n_jobs,
+            n_jobs=n_jobs,
+            exact_n_jobs=exact_n_jobs,
         )
         _fit(model, arrays.X, arrays.y, arrays.sample_weight)
         models[float(q)] = model
@@ -825,6 +1310,7 @@ def _conformal_radius(
     model_spec: ModelSpec,
     arrays: Any,
     n_jobs: Optional[int] = None,
+    exact_n_jobs: bool = False,
 ) -> "tuple[float, int]":
     """
     The split-conformal radius for one training window: absolute
@@ -844,7 +1330,7 @@ def _conformal_radius(
         )
     weights = arrays.sample_weight
     if n_jobs is None:
-        n_jobs = model_spec.budget.max_parallelism
+        n_jobs = model_spec.budget.resolved_max_parallelism()
 
     def fit_predict(train_mask, test_mask):
         model = _instantiate(
@@ -852,6 +1338,7 @@ def _conformal_radius(
             params,
             model_spec.random_seed,
             n_jobs=n_jobs,
+            exact_n_jobs=exact_n_jobs,
         )
         _fit(
             model,
@@ -947,6 +1434,19 @@ def run_experiment(
         model_spec.task, model_spec.estimator.type, model_spec.estimator.params
     )
 
+    # The budget as the spec asked for it -- a whole number, or 'auto' --
+    # and the thread count that means in this process, read once so every
+    # fit of the run shares one answer. Only the first reaches the tool
+    # output: the second depends on the machine, and a recorded run is
+    # replayed on whatever machine checks it. The manifest's
+    # `environment.threads.auto_parallelism` keeps the second.
+    budget_asked = model_spec.budget.max_parallelism
+    budget = model_spec.budget.resolved_max_parallelism()
+    # What sets the cores one fit uses, as the registry declares it: a
+    # forest's own n_jobs, an OpenMP runtime, or one core.
+    cost = estimator_cost(model_spec.task, model_spec.estimator.type)
+    threads_kind = cost.threads if cost is not None else None
+
     # Caveats about THIS run, returned beside its metrics. Seeded with the
     # one the run can state before it starts.
     run_warnings: List[str] = []
@@ -987,6 +1487,7 @@ def run_experiment(
     )
     run_warnings.extend(purge_warnings)
     run_warnings.extend(_gradient_boosting_advice(model_spec, len(panel)))
+    run_warnings.extend(_random_forest_advice(model_spec, len(panel), budget))
     feature_ids = dataset["feature_ids"]
     dates = pd.Index(sorted(panel["date"].unique()))
 
@@ -1090,7 +1591,7 @@ def run_experiment(
     # one, more than one candidate; a tpe search runs one trial at a time).
     search_on_pool = (
         model_spec.search is not None
-        and int(model_spec.budget.max_parallelism) > 1
+        and budget > 1
         and model_spec.search.method != "tpe"
         and n_search_candidates(model_spec.search) > 1
     )
@@ -1109,7 +1610,28 @@ def run_experiment(
         The folds call this on their training rows; the refit calls it on
         the full panel, which is how the deployed estimator comes to carry
         parameters a search actually chose (findings D14).
+
+        Candidates scored side by side share the budget the way folds do:
+        each gets `budget // workers` threads, `workers` being the pool
+        `search_best_params` runs (`search_pool_workers`, one rule for
+        both). Each candidate was handed the whole budget inside a pool of
+        budget-many workers, so a random-forest grid at a budget of 4 ran
+        sixteen tree builders and each histogram-boosting candidate started
+        an OpenMP team on every core. Candidates scored one at a time get
+        the whole budget, as before.
         """
+        n_inner = inner_fold_count(
+            int(frame["date"].nunique()),
+            model_spec.search.inner_splits,
+            model_spec.validation.embargo,
+        )
+        pool_workers = search_pool_workers(
+            model_spec.search.method,
+            n_search_candidates(model_spec.search),
+            n_inner,
+            budget,
+        )
+        candidate_share = max(1, budget // pool_workers)
 
         def _fit_predict(params, inner_train, inner_test, fold_index):
             inner_key = f"{prefix}{fold_index}"
@@ -1118,11 +1640,18 @@ def run_experiment(
                 matrices = _preprocess(model_spec, inner_train, inner_test, feature_ids)
                 cache.store(inner_key, feature_ids, *matrices, projectable=projectable)
             inner_train_X, inner_test_X = matrices
+            fit_jobs, openmp_threads = _fit_threads(
+                threads_kind,
+                budget_asked,
+                candidate_share,
+                int(inner_train_X.shape[0]) * int(inner_train_X.shape[1]),
+            )
             candidate = _instantiate(
                 estimator_cls,
                 params,
                 model_spec.random_seed,
-                n_jobs=model_spec.budget.max_parallelism,
+                n_jobs=fit_jobs,
+                exact_n_jobs=openmp_threads is not None,
             )
             inner_index = SampleIndex.from_frame(inner_train)
             inner_arrays = adapter.prepare(
@@ -1132,17 +1661,18 @@ def run_experiment(
                 _labels(model_spec, inner_train),
                 _fold_sample_weights(model_spec, inner_index),
             )
-            _fit(
-                candidate,
-                inner_arrays.X,
-                inner_arrays.y,
-                inner_arrays.sample_weight,
-                group=inner_arrays.group,
-            )
-            # The adapter's score, so a search on a ranker selects using
-            # the ordering score the real fit will produce rather than
-            # whatever `predict` happens to return.
-            predictions = adapter.score(candidate, inner_test_X)
+            with openmp_thread_limit(openmp_threads):
+                _fit(
+                    candidate,
+                    inner_arrays.X,
+                    inner_arrays.y,
+                    inner_arrays.sample_weight,
+                    group=inner_arrays.group,
+                )
+                # The adapter's score, so a search on a ranker selects using
+                # the ordering score the real fit will produce rather than
+                # whatever `predict` happens to return.
+                predictions = adapter.score(candidate, inner_test_X)
             probabilities = predictions if model_spec.task == "classification" else None
             return predictions, probabilities
 
@@ -1174,14 +1704,19 @@ def run_experiment(
             embargo=model_spec.validation.embargo,
             label_end=(frame[LABEL_END_COL].to_numpy() if has_label_end else None),
             purge_basis=purge_basis,
-            max_parallelism=model_spec.budget.max_parallelism,
+            max_parallelism=budget,
+            # The report says what the spec asked for: 'auto', not this
+            # machine's count.
+            reported_parallelism=budget_asked,
         )
 
-    # How many folds may be fitted side by side, and the n_jobs each fold's
-    # estimators then get -- see `_fold_workers`. One worker is the loop as
-    # it always ran, with the budget's n_jobs.
-    fold_workers = _fold_workers(model_spec, estimator_cls, len(plan.folds))
-    fold_n_jobs = int(model_spec.budget.max_parallelism) // fold_workers
+    # How many folds may be fitted side by side, what limited it, and the
+    # n_jobs each fold's estimators then get -- see `_fold_schedule`. One
+    # worker is the loop as it always ran, with the budget's n_jobs.
+    fold_workers, fold_limit = _fold_schedule(
+        model_spec, estimator_cls, len(plan.folds), budget
+    )
+    fold_n_jobs = budget // fold_workers
     # Folds prepared and not skipped: the number the next completed fold
     # will carry. One at a time it is `len(fold_records)`; it is counted
     # separately so that it is the same number when the fits run later.
@@ -1372,11 +1907,22 @@ def run_experiment(
                 prefix=f"{fold.preprocessing_hash}/inner/{model_spec.search.inner_splits}/",
             )
 
+        # The fold's n_jobs, or for an OpenMP estimator the threads its
+        # runtime is held to -- one under 'auto' on a matrix this small.
+        # Taken after the search, whose candidates set their own.
+        fit_jobs, openmp_threads = _fit_threads(
+            threads_kind,
+            budget_asked,
+            n_jobs,
+            int(train_X.shape[0]) * int(train_X.shape[1]),
+        )
+        exact = openmp_threads is not None
         estimator = _instantiate(
             estimator_cls,
             fold_params,
             model_spec.random_seed,
-            n_jobs=n_jobs,
+            n_jobs=fit_jobs,
+            exact_n_jobs=exact,
         )
         arrays = adapter.prepare(
             model_spec,
@@ -1389,40 +1935,54 @@ def run_experiment(
         # from it, so the map never sees a label the estimator memorized --
         # and never sees a test row at all.
         estimator = _calibrated(estimator, model_spec, len(arrays.y))
-        _fit(estimator, arrays.X, arrays.y, arrays.sample_weight, group=arrays.group)
-
-        metrics, prediction_values, fold_ic = _predict_fold(
-            adapter,
-            model_spec,
-            estimator,
-            test_X,
-            test_y,
-            test_df["date"].to_numpy(),
-            train_y=train_y,
-        )
-        # ── The distribution beside the point ────────────────────────────
-        # One more fit per requested quantile, on the same rows, and a
-        # conformal radius read off held-out date blocks inside this
-        # training window; both become OOS columns beside `prediction`,
-        # which is left exactly as the base fit produced it, and metrics
-        # beside the point metrics.
-        distribution_columns: Dict[str, np.ndarray] = {}
-        quantile_values: Dict[float, np.ndarray] = {}
-        if quantile is not None:
-            for q, model in _fit_quantile_models(
-                estimator_cls, quantile, fold_params, model_spec, arrays, n_jobs=n_jobs
-            ).items():
-                quantile_values[q] = np.asarray(model.predict(test_X.to_numpy()))
-                distribution_columns[quantile_column(q)] = quantile_values[q]
-        lower = upper = None
-        if model_spec.intervals is not None:
-            radius, _n_calibration = _conformal_radius(
-                estimator_cls, fold_params, model_spec, arrays, n_jobs=n_jobs
+        with openmp_thread_limit(openmp_threads):
+            _fit(
+                estimator, arrays.X, arrays.y, arrays.sample_weight, group=arrays.group
             )
-            lower = np.asarray(prediction_values, dtype=float) - radius
-            upper = np.asarray(prediction_values, dtype=float) + radius
-            distribution_columns["lower"] = lower
-            distribution_columns["upper"] = upper
+
+            metrics, prediction_values, fold_ic = _predict_fold(
+                adapter,
+                model_spec,
+                estimator,
+                test_X,
+                test_y,
+                test_df["date"].to_numpy(),
+                train_y=train_y,
+            )
+            # ── The distribution beside the point ────────────────────────
+            # One more fit per requested quantile, on the same rows, and a
+            # conformal radius read off held-out date blocks inside this
+            # training window; both become OOS columns beside `prediction`,
+            # which is left exactly as the base fit produced it, and
+            # metrics beside the point metrics.
+            distribution_columns: Dict[str, np.ndarray] = {}
+            quantile_values: Dict[float, np.ndarray] = {}
+            if quantile is not None:
+                for q, model in _fit_quantile_models(
+                    estimator_cls,
+                    quantile,
+                    fold_params,
+                    model_spec,
+                    arrays,
+                    n_jobs=fit_jobs,
+                    exact_n_jobs=exact,
+                ).items():
+                    quantile_values[q] = np.asarray(model.predict(test_X.to_numpy()))
+                    distribution_columns[quantile_column(q)] = quantile_values[q]
+            lower = upper = None
+            if model_spec.intervals is not None:
+                radius, _n_calibration = _conformal_radius(
+                    estimator_cls,
+                    fold_params,
+                    model_spec,
+                    arrays,
+                    n_jobs=fit_jobs,
+                    exact_n_jobs=exact,
+                )
+                lower = np.asarray(prediction_values, dtype=float) - radius
+                upper = np.asarray(prediction_values, dtype=float) + radius
+                distribution_columns["lower"] = lower
+                distribution_columns["upper"] = upper
         if distribution_columns:
             metrics.update(
                 distributional_metrics(
@@ -1580,6 +2140,9 @@ def run_experiment(
     # IC was stable inside each fold but swung between them scored as
     # dependable. The per-fold numbers remain in validation_report, where
     # they answer the different question of how each fold did.
+    # The pooled per-date series behind the headline, kept for its test
+    # against the null: the series the headline's mean was taken over.
+    headline_series: "pd.Series | None" = None
     for prefix, series_list in pooled_ic.items():
         if is_cpcv:
             # Paths are NOT disjoint in time: a date is tested in several,
@@ -1590,8 +2153,14 @@ def run_experiment(
             merged = pd.concat(series_list)
             per_date = merged.groupby(level=0).mean().sort_index()
             oos_metrics.update(summarize_cross_sectional_ic(per_date, prefix))
+            pooled = per_date
         else:
             oos_metrics.update(aggregate_cross_sectional_ic(series_list, prefix))
+            # The concatenation `aggregate_cross_sectional_ic` summarizes.
+            usable = [s for s in series_list if s is not None and not s.empty]
+            pooled = pd.concat(usable).sort_index() if usable else None
+        if prefix == adapter.headline_series:
+            headline_series = pooled
     importance_summary = summarize_importance(fold_importance, model_columns or [])
 
     # Sample size discounted for target overlap. A `horizon`-bar forward
@@ -1627,6 +2196,27 @@ def run_experiment(
             "h-bar label it overstates the independent observations by up to "
             "a factor of h."
         )
+
+    # ── The headline against what no skill scores ─────────────────────
+    # The metric compare_models and list_models rank this task by, tested
+    # against its null; a warning when it does not beat it.
+    headline_block, headline_warnings = _headline_report(
+        adapter, model_spec.task, oos_metrics, headline_series, horizon
+    )
+    run_warnings.extend(headline_warnings)
+    # Explanations of numbers that read as failures and are not: an r2
+    # below its baseline beside a positive rank IC, and an importance block
+    # that is null by construction. Apart from `warnings`, which say the
+    # run did something that changes how a number should be read.
+    run_notes: List[str] = []
+    run_notes.extend(
+        _r2_note(oos_metrics, fold_metrics, fold_weights, adapter.headline)
+    )
+    run_notes.extend(
+        _importance_note(
+            model_spec, estimator_cls, importance_summary, adapter.headline
+        )
+    )
 
     paths_report = None
     if is_cpcv:
@@ -1788,18 +2378,28 @@ def run_experiment(
             "final_search": plan.n_fits_final_search,
             "candidates_per_fold": plan.n_candidates,
             "max_fits": plan.max_fits,
-            "max_parallelism": int(model_spec.budget.max_parallelism),
+            # As the spec asked for it: a whole number, or 'auto'.
+            "max_parallelism": budget_asked,
+            **_reported_fold_schedule(budget_asked, fold_workers, fold_limit),
         },
         # Pipeline fits this run did and did not have to do: `misses` were
-        # fitted here, `hits` and `projections` were read off an earlier
-        # fit -- of this run's inner search, or of a run that shared the
-        # cache. A projection is a column-wise pipeline's matrix read for
-        # a feature subset, exact by construction.
-        "cache": {
-            key: cache.stats()[key] - cache_before[key]
-            for key in ("hits", "misses", "projections")
-        }
-        | {"shared": fold_cache is not None, "projectable": projectable},
+        # fitted here, `hits` were read off an earlier candidate of this
+        # run's own inner search. A run given a shared cache also reports
+        # `projections`, the folds read off a wider run's matrices -- a
+        # column-wise pipeline's, exact by construction -- and
+        # `projectable`, whether this pipeline allows that. A private cache
+        # never projects: its runs have one feature set, so the two were
+        # reported as `projections: 0` beside `projectable: true` on every
+        # run_model_experiment call, which read as a reuse that failed.
+        "cache": _cache_report(
+            cache.stats(), cache_before, fold_cache is not None, projectable
+        ),
+        # The headline metric against what a model with no skill scores,
+        # with the test that compared them; see `_headline_report`.
+        "headline": headline_block,
+        # Where feature_importance_summary came from: 'coefficients',
+        # 'feature_importances' or 'none'.
+        "importance_source": _importance_source(fold_importance),
         "folds": fold_records,
     }
 
@@ -1842,11 +2442,22 @@ def run_experiment(
             "be fitted on different columns than the ones that were validated."
         )
     full_y = _labels(model_spec, panel)
+    # The refit runs alone, after the folds, on the whole budget: a forest
+    # builds its trees on it and is put back on one thread before it
+    # predicts or is written down, so the deployed model carries no budget.
+    refit_jobs, refit_openmp_threads = _fit_threads(
+        threads_kind,
+        budget_asked,
+        budget,
+        int(full_X.shape[0]) * int(full_X.shape[1]),
+    )
+    refit_exact = refit_openmp_threads is not None
     final_estimator = _instantiate(
         estimator_cls,
         deployed_params,
         model_spec.random_seed,
-        n_jobs=model_spec.budget.max_parallelism,
+        n_jobs=refit_jobs,
+        exact_n_jobs=refit_exact,
     )
     # The deployed estimator is calibrated the same way the folds were. A
     # model validated with calibrated probabilities and deployed without
@@ -1870,48 +2481,53 @@ def run_experiment(
     full_index = SampleIndex.from_frame(panel)
     full_weights = _fold_sample_weights(model_spec, full_index)
     full_arrays = adapter.prepare(model_spec, full_index, full_X, full_y, full_weights)
-    _fit(
-        final_estimator,
-        full_arrays.X,
-        full_arrays.y,
-        full_arrays.sample_weight,
-        group=full_arrays.group,
-    )
-    # The deployed distribution, fitted the way the folds' were: one
-    # quantile model per level on the full panel, and a conformal radius
-    # read off held-out blocks of it. Persisted with the model so scoring
-    # emits the same columns the validation reported on.
-    distribution_state: "Dict[str, Any] | None" = None
-    quantile_models: "Dict[str, Any] | None" = None
-    if quantile is not None or model_spec.intervals is not None:
-        distribution_state = {
-            "quantiles": [float(q) for q in model_spec.quantiles],
-            "columns": {quantile_column(q): float(q) for q in model_spec.quantiles},
-            "conformal": None,
-        }
-        if quantile is not None:
-            fitted = _fit_quantile_models(
-                estimator_cls,
-                quantile,
-                deployed_params,
-                model_spec,
-                full_arrays,
-            )
-            quantile_models = {quantile_column(q): m for q, m in fitted.items()}
-        if model_spec.intervals is not None:
-            radius, n_calibration = _conformal_radius(
-                estimator_cls,
-                deployed_params,
-                model_spec,
-                full_arrays,
-            )
-            distribution_state["conformal"] = {
-                "method": model_spec.intervals.method,
-                "alpha": float(model_spec.intervals.alpha),
-                "calibration_folds": int(model_spec.intervals.calibration_folds),
-                "radius": float(radius),
-                "n_calibration": int(n_calibration),
+    with openmp_thread_limit(refit_openmp_threads):
+        _fit(
+            final_estimator,
+            full_arrays.X,
+            full_arrays.y,
+            full_arrays.sample_weight,
+            group=full_arrays.group,
+        )
+        # The deployed distribution, fitted the way the folds' were: one
+        # quantile model per level on the full panel, and a conformal
+        # radius read off held-out blocks of it. Persisted with the model
+        # so scoring emits the same columns the validation reported on.
+        distribution_state: "Dict[str, Any] | None" = None
+        quantile_models: "Dict[str, Any] | None" = None
+        if quantile is not None or model_spec.intervals is not None:
+            distribution_state = {
+                "quantiles": [float(q) for q in model_spec.quantiles],
+                "columns": {quantile_column(q): float(q) for q in model_spec.quantiles},
+                "conformal": None,
             }
+            if quantile is not None:
+                fitted = _fit_quantile_models(
+                    estimator_cls,
+                    quantile,
+                    deployed_params,
+                    model_spec,
+                    full_arrays,
+                    n_jobs=refit_jobs,
+                    exact_n_jobs=refit_exact,
+                )
+                quantile_models = {quantile_column(q): m for q, m in fitted.items()}
+            if model_spec.intervals is not None:
+                radius, n_calibration = _conformal_radius(
+                    estimator_cls,
+                    deployed_params,
+                    model_spec,
+                    full_arrays,
+                    n_jobs=refit_jobs,
+                    exact_n_jobs=refit_exact,
+                )
+                distribution_state["conformal"] = {
+                    "method": model_spec.intervals.method,
+                    "alpha": float(model_spec.intervals.alpha),
+                    "calibration_folds": int(model_spec.intervals.calibration_folds),
+                    "radius": float(radius),
+                    "n_calibration": int(n_calibration),
+                }
 
     # model_id generated here (not left to save_model's own default)
     # so the OOS predictions artifact lands in the same
@@ -1936,6 +2552,7 @@ def run_experiment(
             "oos_predictions_uri": None,
             "n_train_rows_purged_overlap": (n_purged_total if has_label_end else None),
             "warnings": list(run_warnings),
+            "notes": list(run_notes),
         }
 
     oos_predictions_df = pd.concat(oos_prediction_frames, ignore_index=True)
@@ -2046,7 +2663,11 @@ def run_experiment(
         # OOS metrics.
         "n_train_rows_purged_overlap": (n_purged_total if has_label_end else None),
         # Caveats about the run itself, as opposed to the dataset's (which
-        # travel on the manifest as `dataset_warnings`). Today: the one
-        # calibration makes to the importances.
+        # travel on the manifest as `dataset_warnings`): what calibration
+        # costs the importances, a derived label end, a costly estimator
+        # on a budget of one, a headline that does not beat its null.
         "warnings": list(run_warnings),
+        # What a number that reads as a failure means: an r2 below its
+        # baseline, an importance block null by construction.
+        "notes": list(run_notes),
     }

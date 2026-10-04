@@ -101,6 +101,41 @@ class ParamBound:
             )
 
 
+@dataclass(frozen=True)
+class FractionBound(ParamBound):
+    """
+    A share in [minimum, maximum] given as a float, or one of `choices`
+    given as a string.
+
+    A whole number is refused rather than read as a share. scikit-learn
+    reads an int in these parameters as a COUNT, so `max_features=1` is
+    one feature per split where `max_features=1.0` is all of them, and a
+    caller writing the number without its decimal point would get the
+    other model without a word.
+    """
+
+    def validate(self, estimator: str, name: str, value: Any) -> None:
+        if value is None:
+            super().validate(estimator, name, value)
+            return
+        if isinstance(value, str):
+            if self.choices is not None and value in self.choices:
+                return
+            raise ValidationError(
+                f"estimator {estimator!r}: parameter {name!r}={value!r} is not one "
+                f"of {sorted(c for c in (self.choices or ()) if c is not None)} "
+                "and not a fraction."
+            )
+        if isinstance(value, bool) or not isinstance(value, float):
+            raise ValidationError(
+                f"estimator {estimator!r}: parameter {name!r} must be a fraction "
+                f"written with a decimal point, such as 0.5, got {value!r} "
+                f"({type(value).__name__}). scikit-learn reads a whole number "
+                "here as a count, so 1 would mean one where 1.0 means all."
+            )
+        super().validate(estimator, name, value)
+
+
 # ── Shared bounds ───────────────────────────────────────────────────────
 # Ceilings sized so any realistic research request passes, while a runaway
 # one is rejected before sklearn allocates anything.

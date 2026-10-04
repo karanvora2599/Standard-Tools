@@ -1,5 +1,156 @@
 # Changelog
 
+## A model run tests its headline against the null, says what its other numbers mean, and spends the budget it was given
+
+- **The headline metric is tested, and a run says when it does not beat
+  its null.** Every model fitted to a 30-name daily equity panel (31,680 rows, 8
+  features) reported a positive
+  cross-sectional rank IC and an empty `warnings`; none of the sixteen
+  runs' ICs was distinguishable from zero. A regression or ranking run now
+  computes a Newey-West t of the pooled per-date `cs_rank_ic` series (under
+  `cpcv`, each date's mean across the paths that tested it) and warns when
+  it is not above zero at 5%, two-sided: on that panel ridge t = 0.30
+  (p 0.768), hist_gradient_boosting t = 1.79 (p 0.074), random_forest
+  t = 0.10 (p 0.923), each sentence giving the lag, the IC series' lag-1
+  autocorrelation and the t the same series gives read as independent.
+  The lag is max(2h, the Andrews bandwidth floor(4 (n/100)^(2/9))), capped
+  at n − 1: Bartlett weights cut at h − 1 recover 68% of an h-day overlap's
+  long-run variance (3.4 of 5 for a 5-day label), and a simulation of that
+  rule rejected a true zero 9.6% of the time at a nominal 5%; at 2h they
+  recover 85%. A run with fewer than 10 tested dates says the headline was
+  not tested; one significantly below zero says the predictions order the
+  names in reverse and what the negated ordering scored. Classification
+  compares `auc` with 0.5 and survival `cs_concordance_mean` with 0.5, as
+  points.
+- **`validation_report["headline"]`** records the comparison: `metric`,
+  `null`, `value`, `n_dates`, `t_stat`, `t_stat_uncorrected`, `p_value`,
+  `hac_lag`, `ic_autocorrelation_lag1` and `beats_null` (null when not
+  tested). `validation_report["importance_source"]` says where
+  `feature_importance_summary` came from: `coefficients`,
+  `feature_importances` or `none`. Both persist with the manifest and show
+  in `inspect_model(view="validation")`; a manifest written before them has
+  neither.
+- **A new `notes` field on `run_model_experiment`**, always present, for a
+  number that reads as a failure and is not. When r2 is below
+  `baseline_r2` it says so with the fold count and the ceiling the
+  predictions' correlation with the label puts on r2 (the test-row-weighted
+  mean of each fold's squared pooled IC: 0.0048 ridge, 0.0020
+  hist_gradient_boosting, 0.0027 random_forest on that panel, where the
+  ranked label makes the baseline 0 by construction), and names
+  `cs_rank_ic_mean` as the number to read. An uncalibrated run whose
+  estimator has no `coef_` says which importance fields are null by
+  construction — every one for hist_gradient_boosting, the three signed
+  ones for a forest — with the capability flags that say so and
+  `run_feature_ablation` as the way to measure what a feature is worth. A
+  calibrated run keeps its existing warning instead.
+- **One headline map, on the model adapters.** `ModelAdapter.headline` and
+  its fallbacks (regression `cs_rank_ic_mean`, then `rank_ic`, `ic`, `r2`;
+  ranking `cs_rank_ic_mean`; classification `auc`; survival
+  `cs_concordance_mean`) are what the run tests, what `list_models` and
+  `compare_models` rank by (unchanged output) and what
+  `run_feature_ablation` now compares by default. Its default was the
+  alphabetically first finite metric, which for a regression is
+  `baseline_is_oracle`, a 0/1 flag: every contribution was 0.0.
+- **`budget.max_parallelism` defaults to `"auto"`.** `"auto"` is
+  `SQT_NUM_THREADS` when set, else the CPUs the process may run on
+  (`os.sched_getaffinity` where it exists, else `os.cpu_count()`), at most
+  64, read when the run starts. A whole number keeps its meaning; 1 is the
+  old default. A run reports the budget as asked — `"auto"` — because a
+  recorded call is replayed by comparing its output on whatever machine
+  checks it; the count it resolved to is the manifest's
+  `environment.threads.auto_parallelism`. Linear models still fit one fold
+  at a time.
+- **A random forest predicts on one thread, whatever it was fitted on.** A
+  forest's fit is the same at any `n_jobs` (each tree's seed is drawn
+  first); its predictions summed the trees in thread-finish order above one
+  job, so at a budget of 16 over 8 folds 5,798 of 15,120 out-of-sample
+  predictions differed from the budget-1 run and two budget-16 runs
+  differed from each other, and the deployed forest kept `n_jobs` at the
+  budget, so `score_model` depended on it. After every fit — folds, search
+  candidates, quantile and conformal fits, the refit, and the forests
+  inside a `CalibratedClassifierCV` — a forest goes back to `n_jobs=None`
+  before anything predicts with it, reads its importances or pickles it.
+  On that panel the random-forest run at `"auto"` (8 folds side by
+  side, the refit on 16 threads) reproduces the budget-1 run's
+  every content hash, `model.joblib` included.
+- **Search candidates share the budget.** A candidate scored on the pool
+  gets `max(1, budget // workers)` threads, the rule the fold pool uses;
+  each used to get the whole budget inside a pool of budget-many workers
+  (a forest grid at budget 4 ran sixteen tree builders). The pool runs on
+  min(budget, candidate-fold pairs left after the first) workers.
+- **OpenMP estimators run on their share of the budget.**
+  hist_gradient_boosting (and LightGBM and XGBoost) started an OpenMP team
+  on every logical CPU for each fit whatever the budget said, and under the
+  PASSIVE wait policy this package sets, 16 threads fitted a 15,000-row,
+  8-feature fold in 1.5–1.7 s against 0.28–0.36 s on one, with the same
+  predictions. Each fit and prediction now runs under
+  `_blas.openmp_thread_limit(n)`, a process-wide, reference-counted limit
+  like the BLAS one (a per-call limit on a worker thread reached the main
+  thread under vcomp): n is the fit's share of the budget, and under
+  `"auto"` one thread below 2,000,000 training cells (rows × columns).
+  LightGBM ignores the runtime's count when its `n_jobs` is unset (9.4
+  CPU-seconds in 2.4 s under a one-thread limit), so the OpenMP boosters
+  are handed their share as `n_jobs`, one included. hist_gradient_boosting
+  and XGBoost predictions are bit-identical at 1, 4 and 16 threads;
+  hist_gradient_boosting's `model.joblib` is not, because its bin mapper
+  records the thread count. LightGBM's agreed on a 25,000-row fit and
+  differed by 4e-19 on a 160,000-row one: under `"auto"` it now fits on one
+  thread below the threshold on every machine, where at the old default it
+  took every core.
+- **The report says how the folds ran.** `validation_report["fits"]` gains
+  `fold_workers` and `fold_parallel_limit` — `"budget"`,
+  `"estimator fits one fold at a time"`, `"search"`,
+  `"n_jobs set in params"`, `"one fold"`, or null when every fold ran side
+  by side. Under `"auto"`, where the budget decides, both read `"auto"` and
+  `"budget"`; the count is min(`auto_parallelism`, folds). `max_parallelism`
+  is the budget as asked, and so is the search report's.
+- **The cache block names projections only where one could happen.**
+  `projections` and `projectable` appear only on a run given a shared cache;
+  `run_model_experiment` keeps its cache private, so it reports `hits`,
+  `misses` and `shared`. The two read as a reuse that failed on every call.
+- **A random_forest run at a budget of one says what a budget buys.** On a
+  panel of at least 10,000 rows, at an explicit budget of 1 or under
+  `"auto"` on a one-CPU process: on that panel, 200 trees of depth 6
+  took 71 to 124 s for 8 folds and the refit at budget 1, 18 to 19 s at
+  `"auto"` with the same predictions, and hist_gradient_boosting at its
+  defaults 4 to 8 s. Guidance, never a substitution.
+- **The capability report gives `fit_cost` and `threads` per estimator,**
+  declared at registration (`register_estimator(..., cost=EstimatorCost(...))`)
+  and explained once under `estimator_cost`. Measured with one default fit
+  on a 15,030-row, 8-feature window of that panel on 16 logical cores,
+  OpenMP estimators on one thread: low under 0.05 s (linear, ridge, lasso,
+  elastic_net, huber, logistic, both sgd), medium 0.1–1 s
+  (hist_gradient_boosting 0.16/0.24 s, regression mlp 0.82 s, cox_ph
+  0.15 s, lightgbm 0.53–0.60 s, xgboost 0.19–0.23 s, both rankers 0.64 s,
+  xgboost_cox 0.10 s, xgboost_aft 0.21 s), high 2–11 s (random_forest
+  11.1 s regression / 2.5 s classification, gradient_boosting 3.1/2.8 s,
+  quantile_gradient_boosting 3.0 s, quantile 4.8 s, classification mlp
+  4.6 s). `threads` is `one`, `budget` or `openmp`.
+  `ModelAdapter.capabilities` is unchanged.
+- **The forest allowlist gains `max_features`, `max_samples` and
+  `min_samples_leaf`,** absent by default, so every existing spec fits the
+  forest it did. A share is a float (`0.33`) or `"sqrt"`/`"log2"`; a whole
+  number is refused by name, because scikit-learn reads an int there as a
+  count and `max_features=1` is one feature per split.
+- **The environment fingerprint records `OMP_WAIT_POLICY`** among its
+  thread variables, and `auto_parallelism`.
+- **Unchanged, checked against the recorded runs on that panel
+  (pandas 3):** `oos_metrics`, per-fold metrics, importances, the
+  out-of-sample predictions (`oos_predictions` c4405a8bb8f96084,
+  8681ee1eee5b9fe1, 7eb22cbc34f8ffab) and `prediction_reference`, at the
+  recorded budget of 1 and at `"auto"`. `model.joblib` of
+  hist_gradient_boosting changes with its thread count; `model_spec.json`
+  changes where the spec now carries `"auto"`. A recorded
+  `run_model_experiment` call replays as a mismatch, since its output
+  gains `notes`, the headline block and the new `fits` keys and, on most
+  panels, a warning.
+- **Measured** on that panel, Python 3.11 / pandas 3, 16 logical cores
+  shared with other work, before and after run alternately: ridge
+  1.62–1.91 s → 1.52–1.79 s (unchanged; the headline test and notes cost
+  under 5 ms), hist_gradient_boosting 14.6–16.9 s → 3.9–5.6 s at budget 1
+  and 3.85–4.06 s at `"auto"`, random_forest 79–94 s → 82–87 s at budget 1
+  (unchanged) and 18.1–18.9 s at `"auto"`.
+
 ## select_features tests what it keeps, and redundancy says what VIF says
 
 - **A call with no arguments kept every feature that was not a duplicate.**

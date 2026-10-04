@@ -510,7 +510,29 @@ class RunModelExperimentResult(BaseModel):
         "oos_metrics alone cannot "
         "show performance decay across folds, reveal that one fold carried "
         "the result, or expose how much of the walk-forward schedule "
-        "actually ran.",
+        "actually ran. `headline` is the task's headline metric (the one "
+        "compare_models and list_models rank by) against what a model with "
+        "no skill scores: for a cross-sectional rank IC, the Newey-West t "
+        "of its pooled per-date series at lag max(2 x horizon, Andrews), "
+        "with the uncorrected t, two-sided p and the series' lag-1 "
+        "autocorrelation; for an AUC or a concordance, a comparison with "
+        "0.5; `beats_null` is true when it beats the null at 5%. "
+        "`importance_source` says where feature_importance_summary came "
+        "from: 'coefficients', 'feature_importances' or 'none'. `fits` is "
+        "the planned fit count against its ceiling, the budget as asked "
+        "(`max_parallelism`, a number or 'auto'), and `fold_workers` with "
+        "`fold_parallel_limit`: how many folds ran side by side and what "
+        "limited it ('budget', 'estimator fits one fold at a time', "
+        "'search', 'n_jobs set in params', 'one fold', or null when every "
+        "fold ran side by side); under 'auto' a count the budget decides "
+        "reads 'auto', and the manifest's environment.threads."
+        "auto_parallelism holds the count it resolved to. `cache` is the "
+        "preprocessing work this run did (`misses`) and reused (`hits`, "
+        "from an earlier candidate of its own inner search). A run given a "
+        "shared cache also reports `projections`, the folds read off a "
+        "wider run's matrices, and `projectable`, whether this pipeline "
+        "allows that. run_model_experiment keeps its cache private, so "
+        "neither applies to it.",
     )
     n_train_rows_purged_overlap: Optional[int] = Field(
         0,
@@ -553,10 +575,24 @@ class RunModelExperimentResult(BaseModel):
             "is a thing the run did that changes how a number above should "
             "be read: a calibrated estimator, for instance, whose "
             "`feature_importance_summary` is NaN by construction because "
-            "the wrapper does not expose the base class's coefficients. "
+            "the wrapper does not expose the base class's coefficients; "
+            "and a headline metric that does not beat what a model with no "
+            "skill scores (validation_report.headline has the test). "
             "The engine has always produced these; this result had no "
             "field for them, so they were dropped between the engine and "
             "the agent."
+        ),
+    )
+    notes: List[str] = Field(
+        default_factory=list,
+        description=(
+            "What a number above that reads as a failure means, said "
+            "whenever it applies: r2 below baseline_r2, with the ceiling "
+            "the predictions' correlation with the label puts on it and the "
+            "metric to read instead; a feature_importance_summary that is "
+            "null by construction for this estimator, with the capability "
+            "flags that say so and the tool that measures what a feature is "
+            "worth to it. Always present; empty when nothing applies."
         ),
     )
 

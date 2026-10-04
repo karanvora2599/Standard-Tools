@@ -32,7 +32,7 @@ from __future__ import annotations
 from sklearn.neural_network import MLPClassifier, MLPRegressor
 
 from .bounds import EstimatorParamSchema, ParamBound
-from .registry import register_estimator
+from .registry import EstimatorCost, register_estimator
 
 #: Neurons per hidden layer. The ceiling is a compute budget: this fits
 #: once per fold, and a walk-forward run does that many times over.
@@ -168,8 +168,23 @@ _MLP_SCHEMA = EstimatorParamSchema(
     }
 )
 
-register_estimator("regression", "mlp", PanelMLPRegressor, _MLP_SCHEMA)
-register_estimator("classification", "mlp", PanelMLPClassifier, _MLP_SCHEMA)
+# One default fit on a 15,030-row, 8-feature window, 16 logical cores:
+# 0.82 s regression, 4.6 s classification (log loss converges in more
+# iterations than squared error on this label). See EstimatorCost.
+register_estimator(
+    "regression",
+    "mlp",
+    PanelMLPRegressor,
+    _MLP_SCHEMA,
+    cost=EstimatorCost("medium", "one"),
+)
+register_estimator(
+    "classification",
+    "mlp",
+    PanelMLPClassifier,
+    _MLP_SCHEMA,
+    cost=EstimatorCost("high", "one"),
+)
 
 __all__ = [
     "N_HIDDEN_LAYERS",

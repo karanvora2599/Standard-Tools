@@ -75,7 +75,9 @@ class TestTheKnob:
         assert not hasattr(_instantiate(Ridge, {"alpha": 1.0}, 0, n_jobs=3), "n_jobs")
 
     def test_the_bounds_are_a_budget(self):
-        assert ComputeBudgetSpec().max_parallelism == 1
+        # 'auto' by default since the CHANGELOG entry of 2026-10-04.
+        assert ComputeBudgetSpec().max_parallelism == "auto"
+        assert ComputeBudgetSpec(max_parallelism=1).max_parallelism == 1
         with pytest.raises(PydanticValidationError):
             ComputeBudgetSpec(max_parallelism=0)
         with pytest.raises(PydanticValidationError):

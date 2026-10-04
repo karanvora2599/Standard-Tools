@@ -43,7 +43,7 @@ from .bounds import (
     EstimatorParamSchema,
     ParamBound,
 )
-from .registry import register_estimator
+from .registry import EstimatorCost, register_estimator
 
 #: Bounds for the parameters these estimators take, on the same reasoning
 #: as the boosters': a ceiling is a resource budget, not an opinion.
@@ -467,7 +467,16 @@ class XGBAFTSurvival(_XGBSurvivalBase):
         )
 
 
-register_estimator("survival", "cox_ph", CoxPHRegressor, _COX_PH)
+# One default fit on a 15,030-row, 8-feature window, 16 logical cores:
+# cox_ph 0.15 s; xgboost_cox 0.10 s and xgboost_aft 0.21 s on one OpenMP
+# thread. See EstimatorCost.
+register_estimator(
+    "survival",
+    "cox_ph",
+    CoxPHRegressor,
+    _COX_PH,
+    cost=EstimatorCost("medium", "one"),
+)
 
 
 def _register_xgboost() -> bool:
@@ -475,8 +484,20 @@ def _register_xgboost() -> bool:
         import xgboost  # noqa: F401
     except ImportError:
         return False
-    register_estimator("survival", "xgboost_cox", XGBCoxSurvival, _XGB_COX)
-    register_estimator("survival", "xgboost_aft", XGBAFTSurvival, _XGB_AFT)
+    register_estimator(
+        "survival",
+        "xgboost_cox",
+        XGBCoxSurvival,
+        _XGB_COX,
+        cost=EstimatorCost("medium", "openmp"),
+    )
+    register_estimator(
+        "survival",
+        "xgboost_aft",
+        XGBAFTSurvival,
+        _XGB_AFT,
+        cost=EstimatorCost("medium", "openmp"),
+    )
     return True
 
 
