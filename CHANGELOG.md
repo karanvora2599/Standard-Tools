@@ -1,5 +1,54 @@
 # Changelog
 
+## The ADF report pass solves its design column-major like the sweep above it
+
+- **`engle_granger`'s cost tracked the winning lag, not n.** At n=32,000,
+  where Schwert's rule gives 51 candidates for every run, a series whose
+  information criterion picked lag 0 took 35.6 ms and one that picked lag 50
+  took 284.4 ms off the same sweep. Subtracting the sweep floor leaves
+  0.099–0.118 ms per lag² across lags 13 to 50, against the selection
+  sweep's 0.0138 per k² — the same order of work at about seven times the
+  rate.
+- **The difference was storage, not arithmetic.** `adf_test` refits the
+  winning lag to report its t-statistic, and that refit built its design
+  row-major and called `qr::lstsq`, whose equilibration, reflector norms and
+  trailing-column updates all sweep `i` down a fixed `j`. Row-major strides
+  every one of those loops by k×8 bytes, so by k=47 each element lands on
+  its own cache line. The selection sweep had already gone column-major for
+  exactly this reason; the report pass was left behind.
+- **`lstsq` and `xtx_inv_diag` are now templated on a `Layout`.** One body
+  serves both, so there is no second copy of the numerics to drift.
+  Row-major stays the default and every other caller is untouched —
+  `rolling_beta` and `rolling_factor_loadings` measure unchanged.
+- **Bit-identical, and tested as such rather than assumed.** Both
+  instantiations visit the same elements in the same order and do the same
+  arithmetic; only the addresses move. `test_lstsq_layouts_are_bit_identical`
+  compares rss, rank, the permutation, every coefficient and every
+  `xtx_inv_diag` entry under `==` and not a tolerance, over 40 random designs
+  with a 1e7 column-scale spread, and a second case pins the rank verdict on
+  a deliberately rank-deficient design. A tolerance would have passed a
+  reassociation that moved the ADF statistic, which this kernel has twice
+  been wrong about. Separately, 2,400 `engle_granger` results over 400 series
+  × 3 `max_lag` × 2 criteria are bit-identical to the pre-change binary, 253
+  of them on a non-zero lag.
+- **Measured** at n=32,000, same seeds and the same winning lags: lag 50
+  284.41 → 98.79 ms (2.88×), lag 44 238.29 → 84.37 (2.82×), lag 38 195.92 →
+  72.03 (2.72×), lag 29 130.79 → 59.68 (2.19×), lag 13 56.11 → 42.45
+  (1.32×), and lag 0–5 unchanged at about 37 ms, correctly: there is nothing
+  to refit. At the sizes a pairwise scan uses the median is unchanged and the
+  tail is shorter — worst-against-median over 40 series falls from 4.21× to
+  2.64× at n=4000 and 1.74× to 1.47× at n=2000. `bench_kernels` reports
+  `engle_granger` 14.004 → 9.922 ms at its own n=8000, with every other
+  kernel inside the ±20% band those 23 rows move in anyway.
+- **The exponent is unchanged, and that is the right outcome.** k grows as
+  n^0.25 by Schwert's rule and a QR of a T×k design is O(T·k²), so ~n^1.5 is
+  the floor and the nested sweep already reaches it. A note written while
+  investigating this called the kernel n^2.30 and the third-slowest kernel
+  measured; both were artifacts — it runs at n=8000 where that table's other
+  rows run at n=200,000, and the two points the exponent came from straddled
+  both an L2→L3 boundary and a change in which lag won. On same-data
+  prefixes they give n^1.53.
+
 ## A sample covariance keeps the caller's BLAS threads, and on CI's OpenBLAS its last bits follow them
 
 - **The determinism tests held more than the one-thread limit promises.**
