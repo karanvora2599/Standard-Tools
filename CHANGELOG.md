@@ -1,5 +1,70 @@
 # Changelog
 
+## A covariance is built on one BLAS thread too, so a whole portfolio or PCA answer is the same bits on any machine
+
+- **The products that build a covariance run on one BLAS thread.** The
+  limit of 2026-10-02 covered the factorizations; the products before them
+  kept the caller's threads, and their last bits followed the thread count:
+  np.cov's on the CI runners' OpenBLAS, where five determinism tests failed,
+  and the EWMA product under OpenBLAS 0.3.27 and 0.3.31 at 16 threads. Every
+  output built from them followed too. `estimate_covariance` (all four
+  methods), `annualized_mean_cov` (so every optimizer, and the portfolio
+  tools' covariance and estimability check), `hierarchical_risk_parity`,
+  `portfolio_metrics`, `diversification_ratio` and the risk attribution tool
+  now build it under the same limit. `DataFrame.cov()` on a frame with gaps
+  is pandas' own pairwise loop, which uses no BLAS, and is unchanged.
+- **PCA's factor returns, the network features' correlations and the
+  lead-lag correlations too.** Each is a matrix product over a returns panel
+  whose last bits followed the thread count at 16 threads: on a 600-name
+  panel, 2,324 of 33,600 `network.avg_correlation` values differed between
+  one thread and sixteen. `pca_returns`' power iteration runs under the
+  limit as well, so every output of the function does.
+- **Two inverses the limit had missed.** The inverse in `frontier_stats`,
+  behind `mean_variance_optimize` with shorting and no cap and behind
+  `get_efficient_frontier`, and Black-Litterman's three inverses ran on the
+  caller's threads. At 235 assets their weights changed in the last bits
+  between one and two threads.
+- **What moves, once.** At 16 threads on Python 3.12 and 3.11, the sample
+  and Ledoit-Wolf matrices, every long-only optimizer answer, risk parity,
+  HRP, portfolio metrics, PCA's loadings and variance ratios and the
+  `factors.pca_*` features are the same bits as before. These move in their
+  last bits: an EWMA matrix by at most 1.8e-12 relative, closed-form
+  mean-variance weights by 3.0e-13 and the frontier's inverse by 3.4e-11,
+  Black-Litterman weights by 4.1e-14 and its posterior covariance by
+  3.4e-13, PCA's factor returns by 3.3e-11, `factor_contributions` by
+  5.6e-16 absolute, the network correlations by 7.7e-16 and three lead-lag
+  correlations by 4.3e-16. On the CI runners the sample and Ledoit-Wolf
+  matrices, and what is built from them, move to their one-thread bits too.
+  All are then the same on any machine with the same BLAS;
+  `SQT_BLAS_THREADS=0` gives the products their threads back.
+- **What it costs.** Before and after were run call by call in lockstep on
+  a shared 16-thread machine, after against before, as the range of the
+  minimum and median ratios on Python 3.12 and 3.11. At 1,260 × 235:
+  `estimate_covariance` 0.13–0.69× (sample, Ledoit-Wolf, EWMA),
+  mean-variance minimum volatility 0.23–0.64×, its closed form 0.11–0.21×,
+  HRP 0.79–0.92×, `lead_lag_matrix` 0.26–0.59×, `pca_returns` 0.97–1.08×. At
+  2,106 × 500: `estimate_covariance` 0.34–0.95× for the sample and
+  Ledoit-Wolf matrices and 0.84–1.19× for EWMA, minimum volatility
+  0.52–0.91×, `pca_returns` 1.05–1.22×; the network correlation over 1,000
+  names 1.17–1.50× and `lead_lag_matrix` at 500 names 0.79–1.30×. At 30
+  assets the medians are 0.87–1.04×, within the noise of an unchanged
+  control call. The product that loses most is PCA's factor returns at
+  2,106 × 500, 3.0–7.2× as long on one thread.
+- **The determinism tests hold whole outputs again.** The five weakened on
+  2026-10-04 to hold a condition number to "the matrix each call estimated"
+  again require the whole result — matrix, eigenvalues, condition number,
+  weights, solver report — to be the same bits at caller limits of one, two
+  and four, and the condition number to be the one-thread one of the
+  one-thread covariance, computed in the test from pandas and numpy; the
+  per-matrix checks stay beside them. New ones hold the EWMA matrices, the
+  closed form, the frontier constants, Black-Litterman, HRP, portfolio
+  metrics, the diversification ratio, every `pca_returns` output, factor
+  contributions, the network correlations and `lead_lag_matrix` the same
+  way, and the sample matrix and the factor returns to their one-thread
+  products. On the code before, 12 of them fail under OpenBLAS 0.3.27 at
+  16 threads; the sample, Ledoit-Wolf and condition-number ones are the
+  assertions that failed on the CI runners on 2026-10-04.
+
 ## yfinance's swallowed errors are read whatever the log says, and a history status is read before its type
 
 - **`get_ticker_info` and `get_financial_ratios` no longer read

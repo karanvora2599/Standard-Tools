@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional, Union
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools._blas import single_threaded_blas
 from standard_quant_tools.error import ValidationError
 
 logger = logging.getLogger(__name__)
@@ -50,7 +51,9 @@ def diversification_ratio(
     individual_vols = returns_df.std().to_numpy(dtype=np.float64)
     weighted_avg_vol = float(np.sum(w * individual_vols))
 
-    cov = returns_df.cov().to_numpy(dtype=np.float64)
+    # On one BLAS thread (see `_blas`), like the optimizers' covariance.
+    with single_threaded_blas():
+        cov = returns_df.cov().to_numpy(dtype=np.float64)
     portfolio_vol = float(np.sqrt(w @ cov @ w))
 
     if portfolio_vol <= 0.0:

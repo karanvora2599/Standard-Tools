@@ -43,6 +43,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools._blas import single_threaded_blas
 from standard_quant_tools._special import (
     betacf,
     betainc,
@@ -940,6 +941,11 @@ def lead_lag_matrix(
     # column of the leading block against every column of the lagging one.
     # ddof cancels between numerator and denominator, so the centred
     # cross-products and the centred sums of squares can both be raw.
+    #
+    # The matmul runs on one BLAS thread (see `_blas`): its last bits
+    # followed the thread count under OpenBLAS 0.3.27 and 0.3.31 at sixteen
+    # threads, and a pair whose correlation sits at `min_correlation` could
+    # be kept on one machine and dropped on another.
     values = frame.to_numpy(dtype=float)
     correlations: Dict[int, np.ndarray] = {}
     for lag in range(1, max_lag + 1):
@@ -952,7 +958,7 @@ def lead_lag_matrix(
         denominator = np.sqrt(
             np.outer((lead_c**2).sum(axis=0), (follow_c**2).sum(axis=0))
         )
-        with np.errstate(invalid="ignore", divide="ignore"):
+        with single_threaded_blas(), np.errstate(invalid="ignore", divide="ignore"):
             correlations[lag] = (lead_c.T @ follow_c) / denominator
 
     # The filter and the t-statistic over every (leader, follower, lag) at

@@ -1,15 +1,24 @@
 """
-`single_threaded_blas()`: the library's own small linear algebra on one BLAS
-thread, and the answers that then stop depending on the machine (see the
-CHANGELOG entry of 2026-10-02).
+`single_threaded_blas()`: the library's own covariance-sized linear algebra
+on one BLAS thread, and the answers that then stop depending on the machine
+(see the CHANGELOG entries of 2026-10-02 and 2026-10-04).
 
 Two halves. The limit itself: applied inside, the caller's setting back
 after, nested and concurrent users all on one thread with the setting in
 force before the first one restored after the last, a failure never
 reaching the caller, `SQT_BLAS_THREADS` read and refused by name, and
 nothing at all without threadpoolctl. Then the results: every function that
-runs its factorizations under the limit returns the same bits whatever BLAS
-thread count its caller set, and those bits are the one-thread ones.
+runs its products and factorizations under the limit returns the same bits
+whatever BLAS thread count its caller set, and those bits are the
+one-thread ones.
+
+The products that build a matrix -- np.cov's, Ledoit-Wolf's, the EWMA one,
+PCA's factor returns, the network features' and the lead-lag correlations
+-- kept the caller's threads until 2026-10-04. Their last bits followed the
+thread count on the CI runners' OpenBLAS (the sample and Ledoit-Wolf
+covariances, where these tests failed) or on OpenBLAS 0.3.27 and 0.3.31 on
+a 16-thread Windows machine (the rest), and every output built from them
+did too.
 """
 
 from __future__ import annotations
@@ -25,10 +34,19 @@ import pytest
 
 from standard_quant_tools import _blas
 from standard_quant_tools._blas import single_threaded_blas
-from standard_quant_tools.analysis.pca import pca_returns
+from standard_quant_tools.analysis.correlation import diversification_ratio
+from standard_quant_tools.analysis.diagnostics import lead_lag_matrix
+from standard_quant_tools.analysis.pca import factor_contributions, pca_returns
 from standard_quant_tools.error import ValidationError
+from standard_quant_tools.modeling.features import network
 from standard_quant_tools.portfolio import construction
 from standard_quant_tools.portfolio.covariance import estimate_covariance
+from standard_quant_tools.portfolio.optimize import (
+    annualized_mean_cov,
+    black_litterman,
+    frontier_stats,
+)
+from standard_quant_tools.portfolio.portfolio import portfolio_metrics
 
 threadpoolctl = pytest.importorskip("threadpoolctl")
 from threadpoolctl import threadpool_limits  # noqa: E402
@@ -277,9 +295,17 @@ def _bits(value):
         return (list(value.index), list(value.columns), value.to_numpy().tobytes())
     if isinstance(value, pd.Series):
         return (list(value.index), value.to_numpy().tobytes())
+    if isinstance(value, np.ndarray):
+        return value.tobytes()
     if isinstance(value, float):
         return np.float64(value).tobytes()
     return value
+
+
+def _matrix(result):
+    """estimate_covariance's nested-dict matrix as an array, in its order."""
+    assets = result["assets"]
+    return np.array([[result["matrix"][row][col] for col in assets] for row in assets])
 
 
 N = 235
@@ -287,6 +313,14 @@ RETURNS = _factor_returns(1260, N)
 COVARIANCE = RETURNS.cov() * 252
 RAGGED = _pairwise_covariance(N)
 WEIGHTS = {name: 1.0 / N for name in COVARIANCE.columns}
+#: A wide window for the power iteration, and one for the network
+#: features' four products, whose last bits followed the thread count only
+#: at four threads and up (sixteen under OpenBLAS 0.3.31) on the machine
+#: that measured them: hence the caller's default among the limits below.
+WIDE = _factor_returns(252, 500, seed=67)
+NETWORK = _factor_returns(126, 1000, seed=71)
+VIEWS = np.zeros((2, N))
+VIEWS[0, 0], VIEWS[0, 1], VIEWS[1, 2] = 1.0, -1.0, 1.0
 
 CALLS = {
     "_repair_psd": lambda: construction._repair_psd(RAGGED, "test"),
@@ -299,52 +333,94 @@ CALLS = {
     "portfolio_scenarios": lambda: construction.portfolio_scenarios(
         WEIGHTS, {"down": {"A000": -0.2, "A001": -0.1}}, covariance=RAGGED
     ),
-    # Not estimate_covariance: its sample product keeps the caller's threads
-    # (see the eigenvalue test below). Not the factor returns: that product keeps its threads (see pca.py).
-    "pca_returns": lambda: {
-        k: v for k, v in pca_returns(RETURNS).items() if k != "factor_returns"
-    },
+    # The whole of each: the matrix, its eigenvalues and condition number,
+    # the factor returns, the weights.
+    "estimate_covariance_sample": lambda: estimate_covariance(RETURNS, method="sample"),
+    "estimate_covariance_ledoit_wolf": lambda: estimate_covariance(RETURNS),
+    "estimate_covariance_ewma": lambda: estimate_covariance(RETURNS, method="ewma"),
+    "estimate_covariance_ewma_shrunk": lambda: estimate_covariance(
+        RETURNS, method="ewma_shrunk"
+    ),
+    "annualized_mean_cov": lambda: annualized_mean_cov(RETURNS, 252),
+    "frontier_stats": lambda: frontier_stats(*annualized_mean_cov(RETURNS, 252)),
+    "black_litterman": lambda: black_litterman(
+        COVARIANCE.to_numpy(), np.full(N, 1.0 / N), VIEWS, np.array([0.02, 0.05])
+    ),
+    "hierarchical_risk_parity": lambda: construction.hierarchical_risk_parity(RETURNS),
+    "portfolio_metrics": lambda: portfolio_metrics(RETURNS, np.full(N, 1.0 / N)),
+    "diversification_ratio": lambda: diversification_ratio(RETURNS),
+    "pca_returns": lambda: pca_returns(RETURNS),
+    "pca_returns_five": lambda: pca_returns(RETURNS, n_components=5),
+    "pca_returns_power_iteration": lambda: pca_returns(
+        WIDE, n_components=1, method="power_iteration"
+    ),
+    "factor_contributions": lambda: factor_contributions(RETURNS, 3),
+    "network_correlation": lambda: network._pairwise_correlation(NETWORK, 20),
+    "lead_lag_matrix": lambda: lead_lag_matrix(
+        RETURNS.iloc[:, :120], min_correlation=0.05
+    ),
 }
 
 
 class TestTheAnswerDoesNotDependOnTheCallersThreads:
     @pytest.mark.parametrize("name", sorted(CALLS))
-    def test_one_two_and_the_default_give_the_same_bits(self, name):
+    def test_one_two_four_and_the_default_give_the_same_bits(self, name):
         call = CALLS[name]
         with threadpool_limits(limits=1, user_api="blas"):
             one = _bits(call())
-        with threadpool_limits(limits=2, user_api="blas"):
-            two = _bits(call())
-        default = _bits(call())
-        assert two == one
-        assert default == one
+        for limit in (2, 4):
+            with threadpool_limits(limits=limit, user_api="blas"):
+                assert _bits(call()) == one, f"{limit} threads"
+        assert _bits(call()) == one, "the default"
 
-    @pytest.mark.parametrize("method", ["sample", "ledoit_wolf"])
+    @pytest.mark.parametrize("method", ["sample", "ledoit_wolf", "ewma", "ewma_shrunk"])
     def test_a_covariance_reports_the_one_thread_eigenvalues_of_its_matrix(
         self, method
     ):
-        """The sample product behind the matrix, np.cov's or Ledoit-Wolf's,
-        keeps the caller's threads, and some OpenBLAS builds (numpy's on
-        Python 3.10 in CI) give it different last bits at one and two
-        threads. What runs under the limit is the eigendecomposition: at any
-        caller setting, the smallest eigenvalue and the condition number are
-        the one-thread ones of the matrix returned."""
-        for limit in (1, 2, None):
+        """What each call reports about its own matrix: at any caller
+        setting, the smallest eigenvalue and the condition number are the
+        one-thread ones of the matrix that call returned."""
+        for limit in (1, 2, 4, None):
             if limit is None:
                 result = estimate_covariance(RETURNS, method=method)
             else:
                 with threadpool_limits(limits=limit, user_api="blas"):
                     result = estimate_covariance(RETURNS, method=method)
-            assets = result["assets"]
-            matrix = np.array(
-                [[result["matrix"][row][col] for col in assets] for row in assets]
-            )
             with threadpool_limits(limits=1, user_api="blas"):
-                eigenvalues = np.linalg.eigvalsh(matrix)
+                eigenvalues = np.linalg.eigvalsh(_matrix(result))
             assert result["smallest_eigenvalue"] == float(eigenvalues.min())
             assert result["condition_number"] == float(
                 eigenvalues.max() / eigenvalues.min()
             )
+
+    def test_the_sample_matrix_is_the_one_thread_product(self):
+        """A known answer for the bits: at the caller's default the sample
+        matrix is np.cov's product computed on one BLAS thread, annualized,
+        and so is the optimizers' DataFrame.cov() one. On the CI runners'
+        OpenBLAS the product at the default differed from it in the last
+        bits until the CHANGELOG entry of 2026-10-04. The returns are read
+        as estimate_covariance reads them, through dropna's copy, whose
+        layout decides the mean's last bits."""
+        values = RETURNS.dropna(how="all", axis=1).dropna().to_numpy(dtype=float)
+        with threadpool_limits(limits=1, user_api="blas"):
+            expected = np.cov(values, rowvar=False, ddof=1) * 252
+            frame_cov = RETURNS.cov().to_numpy(dtype=float) * 252
+        sample = _matrix(estimate_covariance(RETURNS, method="sample"))
+        assert sample.tobytes() == expected.tobytes()
+        assert annualized_mean_cov(RETURNS, 252)[1].tobytes() == frame_cov.tobytes()
+
+    def test_the_factor_returns_are_the_one_thread_product(self):
+        """The same for PCA: the factor returns are the centred, scaled
+        returns times the loadings, multiplied on one BLAS thread. Under
+        OpenBLAS 0.3.27 and 0.3.31 at sixteen threads that product differed
+        from the one-thread one in the last bits."""
+        result = pca_returns(RETURNS)
+        values = RETURNS.dropna().to_numpy(dtype=float)
+        centred = values - values.mean(axis=0)
+        scaled = centred / centred.std(axis=0, ddof=1)
+        with threadpool_limits(limits=1, user_api="blas"):
+            expected = scaled @ result["loadings"].to_numpy()
+        assert result["factor_returns"].to_numpy().tobytes() == expected.tobytes()
 
     def test_the_repair_is_the_one_thread_repair(self):
         """A known answer for the bits: the repaired matrix is exactly what

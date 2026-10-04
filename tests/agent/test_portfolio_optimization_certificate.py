@@ -150,11 +150,15 @@ def test_risk_parity_reports_one_condition_number_at_any_blas_thread_count():
     covariance differs in the last bits between one and four BLAS threads.
     It now comes from the same one-thread computation.
 
-    The covariance itself is a product numpy computes on the caller's
-    threads, and some OpenBLAS builds (numpy's on Python 3.10 in CI) give
-    it different last bits at one and four threads. So each reported value
-    is held to the one-thread condition number of the covariance its own
-    call estimated, at the caller's setting."""
+    The covariance before it runs on one thread too. Its product kept the
+    caller's threads until the CHANGELOG entry of 2026-10-04, and on the CI
+    runners' OpenBLAS it gave different last bits at one and four threads,
+    so this test failed there. The whole result is now the same at caller
+    limits of one, two and four, and its condition number is the one-thread
+    condition number of the one-thread covariance, computed here from
+    pandas and numpy directly. Each call's number is also the one-thread
+    condition number of the covariance that call's caller setting
+    estimates."""
     threadpoolctl = pytest.importorskip("threadpoolctl")
     tickers = [f"T{i:03d}" for i in range(235)]
     inp = PortfolioOptimizationInput(
@@ -167,16 +171,26 @@ def test_risk_parity_reports_one_condition_number_at_any_blas_thread_count():
     def fake(req_tickers, start, end, interval="1d"):
         return _wide_returns(req_tickers)
 
-    reported, expected = [], []
-    for threads in (1, 4):
+    with threadpoolctl.threadpool_limits(limits=1, user_api="blas"):
+        one_thread_cov = _wide_returns(tickers).cov().to_numpy(dtype=float) * 252
+        one_thread = float(np.linalg.cond(one_thread_cov))
+    results, per_matrix = [], []
+    for threads in (1, 2, 4):
         with threadpoolctl.threadpool_limits(limits=threads, user_api="blas"):
             with patch(
                 "standard_quant_tools.agent.runtimes.portfolio.tools."
                 "fetch_returns_sync",
                 fake,
             ):
-                reported.append(run_portfolio_optimization(inp).condition_number)
+                results.append(run_portfolio_optimization(inp))
             _, cov = opt.annualized_mean_cov(_wide_returns(tickers), 252)
         with threadpoolctl.threadpool_limits(limits=1, user_api="blas"):
-            expected.append(float(np.linalg.cond(cov)))
-    assert reported == expected
+            per_matrix.append(float(np.linalg.cond(cov)))
+    reported = [result.condition_number for result in results]
+    assert reported == per_matrix
+    assert reported == [one_thread] * 3
+    # Every field, floats by their shortest round-trip repr: equal text is
+    # equal bits.
+    dumped = [result.model_dump_json() for result in results]
+    assert dumped[1] == dumped[0]
+    assert dumped[2] == dumped[0]

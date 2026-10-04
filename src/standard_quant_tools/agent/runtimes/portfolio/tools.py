@@ -181,9 +181,12 @@ def run_portfolio_optimization(
     if input_data.method == "risk_parity":
         # risk_parity and black_litterman bypass mean_variance_optimize, so
         # they need the same gate it applies -- otherwise a covariance that
-        # is singular by construction reaches them too.
+        # is singular by construction reaches them too. The covariance is
+        # the one that gate reads, computed on one BLAS thread.
         _check_covariance_estimable(
-            returns_df.shape[0], len(solved_tickers), returns_df.cov().to_numpy()
+            returns_df.shape[0],
+            len(solved_tickers),
+            annualized_mean_cov(returns_df, 1)[1],
         )
         mu, cov = _mean_cov_for_tools(returns_df, input_data.periods_per_year)
         budget = (
@@ -224,7 +227,9 @@ def run_portfolio_optimization(
 
     if input_data.method == "black_litterman":
         _check_covariance_estimable(
-            returns_df.shape[0], len(solved_tickers), returns_df.cov().to_numpy()
+            returns_df.shape[0],
+            len(solved_tickers),
+            annualized_mean_cov(returns_df, 1)[1],
         )
         mu, cov = _mean_cov_for_tools(returns_df, input_data.periods_per_year)
         n = len(input_data.tickers)
@@ -426,7 +431,7 @@ def get_efficient_frontier(
     # covariance that is singular by construction has no frontier, and the
     # refusal names the remedy rather than letting np.linalg.inv raise.
     _check_covariance_estimable(
-        returns_df.shape[0], len(solved_tickers), returns_df.cov().to_numpy()
+        returns_df.shape[0], len(solved_tickers), annualized_mean_cov(returns_df, 1)[1]
     )
 
     mu, cov = _mean_cov_for_tools(returns_df, input_data.periods_per_year)
@@ -582,7 +587,8 @@ def get_portfolio_risk_attribution(
     ir = float(information_ratio(port_aligned, bench_aligned))
 
     # ── Marginal Risk Contribution (fraction of portfolio variance) ─
-    cov_ann = returns_df.cov().values * 252
+    # On one BLAS thread, like every covariance the optimizers build.
+    _, cov_ann = annualized_mean_cov(returns_df, 252)
     port_var = float(weights @ cov_ann @ weights)
     mcr = (
         (cov_ann @ weights) * weights / port_var

@@ -81,9 +81,17 @@ def annualized_mean_cov(
     volatility would scale with its square root, and getting that wrong in
     one copy and not the other is a factor of ~16 on a daily series that
     shows up as a plausible-looking number rather than an error.
+
+    The covariance is computed on one BLAS thread (see `_blas`). Without
+    missing values `DataFrame.cov()` is `np.cov`, a matrix product whose
+    last bits followed the BLAS thread count on the CI runners' OpenBLAS,
+    and every optimizer's weights and condition number start here. With
+    missing values pandas computes it pairwise in its own loop, which uses
+    no BLAS.
     """
     mu = returns_df.mean().to_numpy(dtype=float) * periods_per_year
-    cov = returns_df.cov().to_numpy(dtype=float) * periods_per_year
+    with single_threaded_blas():
+        cov = returns_df.cov().to_numpy(dtype=float) * periods_per_year
     return mu, cov
 
 
@@ -340,18 +348,23 @@ def frontier_stats(
     were private the only way to obtain a frontier was to re-solve the
     same closed form numerically once per point. Exposed so a caller that
     wants the curve rather than one portfolio can have it in one pass.
+
+    The inverse is taken on one BLAS thread (see `_blas`): at 235 assets
+    its last bits, and so every closed-form weight, followed the thread
+    count.
     """
-    try:
-        sigma_inv = np.linalg.inv(cov)
-    except np.linalg.LinAlgError as e:
-        raise ValidationError(
-            f"covariance matrix is singular/near-singular — cannot solve the "
-            f"unconstrained efficient frontier: {e}"
-        ) from e
     ones = np.ones(len(mu))
-    A = float(ones @ sigma_inv @ ones)
-    B = float(ones @ sigma_inv @ mu)
-    C = float(mu @ sigma_inv @ mu)
+    with single_threaded_blas():
+        try:
+            sigma_inv = np.linalg.inv(cov)
+        except np.linalg.LinAlgError as e:
+            raise ValidationError(
+                f"covariance matrix is singular/near-singular — cannot solve "
+                f"the unconstrained efficient frontier: {e}"
+            ) from e
+        A = float(ones @ sigma_inv @ ones)
+        B = float(ones @ sigma_inv @ mu)
+        C = float(mu @ sigma_inv @ mu)
     D = A * C - B * B
     if A <= 0 or abs(D) < 1e-14:
         raise ValidationError(
@@ -1782,38 +1795,44 @@ def black_litterman(
     if risk_aversion <= 0:
         raise ValidationError(f"risk_aversion must be > 0, got {risk_aversion}")
 
-    try:
-        tau_sigma_inv = np.linalg.inv(tau * cov_matrix)
-    except np.linalg.LinAlgError as e:
-        raise ValidationError(f"cov_matrix is singular: {e}") from e
+    # The inverses on one BLAS thread (see `_blas`): at 235 assets their
+    # last bits, and so the posterior and the weights, followed the thread
+    # count.
+    with single_threaded_blas():
+        try:
+            tau_sigma_inv = np.linalg.inv(tau * cov_matrix)
+        except np.linalg.LinAlgError as e:
+            raise ValidationError(f"cov_matrix is singular: {e}") from e
 
-    pi = risk_aversion * cov_matrix @ market_weights
+        pi = risk_aversion * cov_matrix @ market_weights
 
-    if omega is None:
-        omega = np.diag(np.diag(tau * P @ cov_matrix @ P.T))
-    else:
-        omega = np.asarray(omega, dtype=float)
-        if not np.all(np.isfinite(omega)):
-            raise ValidationError(
-                "omega (view uncertainty) contains non-finite entries"
-            )
-        if omega.shape != (k, k):
-            raise ValidationError(f"omega must be shape ({k}, {k}), got {omega.shape}")
+        if omega is None:
+            omega = np.diag(np.diag(tau * P @ cov_matrix @ P.T))
+        else:
+            omega = np.asarray(omega, dtype=float)
+            if not np.all(np.isfinite(omega)):
+                raise ValidationError(
+                    "omega (view uncertainty) contains non-finite entries"
+                )
+            if omega.shape != (k, k):
+                raise ValidationError(
+                    f"omega must be shape ({k}, {k}), got {omega.shape}"
+                )
 
-    try:
-        omega_inv = np.linalg.inv(omega)
-    except np.linalg.LinAlgError as e:
-        raise ValidationError(f"omega (view uncertainty) is singular: {e}") from e
+        try:
+            omega_inv = np.linalg.inv(omega)
+        except np.linalg.LinAlgError as e:
+            raise ValidationError(f"omega (view uncertainty) is singular: {e}") from e
 
-    middle = np.linalg.inv(tau_sigma_inv + P.T @ omega_inv @ P)
-    posterior_returns = middle @ (tau_sigma_inv @ pi + P.T @ omega_inv @ Q)
-    posterior_cov = cov_matrix + middle
+        middle = np.linalg.inv(tau_sigma_inv + P.T @ omega_inv @ P)
+        posterior_returns = middle @ (tau_sigma_inv @ pi + P.T @ omega_inv @ Q)
+        posterior_cov = cov_matrix + middle
 
-    try:
-        posterior_cov_inv = np.linalg.inv(posterior_cov)
-    except np.linalg.LinAlgError as e:
-        raise ValidationError(f"posterior_cov is singular: {e}") from e
-    implied_weights_raw = (posterior_cov_inv @ posterior_returns) / risk_aversion
+        try:
+            posterior_cov_inv = np.linalg.inv(posterior_cov)
+        except np.linalg.LinAlgError as e:
+            raise ValidationError(f"posterior_cov is singular: {e}") from e
+        implied_weights_raw = (posterior_cov_inv @ posterior_returns) / risk_aversion
     total = implied_weights_raw.sum()
     if abs(total) < 1e-14:
         raise ValidationError(

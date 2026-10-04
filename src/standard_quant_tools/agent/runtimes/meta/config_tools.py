@@ -546,12 +546,14 @@ _OTHER_SETTINGS: Tuple[_Setting, ...] = (
         default="1",
         is_secret=False,
         effect=(
-            "The BLAS threads the library's own covariance-sized "
-            "factorizations run on (the PSD repair, maximum diversification, "
-            "PCA's SVD, the covariance's eigenvalues, the optimizer's "
-            "decompositions, and every fit on a modeling pool). One is faster "
-            "at these sizes and gives the same bits on any machine; 0 leaves "
-            "BLAS at the process's own setting."
+            "The BLAS threads the library's own covariance-sized products "
+            "and factorizations run on (the sample, Ledoit-Wolf and EWMA "
+            "covariances and the optimizers' DataFrame.cov(), PCA's factor "
+            "returns, the network and lead-lag correlations, the PSD repair, "
+            "maximum diversification, PCA's SVD, the covariance's "
+            "eigenvalues, the optimizer's decompositions, and every fit on a "
+            "modeling pool). One gives the same bits on any machine with the "
+            "same BLAS; 0 leaves BLAS at the process's own setting."
         ),
         resolve=_blas_threads_value,
     ),

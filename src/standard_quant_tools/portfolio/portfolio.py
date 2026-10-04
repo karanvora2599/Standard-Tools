@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+from standard_quant_tools._blas import single_threaded_blas
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.metrics.return_metrics import cagr
 from standard_quant_tools.metrics.risk_metrics import (
@@ -132,8 +133,10 @@ def portfolio_metrics(
     port_returns = build_portfolio(returns_df, w)
     equity_curve = (1 + port_returns).cumprod()
 
-    # Covariance (annualized): single O(n·k²) BLAS call via numpy
-    cov_matrix = returns_df.cov().to_numpy(dtype=np.float64) * periods_per_year
+    # Covariance (annualized): single O(n·k²) BLAS call via numpy, on one
+    # BLAS thread (see `_blas`) so its bits do not follow the core count.
+    with single_threaded_blas():
+        cov_matrix = returns_df.cov().to_numpy(dtype=np.float64) * periods_per_year
     port_vol = float(np.sqrt(w @ cov_matrix @ w))
 
     annual_ret = float(cagr(equity_curve, periods_per_year))

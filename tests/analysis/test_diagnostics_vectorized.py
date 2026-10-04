@@ -21,6 +21,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from standard_quant_tools._blas import single_threaded_blas
 from standard_quant_tools.analysis import diagnostics
 from standard_quant_tools.analysis.diagnostics import (
     _clean,
@@ -121,8 +122,12 @@ def _reference_lead_lag_matrix(
     max_lag: int = 3,
     min_correlation: float = 0.1,
 ) -> Dict[str, Any]:
-    """`lead_lag_matrix` as it was, verbatim but for this docstring and for
-    reaching `_f_sf` through its module, so a test can watch the calls."""
+    """`lead_lag_matrix` as it was, verbatim but for this docstring, for
+    reaching `_f_sf` through its module, so a test can watch the calls, and
+    for computing its cross products on one BLAS thread, as the function
+    has since the CHANGELOG entry of 2026-10-04. At the caller's threads
+    their last bits differ on some OpenBLAS builds, and the comparison is
+    of the loop, not of the thread count."""
     frame = pd.DataFrame(returns).astype(float).dropna()
     n_assets = frame.shape[1]
     if n_assets < 2:
@@ -153,7 +158,7 @@ def _reference_lead_lag_matrix(
         denominator = np.sqrt(
             np.outer((lead_c**2).sum(axis=0), (follow_c**2).sum(axis=0))
         )
-        with np.errstate(invalid="ignore", divide="ignore"):
+        with single_threaded_blas(), np.errstate(invalid="ignore", divide="ignore"):
             correlations[lag] = (lead_c.T @ follow_c) / denominator
 
     for i, leader in enumerate(columns):

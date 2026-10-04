@@ -11,9 +11,26 @@ in the last bits with the thread count, so the same call gave different bits
 on machines with different core counts.
 
 `single_threaded_blas()` runs a block on one BLAS thread: faster for these
-sizes, and the same bits on any machine with the same BLAS. Large products
-that do gain from threads (a lead-lag matrix product over hundreds of names,
-a sample covariance's Gram matrix) are left alone.
+sizes, and the same bits on any machine with the same BLAS.
+
+The products that build those matrices run under it too: the sample,
+Ledoit-Wolf and EWMA covariances, the `DataFrame.cov()` the optimizers read
+(np.cov when nothing is missing; with gaps, pandas' own pairwise loop,
+which uses no BLAS), PCA's factor returns, and the network features' and
+the lead-lag correlations. Their last bits followed the thread count as
+well -- np.cov's on the CI runners' OpenBLAS, the EWMA, factor-return,
+network and lead-lag products under 0.3.27 and 0.3.31 at sixteen threads --
+and so did every output built from them. At 235 assets and below no whole
+call measured was more than 8% slower with them on one thread (PCA's), and
+most were faster. Wider, some of these products are slower on one: on a
+shared 16-thread machine the factor returns of 2,106 days of 500 assets
+took 3.0-7.2x as long and the network features' four products over 1,000
+names 1.8-3.4x, which made those whole calls 1.05-1.22x and 1.17-1.50x as
+long. That is the price of a whole output, not only its factorizations,
+being the same bits on any machine with the same BLAS. Matrix-vector
+products outside these blocks (a portfolio's variance, an optimizer's
+gradient) keep the caller's setting: they gave the same bits at every
+thread count measured.
 
 A BLAS library has one thread setting for the whole process, so the limit is
 reference-counted: every concurrent user runs on one thread, and the setting

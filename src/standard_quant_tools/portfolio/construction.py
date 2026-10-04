@@ -516,7 +516,10 @@ def hierarchical_risk_parity(
         )
 
     correlation = _correlation_matrix(frame)
-    covariance = frame.cov().to_numpy()
+    # np.cov's product, on one BLAS thread (see `_blas`) like every other
+    # covariance the allocators build.
+    with single_threaded_blas():
+        covariance = frame.cov().to_numpy()
     distance = np.sqrt(np.clip(0.5 * (1.0 - correlation), 0.0, None))
     order = _quasi_diagonal_order(distance)
 

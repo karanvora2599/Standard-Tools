@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from standard_quant_tools._blas import single_threaded_blas
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.portfolio import construction, covariance
 from standard_quant_tools.portfolio.construction import (
@@ -458,10 +459,16 @@ class TestQuasiDiagonalOrderIsUnchanged:
 
 
 class TestCovarianceMatrixIsUnchanged:
+    """The reference runs on one BLAS thread, as estimate_covariance's
+    products have since the CHANGELOG entry of 2026-10-04: at the caller's
+    threads their last bits differ on some OpenBLAS builds, and these tests
+    compare the code, not the thread count."""
+
     @pytest.mark.parametrize("method", METHODS)
     def test_every_method(self, method):
         returns = _factor_returns(40, 300, 10)
-        expected = _reference_estimate_covariance(returns, method=method)
+        with single_threaded_blas():
+            expected = _reference_estimate_covariance(returns, method=method)
         actual = covariance.estimate_covariance(returns, method=method)
         assert actual == expected
         assert list(actual["matrix"]) == list(expected["matrix"])
@@ -472,7 +479,8 @@ class TestCovarianceMatrixIsUnchanged:
         returns = _factor_returns(6, 200, 11)
         returns.iloc[:40, 2] = np.nan
         returns.columns = [10, 20, 30, 40, 50, 60]
-        expected = _reference_estimate_covariance(returns, method="sample")
+        with single_threaded_blas():
+            expected = _reference_estimate_covariance(returns, method="sample")
         actual = covariance.estimate_covariance(returns, method="sample")
         assert actual == expected
         assert all(type(k) is int for k in actual["matrix"])

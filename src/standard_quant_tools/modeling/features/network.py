@@ -47,6 +47,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools._blas import single_threaded_blas
 from standard_quant_tools.error import ValidationError
 
 from .base import FeatureContext, FeatureDefinition, FeatureScope, TemporalSupport
@@ -102,6 +103,11 @@ def _pairwise_correlation(frame: pd.DataFrame, min_periods: int):
     Returns None when the panel is too ill-conditioned for that centring to
     be exact, so the caller falls back to pandas rather than quietly
     returning a different number.
+
+    The products run on one BLAS thread (see `_blas`): their last bits
+    followed the thread count under OpenBLAS 0.3.27 and 0.3.31 at sixteen
+    threads, so a dataset's network features depended on the core count
+    of the machine that built it.
     """
     values = frame.to_numpy(dtype=np.float64)
     present = np.isfinite(values)
@@ -126,11 +132,12 @@ def _pairwise_correlation(frame: pd.DataFrame, min_periods: int):
 
     centred = np.where(present, values - column_mean, 0.0)
     mask = present.astype(np.float64)
-    n_pairs = mask.T @ mask
-    sum_x = centred.T @ mask
+    with single_threaded_blas():
+        n_pairs = mask.T @ mask
+        sum_x = centred.T @ mask
+        sum_xy = centred.T @ centred
+        sum_xx = (centred * centred).T @ mask
     sum_y = sum_x.T
-    sum_xy = centred.T @ centred
-    sum_xx = (centred * centred).T @ mask
     sum_yy = sum_xx.T
     with np.errstate(invalid="ignore", divide="ignore"):
         covariance = sum_xy / n_pairs - (sum_x / n_pairs) * (sum_y / n_pairs)

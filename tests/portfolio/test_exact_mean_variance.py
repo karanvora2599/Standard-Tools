@@ -150,6 +150,19 @@ def _weights(result) -> np.ndarray:
     return np.array(list(result["weights"].values()))
 
 
+def _result_bits(value):
+    """A whole result as a comparable structure, every float by its bits."""
+    if isinstance(value, dict):
+        return {k: _result_bits(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_result_bits(v) for v in value]
+    if isinstance(value, np.ndarray):
+        return value.tobytes()
+    if isinstance(value, float):
+        return np.float64(value).tobytes()
+    return value
+
+
 # ── planted optima ───────────────────────────────────────────────────────
 
 
@@ -603,25 +616,64 @@ class TestDeterminism:
         in the last bits between one and four BLAS threads: the factor
         frame's is 781.0238456977911 on one and 781.023845697788 on four
         under numpy 2.0's OpenBLAS, and the noise frame's differs under
-        OpenBLAS 0.3.31. The SVD now runs on one thread whatever the caller
-        set, so the reported number is the one-thread value.
+        OpenBLAS 0.3.31. The SVD runs on one thread whatever the caller set.
 
-        The covariance it is the condition number of is a product numpy
-        computes on the caller's threads, and some OpenBLAS builds (numpy's
-        on Python 3.10 in CI) give it different last bits at one and four
-        threads. So each reported number is held to the one-thread
-        condition number of the covariance its own call estimated."""
+        So does the covariance it is the condition number of. Its product
+        kept the caller's threads until the CHANGELOG entry of 2026-10-04,
+        and on the CI runners' OpenBLAS it gave different last bits at one
+        and four threads, so this test failed there. The reported number is
+        now one number at caller limits of one, two and four: the one-thread
+        condition number of the one-thread covariance, computed here from
+        pandas and numpy directly. Each call's number is also the
+        one-thread condition number of the covariance that call's caller
+        setting estimates."""
         threadpoolctl = pytest.importorskip("threadpoolctl")
         frame = (_noise_frame if kind == "noise" else _factor_frame)(12, 235, 2000)
-        reported, expected = [], []
-        for threads in (1, 4):
+        with threadpoolctl.threadpool_limits(limits=1, user_api="blas"):
+            one_thread_cov = frame.dropna().cov().to_numpy(dtype=float) * 252
+            one_thread = float(np.linalg.cond(one_thread_cov))
+        reported, per_matrix = [], []
+        for threads in (1, 2, 4):
             with threadpoolctl.threadpool_limits(limits=threads, user_api="blas"):
                 result = mean_variance_optimize(frame, "min_volatility")
                 _, cov = _moments(frame)
             with threadpoolctl.threadpool_limits(limits=1, user_api="blas"):
-                expected.append(float(np.linalg.cond(cov)))
+                per_matrix.append(float(np.linalg.cond(cov)))
             reported.append(result["condition_number"])
-        assert reported == expected
+        assert reported == per_matrix
+        assert reported == [one_thread] * 3
+
+    @pytest.mark.parametrize(
+        "objective,kwargs",
+        [
+            ("min_volatility", {}),
+            ("max_sharpe", {}),
+            ("min_volatility", {"allow_short": True}),
+            ("max_sharpe", {"allow_short": True}),
+        ],
+    )
+    def test_the_whole_answer_does_not_depend_on_the_blas_thread_count(
+        self, objective, kwargs
+    ):
+        """Every number the optimizer returns -- the weights, the expected
+        return and volatility, the Sharpe ratio, the solver's report and
+        certificate, the condition number -- is the same bits at caller
+        limits of one, two and four BLAS threads (see the CHANGELOG entry
+        of 2026-10-04). Two steps kept the caller's threads before: the
+        covariance product, whose last bits followed the thread count on
+        the CI runners' OpenBLAS, and the closed form's inverse (the
+        shorting cases here), whose last bits followed it under OpenBLAS
+        0.3.27 and 0.3.31 on a 16-thread Windows machine as well."""
+        threadpoolctl = pytest.importorskip("threadpoolctl")
+        frame = _factor_frame(12, 235, 2000)
+        answers = []
+        for threads in (1, 2, 4):
+            with threadpoolctl.threadpool_limits(limits=threads, user_api="blas"):
+                answers.append(
+                    _result_bits(mean_variance_optimize(frame, objective, **kwargs))
+                )
+        assert answers[1] == answers[0]
+        assert answers[2] == answers[0]
 
 
 # ── what a non-converged run says ────────────────────────────────────────

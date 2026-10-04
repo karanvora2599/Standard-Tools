@@ -100,35 +100,40 @@ def estimate_covariance(
     shrinkage: Optional[float] = None
     effective = float(n_obs)
 
-    if method == "sample":
-        cov = np.cov(values, rowvar=False, ddof=1)
-    elif method == "ledoit_wolf":
-        from sklearn.covariance import LedoitWolf
-
-        # Without the precision matrix, which nothing here reads: the fit
-        # inverts its covariance (an eigendecomposition) to store one, and at
-        # 235 assets that was 15 to 27 ms of a 23 to 33 ms fit. The
-        # covariance and the shrinkage are the same bits either way.
-        estimator = LedoitWolf(store_precision=False).fit(values)
-        cov = estimator.covariance_
-        shrinkage = float(estimator.shrinkage_)
-    else:
-        # `halflife or 60.0` turned an explicit 0 into the default 60 while
-        # -5 was refused: 0 is what an uninitialised config field arrives
-        # as, and it was answered as though 60 had been asked for. Only an
-        # absent halflife takes the default; 0 reaches the refusal below.
-        cov, effective = _ewma_covariance(
-            values, 60.0 if halflife is None else halflife
-        )
-        if method == "ewma_shrunk":
-            cov, shrinkage = _shrink_to_identity(cov, n_obs, n_assets)
-
-    annual = cov * periods_per_year
-    # On one BLAS thread (see `_blas`): faster at these sizes, and the
-    # condition number's bits no longer depend on the machine's core count.
-    # The products above keep their threads; only the EWMA one's last bits
-    # still depend on the thread count.
+    # The product that builds the matrix and the eigendecomposition after
+    # it, all on one BLAS thread (see `_blas`), so the matrix, its
+    # eigenvalues and the condition number are the same bits on any machine
+    # with the same BLAS. np.cov's, Ledoit-Wolf's and the EWMA product's
+    # last bits followed the thread count on some OpenBLAS builds: the CI
+    # runners' for the first two, 0.3.27 and 0.3.31 at sixteen threads for
+    # the third.
     with single_threaded_blas():
+        if method == "sample":
+            cov = np.cov(values, rowvar=False, ddof=1)
+        elif method == "ledoit_wolf":
+            from sklearn.covariance import LedoitWolf
+
+            # Without the precision matrix, which nothing here reads: the
+            # fit inverts its covariance (an eigendecomposition) to store
+            # one, and at 235 assets that was 15 to 27 ms of a 23 to 33 ms
+            # fit. The covariance and the shrinkage are the same bits
+            # either way.
+            estimator = LedoitWolf(store_precision=False).fit(values)
+            cov = estimator.covariance_
+            shrinkage = float(estimator.shrinkage_)
+        else:
+            # `halflife or 60.0` turned an explicit 0 into the default 60
+            # while -5 was refused: 0 is what an uninitialised config field
+            # arrives as, and it was answered as though 60 had been asked
+            # for. Only an absent halflife takes the default; 0 reaches the
+            # refusal below.
+            cov, effective = _ewma_covariance(
+                values, 60.0 if halflife is None else halflife
+            )
+            if method == "ewma_shrunk":
+                cov, shrinkage = _shrink_to_identity(cov, n_obs, n_assets)
+
+        annual = cov * periods_per_year
         eigenvalues = np.linalg.eigvalsh(annual)
     smallest = float(eigenvalues.min())
     condition = float(eigenvalues.max() / smallest) if smallest > 0 else float("inf")

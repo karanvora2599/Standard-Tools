@@ -260,9 +260,14 @@ def pca_returns(
     full_eigenvalues: Optional[np.ndarray] = None
 
     if method == "power_iteration":
-        Vt, eigenvalues, total_var, converged = _top_k_pc_power_iteration(
-            arr, n_comp, _POWER_ITERATION_TOL, _POWER_ITERATION_MAX_ITER
-        )
+        # On one BLAS thread too, so that every output of this function is
+        # under the limit. Its products are matrix-vector ones, which gave
+        # the same bits at every thread count measured; one thread costs
+        # about 0.3 ms at 252 days of 500 assets.
+        with single_threaded_blas():
+            Vt, eigenvalues, total_var, converged = _top_k_pc_power_iteration(
+                arr, n_comp, _POWER_ITERATION_TOL, _POWER_ITERATION_MAX_ITER
+            )
         if not converged:
             # Fall back rather than return an unconverged eigenpair. Power
             # iteration is an optimization, not a different definition of
@@ -281,8 +286,7 @@ def pca_returns(
     # take effect here.
     if method == "svd":
         # On one BLAS thread (see `_blas`): 26 against 77 ms at 1260 days of
-        # 235 assets, and the same bits on any machine. The factor-return
-        # product below keeps its threads, which it gains from.
+        # 235 assets, and the same bits on any machine.
         with single_threaded_blas():
             _, s, Vt_full = np.linalg.svd(arr, full_matrices=False)
         full_eigenvalues = s**2 / (n_obs - 1)
@@ -312,8 +316,14 @@ def pca_returns(
         columns=comp_names,
     )
 
+    # The factor returns are a matrix product whose last bits followed the
+    # BLAS thread count under OpenBLAS 0.3.27 and 0.3.31 at sixteen threads,
+    # so it runs on one thread as well, and every output here is the same
+    # bits on any machine with the same BLAS.
+    with single_threaded_blas():
+        factor_values = arr @ Vt[:n_comp].T
     factor_rets = pd.DataFrame(
-        arr @ Vt[:n_comp].T,
+        factor_values,
         index=data.index,
         columns=comp_names,
     )
