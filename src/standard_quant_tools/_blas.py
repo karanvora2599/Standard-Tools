@@ -243,8 +243,12 @@ def openmp_count_is_process_wide(library: Any) -> bool:
     """Whether a runtime's thread count, set on one thread, reaches every
     thread: MSVC's vcomp, measured. Every other runtime keeps it per thread,
     as the OpenMP specification has `omp_set_num_threads` do."""
+    import ntpath
+
+    # ntpath splits on both separators, so a Windows path is read the same
+    # wherever this runs.
     path = str(getattr(library, "filepath", "") or "")
-    name = os.path.basename(path).lower() or str(getattr(library, "prefix", "")).lower()
+    name = ntpath.basename(path).lower() or str(getattr(library, "prefix", "")).lower()
     return name.startswith("vcomp")
 
 

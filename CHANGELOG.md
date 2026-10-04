@@ -15,8 +15,9 @@
   is counted across threads as before. A per-thread runtime is set by each
   thread on its first entry and put back by that thread on its last exit, a
   nested user running on its thread's outer count. Which kind a runtime is
-  follows from its library (`_blas.openmp_count_is_process_wide`), and both
-  are tested on every platform with stand-in runtimes of each kind.
+  follows from its library's file name (`_blas.openmp_count_is_process_wide`,
+  which reads a Windows path the same on any platform), and both are tested
+  on every platform with stand-in runtimes of each kind.
   Predictions are unchanged: the estimators the limit wraps give the same
   predictions at any thread count.
 
