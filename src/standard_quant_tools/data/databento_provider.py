@@ -902,13 +902,13 @@ def _record(
     the rest of a cached fetch (see the CHANGELOG entry of 2026-10-01)."""
     if not audit.recording_data_access():
         return
-    audit.record_data_access(
+    audit.record_frame_access(
         symbol,
         str(start_date),
         str(end_date),
         what,
         source=f"databento:{dataset}",
-        content_hash=audit.hash_dataframe(frame),
+        frame=frame,
     )
 
 

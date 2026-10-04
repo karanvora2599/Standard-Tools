@@ -12,6 +12,12 @@ class DecisionRecord(BaseModel):
     timestamp_utc: str
     tool_name: str
     input: Dict[str, Any]
+    # One entry per data access: symbol, start, end, interval, source,
+    # content_hash, fetch_ms, and `content_hash_version` -- 2 for
+    # `canonical_frame_hash`, which does not depend on the pandas version.
+    # An entry without it (every one written before it existed) holds
+    # `hash_dataframe`, version 1, and still verifies, because a record is
+    # hashed as it was stored; replay compares each in its own form.
     data_sources: List[Dict[str, Any]] = Field(default_factory=list)
     cpp_available: bool
     n_workers: Optional[int] = None

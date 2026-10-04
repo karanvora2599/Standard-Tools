@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 from pydantic import ValidationError as PydanticValidationError
 
-from standard_quant_tools.audit.hashing import hash_dataframe
+from standard_quant_tools.audit.hashing import canonical_frame_hash
 from standard_quant_tools.data.factory import DataFactory
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.modeling.dataset.builder import build_dataset
@@ -430,12 +430,29 @@ class TestImmutableScoreArtifacts:
         # writing a different frame through the same naming path.
         df = _artifacts.load_artifact(first["predictions_uri"])
         df["prediction"] = df["prediction"] + 1.0
-        new_hash = hash_dataframe(df)
+        new_hash = canonical_frame_hash(df)
         assert new_hash != first["predictions_hash"]
 
         # The earlier artifact is untouched and still resolves to its own
         # bytes — which is the whole property being claimed.
         assert Path(first["predictions_uri"]).read_bytes() == original_bytes
+
+    def test_the_digest_is_the_files_own_under_any_pandas(self, patched_multi_factory):
+        """`predictions_hash` is `canonical_frame_hash`, which does not
+        depend on the pandas version: the file read back under any pandas
+        hashes to the digest its name carries. `hash_dataframe` named the
+        same predictions differently under pandas 2 and pandas 3 (`entity`
+        is `object` under one and `str` under the other; the CHANGELOG
+        entry of 2026-10-04)."""
+        from standard_quant_tools.modeling import artifacts as _artifacts
+
+        model_id = _train_a_model(patched_multi_factory)
+        result = score_model(
+            model_id=model_id, as_of="2023-12-29", universe=["AAA", "BBB"]
+        )
+        stored = _artifacts.load_artifact(result["predictions_uri"])
+        assert canonical_frame_hash(stored) == result["predictions_hash"]
+        assert Path(result["predictions_uri"]).stem.endswith(result["predictions_hash"])
 
     def test_universe_digest_is_full_length(self, patched_multi_factory):
         """8 hex chars is 32 bits — too short to lean on once it is part of

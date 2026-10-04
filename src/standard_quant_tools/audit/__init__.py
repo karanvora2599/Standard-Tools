@@ -17,9 +17,13 @@ readable as features accrete (retention/legal-hold, checkpoint signing,
 pluggable storage backends, ...):
 
     hashing     — content-fingerprint hashing (hash_payload, hash_dataframe,
-                  round_floats for the twelve-digit output hash)
+                  canonical_frame_hash, round_floats for the twelve-digit
+                  output hash)
+    legacy_hash — a hash_dataframe value reproduced under another pandas's
+                  dtype names and datetime resolutions
     json_native — what a record's input is made of before it is hashed
-    context     — per-call request context + correlated-logging helper
+    context     — per-call request context, the data-source entries a
+                  provider reports into it, + correlated-logging helper
     provenance  — git/package-version/strategy-source best-effort provenance,
                   and the build and platform facts the last bits depend on
     paths       — audit-dir resolution, day-file discovery, advisory locking
@@ -29,7 +33,8 @@ pluggable storage backends, ...):
     verify      — verify_audit_log_integrity, verify_audit_trail_integrity
     redaction   — SQT_AUDIT_REDACT_FIELDS field redaction
     retention   — legal hold, retention/gc, read-only sealing
-    repair      — cutting a torn final record off the newest day (CLI only)
+    repair      — cutting a torn final line off the newest day or the chain
+                  index (CLI only)
     export      — export_bundle (auditor-ready zip)
     signing     — Ed25519 checkpoint signing (optional `cryptography` extra)
     dispatch    — _run_and_record, the core agent.tools.dispatch() uses
@@ -42,15 +47,18 @@ internally organized.
 """
 
 from .context import (
+    DATA_SOURCE_HASH_VERSION,
     RequestIdFilter,
     configure_logging,
     new_request_id,
     record_data_access,
+    record_frame_access,
     recording_data_access,
 )
 from .dispatch import _run_and_record, last_request_id
 from .export import ExportedBundle, export_bundle
-from .hashing import hash_dataframe, hash_payload, round_floats
+from .hashing import canonical_frame_hash, hash_dataframe, hash_payload, round_floats
+from .legacy_hash import legacy_hash_variant
 from .models import DecisionRecord, ReplayResult
 from .paths import (
     _DAY_FILE_RE,
@@ -71,7 +79,7 @@ from .provenance import (
     _strategy_source_hash,
 )
 from .redaction import _redact, _redact_fields, redact_text
-from .repair import TornTail, repair_torn_tail
+from .repair import TornTail, repair_torn_index, repair_torn_tail, repair_torn_tails
 from .replay import verify_replay
 from .retention import gc, gc_candidates, hold_day, is_held, release_hold, seal_day
 from .signing import (
@@ -93,6 +101,7 @@ from .writer import AuditWriter
 
 __all__ = [
     "AuditStorageBackend",
+    "DATA_SOURCE_HASH_VERSION",
     "AuditWriter",
     "CheckpointVerification",
     "DecisionRecord",
@@ -102,6 +111,7 @@ __all__ = [
     "ReplayResult",
     "RequestIdFilter",
     "TornTail",
+    "canonical_frame_hash",
     "checkpoint_and_sign",
     "configure_logging",
     "describe_head",
@@ -114,11 +124,15 @@ __all__ = [
     "hold_day",
     "is_held",
     "last_request_id",
+    "legacy_hash_variant",
     "new_request_id",
     "record_data_access",
+    "record_frame_access",
     "recording_data_access",
     "release_hold",
+    "repair_torn_index",
     "repair_torn_tail",
+    "repair_torn_tails",
     "round_floats",
     "seal_day",
     "verify_audit_log_integrity",

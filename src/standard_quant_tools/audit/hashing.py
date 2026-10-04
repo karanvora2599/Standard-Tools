@@ -1,9 +1,12 @@
 """Content-fingerprint hashing shared by every other module in this package:
 `hash_payload` for JSON-serializable objects (decision records, chain-index
-entries), `hash_dataframe` for OHLCV data provenance, `canonical_frame_hash`
-for a frame whose fingerprint must not depend on the pandas version, and
-`round_floats`, which an output passes through before its rounded hash is
-taken."""
+entries), `canonical_frame_hash` for a frame whose fingerprint must not
+depend on the pandas version (a data source's `content_hash`, a dataset's
+`data_hash`, a scored predictions frame), `hash_dataframe`, a frame
+fingerprint that covers how the installed pandas spells each dtype (version
+1 of a data source's and a dataset's hash, which records and datasets
+written before version 2 carry), and `round_floats`, which an output passes
+through before its rounded hash is taken."""
 
 import hashlib
 import json

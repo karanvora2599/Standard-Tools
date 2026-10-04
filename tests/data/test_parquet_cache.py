@@ -425,7 +425,7 @@ class TestCacheHardening:
             patch.object(
                 provider_module.audit, "recording_data_access", return_value=True
             ),
-            patch.object(provider_module.audit, "record_data_access") as mock_record,
+            patch.object(provider_module.audit, "record_frame_access") as mock_record,
         ):
             mock_ticker.return_value.history.return_value = minimal_ohlcv.rename(
                 columns=str.lower
@@ -554,7 +554,7 @@ class TestCacheHardening:
             patch.object(
                 provider_module.audit, "recording_data_access", return_value=True
             ),
-            patch.object(provider_module.audit, "record_data_access") as mock_record,
+            patch.object(provider_module.audit, "record_frame_access") as mock_record,
         ):
             mock_ticker.return_value.history.return_value = minimal_ohlcv.rename(
                 columns=str.lower

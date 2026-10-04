@@ -377,13 +377,13 @@ class YFinanceProvider(DataProvider):
         cached_df = _session_cache_get(cache_key)
         if cached_df is not None:
             if audit.recording_data_access():
-                audit.record_data_access(
+                audit.record_frame_access(
                     symbol,
                     start_str,
                     end_str,
                     interval,
                     source="session_cache",
-                    content_hash=audit.hash_dataframe(cached_df),
+                    frame=cached_df,
                 )
             return disclose_served(cached_df.copy(), symbol, interval, clock)
 
@@ -442,13 +442,13 @@ class YFinanceProvider(DataProvider):
                     pq_path.name,
                 )
                 if audit.recording_data_access():
-                    audit.record_data_access(
+                    audit.record_frame_access(
                         symbol,
                         start_str,
                         end_str,
                         interval,
                         source="disk_cache",
-                        content_hash=audit.hash_dataframe(cached_df),
+                        frame=cached_df,
                     )
                 return cached_df
 
@@ -554,13 +554,13 @@ class YFinanceProvider(DataProvider):
         elapsed_ms = (time.perf_counter() - t0) * 1000
         logger.debug("[fetch] ✓ %s  %d rows  %.0fms", symbol, len(result), elapsed_ms)
         if audit.recording_data_access():
-            audit.record_data_access(
+            audit.record_frame_access(
                 symbol,
                 start_str,
                 end_str,
                 interval,
                 source="live_fetch",
-                content_hash=audit.hash_dataframe(result),
+                frame=result,
             )
 
         # ── Persist to Parquet for future sessions ─────────────────────────

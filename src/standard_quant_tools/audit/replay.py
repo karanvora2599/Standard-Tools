@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from standard_quant_tools.error import ValidationError
 
 from . import provenance as _provenance
-from .context import _data_sources_var
+from .context import DATA_SOURCE_HASH_VERSION, _data_sources_var, _ReplaySources
 from .hashing import ROUNDED_SIGNIFICANT_DIGITS, hash_payload, round_floats
 from .models import ReplayResult
 
@@ -190,6 +190,179 @@ def _redacted_input_fields(node: Any, prefix: str = "") -> List[str]:
     return sorted(set(found))
 
 
+_SourceKey = Tuple[str, str, str, str]
+
+#: How one data source compared: the hashes agree (`same`), agree only
+#: under the other pandas's representation (`respelled`), differ in a form
+#: that does not depend on pandas or between digests compared as given
+#: (`changed`), differ in the earlier form under every representation tried
+#: (`undecided`), or were taken in forms that cannot be compared
+#: (`uncompared`).
+_SAME, _RESPELLED, _CHANGED, _UNDECIDED, _UNCOMPARED = (
+    "same",
+    "respelled",
+    "changed",
+    "undecided",
+    "uncompared",
+)
+
+
+def _source_key(entry: Dict[str, Any]) -> _SourceKey:
+    return (entry["symbol"], entry["start"], entry["end"], entry["interval"])
+
+
+def _hash_version(entry: Dict[str, Any]) -> Optional[int]:
+    """The form of a data source's `content_hash`: 1 for an entry without
+    `content_hash_version` (every entry written before the key existed),
+    otherwise what it says; None for a value that is not a version."""
+    version = entry.get("content_hash_version")
+    if version is None:
+        return 1
+    if isinstance(version, bool):
+        return None
+    try:
+        return int(version)
+    except (TypeError, ValueError):
+        return None
+
+
+def _compare_source(
+    key: _SourceKey,
+    old: Optional[Dict[str, Any]],
+    new: Optional[Dict[str, Any]],
+) -> Tuple[Dict[str, Any], str]:
+    """
+    One `data_source_matches` entry -- the recorded and the replayed hash of
+    one data source, compared like with like -- and how it compared.
+
+    A version-2 record is compared with the replay's canonical hash. A
+    version-1 record is compared with `hash_dataframe` of the replayed
+    frame, as read and then under the other pandas's dtype names and
+    datetime resolutions: `new_hash` is the value as read, and
+    `reproduced_with` names the representation that matched when it was not
+    the one read. Two digests of the same declared form that the replay did
+    not take itself -- a provider outside this library reporting its own --
+    are compared as given. Forms that cannot be bridged (an unversioned
+    digest against a versioned one, or a version this release does not
+    know) are not compared, and `match` is None.
+
+    `hash_version` is the form the record's hash is in: 1, 2, or None for a
+    value that names no version this release knows.
+    """
+    symbol, start, end, interval = key
+    present = old if old is not None else new
+    entry: Dict[str, Any] = {
+        "symbol": symbol,
+        "start": start,
+        "end": end,
+        "interval": interval,
+        "old_hash": old.get("content_hash") if old is not None else None,
+        "new_hash": new.get("content_hash") if new is not None else None,
+        "match": False,
+        "hash_version": _hash_version(present) if present is not None else None,
+        "reproduced_with": None,
+    }
+    if old is None or new is None:
+        # Fetched by only one of the two: a difference whatever the form.
+        return entry, _CHANGED
+    old_version = _hash_version(old)
+    if old_version == 1 and "legacy_content_hash" in new:
+        entry["new_hash"] = new["legacy_content_hash"]
+        if entry["new_hash"] == entry["old_hash"]:
+            entry["match"] = True
+            return entry, _SAME
+        variant = new.get("legacy_variant")
+        if variant is not None:
+            entry["match"] = True
+            entry["reproduced_with"] = variant
+            return entry, _RESPELLED
+        return entry, _UNDECIDED
+    known = old_version in (1, DATA_SOURCE_HASH_VERSION)
+    if known and old_version == _hash_version(new):
+        entry["match"] = entry["old_hash"] == entry["new_hash"]
+        return entry, _SAME if entry["match"] else _CHANGED
+    entry["match"] = None
+    return entry, _UNCOMPARED
+
+
+def _named(entries: List[Dict[str, Any]], limit: int = 5) -> str:
+    names = [
+        f"{m['symbol']} {m['start']} -> {m['end']} ({m['interval']})" for m in entries
+    ]
+    shown = ", ".join(names[:limit])
+    return shown + (f" and {len(names) - limit} more" if len(names) > limit else "")
+
+
+def _data_source_notes(
+    compared: List[Tuple[Dict[str, Any], str]], output_moved: bool
+) -> List[str]:
+    """What the data-source comparison says, one note per kind of finding."""
+    kinds: Dict[str, List[Dict[str, Any]]] = {}
+    for entry, kind in compared:
+        kinds.setdefault(kind, []).append(entry)
+    notes: List[str] = []
+
+    respelled = kinds.get(_RESPELLED, [])
+    if respelled:
+        hows = "; ".join(sorted({m["reproduced_with"] for m in respelled}))
+        notes.append(
+            f"The content hash recorded for {_named(respelled)} is the earlier "
+            "form, `hash_dataframe`, which covers how pandas spells each "
+            "column's dtype and stores its datetimes. The replayed data "
+            f"reproduces it with {hows}, so it is the data that was recorded; "
+            "only the representation the hash was taken over differs, as it "
+            "does between pandas 2 and pandas 3."
+        )
+    if kinds.get(_CHANGED):
+        if output_moved:
+            notes.append(
+                "Underlying data changed and the output changed accordingly — "
+                "the provider likely revised historical values."
+            )
+        else:
+            notes.append(
+                "Underlying data changed but the output is unaffected "
+                "(e.g. a scale- or shift-invariant metric) — worth a closer look."
+            )
+    undecided = kinds.get(_UNDECIDED, [])
+    if undecided:
+        import pandas as pd
+
+        notes.append(
+            f"The content hash recorded for {_named(undecided)} is the earlier "
+            "form, `hash_dataframe`, which depends on how pandas spells each "
+            "column's dtype and stores its datetimes. The replayed data does "
+            "not reproduce it as read, with text columns spelled `object`, "
+            "`str` or `string`, or with its datetime columns and index at "
+            "`[ns]`, `[us]`, `[ms]` or `[s]`. The record does not say which "
+            f"pandas hashed it, and this replay runs pandas {pd.__version__}, "
+            "so this check cannot tell a revision by the provider from a "
+            "difference in how that pandas represented the same values. A "
+            "call recorded now carries a hash that does not depend on the "
+            "pandas version."
+        )
+    uncompared = kinds.get(_UNCOMPARED, [])
+    if uncompared:
+        notes.append(
+            f"The record and the replay hashed {_named(uncompared)} in "
+            "different forms (an unversioned digest reported by a provider "
+            "outside this library against a versioned one, or a content-hash "
+            "version this release, which writes version "
+            f"{DATA_SOURCE_HASH_VERSION}, does not know), so the two were not "
+            "compared."
+        )
+    if output_moved and not (kinds.get(_CHANGED) or undecided):
+        notes.append(
+            "Output changed even though input data is identical — "
+            "code/logic likely changed since the record was written."
+            if not uncompared
+            else "Output changed, and every input data source that could be "
+            "compared is identical — code/logic likely changed since the "
+            "record was written."
+        )
+    return notes
+
+
 def verify_replay(record: Dict[str, Any]) -> ReplayResult:
     """
     Re-run a recorded tool call and compare data + output hashes against
@@ -202,6 +375,14 @@ def verify_replay(record: Dict[str, Any]) -> ReplayResult:
     replay produced, the one the record stored, and both hashes for every
     data source — so "the code changed" arrives with what changed rather
     than as a bare claim.
+
+    Each data source is compared in the form its record took (see
+    `_compare_source`). A record written before `content_hash_version`
+    existed holds `hash_dataframe`, whose value depends on the pandas
+    version; it is checked against the replayed frame's `hash_dataframe` as
+    read and under the other pandas's dtype names and datetime resolutions,
+    and a miss under all of them is reported as undecided between a revised
+    value and a pandas difference, not as a revision.
     """
     fn, model_cls, surface = _resolve_tool(record["tool_name"])
     tool_name = record["tool_name"]
@@ -231,7 +412,18 @@ def verify_replay(record: Dict[str, Any]) -> ReplayResult:
     original_status = record.get("status", "ok")
     original_error = record.get("error_type")
 
-    token_data = _data_sources_var.set([])
+    # The record's data sources by key. A version-1 entry's hash is handed
+    # to the replay's providers, which hash the frame they fetch that way
+    # too, so the comparison below is made like with like.
+    old_by_key = {_source_key(s): s for s in record.get("data_sources", [])}
+    replay_sources = _ReplaySources(
+        legacy={
+            key: entry["content_hash"]
+            for key, entry in old_by_key.items()
+            if _hash_version(entry) == 1 and entry.get("content_hash") is not None
+        }
+    )
+    token_data = _data_sources_var.set(replay_sources)
     try:
         result_obj = fn(model_cls(**record["input"]))
         new_output = result_obj.model_dump()
@@ -394,53 +586,18 @@ def verify_replay(record: Dict[str, Any]) -> ReplayResult:
     reproduced_elsewhere = bool(rounded_match) and bool(build_differences)
     output_moved = output_match is False and not reproduced_elsewhere
 
-    old_by_key = {
-        (s["symbol"], s["start"], s["end"], s["interval"]): s["content_hash"]
-        for s in record.get("data_sources", [])
-    }
-    new_by_key = {
-        (s["symbol"], s["start"], s["end"], s["interval"]): s["content_hash"]
-        for s in new_sources
-    }
+    new_by_key = {_source_key(s): s for s in new_sources}
     # Iterate the union of old and new keys, not just new_sources — a key
     # present in the original record but absent from the replay (e.g. the
     # tool no longer fetches a symbol/range it used to) must still be
     # reported, not silently dropped just because the loop only walked
     # what the replay happened to touch.
-    data_matches: List[Dict[str, Any]] = []
-    for key in sorted(set(old_by_key) | set(new_by_key)):
-        symbol, start, end, interval = key
-        old_hash = old_by_key.get(key)
-        new_hash = new_by_key.get(key)
-        data_matches.append(
-            {
-                "symbol": symbol,
-                "start": start,
-                "end": end,
-                "interval": interval,
-                "old_hash": old_hash,
-                "new_hash": new_hash,
-                "match": old_hash == new_hash,
-            }
-        )
-
-    data_all_match = all(m["match"] for m in data_matches) if data_matches else True
-    if not data_all_match:
-        if output_moved:
-            notes.append(
-                "Underlying data changed and the output changed accordingly — "
-                "the provider likely revised historical values."
-            )
-        else:
-            notes.append(
-                "Underlying data changed but the output is unaffected "
-                "(e.g. a scale- or shift-invariant metric) — worth a closer look."
-            )
-    elif output_moved:
-        notes.append(
-            "Output changed even though input data is identical — "
-            "code/logic likely changed since the record was written."
-        )
+    compared = [
+        _compare_source(key, old_by_key.get(key), new_by_key.get(key))
+        for key in sorted(set(old_by_key) | set(new_by_key))
+    ]
+    data_matches: List[Dict[str, Any]] = [entry for entry, _kind in compared]
+    notes.extend(_data_source_notes(compared, output_moved))
 
     return ReplayResult(
         request_id=record["request_id"],

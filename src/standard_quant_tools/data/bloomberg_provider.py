@@ -443,13 +443,13 @@ class BloombergProvider(DataProvider):
         # provider follows.
         result = drop_unusable_closes(result, symbol, provider="bloomberg")
         if audit.recording_data_access():
-            audit.record_data_access(
+            audit.record_frame_access(
                 symbol,
                 start_str,
                 end_str,
                 interval,
                 source="live_fetch",
-                content_hash=audit.hash_dataframe(result),
+                frame=result,
             )
         return result
 

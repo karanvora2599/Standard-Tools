@@ -36,7 +36,7 @@ from typing import Any, Dict, List, Optional, Sequence
 import numpy as np
 import pandas as pd
 
-from standard_quant_tools.audit.hashing import hash_dataframe
+from standard_quant_tools.audit.hashing import canonical_frame_hash
 from standard_quant_tools.error import ValidationError
 
 from . import artifacts as _artifacts
@@ -789,7 +789,14 @@ def score_model(
     # same path (idempotent, no file proliferation) while any change in the
     # predictions produces a new path, leaving the old one intact for
     # whoever recorded it.
-    content_digest = hash_dataframe(predictions_df)
+    #
+    # `canonical_frame_hash`, not `hash_dataframe`: the latter covers how
+    # the installed pandas spells each dtype, and `entity` is `object` under
+    # pandas 2 and `str` under pandas 3, so identical predictions were named
+    # and hashed differently under the two. A file written under the earlier
+    # digest keeps its name and loads as before; re-scoring it writes the
+    # same predictions once more under the new name.
+    content_digest = canonical_frame_hash(predictions_df)
     run_name = (
         f"predictions_{as_of_ts.strftime('%Y%m%d')}_{universe_digest}_{content_digest}"
     )

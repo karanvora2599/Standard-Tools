@@ -49,17 +49,20 @@ Command-line interface for the audit trail's JSONL decision records
                                             (not WORM — see
                                             audit.seal_day's docstring).
     sqt audit repair-tail [date]
-                          [--confirm]    — for the newest day, whose final
-                                            line a crash or a full disk cut
-                                            off mid-record, show the torn
-                                            bytes (dry-run) or, with
-                                            --confirm, cut exactly those
-                                            under the writer's lock and keep
-                                            them in a side file beside the
-                                            day; then verify the trail.
-                                            Refuses a complete final line,
-                                            damage elsewhere in the day, and
-                                            a day that is not the newest.
+                          [--confirm]    — for the newest day and the chain
+                                            index, whichever ends in a line
+                                            a crash or a full disk cut off
+                                            mid-write, show the torn bytes
+                                            (dry-run) or, with --confirm,
+                                            cut exactly those under the
+                                            writer's locks and keep them in
+                                            a side file beside the file;
+                                            then verify the trail. Refuses
+                                            when neither ends in a torn
+                                            line, damage anywhere but the
+                                            end of either, and a day that is
+                                            not the newest; a refusal of
+                                            either leaves both untouched.
                                             Exit code: 0 = shown, or cut and
                                             the trail verifies; 1 = refused,
                                             or problems remain after the cut.
@@ -384,6 +387,18 @@ def cmd_repair_tail(
     return audit.repair_torn_tail(date, audit_dir=audit_dir, confirm=confirm)
 
 
+def cmd_repair_tails(
+    date: Optional[str] = None,
+    confirm: bool = False,
+    audit_dir: Optional[Path] = None,
+) -> "List[audit.TornTail]":
+    """What `sqt audit repair-tail` runs: the newest day and the chain
+    index, each examined, and whichever ends in a torn line reported or,
+    with confirm=True, cut (`audit.repair_torn_tails`). CLI only, like
+    `cmd_repair_tail`."""
+    return audit.repair_torn_tails(date, audit_dir=audit_dir, confirm=confirm)
+
+
 #: How much of a fragment the dry-run prints; the side file keeps it whole.
 _FRAGMENT_SHOWN = 160
 
@@ -391,10 +406,11 @@ _FRAGMENT_SHOWN = 160
 def _format_repair_tail(torn: "audit.TornTail") -> str:
     shown = torn.fragment[:_FRAGMENT_SHOWN]
     more = len(torn.fragment) - len(shown)
+    a_what = "an entry" if torn.is_index else "a record"
     lines = [
-        f"{torn.day.name} ends in a torn record: {len(torn.fragment)} byte(s) "
-        f"from byte {torn.offset}, with no newline after them, that are not "
-        "a record.",
+        f"{torn.day.name} ends in a torn {torn.what}: {len(torn.fragment)} "
+        f"byte(s) from byte {torn.offset}, with no newline after them, that "
+        f"are not {a_what}.",
         f"  fragment: {shown!r}" + (f" ... ({more} more byte(s))" if more else ""),
     ]
     if torn.cut:
@@ -408,7 +424,7 @@ def _format_repair_tail(torn: "audit.TornTail") -> str:
             f"Would cut (dry-run; pass --confirm): truncate {torn.day.name} "
             f"to {torn.offset} byte(s), keeping the fragment in a side file "
             f"{torn.day.name}{audit.repair.TORN_SUFFIX}<UTC time>-<id> beside "
-            "it. No complete record is removed."
+            f"it. No complete {torn.what} is removed."
         )
     return "\n".join(lines)
 
@@ -598,13 +614,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         "audit",
         help="Repair the decision log. `audit repair-tail` shows (or with "
         "--confirm cuts, keeping the bytes in a side file) the torn final "
-        "line a crash or a full disk left on the newest day, which the "
-        "writer refuses to append after.",
+        "line a crash or a full disk left on the newest day or the chain "
+        "index, which the writer refuses to append after.",
     )
     p_audit.add_argument(
         "action",
         choices=["repair-tail"],
-        help="repair-tail: the newest day's torn final line.",
+        help="repair-tail: the torn final line of the newest day or the "
+        "chain index.",
     )
     p_audit.add_argument(
         "date",
@@ -731,9 +748,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             path = cmd_seal(args.date)
             print(f"Sealed {path} read-only.")
         elif args.command == "audit":
-            torn = cmd_repair_tail(args.date, confirm=args.confirm)
-            print(_format_repair_tail(torn))
-            if torn.cut:
+            repaired = cmd_repair_tails(args.date, confirm=args.confirm)
+            for torn in repaired:
+                print(_format_repair_tail(torn))
+            if any(torn.cut for torn in repaired):
                 # The cut is shown to have done what it claims: the trail,
                 # verified now, is what it was before the interrupted write.
                 notes = []

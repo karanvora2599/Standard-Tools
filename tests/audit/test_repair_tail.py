@@ -1,15 +1,17 @@
 """
-`sqt audit repair-tail` cuts a torn final record off the newest day, and
-nothing else.
+`sqt audit repair-tail` cuts a torn final line off the newest day or the
+chain index, and nothing else.
 
-A crash or a full disk during a write leaves the newest day ending in a
-fragment the writer refuses to append after. The remedy was a manual
-truncation at a byte offset. The command shows the fragment by default and,
-with --confirm, cuts exactly those bytes under the writer's lock, keeping
-them in a side file beside the day -- after which the trail verifies as it
-did before the interrupted write. It refuses a complete final line, damage
-anywhere but the end, and any day but the newest; and like every function
-that changes the trail it is reachable from no dispatch table.
+A crash or a full disk during a write leaves the newest day -- or, when the
+write was a new day's first, the chain index -- ending in a fragment the
+writer refuses to append after. The remedy was a manual truncation at a byte
+offset, and for the chain index it still was until the CHANGELOG entry of
+2026-10-04. The command shows the fragment by default and, with --confirm,
+cuts exactly those bytes under the writer's lock, keeping them in a side
+file beside the file -- after which the trail verifies as it did before the
+interrupted write. It refuses a complete final line, damage anywhere but the
+end, and any day but the newest; and like every function that changes the
+trail it is reachable from no dispatch table.
 """
 
 import json
@@ -28,6 +30,8 @@ from standard_quant_tools.audit.writer import AuditWriter
 from standard_quant_tools.error import AuditIntegrityError, ValidationError
 
 FRAGMENT = b'{"request_id": "r3", "record_ha'
+#: What a new day's index entry cut short leaves: the keys are written sorted.
+INDEX_FRAGMENT = b'{"chain_head": "0123456789abcdef", "date": "2026'
 
 
 def _record(i: int) -> "audit.DecisionRecord":
@@ -77,16 +81,18 @@ class TestTheWriterNamesTheCommand:
         assert f"sqt audit repair-tail {day.stem}" in str(refused.value)
         assert "--confirm" in str(refused.value)
 
-    def test_a_torn_chain_index_names_only_the_manual_cut(self, trail):
-        """Null case: the command repairs day files, so a torn index is not
-        pointed at it."""
+    def test_a_torn_chain_index_is_refused_with_the_repair_command(self, trail):
+        """The command cuts a torn index too, so the refusal names it, with
+        no date, and keeps the manual cut beside it."""
         directory, _day, _whole, _before = trail
         index = directory / audit._INDEX_FILENAME
-        _tear(index, b'{"date": "2026')
+        _tear(index, INDEX_FRAGMENT)
         with pytest.raises(AuditIntegrityError) as refused:
             AuditWriter(audit_dir=directory)._read_tail(index, "entry")
-        assert "repair-tail" not in str(refused.value)
-        assert "truncate" in str(refused.value)
+        message = str(refused.value)
+        assert "`sqt audit repair-tail` to see the fragment" in message
+        assert "--confirm" in message and "beside the index" in message
+        assert "truncate" in message
 
 
 class TestTheCutIsShownThenMade:
@@ -278,6 +284,195 @@ class TestTheCommandLine:
         assert "complete record" in capsys.readouterr().err
 
 
+def _index(directory: Path) -> Path:
+    return directory / audit._INDEX_FILENAME
+
+
+def _index_side_files(directory: Path) -> List[Path]:
+    return _side_files(_index(directory))
+
+
+class TestATornChainIndex:
+    """The writer appends a new day's index entry just before the day's
+    first record, so a write cut short there leaves the index ending in a
+    fragment and the day with no file. The command finds and cuts it the
+    way it cuts a torn day."""
+
+    def test_the_writer_cannot_start_a_new_day_until_it_is_cut(self, trail):
+        directory, _day, _whole, before = trail
+        index = _index(directory)
+        whole_index = index.read_bytes()
+        _tear(index, INDEX_FRAGMENT)
+        writer = AuditWriter(audit_dir=directory)
+        with pytest.raises(AuditIntegrityError, match="sqt audit repair-tail"):
+            writer._bootstrap_new_day(directory / "2099-01-01.jsonl")
+
+        torn = cli.cmd_repair_tails(confirm=True, audit_dir=directory)
+
+        assert [t.day for t in torn] == [index] and torn[0].is_index
+        assert index.read_bytes() == whole_index
+        assert torn[0].side_file.read_bytes() == INDEX_FRAGMENT
+        assert _index_side_files(directory) == [torn[0].side_file]
+        assert _verified(directory) == before and before[0] == []
+        writer._bootstrap_new_day(directory / "2099-01-01.jsonl")
+        assert len(index.read_bytes().splitlines()) == 2
+
+    def test_by_default_nothing_is_touched(self, trail):
+        directory, day, whole, _before = trail
+        index = _index(directory)
+        _tear(index, INDEX_FRAGMENT)
+        torn_index = index.read_bytes()
+
+        (torn,) = cli.cmd_repair_tails(audit_dir=directory)
+
+        assert not torn.cut and torn.what == "entry"
+        assert torn.offset == len(torn_index) - len(INDEX_FRAGMENT)
+        assert torn.fragment == INDEX_FRAGMENT
+        assert index.read_bytes() == torn_index and day.read_bytes() == whole
+        assert _index_side_files(directory) == []
+
+    def test_a_healthy_index_is_untouched_when_the_day_is_cut(self, trail):
+        directory, day, whole, before = trail
+        index = _index(directory)
+        whole_index = index.read_bytes()
+        _tear(day)
+
+        (torn,) = cli.cmd_repair_tails(confirm=True, audit_dir=directory)
+
+        assert torn.day == day and torn.what == "record"
+        assert day.read_bytes() == whole and index.read_bytes() == whole_index
+        assert _index_side_files(directory) == []
+        assert _verified(directory) == before
+
+    def test_both_torn_are_both_cut(self, trail):
+        """Two crashes' worth of damage, each a torn last line: the day
+        first in the result, and the trail whole afterwards."""
+        directory, day, whole, before = trail
+        index = _index(directory)
+        whole_index = index.read_bytes()
+        _tear(day)
+        _tear(index, INDEX_FRAGMENT)
+
+        torn = cli.cmd_repair_tails(confirm=True, audit_dir=directory)
+
+        assert [t.day for t in torn] == [day, index] and all(t.cut for t in torn)
+        assert day.read_bytes() == whole and index.read_bytes() == whole_index
+        assert _verified(directory) == before
+
+    def test_a_corrupt_middle_is_refused_and_nothing_is_cut(self, trail):
+        """A damaged earlier entry is evidence, not a torn write; and the
+        refusal of the index leaves a torn day uncut as well."""
+        directory, day, _whole, _before = trail
+        index = _index(directory)
+        AuditWriter(audit_dir=directory)._bootstrap_new_day(
+            directory / "2099-01-01.jsonl"
+        )
+        lines = index.read_bytes().splitlines(keepends=True)
+        index.write_bytes(b"{damaged\n" + lines[1] + INDEX_FRAGMENT)
+        _tear(day)
+        untouched = (index.read_bytes(), day.read_bytes())
+
+        for confirm in (False, True):
+            with pytest.raises(ValidationError, match=r"line\(s\) \[1\]") as refused:
+                cli.cmd_repair_tails(confirm=confirm, audit_dir=directory)
+            message = str(refused.value)
+            assert "not readable entries" in message and "Nothing was cut" in message
+        with pytest.raises(ValidationError, match="not only at the end"):
+            audit.repair_torn_index(audit_dir=directory, confirm=True)
+        assert (index.read_bytes(), day.read_bytes()) == untouched
+        assert _index_side_files(directory) == [] and _side_files(day) == []
+
+    @pytest.mark.parametrize(
+        "tail, reason",
+        [
+            (b'{"extra": 1}', "lost only its newline"),
+            (b"{not json\n", "ends in a newline"),
+            (b"42", "not an entry"),
+        ],
+        ids=[
+            "a complete entry without its newline",
+            "a damaged line with its newline",
+            "a JSON value that is not an entry",
+        ],
+    )
+    def test_a_final_line_that_is_not_a_torn_entry(self, trail, tail, reason):
+        """Null cases, refused in the index's own words."""
+        directory, _day, _whole, _before = trail
+        index = _index(directory)
+        _tear(index, tail)
+        untouched = index.read_bytes()
+        for confirm in (False, True):
+            with pytest.raises(ValidationError, match=reason):
+                audit.repair_torn_index(audit_dir=directory, confirm=confirm)
+        assert index.read_bytes() == untouched and _index_side_files(directory) == []
+
+    def test_neither_torn_says_what_each_ends_in(self, trail):
+        directory, _day, _whole, _before = trail
+        with pytest.raises(ValidationError) as refused:
+            cli.cmd_repair_tails(confirm=True, audit_dir=directory)
+        message = str(refused.value)
+        assert "final line is a complete record" in message
+        assert "final line is a complete entry" in message
+        assert message.count("Nothing was cut") == 1
+
+    def test_the_first_entry_ever_cut_short(self, tmp_path):
+        """The very first write: the index's first entry torn, no day file
+        yet. The index is cut to nothing and the writer starts the trail."""
+        directory = tmp_path / "audit"
+        directory.mkdir()
+        index = _index(directory)
+        index.write_bytes(INDEX_FRAGMENT)
+
+        (torn,) = cli.cmd_repair_tails(confirm=True, audit_dir=directory)
+
+        assert torn.offset == 0 and index.read_bytes() == b""
+        AuditWriter(audit_dir=directory).write(_record(1))
+        assert audit.verify_audit_trail_integrity(directory) == []
+
+    def test_the_cut_waits_for_the_index_lock(self, trail):
+        directory, _day, _whole, _before = trail
+        index = _index(directory)
+        whole_index = index.read_bytes()
+        _tear(index, INDEX_FRAGMENT)
+        held = _filelock.acquire_lock(lock_path_for(index))
+        assert held is not None
+        done = threading.Event()
+
+        def _repair():
+            cli.cmd_repair_tails(confirm=True, audit_dir=directory)
+            done.set()
+
+        worker = threading.Thread(target=_repair)
+        try:
+            worker.start()
+            time.sleep(0.3)
+            assert not done.is_set()
+            assert index.read_bytes().endswith(INDEX_FRAGMENT)
+        finally:
+            _filelock.release_lock(held)
+            worker.join(timeout=10)
+        assert done.is_set() and index.read_bytes() == whole_index
+
+    def test_the_command_line_shows_then_cuts(self, trail, capsys, monkeypatch):
+        directory, _day, _whole, _before = trail
+        monkeypatch.setenv("SQT_AUDIT_DIR", str(directory))
+        index = _index(directory)
+        whole_index = index.read_bytes()
+        _tear(index, INDEX_FRAGMENT)
+
+        assert cli.main(["audit", "repair-tail"]) == 0
+        shown = capsys.readouterr().out
+        assert f"{audit._INDEX_FILENAME} ends in a torn entry" in shown
+        assert "Would cut (dry-run; pass --confirm)" in shown
+        assert "No complete entry is removed." in shown
+        assert index.read_bytes().endswith(INDEX_FRAGMENT)
+
+        assert cli.main(["audit", "repair-tail", "--confirm"]) == 0
+        done = capsys.readouterr().out
+        assert "Cut:" in done and "OK — no integrity problems found." in done
+        assert index.read_bytes() == whole_index
+
+
 class TestItIsNeverATool:
     def test_no_dispatch_table_reaches_it(self):
         from standard_quant_tools.agent.runtimes import all_runtimes
@@ -288,8 +483,13 @@ class TestItIsNeverATool:
         reachable = {fn for table in tables for fn, _model in table.values()}
         for fn in (
             repair.repair_torn_tail,
+            repair.repair_torn_index,
+            repair.repair_torn_tails,
             audit.repair_torn_tail,
+            audit.repair_torn_index,
+            audit.repair_torn_tails,
             cli.cmd_repair_tail,
+            cli.cmd_repair_tails,
         ):
             assert fn not in reachable
 

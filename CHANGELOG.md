@@ -1,5 +1,85 @@
 # Changelog
 
+## A replay under the other pandas no longer calls unchanged data revised, `sqt audit repair-tail` cuts a torn chain index, and `model.skops` reproduces
+
+- **The false revision.** Every provider recorded a fetched frame's
+  `content_hash` with `audit.hash_dataframe`, which covers each column's
+  `str(dtype)`: `object` under pandas 2, `str` under pandas 3. A tick
+  frame carries text columns (`action`, `side`, `symbol`), so the same
+  trades hashed differently under the two (a 1M-row MBO-shaped frame:
+  `052eca899da25657` under pandas 2.3.3, `d81a29e5fcd613b1` under 3.0.5),
+  and a replay under the other pandas reported the data as changed, with
+  the note "the provider likely revised historical values".
+- **New entries record version 2.** All twelve provider sites (Databento
+  bars, trades, quotes, depth and order events; Polygon bars, trades,
+  quotes and point-in-time records; yfinance; Bloomberg) report through
+  `audit.record_frame_access`, which records `audit.canonical_frame_hash`
+  with `content_hash_version: 2` beside it. The same MBO frame gives
+  `b325773ae0eaa647` under both. `DecisionRecord` is unchanged, and
+  `record_data_access` takes an optional `content_hash_version` for a
+  caller that hashes its own frames.
+- **Existing records keep verifying.** Nothing on disk is rewritten: a
+  record is hashed as it was stored, and a day holding both forms
+  verifies.
+- **Replay compares like with like.** A version-2 entry is compared with
+  the replayed frame's canonical hash. A version-1 entry is compared with
+  the replayed frame's `hash_dataframe` as read, then under the other
+  pandas's text spellings (`object`, `str`, `string`) and datetime
+  resolutions (`[ns]`, `[us]`, `[ms]`, `[s]`), a datetime index now
+  included, by the search datasets use, moved to `audit.legacy_hash`. A
+  match there is unchanged data and the note names the representation. A
+  miss under all of them is no longer called a revision: the note says
+  the check cannot tell a revision from a pandas difference and names
+  this process's pandas, since no record says which pandas wrote it.
+  Each `data_source_matches` entry gains `hash_version` and
+  `reproduced_with`; an unversioned digest from a provider outside the
+  library against a versioned one is not compared (`match: None`).
+- **`score_model`'s digest.** `predictions_hash`, and the file name built
+  from it, is `canonical_frame_hash`: `entity` is `object` under pandas 2
+  and `str` under pandas 3, so identical predictions were named
+  differently under the two. A file written before keeps its name and
+  loads as before; the first re-score after the upgrade writes the same
+  predictions once more under the new name, and a replay of an earlier
+  `score_model` record reports its output as changed.
+- **A torn chain index is cut like a torn day.** The writer appends a new
+  day's index entry before the day's first record, so a crash there left
+  the index ending in a fragment the writer refused to append after,
+  with only a manual truncation named. `sqt audit repair-tail` now
+  examines the newest day and the chain index, shows whichever ends in a
+  torn line, and with `--confirm` cuts it under the writer's locks (the
+  index's before the day's), keeping the bytes in
+  `_chain_index.jsonl.torn-<UTC time>-<id>`. A damaged earlier line of
+  either file is refused, and a refusal of either leaves both untouched.
+  The writer's refusal names the command. `audit.repair_torn_index` and
+  `audit.repair_torn_tails` are CLI-only, in no dispatch table.
+- **`model.skops` reproduces.** `skops.io.dump` dated each zip member
+  with the wall clock, stored each array under its object's memory
+  address and each bytes value under a random UUID, and a tree's node
+  records carry seven padding bytes each, whatever the allocator left.
+  Two identical runs wrote different bundles, so the manifest's
+  `model.skops` hash never reproduced. The bundle is rewritten before it
+  is saved: ids numbered by first appearance, members renamed to match,
+  padding zeroed, every member dated 1980-01-01. What loads is unchanged
+  and an earlier bundle loads as before. Two identical registrations now
+  record identical `content_hashes`, every key included; the live
+  fixture's 3 forest, 5 histogram-boosting and 8 ridge runs each give one
+  bundle hash, also when re-dumped from two loads of one `model.joblib`.
+- **`model.joblib` already reproduced** for a fresh fit: the fixture's
+  identical runs share one hash per estimator. A forest re-dumped after
+  loading carries its padding bytes as loaded (two loads gave two
+  hashes), and a histogram-boosting model pickles the OpenMP thread count
+  it was fitted with, so its bytes match only between runs with the same
+  thread setting.
+- **Cost.** Recording a 1M-row MBO-shaped frame takes 172–238 ms under
+  pandas 2.3.3 and 125–171 ms under 3.0.5, against 198–265 ms and
+  278–364 ms for `hash_dataframe`; 1M OHLCV bars take 56–67 ms and
+  46–63 ms, against 83–97 ms and 80–101 ms. Replaying a version-1 entry
+  adds one `hash_dataframe` when it matches as read, 0.53 s and 0.74 s on
+  the MBO frame when the other pandas's text spelling matches, and
+  0.68–0.91 s on a miss. The bundle rewrite adds 0.45 ms to a ridge, 38 ms
+  to a 759 KiB histogram-boosting model and 165–180 ms to a 4.6 MiB
+  200-tree forest.
+
 ## The Parabolic SAR and the simple ATR read a missing bar as a gap, and seven kernels test finiteness inline
 
 - **`parabolic_sar` and `atr` read NaN as a missing bar.** They were the

@@ -94,13 +94,12 @@ class AuditWriter:
         different remedies. A last line with no newline after it that does
         not parse is a record a crash or a full disk cut off mid-write: the
         refusal says where the fragment starts, so the file can be cut back
-        to its last complete record. For a day file it names
-        `sqt audit repair-tail`, which makes exactly that cut under this
-        writer's lock and keeps the fragment in a side file; the chain
-        index has no such command and names the manual cut. A last line
-        that does parse but has lost only its newline is a complete record,
-        and is NOT refused -- the backend writes the missing newline before
-        the next line.
+        to its last complete line. For a day file and for the chain index it
+        names `sqt audit repair-tail`, which makes exactly that cut under
+        this writer's lock and keeps the fragment in a side file, and the
+        manual cut beside it. A last line that does parse but has lost only
+        its newline is a complete record, and is NOT refused -- the backend
+        writes the missing newline before the next line.
         """
         try:
             tail = self._last_line(path)
@@ -108,14 +107,15 @@ class AuditWriter:
             # A write cut short inside a multi-byte character leaves this
             # too, and then the repair command applies; it refuses a line
             # that has its newline, so naming it cannot cut a whole line.
-            remedy = (
-                "If the line has no newline after it, `sqt audit repair-tail "
-                f"{path.stem}` shows it and cuts it with --confirm; otherwise "
-                "copy the file somewhere safe, remove the damaged line, and "
-                "run `sqt verify`."
+            command = (
+                f"sqt audit repair-tail {path.stem}"
                 if what == "record"
-                else "Copy the file somewhere safe, remove the damaged line, "
-                "and run `sqt verify`."
+                else "sqt audit repair-tail"
+            )
+            remedy = (
+                f"If the line has no newline after it, `{command}` shows it "
+                "and cuts it with --confirm; otherwise copy the file somewhere "
+                "safe, remove the damaged line, and run `sqt verify`."
             )
             raise AuditIntegrityError(
                 f"audit chain is corrupt: the last line of {path} is not "
@@ -139,14 +139,17 @@ class AuditWriter:
                     "where the fragment starts (the end of the last complete "
                     "line), and run `sqt verify`."
                 )
-                remedy = (
-                    f"To continue, run `sqt audit repair-tail {path.stem}` to "
-                    "see the fragment, then again with --confirm to cut "
-                    "exactly those bytes under this writer's lock; they are "
-                    "kept in a side file beside the day, which then verifies "
-                    "as it did before the interrupted write. By hand: " + by_hand
+                command, beside = (
+                    (f"sqt audit repair-tail {path.stem}", "the day")
                     if what == "record"
-                    else "To continue: " + by_hand
+                    else ("sqt audit repair-tail", "the index")
+                )
+                remedy = (
+                    f"To continue, run `{command}` to see the fragment, then "
+                    "again with --confirm to cut exactly those bytes under "
+                    "this writer's lock; they are kept in a side file beside "
+                    f"{beside}, which then verifies as it did before the "
+                    "interrupted write. By hand: " + by_hand
                 )
                 raise AuditIntegrityError(
                     f"audit chain is corrupt: the last line of {path} was cut "

@@ -629,13 +629,13 @@ class PolygonProvider(DataProvider):
         cached_df = _session_cache_get(cache_key)
         if cached_df is not None:
             if audit.recording_data_access():
-                audit.record_data_access(
+                audit.record_frame_access(
                     symbol,
                     start_str,
                     end_str,
                     interval,
                     source="session_cache",
-                    content_hash=audit.hash_dataframe(cached_df),
+                    frame=cached_df,
                 )
             return disclose_served(cached_df.copy(), symbol, interval, clock)
 
@@ -668,13 +668,13 @@ class PolygonProvider(DataProvider):
                     pq_path.name,
                 )
                 if audit.recording_data_access():
-                    audit.record_data_access(
+                    audit.record_frame_access(
                         symbol,
                         start_str,
                         end_str,
                         interval,
                         source="disk_cache",
-                        content_hash=audit.hash_dataframe(cached_df),
+                        frame=cached_df,
                     )
                 return cached_df
 
@@ -711,13 +711,13 @@ class PolygonProvider(DataProvider):
         # provider follows, so the frame cached below is the one served.
         result = drop_unusable_closes(result, symbol, provider="polygon")
         if audit.recording_data_access():
-            audit.record_data_access(
+            audit.record_frame_access(
                 symbol,
                 start_str,
                 end_str,
                 interval,
                 source="live_fetch",
-                content_hash=audit.hash_dataframe(result),
+                frame=result,
             )
 
         if pq_path is not None and _is_historical(end_str):
@@ -827,13 +827,13 @@ class PolygonProvider(DataProvider):
         out = out.reset_index(drop=True)
         out.attrs["n_dropped_without_available_time"] = int(dropped)
         if audit.recording_data_access():
-            audit.record_data_access(
+            audit.record_frame_access(
                 ",".join(str(s) for s in symbols),
                 str(start_date),
                 str(end_date),
                 f"pit:{frame_kind}",
                 source="polygon",
-                content_hash=audit.hash_dataframe(out),
+                frame=out,
             )
         return out
 
@@ -944,13 +944,13 @@ class PolygonProvider(DataProvider):
         # Ticks reach the decision record like bars do; they did not, so a
         # microstructure call's record could never replay as data_changed.
         if audit.recording_data_access():
-            audit.record_data_access(
+            audit.record_frame_access(
                 symbol,
                 str(start_date),
                 str(end_date),
                 "trades",
                 source="polygon",
-                content_hash=audit.hash_dataframe(frame),
+                frame=frame,
             )
         return frame
 
@@ -998,12 +998,12 @@ class PolygonProvider(DataProvider):
             "quotes",
         )
         if audit.recording_data_access():
-            audit.record_data_access(
+            audit.record_frame_access(
                 symbol,
                 str(start_date),
                 str(end_date),
                 "quotes",
                 source="polygon",
-                content_hash=audit.hash_dataframe(frame),
+                frame=frame,
             )
         return frame

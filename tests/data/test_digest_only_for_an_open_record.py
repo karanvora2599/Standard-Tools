@@ -9,8 +9,10 @@ each provider asks `audit.recording_data_access()` first (see the
 CHANGELOG entry of 2026-10-01).
 
 Two halves: outside a record no frame is hashed, on any path of any
-provider; inside one the line written is the line the pre-change code
-wrote, byte for byte.
+provider; inside one the line written is the line an unconditional digest
+writes, byte for byte. Since the CHANGELOG entry of 2026-10-04 that digest is
+`canonical_frame_hash`, recorded with `content_hash_version` 2, where it was
+`hash_dataframe`.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ import pytest
 from pydantic import BaseModel
 
 from standard_quant_tools import audit
+from standard_quant_tools.audit import hashing
 from standard_quant_tools.audit.context import _data_sources_var
 from standard_quant_tools.audit.dispatch import _run_and_record
 from standard_quant_tools.data import (
@@ -52,7 +55,7 @@ from .test_point_in_time_records import EPS, PAGE_ONE, PAGE_TWO
 
 
 def _reference_record(symbol, start_date, end_date, what, dataset, frame) -> None:
-    """Databento's `_record` as it stood before: the digest taken first,
+    """Databento's `_record` without the question: the digest taken first,
     unconditionally, then handed to a report that may discard it."""
     audit.record_data_access(
         symbol,
@@ -60,7 +63,8 @@ def _reference_record(symbol, start_date, end_date, what, dataset, frame) -> Non
         str(end_date),
         what,
         source=f"databento:{dataset}",
-        content_hash=audit.hash_dataframe(frame),
+        content_hash=audit.canonical_frame_hash(frame),
+        content_hash_version=audit.DATA_SOURCE_HASH_VERSION,
     )
 
 
@@ -79,15 +83,21 @@ def _isolated(tmp_path, monkeypatch):
 
 @pytest.fixture
 def digests(monkeypatch) -> List[int]:
-    """Every frame the providers hash, counted by row."""
+    """Every frame the providers hash, counted by row: the digest they
+    record, and the earlier one, which only a replay of an earlier record
+    takes."""
     seen: List[int] = []
-    real = audit.hash_dataframe
 
-    def counting(frame: Any) -> str:
-        seen.append(len(frame))
-        return real(frame)
+    def counting(real):
+        def digest(frame: Any) -> str:
+            seen.append(len(frame))
+            return real(frame)
 
-    monkeypatch.setattr(audit, "hash_dataframe", counting)
+        return digest
+
+    for name in ("canonical_frame_hash", "hash_dataframe"):
+        monkeypatch.setattr(hashing, name, counting(getattr(hashing, name)))
+        monkeypatch.setattr(audit, name, counting(getattr(audit, name)))
     return seen
 
 
@@ -253,8 +263,9 @@ class TestInsideARecordTheLineIsUnchanged:
         self, tmp_path, monkeypatch
     ):
         """Through `dispatch`'s core, onto disk: the data sources the
-        record carries are the pre-change ones, apart from the measured
-        `fetch_ms`, which is a timing and differs run to run."""
+        record carries are the ones an unconditional digest writes, apart
+        from the measured `fetch_ms`, which is a timing and differs run to
+        run."""
         monkeypatch.setenv("SQT_AUDIT_ENABLED", "1")
 
         from standard_quant_tools.data import _cache as cache_module
