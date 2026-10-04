@@ -8,7 +8,7 @@ import pandas as pd
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.indicators._missing import refuse_infinities
 from standard_quant_tools.indicators.momentum import _LastFinite
-from standard_quant_tools.validation import require_finite_array, validate_series
+from standard_quant_tools.validation import validate_series
 
 logger = logging.getLogger(__name__)
 
@@ -185,8 +185,21 @@ def atr(
     high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14
 ) -> pd.Series:
     """
-    Calculate Average True Range (ATR).
-    Uses np.maximum for a single-pass true range instead of pd.concat.
+    Calculate Average True Range (ATR): the simple `period`-bar rolling mean
+    of the true range. Uses np.maximum for a single-pass true range instead
+    of pd.concat.
+
+    TR[i] = max(H[i]-L[i], |H[i]-C[prev]|, |L[i]-C[prev]|), where C[prev] is
+    the close of the previous present bar; the first bar has no previous
+    close, so its TR is NaN and the first ATR is at bar `period`.
+
+    A bar with a NaN high, low or close is a missing bar, read the way
+    `wilder_atr` reads it for the true range and the way the windowed
+    indicators read it for the mean: its TR is NaN, the next present bar's
+    TR is measured against the last present close, and the ATR is NaN for
+    every window holding a missing bar, resuming at the first window of
+    `period` present bars after it. An infinite value is refused. See
+    `indicators/_missing.py`.
     """
     if period <= 0:
         raise ValidationError(f"period must be > 0, got {period}")
@@ -196,20 +209,28 @@ def atr(
             f"{len(high)}/{len(low)}/{len(close)}"
         )
     logger.debug("[atr] period=%d  bars=%d", period, len(close))
-    prev_close = close.shift(1).to_numpy(dtype=float)
-    h = high.to_numpy(dtype=float)
-    l = low.to_numpy(dtype=float)
-    # Same finite-input contract wilder_atr already enforces — these two are
-    # siblings computing the same true range, and it made no sense for one to
-    # reject NaN/Inf while the other quietly propagated it into the rolling
-    # mean.
-    require_finite_array(h, "high", "atr")
-    require_finite_array(l, "low", "atr")
-    require_finite_array(close.to_numpy(dtype=float), "close", "atr")
-    tr = pd.Series(
-        np.maximum(h - l, np.maximum(np.abs(h - prev_close), np.abs(l - prev_close))),
-        index=close.index,
+    h = high.to_numpy(dtype=np.float64)
+    l = low.to_numpy(dtype=np.float64)
+    c = close.to_numpy(dtype=np.float64)
+    # The same input contract as its sibling wilder_atr: NaN is a missing
+    # bar, an infinity is refused. Before the CHANGELOG entry of 2026-10-04
+    # this refused NaN as well.
+    refuse_infinities(h, "high", "atr")
+    refuse_infinities(l, "low", "atr")
+    refuse_infinities(c, "close", "atr")
+    present = ~(np.isnan(h) | np.isnan(l) | np.isnan(c))
+    if present.all():
+        # Every bar present: the previous present close is the previous close.
+        prev_close = close.shift(1).to_numpy(dtype=np.float64)
+    else:
+        # The close of the last present bar before each bar.
+        present_close = pd.Series(np.where(present, c, np.nan))
+        prev_close = present_close.ffill().shift(1).to_numpy(dtype=np.float64)
+    tr_values = np.maximum(
+        h - l, np.maximum(np.abs(h - prev_close), np.abs(l - prev_close))
     )
+    tr_values[~present] = np.nan
+    tr = pd.Series(tr_values, index=close.index)
     result = tr.rolling(window=period).mean()
     # Guarded: the dropna is computed before logger.debug can see the level.
     if logger.isEnabledFor(logging.DEBUG):

@@ -119,7 +119,10 @@ jobs:
     # (no C++ toolchain on the machine that wrote it) -- continue-on-error
     # until it's proven green on a real run, so a config mistake here (wrong
     # libasan path, incompatible flag combination) doesn't block unrelated
-    # PRs. Flip this to false once confirmed working.
+    # PRs. Flip this to false once confirmed working. Its C++ suite has run
+    # green; its Python step aborted in ASan's __cxa_throw wrapper until
+    # libstdc++ was preloaded with the runtime (see that step), a change no
+    # run has confirmed yet.
     continue-on-error: true
 
     steps:
@@ -167,24 +170,41 @@ jobs:
         # missing the preload the whole time, so it never validated
         # anything -- always failing at the same "runtime not first" error
         # regardless of whether the build itself was actually healthy.
+        # libstdc++ is preloaded after it for the reason the next step gives.
         run: |
-          export LD_PRELOAD=$(gcc -print-file-name=libasan.so)
+          export LD_PRELOAD="$(gcc -print-file-name=libasan.so):$(gcc -print-file-name=libstdc++.so.6)"
+          echo "LD_PRELOAD=$LD_PRELOAD"
           python -c "from standard_quant_tools import _sqt_core; print('_sqt_core loaded:', _sqt_core.__file__)"
 
       - name: Run tests under ASan/UBSan
         # Python itself isn't built with ASan, so libasan must be preloaded
-        # into the interpreter process for a sanitized extension to work.
+        # into the interpreter process for a sanitized extension to work,
+        # first in the library list.
+        #
+        # libstdc++ is preloaded right after it. ASan wraps __cxa_throw, and
+        # its wrapper looks the real __cxa_throw up ONCE, when the runtime
+        # starts, among the libraries loaded after it. The interpreter does
+        # not link libstdc++ -- it arrives later, with the first C++
+        # extension imported -- so that lookup found nothing, and the first
+        # C++ exception thrown anywhere in the process (the bindings' own
+        # argument errors, which the tests provoke on purpose, or one thrown
+        # and caught inside a third-party extension) failed the wrapper's
+        # CHECK on the null pointer and aborted the run. With libstdc++
+        # preloaded the lookup finds it. The native test executables above
+        # link libstdc++ at startup, which is why they never hit this.
+        #
         # detect_leaks=0: CPython's own long-lived allocator pools otherwise
         # get flagged as leaks at interpreter shutdown -- not something this
-        # project's code is responsible for. This is exactly where item 1's
-        # new negative/zero-argument C++ tests (test_cpp_indicators.py,
+        # project's code is responsible for. This step is where the
+        # negative/zero-argument binding tests (test_cpp_indicators.py,
         # test_cpp_hurst.py) earn their keep: an out-of-bounds write that a
-        # plain Release build silently corrupts memory on now aborts here.
+        # plain Release build silently corrupts memory on aborts here.
         env:
           ASAN_OPTIONS: "detect_leaks=0:halt_on_error=1"
           UBSAN_OPTIONS: "halt_on_error=1:print_stacktrace=1"
         run: |
-          export LD_PRELOAD=$(gcc -print-file-name=libasan.so)
+          export LD_PRELOAD="$(gcc -print-file-name=libasan.so):$(gcc -print-file-name=libstdc++.so.6)"
+          echo "LD_PRELOAD=$LD_PRELOAD"
           pytest -m "not integration and not slow" --tb=short -q -s
 
   parity-check-on-ci-completion:

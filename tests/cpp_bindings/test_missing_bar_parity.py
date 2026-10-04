@@ -1,12 +1,12 @@
 """
 A missing bar reads the same on both backends, at every door.
 
-The rule (indicators/_missing.py): NaN is a missing bar. RSI, Wilder's ATR
-and ADX skip it -- the indicator of the series with that bar dropped,
-reported back at the bars that remain, NaN at the bar itself. Bollinger
-Bands and the stochastic %K/%D are NaN over the windows that hold it and
-resume after. An infinity is refused at every library function; a direct
-kernel caller sees it treated as missing.
+The rule (indicators/_missing.py): NaN is a missing bar. RSI, Wilder's ATR,
+ADX and the Parabolic SAR skip it -- the indicator of the series with that
+bar dropped, reported back at the bars that remain, NaN at the bar itself.
+Bollinger Bands, the stochastic %K/%D and the simple ATR are NaN over the
+windows that hold it and resume after. An infinity is refused at every
+library function; a direct kernel caller sees it treated as missing.
 
 What this replaced, measured on the previous build with one NaN close:
 
@@ -29,7 +29,7 @@ from standard_quant_tools.error import ValidationError
 from standard_quant_tools.indicators import momentum, panel, trend, volatility
 from standard_quant_tools.indicators.momentum import _rsi_numba
 from standard_quant_tools.indicators.panel import technical_indicators_panel
-from standard_quant_tools.indicators.trend import _adx_numba
+from standard_quant_tools.indicators.trend import _adx_numba, _psar_numba
 from standard_quant_tools.indicators.volatility import _wilder_atr_kernel
 
 _cpp: Any = pytest.importorskip(
@@ -102,6 +102,20 @@ class TestKernelsAgreeOnGaps:
         for kernel in _fallbacks(_wilder_atr_kernel):
             _assert_same(_cpp.wilder_atr(*cols, 14), kernel(*cols, 14))
 
+    @pytest.mark.parametrize("gaps", GAPS)
+    @pytest.mark.parametrize("column", [0, 1])
+    def test_parabolic_sar(self, gaps, column):
+        """Bit for bit: the state machine has no tolerance to hide behind
+        (CHANGELOG entry of 2026-10-04)."""
+        cols = list(_ohlc()[:2])
+        cols[column] = _with_gaps(cols[column], gaps)
+        native = _cpp.parabolic_sar(*cols, 0.02, 0.02, 0.2)
+        for kernel in _fallbacks(_psar_numba):
+            fallback = kernel(*cols, 0.02, 0.02, 0.2)
+            np.testing.assert_array_equal(
+                native.view(np.uint64), fallback.view(np.uint64)
+            )
+
     @pytest.mark.parametrize("bad", [np.inf, -np.inf])
     def test_an_infinity_reads_as_a_missing_bar_on_both(self, bad):
         """What a direct kernel caller sees; the library refuses it first."""
@@ -116,6 +130,15 @@ class TestKernelsAgreeOnGaps:
         )
         _assert_same(
             _cpp.adx(high, low, inf_close, 14), _adx_numba(high, low, inf_close, 14)
+        )
+        inf_high, nan_high = _with_gaps(high, [30], bad), _with_gaps(high, [30])
+        _assert_same(
+            _cpp.parabolic_sar(inf_high, low, 0.02, 0.02, 0.2),
+            _cpp.parabolic_sar(nan_high, low, 0.02, 0.02, 0.2),
+        )
+        _assert_same(
+            _psar_numba(inf_high, low, 0.02, 0.02, 0.2),
+            _psar_numba(nan_high, low, 0.02, 0.02, 0.2),
         )
 
 
@@ -148,6 +171,23 @@ class TestTheRecursionSkipsTheGap:
             atr_full[present],
             _cpp.wilder_atr(high[present], low[present], close[present], 14),
         )
+
+    @pytest.mark.parametrize("gaps", GAPS[1:])
+    @pytest.mark.parametrize("column", [0, 1])
+    def test_parabolic_sar_is_that_of_the_present_bars(self, gaps, column):
+        """The SAR steps over a missing bar: its two prior lows (highs) are
+        the two previous present bars', and the trend and acceleration
+        carry across (CHANGELOG entry of 2026-10-04)."""
+        cols = list(_ohlc()[:2])
+        cols[column] = _with_gaps(cols[column], gaps)
+        present = np.isfinite(cols[0]) & np.isfinite(cols[1])
+        full = _cpp.parabolic_sar(*cols, 0.02, 0.02, 0.2)
+        assert np.isnan(full[~present]).all()
+        dropped = _cpp.parabolic_sar(
+            cols[0][present], cols[1][present], 0.02, 0.02, 0.2
+        )
+        np.testing.assert_array_equal(full[present], dropped)
+        assert np.isin(full[present, 1], [1.0, -1.0]).all()
 
     def test_a_nan_in_the_seed_window_no_longer_ends_the_series(self):
         """The native RSI summed the NaN into its seed and was NaN from
@@ -208,6 +248,8 @@ class TestWrappersAgreeOnGaps:
                 "adx": trend.adx(h, l_, c, 14).to_numpy(),
                 "atr": volatility.wilder_atr(h, l_, c, 14).to_numpy(),
                 "bb": volatility.bollinger_bands(cg, 20, 2.0).to_numpy(),
+                "psar": trend.parabolic_sar(h, l_).to_numpy(),
+                "atr_simple": volatility.atr(h, l_, cg, 14).to_numpy(),
             }
 
         native = run()
@@ -225,6 +267,8 @@ class TestWrappersAgreeOnGaps:
             lambda h, l_, c: volatility.wilder_atr(h, l_, c, 14),
             lambda h, l_, c: volatility.bollinger_bands(c, 20),
             lambda h, l_, c: momentum.stochastic_oscillator(h, l_, c),
+            lambda h, l_, c: trend.parabolic_sar(h, c),
+            lambda h, l_, c: volatility.atr(h, l_, c, 14),
         ],
     )
     @pytest.mark.parametrize("native", [True, False])
@@ -287,6 +331,27 @@ class TestPanelFallbackReadsAGapLikeTheKernel:
             pd.testing.assert_frame_equal(
                 native[name], fallback[name], rtol=1e-12, atol=0.0
             )
+
+    def test_the_sar_and_the_simple_atr_columns_take_a_gap_on_both(self, monkeypatch):
+        """Both used to refuse NaN, so a universe with one missing bar had
+        no SAR or simple-ATR column on either path (CHANGELOG entry of
+        2026-10-04). The gap is now a gap, and the two paths agree."""
+        universe = _universe()
+        wanted = ["parabolic_sar", "atr_simple"]
+        native = technical_indicators_panel(universe, wanted)
+        for module in (panel, momentum, trend, volatility):
+            monkeypatch.setattr(module, "HAS_CPP", False)
+        fallback = technical_indicators_panel(universe, wanted)
+        for name in wanted:
+            pd.testing.assert_frame_equal(native[name], fallback[name], rtol=0, atol=0)
+        sar = native["parabolic_sar"]
+        assert np.isnan(sar[("BBB", "SAR")].iloc[100])  # the missing high
+        assert np.isfinite(sar[("BBB", "SAR")].iloc[101])
+        # A NaN close leaves the SAR alone: it reads high and low only.
+        assert np.isfinite(sar[("BBB", "SAR")].iloc[60])
+        atr_bbb = native["atr_simple"]["BBB"]
+        assert np.isnan(atr_bbb.iloc[60:74]).all()  # the 14 windows holding bar 60
+        assert np.isfinite(atr_bbb.iloc[74])
 
     @pytest.mark.parametrize("native", [True, False])
     def test_a_bollinger_period_below_two_is_refused_on_both(self, native, monkeypatch):

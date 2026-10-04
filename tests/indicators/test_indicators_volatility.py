@@ -169,6 +169,102 @@ class TestATR:
         assert atr_hi > atr_lo
 
 
+def _walk_ohlc(n=300, seed=4):
+    rng = np.random.default_rng(seed)
+    close = 100.0 + np.cumsum(rng.normal(0.0, 1.0, n))
+    high = close + rng.uniform(0.1, 1.2, n)
+    low = close - rng.uniform(0.1, 1.2, n)
+    index = pd.date_range("2024-01-01", periods=n, freq="B")
+    return (pd.Series(a, index=index) for a in (high, low, close))
+
+
+class TestATRMissingBars:
+    """
+    The simple ATR reads a NaN as a missing bar (CHANGELOG entry of
+    2026-10-04); it used to refuse it while its sibling wilder_atr, the
+    panel and every other indicator read it as a gap. Its true range is
+    Wilder's -- NaN at the missing bar, measured against the last present
+    close at the bar after it -- and its mean is a window: NaN for every
+    window holding a missing bar, resuming at the first that does not.
+    """
+
+    @pytest.mark.parametrize("period", [1, 5, 14, 50])
+    def test_finite_input_gives_the_previous_bits(self, period):
+        """The null case: with every bar present the answer is the one the
+        function gave before NaN was accepted, bit for bit."""
+        high, low, close = _walk_ohlc()
+        prev_close = close.shift(1).to_numpy(dtype=float)
+        h, l = high.to_numpy(dtype=float), low.to_numpy(dtype=float)
+        tr = np.maximum(
+            h - l, np.maximum(np.abs(h - prev_close), np.abs(l - prev_close))
+        )
+        before = pd.Series(tr, index=close.index).rolling(window=period).mean()
+        pd.testing.assert_series_equal(
+            atr(high, low, close, period), before, check_exact=True
+        )
+
+    @pytest.mark.parametrize("column", ["high", "low", "close"])
+    def test_an_infinity_is_refused(self, column):
+        cols = dict(zip(("high", "low", "close"), _walk_ohlc()))
+        cols[column].iloc[30] = -np.inf
+        with pytest.raises(ValidationError, match="infinite"):
+            atr(cols["high"], cols["low"], cols["close"])
+
+    @pytest.mark.parametrize("column", ["high", "low", "close"])
+    def test_the_windows_holding_a_missing_bar_are_nan(self, column):
+        cols = dict(zip(("high", "low", "close"), _walk_ohlc()))
+        cols[column].iloc[100] = np.nan
+        out = atr(cols["high"], cols["low"], cols["close"], 14)
+        assert out.iloc[15:100].notna().all()
+        assert out.iloc[100:114].isna().all()
+        assert out.iloc[114:].notna().all()
+
+    def test_the_first_window_after_the_gap_measures_from_the_last_present_close(
+        self,
+    ):
+        high, low, close = _walk_ohlc()
+        close.iloc[100] = np.nan
+        out = atr(high, low, close, 5)
+        h, l, c = (s.to_numpy() for s in (high, low, close))
+
+        def tr(i, prev):
+            return max(h[i] - l[i], abs(h[i] - c[prev]), abs(l[i] - c[prev]))
+
+        expected = [tr(101, 99)] + [tr(i, i - 1) for i in range(102, 106)]
+        assert out.iloc[105] == pytest.approx(np.mean(expected), rel=1e-12)
+
+    def test_period_one_is_wilders_true_range(self):
+        """With a one-bar window both ATRs are the true range itself, so
+        they agree at every present bar after the first -- where the simple
+        ATR has no previous close and Wilder's uses high - low."""
+        high, low, close = _walk_ohlc()
+        high.iloc[[0, 50, 51]] = np.nan
+        close.iloc[[120, 200]] = np.nan
+        simple = atr(high, low, close, 1).to_numpy()
+        wilder = wilder_atr(high, low, close, 1).to_numpy()
+        present = ~(high.isna() | close.isna()).to_numpy()
+        first = np.flatnonzero(present)[0]
+        assert np.isnan(simple[~present]).all()
+        assert np.isnan(simple[first])
+        later = present.copy()
+        later[first] = False
+        np.testing.assert_array_equal(simple[later], wilder[later])
+
+    def test_leading_missing_bars_read_as_a_later_start(self):
+        """A ticker whose history starts late in a panel is padded with
+        NaN; its ATR is the ATR of the history it has."""
+        high, low, close = _walk_ohlc()
+        for s in (high, low, close):
+            s.iloc[:40] = np.nan
+        out = atr(high, low, close, 14)
+        assert out.iloc[:54].isna().all()
+        pd.testing.assert_series_equal(
+            out.iloc[40:],
+            atr(high.iloc[40:], low.iloc[40:], close.iloc[40:], 14),
+            check_exact=True,
+        )
+
+
 # ── Flat windows, on both backends ───────────────────────────────────────────
 
 

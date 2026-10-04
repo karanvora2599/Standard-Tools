@@ -740,7 +740,7 @@ std::size_t run_portfolio_simulation(
         double cost_total = 0.0;
         for (std::size_t i = 0; i < n_tickers; ++i) {
             const double price = px[i];
-            const bool bad = !std::isfinite(price) || price <= 0.0;
+            const bool bad = !numerics::is_finite(price) || price <= 0.0;
             if (bad && std::abs(w[i]) > 1e-12) {
                 // A zero target needs no valid price to size -- there is
                 // nothing to buy -- so only a nonzero weight is an error.
@@ -775,7 +775,7 @@ std::size_t run_portfolio_simulation(
 
                 if (needs_volume) {
                     const double adv = dollar_volume[src];
-                    if (!std::isfinite(adv) || adv <= 0.0) {
+                    if (!numerics::is_finite(adv) || adv <= 0.0) {
                         fail(kPortfolioBadDollarVolume, bar,
                              static_cast<int>(i), adv);
                         return false;
@@ -811,7 +811,7 @@ std::size_t run_portfolio_simulation(
 
                 if (costs.use_impact_model) {
                     const double vol = volatility[src];
-                    if (!std::isfinite(vol) || vol < 0.0) {
+                    if (!numerics::is_finite(vol) || vol < 0.0) {
                         fail(kPortfolioBadVolatility, bar,
                              static_cast<int>(i), vol);
                         return false;

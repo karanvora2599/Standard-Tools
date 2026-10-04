@@ -220,7 +220,7 @@ void rolling_beta_into(
     const bool use_avx2 = detect_isa_features().avx2;
 
     auto bar_is_bad = [&](std::size_t j) {
-        return !std::isfinite(x[j]) || !std::isfinite(y[j]);
+        return !numerics::is_finite(x[j]) || !numerics::is_finite(y[j]);
     };
 
     auto recompute_window = [&](std::size_t start) {
@@ -232,8 +232,8 @@ void rolling_beta_into(
         // back to 0.0 costs nothing: a window whose newest bar is bad
         // reports NaN until that bar leaves, which is the slide the next
         // refresh fires on.
-        cx = std::isfinite(x[end - 1]) ? x[end - 1] : 0.0;
-        cy = std::isfinite(y[end - 1]) ? y[end - 1] : 0.0;
+        cx = numerics::is_finite(x[end - 1]) ? x[end - 1] : 0.0;
+        cy = numerics::is_finite(y[end - 1]) ? y[end - 1] : 0.0;
         if (use_avx2) {
             rolling_beta_reduce_avx2(x, y, start, window, cx, cy,
                                      Sx, Sy, Sxy, Sxx, Syy);

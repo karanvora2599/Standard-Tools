@@ -1,6 +1,7 @@
 #include "sqt/fp_contract.hpp"  // first: no contraction in this unit
 #include "sqt/options.hpp"
 
+#include "sqt/numerics.hpp"
 #include "sqt/omp_policy.hpp"
 #include "sqt/platform.hpp"
 
@@ -62,12 +63,12 @@ inline double norm_cdf(double x) { return 0.5 * (1.0 + std::erf(x / kSqrt2)); }
 inline double norm_pdf(double x) { return std::exp(-0.5 * x * x) / kSqrt2Pi; }
 
 inline bool finite_in(double v, double low_exclusive, double high) {
-    return std::isfinite(v) && v > low_exclusive && v <= high;
+    return numerics::is_finite(v) && v > low_exclusive && v <= high;
 }
 
 inline bool rates_ok(double rate, double q, double t) {
-    return std::isfinite(rate) && std::abs(rate) <= kMaxRate &&
-           std::isfinite(q) && std::abs(q) <= kMaxRate &&
+    return numerics::is_finite(rate) && std::abs(rate) <= kMaxRate &&
+           numerics::is_finite(q) && std::abs(q) <= kMaxRate &&
            std::abs(rate * t) <= kMaxExponent && std::abs(q * t) <= kMaxExponent;
 }
 
@@ -111,7 +112,7 @@ inline double iv_price(const Contract& c, double sigma, double d1) {
 // not finite (the scalar's _require_finite_price refusal).
 inline double price_diff(const Contract& c, double sigma, double price, bool& priceable) {
     const double model = iv_price(c, sigma, iv_d1(c, sigma));
-    if (!std::isfinite(model)) {
+    if (!numerics::is_finite(model)) {
         priceable = false;
         return kNaN;
     }
@@ -176,10 +177,10 @@ SQT_NOINLINE ImpliedVolResult implied_volatility_one(double price, double spot,
     c.disc_r = std::exp(-rate * time_to_expiry);
     // A discounted strike or spot past a double is a rate-unit error the
     // scalar only discovers as a non-finite price mid-solve.
-    if (!std::isfinite(spot * c.disc_q) || !std::isfinite(strike * c.disc_r)) {
+    if (!numerics::is_finite(spot * c.disc_q) || !numerics::is_finite(strike * c.disc_r)) {
         return refused(kIvNotPriceable);
     }
-    if (!std::isfinite(price)) return refused(kIvPriceNotFinite);
+    if (!numerics::is_finite(price)) return refused(kIvPriceNotFinite);
 
     double lower = 0.0;
     double upper = 0.0;
@@ -207,7 +208,7 @@ SQT_NOINLINE ImpliedVolResult implied_volatility_one(double price, double spot,
     for (int i = 0; i < newton_iterations; ++i) {
         const double d1 = iv_d1(c, sigma);
         const double model = iv_price(c, sigma, d1);
-        if (!std::isfinite(model)) return refused(kIvNotPriceable);
+        if (!numerics::is_finite(model)) return refused(kIvNotPriceable);
         const double diff = model - price;
         // analysis.options.black_scholes_greeks' raw vega.
         const double vega = c.spot * c.disc_q * norm_pdf(d1) * c.sqrt_t;

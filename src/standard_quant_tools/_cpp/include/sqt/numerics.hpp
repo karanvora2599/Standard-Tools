@@ -24,8 +24,15 @@ namespace sqt::numerics {
 // lets the callee clobber xmm0-xmm5, so a loop keeps its state out of those
 // registers around it. In the Wilder kernels, which test three inputs per
 // bar, those calls were about a tenth of the kernel's time (CHANGELOG,
-// 2026-10-01). clang, GCC and clang-cl already inline std::isfinite; this
-// is the same few instructions on all of them.
+// 2026-10-01); replacing them in the per-bar and per-row loops of the
+// Bollinger, stochastic, rolling-beta, portfolio, cross-sectional IC and
+// standardization and implied-volatility kernels, and in
+// is_negligible_pivot and clamp_near_zero_sumsq below, which two of those
+// call per bar, made those kernels 1.03-2.5x faster (CHANGELOG,
+// 2026-10-04). A test that runs once per call, column or date is left as
+// std::isfinite: nothing measured a difference there. clang, GCC and
+// clang-cl already inline std::isfinite; this is the same few instructions
+// on all of them.
 //
 // A bit test, not `(x - x) == 0.0` or `std::abs(x) <= DBL_MAX`: those are
 // floating-point identities a -ffast-math or -ffinite-math-only build may
@@ -74,8 +81,8 @@ inline bool is_nan(double x) noexcept { return x != x; }
 // against a fabricated unit scale.
 inline bool is_negligible_pivot(double value, double scale, double rel_eps = 1e-12) {
     const double ref = std::abs(scale);
-    if (!(ref > 0.0) || !std::isfinite(ref))
-        return !std::isfinite(value) || value == 0.0;
+    if (!(ref > 0.0) || !is_finite(ref))
+        return !is_finite(value) || value == 0.0;
     return std::abs(value) < rel_eps * ref;
 }
 
@@ -109,7 +116,7 @@ inline bool is_negligible_pivot(double value, double scale, double rel_eps = 1e-
 // bars and kept going.
 inline double clamp_near_zero_sumsq(double value, double scale, const char* context,
                                      double rel_eps = 1e-9) {
-    if (!std::isfinite(value) || !std::isfinite(scale)) return value;
+    if (!is_finite(value) || !is_finite(scale)) return value;
     if (value >= 0.0) return value;
     if (std::abs(value) < rel_eps * std::abs(scale)) return 0.0;
     throw std::runtime_error(

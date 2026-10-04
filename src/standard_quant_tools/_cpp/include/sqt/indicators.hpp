@@ -16,12 +16,13 @@ namespace sqt {
 // wrapper: allocate, call the `_into` variant, return).
 //
 // MISSING BARS. A non-finite input value (NaN or +/-inf) is a missing bar in
-// every kernel below. The Wilder recursions (rsi, adx, wilder_atr) skip it:
-// they compute the indicator of the series with the missing bars dropped and
-// report NaN at the missing ones. The windowed ones (bollinger_bands,
-// stochastic_oscillator) report NaN for every window holding a missing bar
-// and resume at the first window that does not. The Python entry points
-// refuse +/-inf before calling these; NaN reaches them as a gap.
+// every kernel below. The recursions (rsi, adx, wilder_atr, parabolic_sar)
+// skip it: they compute the indicator of the series with the missing bars
+// dropped and report NaN at the missing ones. The windowed ones
+// (bollinger_bands, stochastic_oscillator) report NaN for every window
+// holding a missing bar and resume at the first window that does not. The
+// Python entry points refuse +/-inf before calling these; NaN reaches them as
+// a gap.
 
 /**
  * RSI — Relative Strength Index (Wilder's smoothing).
@@ -79,7 +80,10 @@ void adx_into(
  * Returns a flat row-major array of length 2*n:
  *   [SAR_0, Trend_0, SAR_1, Trend_1, ...].
  * Trend: 1.0 = rising (long), -1.0 = falling (short).
- * Bar 0 is bootstrapped: SAR = low[0], EP = high[0], rising.
+ * The first present bar is bootstrapped: SAR = its low, EP = its high,
+ * rising. A bar whose high or low is not finite is missing: SAR and Trend are
+ * NaN there, the state carries across it, and the two prior lows (highs)
+ * that cap the SAR are those of the two previous present bars.
  *
  * @param high      Contiguous high-price array (length n).
  * @param low       Contiguous low-price array (length n).

@@ -7,7 +7,7 @@ import pandas as pd
 
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.indicators._missing import refuse_infinities
-from standard_quant_tools.validation import require_finite_array, validate_series
+from standard_quant_tools.validation import validate_series
 
 logger = logging.getLogger(__name__)
 
@@ -282,67 +282,85 @@ def _psar_numba(
     af_max: float,
 ) -> np.ndarray:
     """
-    Parabolic SAR state machine.
+    Parabolic SAR state machine, the fallback for parabolic_sar_into in
+    indicators.cpp, which returns the same bits.
     Returns a (n, 2) array: [:, 0] = SAR values, [:, 1] = trend (1=rising, -1=falling).
+
+    A bar whose high or low is not finite is a missing bar and is skipped:
+    SAR and trend are NaN there, the state (SAR, extreme point, acceleration
+    factor, trend) is carried across it, and the two prior lows or highs
+    that cap the SAR are those of the two previous PRESENT bars. The result
+    is the SAR of the series with the missing bars dropped (see
+    _missing.py). The bootstrap is at the first present bar.
     """
     n = len(high)
     result = np.full((n, 2), np.nan)
 
-    # The bootstrap below reads low[0]/high[0] unconditionally. @njit compiles
-    # without bounds checking, so on an empty input that is an out-of-bounds
-    # read rather than an IndexError -- return the (empty) result first.
-    if n == 0:
-        return result
-
-    # Bootstrap: assume rising trend from bar 0
-    sar = low[0]
-    ep = high[0]
+    sar = 0.0
+    ep = 0.0
     af = af_start
     is_rising = True
+    # Lows and highs of the last two present bars, newest first.
+    low1 = 0.0
+    low2 = 0.0
+    high1 = 0.0
+    high2 = 0.0
+    n_present = 0
 
-    result[0, 0] = sar
-    result[0, 1] = 1.0
+    for i in range(n):
+        h = high[i]
+        lo = low[i]
+        if not (math.isfinite(h) and math.isfinite(lo)):
+            continue
 
-    for i in range(1, n):
-        prev_sar = sar
-
-        if is_rising:
+        if n_present == 0:
+            # Bootstrap: assume a rising trend from the first present bar
+            sar = lo
+            ep = h
+        elif is_rising:
+            prev_sar = sar
             sar = prev_sar + af * (ep - prev_sar)
             # SAR must be below the two prior lows
-            sar = min(sar, low[i - 1])
-            if i >= 2:
-                sar = min(sar, low[i - 2])
+            sar = min(sar, low1)
+            if n_present >= 2:
+                sar = min(sar, low2)
 
-            if high[i] > ep:
-                ep = high[i]
+            if h > ep:
+                ep = h
                 af = min(af + af_step, af_max)
 
-            if low[i] < sar:
+            if lo < sar:
                 # Bearish reversal
                 is_rising = False
                 sar = ep
-                ep = low[i]
+                ep = lo
                 af = af_start
         else:
+            prev_sar = sar
             sar = prev_sar - af * (prev_sar - ep)
             # SAR must be above the two prior highs
-            sar = max(sar, high[i - 1])
-            if i >= 2:
-                sar = max(sar, high[i - 2])
+            sar = max(sar, high1)
+            if n_present >= 2:
+                sar = max(sar, high2)
 
-            if low[i] < ep:
-                ep = low[i]
+            if lo < ep:
+                ep = lo
                 af = min(af + af_step, af_max)
 
-            if high[i] > sar:
+            if h > sar:
                 # Bullish reversal
                 is_rising = True
                 sar = ep
-                ep = high[i]
+                ep = h
                 af = af_start
 
         result[i, 0] = sar
         result[i, 1] = 1.0 if is_rising else -1.0
+        low2 = low1
+        low1 = lo
+        high2 = high1
+        high1 = h
+        n_present += 1
 
     return result
 
@@ -362,6 +380,14 @@ def parabolic_sar(
     Returns DataFrame with:
         'SAR'   : Stop-and-reverse price level.
         'Trend' : 1 = rising (long), -1 = falling (short).
+
+    A bar with a NaN high or low is a missing bar. The state machine skips
+    it, as the Wilder recursions do: the result is the SAR of the series
+    with that bar dropped, the bars either side of it count as consecutive
+    (the two prior lows that cap a rising SAR are the two previous present
+    bars'), and SAR and Trend are NaN at the bar itself. The series starts
+    rising at its first present bar. An infinite value is refused. See
+    `indicators/_missing.py`.
     """
     for name, value in (
         ("af_start", af_start),
@@ -388,12 +414,13 @@ def parabolic_sar(
 
     h = high.to_numpy(dtype=np.float64)
     l = low.to_numpy(dtype=np.float64)
-    # Consistent with adx()/rsi(): NaN/Inf must be rejected at the API
-    # boundary rather than silently producing a garbage SAR path (the state
-    # machine's comparisons are all false against NaN, so it would carry the
-    # bootstrap value forward for the whole series and look like real output).
-    require_finite_array(h, "high", "parabolic_sar")
-    require_finite_array(l, "low", "parabolic_sar")
+    # NaN is a missing bar, which both kernels skip; an infinity is refused,
+    # as adx()/rsi() refuse it. Before the CHANGELOG entry of 2026-10-04 NaN
+    # was refused here too: fed to the old state machine, whose comparisons
+    # are all false against NaN, it carried a stale SAR forward that looked
+    # like real output.
+    refuse_infinities(h, "high", "parabolic_sar")
+    refuse_infinities(l, "low", "parabolic_sar")
 
     if HAS_CPP and _cpp_core is not None:
         raw = _cpp_core.parabolic_sar(h, l, af_start, af_step, af_max)

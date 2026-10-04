@@ -342,6 +342,146 @@ static void test_psar_empty() {
     CHECK_EQ(static_cast<int>(result.size()), 0);
 }
 
+// The state machine as it was written before the kernel was respelled
+// without the new-extreme branch (CHANGELOG entry of 2026-10-04), for
+// all-finite input: std::min/std::max, the `i >= 2` test and the branches.
+static std::vector<double> psar_reference(const std::vector<double>& high,
+                                          const std::vector<double>& low,
+                                          double af_start, double af_step,
+                                          double af_max) {
+    const std::size_t n = high.size();
+    std::vector<double> out(2 * n, std::numeric_limits<double>::quiet_NaN());
+    if (n == 0) return out;
+    double sar = low[0], ep = high[0], af = af_start;
+    bool is_rising = true;
+    out[0] = sar;
+    out[1] = 1.0;
+    for (std::size_t i = 1; i < n; ++i) {
+        const double prev_sar = sar;
+        if (is_rising) {
+            sar = prev_sar + af * (ep - prev_sar);
+            sar = std::min(sar, low[i - 1]);
+            if (i >= 2) sar = std::min(sar, low[i - 2]);
+            if (high[i] > ep) {
+                ep = high[i];
+                af = std::min(af + af_step, af_max);
+            }
+            if (low[i] < sar) {
+                is_rising = false;
+                sar = ep;
+                ep = low[i];
+                af = af_start;
+            }
+        } else {
+            sar = prev_sar - af * (prev_sar - ep);
+            sar = std::max(sar, high[i - 1]);
+            if (i >= 2) sar = std::max(sar, high[i - 2]);
+            if (low[i] < ep) {
+                ep = low[i];
+                af = std::min(af + af_step, af_max);
+            }
+            if (high[i] > sar) {
+                is_rising = true;
+                sar = ep;
+                ep = high[i];
+                af = af_start;
+            }
+        }
+        out[i * 2 + 0] = sar;
+        out[i * 2 + 1] = is_rising ? 1.0 : -1.0;
+    }
+    return out;
+}
+
+static bool same_bits(const std::vector<double>& a, const std::vector<double>& b) {
+    return a.size() == b.size() &&
+           (a.empty() || std::memcmp(a.data(), b.data(), a.size() * sizeof(double)) == 0);
+}
+
+static void test_psar_respelling_keeps_every_bit() {
+    // The branch-free new-extreme update and the pre-combined prior lows
+    // must give the reference's bits: random walks at several magnitudes and
+    // acceleration settings, a zero step, and ties between +0.0 and -0.0.
+    struct Af { double start, step, max; };
+    const Af afs[] = {{0.02, 0.02, 0.2}, {0.01, 0.005, 0.5}, {0.2, 0.0, 0.2},
+                      {0.05, -0.0, 0.1}, {0.02, 0.3, 0.25}};
+    for (unsigned seed = 1; seed <= 6; ++seed) {
+        const double scale = (seed % 3 == 0) ? 1e-6 : (seed % 3 == 1 ? 1.0 : 1e9);
+        auto close = pseudo_random(3000, seed);
+        auto spread = pseudo_random(3000, seed + 100);
+        std::vector<double> high(3000), low(3000);
+        double level = 0.0;
+        for (std::size_t i = 0; i < close.size(); ++i) {
+            level += close[i] - 100.0;
+            high[i] = scale * (level + 0.05 * (spread[i] - 94.0));
+            low[i]  = scale * (level - 0.05 * (spread[i] - 94.0));
+        }
+        for (const Af& af : afs) {
+            const auto got = sqt::parabolic_sar(high.data(), low.data(), high.size(),
+                                                af.start, af.step, af.max);
+            CHECK(same_bits(got, psar_reference(high, low, af.start, af.step, af.max)));
+        }
+    }
+    // Signed zeros: every comparison between them is a tie.
+    std::vector<double> high = {0.0, -0.0, 0.0, 1.0, -0.0, 0.0, -1.0, -0.0, 0.0, 0.0};
+    std::vector<double> low  = {-0.0, 0.0, -0.0, 0.0, -1.0, -0.0, -2.0, 0.0, -0.0, -0.0};
+    const auto got = sqt::parabolic_sar(high.data(), low.data(), high.size(), 0.02, 0.02, 0.2);
+    CHECK(same_bits(got, psar_reference(high, low, 0.02, 0.02, 0.2)));
+    const auto swapped = sqt::parabolic_sar(low.data(), high.data(), high.size(), 0.02, 0.02, 0.2);
+    CHECK(same_bits(swapped, psar_reference(low, high, 0.02, 0.02, 0.2)));
+}
+
+static void test_psar_missing_bar_is_the_series_without_it() {
+    // A bar with a non-finite high or low is skipped: the SAR at the present
+    // bars is the SAR of the series with the missing bars dropped, bit for
+    // bit, and SAR and Trend are NaN at the missing ones.
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const double inf = std::numeric_limits<double>::infinity();
+    auto close = pseudo_random(400, 9);
+    std::vector<double> high, low;
+    ohlc_from_prices(close, high, low);
+    for (std::size_t i = 0; i < close.size(); ++i) {  // a trending walk
+        high[i] += 0.3 * static_cast<double>(i);
+        low[i]  += 0.3 * static_cast<double>(i);
+    }
+    const std::size_t gaps_high[] = {0, 1, 57, 58, 59, 200, 399};
+    const std::size_t gaps_low[]  = {2, 120, 201, 300};
+    high[gaps_high[0]] = nan;
+    high[gaps_high[1]] = inf;
+    for (std::size_t k = 2; k < sizeof gaps_high / sizeof gaps_high[0]; ++k) high[gaps_high[k]] = nan;
+    for (std::size_t g : gaps_low) low[g] = (g == 300) ? -inf : nan;
+
+    const auto full = sqt::parabolic_sar(high.data(), low.data(), high.size(), 0.02, 0.02, 0.2);
+    std::vector<double> kept_high, kept_low, kept_out;
+    for (std::size_t i = 0; i < high.size(); ++i) {
+        const bool present = std::isfinite(high[i]) && std::isfinite(low[i]);
+        if (present) {
+            kept_high.push_back(high[i]);
+            kept_low.push_back(low[i]);
+            kept_out.push_back(full[2 * i]);
+            kept_out.push_back(full[2 * i + 1]);
+        } else {
+            CHECK_NAN(full[2 * i]);
+            CHECK_NAN(full[2 * i + 1]);
+        }
+    }
+    const auto dropped = sqt::parabolic_sar(kept_high.data(), kept_low.data(),
+                                            kept_high.size(), 0.02, 0.02, 0.2);
+    CHECK(same_bits(kept_out, dropped));
+    // The first present bar is bar 3: the bootstrap is there.
+    CHECK_EQ(full[6], low[3]);
+    CHECK_EQ(full[7], 1.0);
+}
+
+static void test_psar_all_missing_is_all_nan() {
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const std::vector<double> high = {nan, 101.0, nan};
+    const std::vector<double> low  = {99.0, nan, nan};
+    const auto out = sqt::parabolic_sar(high.data(), low.data(), 3, 0.02, 0.02, 0.2);
+    CHECK_EQ(static_cast<int>(out.size()), 6);
+    for (double v : out) CHECK_NAN(v);
+}
+
 
 // ── Wilder's ATR tests ────────────────────────────────────────────────────────
 
@@ -1283,6 +1423,9 @@ int main() {
     test_psar_rising_trend_sar_below_price();
     test_psar_single_bar();
     test_psar_empty();
+    test_psar_respelling_keeps_every_bit();
+    test_psar_missing_bar_is_the_series_without_it();
+    test_psar_all_missing_is_all_nan();
 
     // Wilder's ATR
     test_wilder_atr_nan_prefix();

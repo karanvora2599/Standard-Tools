@@ -590,7 +590,7 @@ class TestAnInfinityIsRefusedOnBothPaths:
     def test_nan_is_still_a_gap_for_the_kernel(self, universe):
         """The null case: NaN marks a missing bar and is not refused here.
         The kernel blanks the windows holding it and RSI resumes after it.
-        (The per-ticker wrappers the fallback loops refuse NaN themselves.)"""
+        (The per-ticker wrappers the fallback loops read it as a gap too.)"""
         if not panel_module.HAS_CPP:
             pytest.skip("C++ extension not built")
         gap = _with(universe, "BBB", "Close", 100, np.nan)

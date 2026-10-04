@@ -1,5 +1,54 @@
 # Changelog
 
+## The Parabolic SAR and the simple ATR read a missing bar as a gap, and seven kernels test finiteness inline
+
+- **`parabolic_sar` and `atr` read NaN as a missing bar.** They were the
+  last indicators to refuse it, so a universe with one missing bar got no
+  SAR or simple-ATR column from `technical_indicators_panel` on either
+  path. The SAR state machine skips a bar whose high or low is NaN, in the
+  native kernel and the Numba fallback alike: `SAR` and `Trend` are NaN
+  there, the SAR, extreme point, acceleration factor and trend carry
+  across it, and the two prior lows (highs) that cap the SAR are the two
+  previous present bars'. The result is the SAR of the series with the bar
+  dropped, and both backends return the same bits. The simple ATR reads a
+  bar with a NaN high, low or close as missing: it has no true range, the
+  next present bar's is measured against the last present close, as in
+  `wilder_atr`, and the rolling mean is NaN over every window holding it.
+  ±inf is still refused. With every bar present both return the bits they
+  returned before.
+- **The native Parabolic SAR no longer trails its Numba fallback.** It ran
+  at 0.82–0.92× of Numba from 20k to 2M bars. MSVC compiled the
+  new-extreme update to a branch that goes either way from bar to bar; it
+  is now a maximum and an add of a masked step, the two prior lows are
+  combined before the SAR meets them, and the output is written in one
+  pass, none of it moving a bit. Raw kernel, one thread: 1.19–1.45× of
+  Numba from 200k to 2M bars, and 1.37–1.54× the previous kernel there;
+  over 20 to 400 distinct series of 500 to 20k bars, 1.23–1.46× the
+  previous kernel. The Numba fallback pays for its gap test: 0.83× its
+  previous speed at 2k bars, 0.93× at 200k, 0.99× at 2M.
+- **Seven more kernels test finiteness without a call per value.** Under
+  MSVC `std::isfinite` and `std::isnan` call `_dclass` in the C runtime
+  DLL. They are now the inline tests of `numerics.hpp` in the per-bar and
+  per-row loops, and in the two helpers Bollinger and `rolling_beta` call
+  per bar, with every output bit-identical. Min of 7 interleaved runs, one
+  thread: `bollinger_bands` 1.35–1.65×, `stochastic_oscillator`
+  1.14–1.78×, `rolling_beta` 1.68–2.51× (2k to 2M bars),
+  `run_portfolio_simulation` with daily rebalancing 1.07–1.42× (every
+  fifth bar: within noise), `cross_sectional_correlation` 1.41–1.51×
+  Pearson and 1.05–1.09× Spearman, `standardize_by_date` 1.03–1.07×,
+  `implied_volatility_batch` 1.01–1.16×. `fit_preprocess_stats`,
+  `rank_by_date`, `permutation_null_ic` and `rolling_factor_loadings`
+  measured within noise (paired medians 0.98–1.02×; a sort or a QR
+  dominates) and keep the library call, as does every test that runs once
+  per call, column or date.
+- **The sanitizer job's Python step preloads libstdc++ with the ASan
+  runtime.** ASan's `__cxa_throw` wrapper looks the real function up once,
+  when the runtime starts. The interpreter does not link libstdc++, so the
+  lookup found nothing, and the first C++ exception thrown in the process
+  aborted the run inside the wrapper's own check; the C++ test executables
+  link libstdc++ at startup and never hit it. The job stays
+  `continue-on-error` until a run proves it green.
+
 ## The OpenMP limit restores each thread's own count on a runtime that keeps it per thread
 
 - **On Linux a thread could be left limited after two fits overlapped.**

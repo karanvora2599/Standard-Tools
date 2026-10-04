@@ -515,7 +515,7 @@ bool cross_sectional_correlation(const double* y_true,
     // and, for spearman, before it ranks. An infinity is kept: pandas treats
     // only NaN as missing.
     const auto keep = [y_true, y_pred](std::size_t i) {
-        return !std::isnan(y_true[i]) && !std::isnan(y_pred[i]);
+        return !numerics::is_nan(y_true[i]) && !numerics::is_nan(y_pred[i]);
     };
 
     std::vector<std::size_t> offsets, counts, order;
@@ -654,7 +654,7 @@ bool standardize_by_date(const double* values,
             std::size_t n_valid = 0;
             for (std::size_t i = 0; i < n; ++i) {
                 const double v = values[order[base + i] * n_cols + c];
-                if (!std::isnan(v)) column[n_valid++] = v;
+                if (!numerics::is_nan(v)) column[n_valid++] = v;
             }
             const double* buffer = column.data();
 
@@ -682,13 +682,13 @@ bool standardize_by_date(const double* values,
             for (std::size_t i = 0; i < n; ++i) {
                 const std::size_t index = order[base + i] * n_cols + c;
                 const double raw = values[index];
-                if (std::isnan(raw)) {
+                if (numerics::is_nan(raw)) {
                     // Absent stays absent.
                     out[index] = raw;
                     continue;
                 }
                 double z = usable ? (raw - mean) / stdev : 0.0;
-                if (!std::isfinite(z)) z = 0.0;
+                if (!numerics::is_finite(z)) z = 0.0;
                 if (clip_sigma > 0.0) {
                     z = std::min(std::max(z, -clip_sigma), clip_sigma);
                 }

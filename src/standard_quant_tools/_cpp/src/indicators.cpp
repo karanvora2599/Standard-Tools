@@ -42,6 +42,10 @@ inline double zero_unless(bool keep, double x) noexcept {
 // to the stack and read the larger back through a pointer on every bar.
 inline double max_of(double a, double b) noexcept { return (a < b) ? b : a; }
 
+// std::min(a, b) for doubles, by value: `(b < a) ? b : a`, std::min's own
+// expression, for the reason max_of exists. MSVC compiles it to minsd.
+inline double min_of(double a, double b) noexcept { return (b < a) ? b : a; }
+
 // Wilder's true range against the previous present close. max_of nests left
 // to right, so it returns the first of the largest, as std::max({...}) did.
 inline double true_range(double high, double low, double prev_close) noexcept {
@@ -311,6 +315,38 @@ std::vector<double> adx(
 //
 // State machine with SAR-clamp rules identical to _psar_numba in trend.py.
 // Flat row-major output: (SAR, Trend) per bar.
+//
+// A bar is missing when its high or low is not finite, and the state machine
+// skips it the way the Wilder recursions do (see the note above rsi_into):
+// SAR and Trend are NaN at the missing bar, and the SAR, the extreme point,
+// the acceleration factor and the trend are carried across it unchanged. The
+// "two prior lows" (highs, when falling) that cap the SAR are those of the
+// two previous PRESENT bars, and the bootstrap is at the first present bar.
+// The result is exactly the SAR of the series with the missing bars dropped,
+// reported back at the bars that remain.
+//
+// Three things in the loop are spelled for MSVC, none of them changing a
+// result bit (CHANGELOG, 2026-10-04). Spelled as the reference is, this
+// kernel ran at 0.82-0.92x of the Numba fallback from 20k to 2M bars;
+// respelled, at 1.1-1.45x:
+//
+//   * The new-extreme update has no branch. `if (high > ep) { ep = high;
+//     af = min(af + step, af_max); }` became a conditional jump, and whether
+//     a bar makes a new extreme changes from bar to bar, so it was
+//     mispredicted often; LLVM turns the same lines in the Numba kernel into
+//     selects. Here ep is max_of(ep, high) (min_of when falling), the same
+//     comparison, and af adds zero_unless(new extreme, step) before the cap:
+//     without a new extreme that is af + 0.0 capped at af_max, which is af
+//     itself, because af is positive and never above af_max.
+//   * The two prior lows are combined before the SAR meets them:
+//     min_of(sar, min_of(low1, low2)) in place of min_of(min_of(sar, low1),
+//     low2). Both return the first of the smallest of (sar, low1, low2), so
+//     the bits are the same (a +0.0/-0.0 tie included), and the SAR's chain
+//     from one bar to the next is one minimum shorter. Before the second
+//     present bar the older low is +inf, which never wins a minimum, as the
+//     reference's `i >= 2` test skips it; the highs mirror this with -inf.
+//   * There is no separate pass filling the output with NaN: every bar is
+//     written once, in the loop.
 
 void parabolic_sar_into(
     const double* SQT_RESTRICT high,
@@ -322,8 +358,6 @@ void parabolic_sar_into(
     double* SQT_RESTRICT       out)
 {
     // 2 columns per bar: SAR, Trend
-    std::fill(out, out + 2 * n, kNaN);
-    if (n == 0) return;
 
     // Not a crash risk (af_* only feed floating-point arithmetic below, no
     // indexing) but a nonsensical combination (e.g. af_max < af_start, a
@@ -333,61 +367,82 @@ void parabolic_sar_into(
     // file.
     if (!std::isfinite(af_start) || !std::isfinite(af_step) || !std::isfinite(af_max) ||
         af_start <= 0.0 || af_step < 0.0 || af_max <= 0.0 || af_max < af_start) {
+        std::fill(out, out + 2 * n, kNaN);
         return;
     }
 
-    // Bootstrap: assume rising trend from bar 0
-    double sar       = low[0];
-    double ep        = high[0];
+    // Missing bars before the first present one.
+    std::size_t i = 0;
+    for (; i < n; ++i) {
+        if (numerics::is_finite(high[i]) & numerics::is_finite(low[i])) break;
+        out[i * 2 + 0] = kNaN;
+        out[i * 2 + 1] = kNaN;
+    }
+    if (i == n) return;
+
+    // Bootstrap at the first present bar: rising, the SAR at its low and the
+    // extreme point at its high.
+    double sar       = low[i];
+    double ep        = high[i];
     double af        = af_start;
     bool   is_rising = true;
+    out[i * 2 + 0] = sar;
+    out[i * 2 + 1] = 1.0;
 
-    out[0] = sar;
-    out[1] = 1.0;
+    // Lows and highs of the last two present bars, newest first.
+    constexpr double kInf = std::numeric_limits<double>::infinity();
+    double low1 = low[i], low2 = kInf;
+    double high1 = high[i], high2 = -kInf;
 
-    for (std::size_t i = 1; i < n; ++i) {
+    for (++i; i < n; ++i) {
+        // `&`, not `&&`: two independent tests and one branch.
+        if (!(numerics::is_finite(high[i]) & numerics::is_finite(low[i]))) {
+            out[i * 2 + 0] = kNaN;  // a missing bar: the state is carried across
+            out[i * 2 + 1] = kNaN;
+            continue;
+        }
+        const double h = high[i];
+        const double l = low[i];
         const double prev_sar = sar;
 
         if (is_rising) {
-            sar = prev_sar + af * (ep - prev_sar);
             // SAR must stay below the two prior lows
-            sar = std::min(sar, low[i - 1]);
-            if (i >= 2) sar = std::min(sar, low[i - 2]);
+            sar = min_of(prev_sar + af * (ep - prev_sar), min_of(low1, low2));
 
-            if (high[i] > ep) {
-                ep = high[i];
-                af = std::min(af + af_step, af_max);
-            }
+            const bool new_extreme = h > ep;
+            ep = max_of(ep, h);
+            af = min_of(af + zero_unless(new_extreme, af_step), af_max);
 
-            if (low[i] < sar) {
+            if (l < sar) {
                 // Bearish reversal
                 is_rising = false;
                 sar = ep;
-                ep  = low[i];
+                ep  = l;
                 af  = af_start;
             }
         } else {
-            sar = prev_sar - af * (prev_sar - ep);
             // SAR must stay above the two prior highs
-            sar = std::max(sar, high[i - 1]);
-            if (i >= 2) sar = std::max(sar, high[i - 2]);
+            sar = max_of(prev_sar - af * (prev_sar - ep), max_of(high1, high2));
 
-            if (low[i] < ep) {
-                ep = low[i];
-                af = std::min(af + af_step, af_max);
-            }
+            const bool new_extreme = l < ep;
+            ep = min_of(ep, l);
+            af = min_of(af + zero_unless(new_extreme, af_step), af_max);
 
-            if (high[i] > sar) {
+            if (h > sar) {
                 // Bullish reversal
                 is_rising = true;
                 sar = ep;
-                ep  = high[i];
+                ep  = h;
                 af  = af_start;
             }
         }
 
         out[i * 2 + 0] = sar;
         out[i * 2 + 1] = is_rising ? 1.0 : -1.0;
+        low2  = low1;
+        low1  = l;
+        high2 = high1;
+        high1 = h;
     }
 }
 
@@ -568,7 +623,7 @@ void bollinger_bands_into(
         Sxx = 0.0;
         nan_in_window = 0;
         for (std::size_t j = start; j < end; ++j) {
-            if (!std::isfinite(prices[j])) ++nan_in_window;
+            if (!numerics::is_finite(prices[j])) ++nan_in_window;
         }
         // The reference point must itself be finite or it poisons every
         // shifted value in the window; fall back to 0.0 only when the
@@ -579,7 +634,7 @@ void bollinger_bands_into(
         // slide after the refresh -- and when it was a large print, every
         // later window was shifted by the print's magnitude until the next
         // refresh, which is the cancellation the shift exists to prevent.
-        c = std::isfinite(prices[end - 1]) ? prices[end - 1] : 0.0;
+        c = numerics::is_finite(prices[end - 1]) ? prices[end - 1] : 0.0;
         for (std::size_t j = start; j < end; ++j) {
             const double d = prices[j] - c;
             Sx += d;
@@ -633,8 +688,8 @@ void bollinger_bands_into(
     const std::size_t period_sz = static_cast<std::size_t>(period);
     for (std::size_t i = period_sz; i < n; ++i) {
         const std::size_t old = i - period_sz;
-        if (!std::isfinite(prices[old])) --nan_in_window;
-        if (!std::isfinite(prices[i])) { ++nan_in_window; sums_polluted = true; }
+        if (!numerics::is_finite(prices[old])) --nan_in_window;
+        if (!numerics::is_finite(prices[i])) { ++nan_in_window; sums_polluted = true; }
         Sx  += (prices[i] - c) - (prices[old] - c);
         Sxx += (prices[i] - c) * (prices[i] - c) - (prices[old] - c) * (prices[old] - c);
         ++since_refresh;
@@ -750,10 +805,10 @@ void stochastic_oscillator_into(
         // the window, then add the bar that just entered it.
         if (window_start >= 1) {
             const std::size_t leaving = static_cast<std::size_t>(window_start - 1);
-            if (!std::isfinite(high[leaving]) || !std::isfinite(low[leaving])) --nan_in_window;
+            if (!numerics::is_finite(high[leaving]) || !numerics::is_finite(low[leaving])) --nan_in_window;
         }
-        const bool high_missing = !std::isfinite(high[i_sz]);
-        const bool low_missing  = !std::isfinite(low[i_sz]);
+        const bool high_missing = !numerics::is_finite(high[i_sz]);
+        const bool low_missing  = !numerics::is_finite(low[i_sz]);
         if (high_missing || low_missing) ++nan_in_window;
 
         while (!max_dq.empty() && max_dq.front() < window_start) max_dq.pop_front();
@@ -778,7 +833,7 @@ void stochastic_oscillator_into(
         // window -- including a flat one, which would otherwise report 0.0
         // for a bar whose close was never observed. The close is read at
         // this bar only, so it does not blank the windows after it.
-        if (i >= k_period_ll - 1 && nan_in_window == 0 && std::isfinite(close[i_sz])) {
+        if (i >= k_period_ll - 1 && nan_in_window == 0 && numerics::is_finite(close[i_sz])) {
             // nan_in_window == 0 guarantees both deques are non-empty here:
             // every bar of the window was pushed into each of them.
             const double hi  = high[static_cast<std::size_t>(max_dq.front())];
@@ -809,12 +864,12 @@ void stochastic_oscillator_into(
 
         // isfinite, not isnan: a %K that overflowed to +/-inf could no more
         // be subtracted back out of Sk than a NaN could.
-        if (!std::isfinite(k_in)) ++nan_k; else Sk += k_in;
+        if (!numerics::is_finite(k_in)) ++nan_k; else Sk += k_in;
         ++count;
         if (count >= d_period_ll) {
             out[i_sz * 2 + 1] = (nan_k == 0) ? Sk / d_period : kNaN;  // %D
             const double k_out = K_vals[static_cast<std::size_t>(i - d_period_ll + 1)];
-            if (!std::isfinite(k_out)) --nan_k; else Sk -= k_out;
+            if (!numerics::is_finite(k_out)) --nan_k; else Sk -= k_out;
         }
     }
 }

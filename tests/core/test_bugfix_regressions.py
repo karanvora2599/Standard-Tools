@@ -388,12 +388,18 @@ class TestPathConsistency:
 
 
 class TestFiniteInputConsistency:
-    def test_atr_rejects_nan(self):
+    def test_atr_refuses_an_infinity_and_reads_nan_as_a_gap(self):
+        """Since the CHANGELOG entry of 2026-10-04 a NaN is a missing bar
+        here, as in wilder_atr; an infinity is still refused."""
         df = _ohlcv()
         bad = df["High"].copy()
-        bad.iloc[5] = np.nan
-        with pytest.raises(ValidationError, match="non-finite"):
+        bad.iloc[5] = np.inf
+        with pytest.raises(ValidationError, match="infinite"):
             atr(bad, df["Low"], df["Close"])
+        bad.iloc[5] = np.nan
+        out = atr(bad, df["Low"], df["Close"], period=3)
+        assert out.iloc[5:8].isna().all()
+        assert np.isfinite(out.iloc[8])
 
     def test_kalman_hedge_ratio_rejects_nan(self):
         idx = pd.date_range("2024-01-01", periods=50)
