@@ -1,5 +1,56 @@
 # Changelog
 
+## yfinance's swallowed errors are read whatever the log says, and a history status is read before its type
+
+- **`get_ticker_info` and `get_financial_ratios` no longer read
+  yfinance's log.** The 5xx detection read the "HTTP Error 503" line
+  yfinance logs when it catches a quote request's error, so a process that
+  set the `yfinance` logger or a parent above ERROR, set it `disabled`, or
+  called `logging.disable` hid it: with the HTTP layer stubbed, a 5xx on
+  both quote requests then read as "No metadata found" under yfinance
+  1.7.0 and as the old `APIError` under 0.2.65, and a 401 lost its status
+  from the message. yfinance's `YfData.get`, `cache_get` and
+  `get_raw_json` are now wrapped once per process; each returns and raises
+  what it did, and records only while a provider read runs in the calling
+  context (a `ContextVar`). No handler is added, no level is changed and
+  nothing is logged. Under each of the four ways of silencing the log a
+  5xx is `VendorUnavailableError` with its status on both versions, and
+  two threads reading at once, one failing and one healthy, each get their
+  own answer.
+- **The timezone lookup behind the history call is read the same way.**
+  Its swallowed error was read from the log too. A 503 it got with
+  Yahoo's JSON error body read as "possibly delisted; no timezone found"
+  even with the log on; it is now `VendorUnavailableError` with status 503.
+  A 404 stays "No data found".
+- **A history status is read before its type.** curl_cffi's `HTTPError`
+  is a `CurlError`, which the history path took for a transport failure
+  whatever its status: a 404 or a 401 was asked three times and named as
+  Yahoo's outage, with no status. One classifier, shared with the info
+  path, now reads the status first: a 5xx, 408 or 429 is retried and
+  raised as `VendorUnavailableError` with `.status`; a 404 is
+  `DataNotFoundError` and not retried; a 401 or 403 keeps the old
+  `APIError` ("Error fetching data for 'X' from yfinance: HTTP Error 401:
+  Unauthorized"). requests' `HTTPError`, which yfinance 1.x uses without
+  curl_cffi, is read the same way; its 503 used to be the plain `APIError`.
+- **A 5xx Yahoo answers on the history request is the vendor's.**
+  yfinance turns the answer's JSON error into "no price data found", which
+  read as "No data found ... Verify symbol and date range". The answer's
+  status is now read first. A 404 answer reads word for word as before; a
+  401 or 403 answer stays `DataNotFoundError` and says that Yahoo refused
+  the request.
+- **A retry reaches Yahoo again.** yfinance memoizes `cache_get`'s answers
+  for the process, a failed one too: the history request for any window
+  that ended more than 30 minutes ago, the timezone lookup and the info
+  path's time series. Stubbed, two calls for one window after a 503 made
+  one request and both read "No data found". The memo, which cannot evict
+  one entry, is now emptied after a vendor failure, before the next
+  attempt: the same two calls make two requests and return 22 rows each.
+- **Unchanged:** a healthy history frame has the same bytes, and a healthy
+  `TickerInfo` and `FinancialRatios` the same fields, on both versions;
+  with yfinance's log at its default, every info outcome is word for word
+  the same. A wrapped request costs 0.3 µs more outside a provider read
+  and 0.6 to 0.8 µs more while recording.
+
 ## A replay that cannot decide its inputs says so, a portfolio's hashes do not depend on pandas, and an external panel's refusal says whether its file moved
 
 - **`data_undecided`.** When every data source that missed in a replay was a
