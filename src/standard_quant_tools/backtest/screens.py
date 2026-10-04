@@ -16,12 +16,12 @@ from typing import List, Optional
 
 import pandas as pd
 
+# SPLIT_SCREEN_THRESHOLD (35%) is defined once, in `constants`, and read
+# here and by the dataset build's screen
+# (`data.quality.detect_split_like_moves`), so a backtest and a dataset
+# built from the same bars name the same moves.
+from standard_quant_tools.constants import SPLIT_SCREEN_THRESHOLD
 from standard_quant_tools.error import ValidationError
-
-#: A bar-to-bar move beyond this is screened as a probable split (or a
-#: bad print). No equity moves 35% in a day often; a 2:1 split moves
-#: -50% every time.
-SPLIT_SCREEN_THRESHOLD = 0.35
 
 
 def require_sorted_unique_index(

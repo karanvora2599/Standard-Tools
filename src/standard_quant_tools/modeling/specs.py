@@ -472,6 +472,68 @@ class MissingDataSpec(BaseModel):
         return self
 
 
+class CorporateActionSpec(BaseModel):
+    """
+    One stock split the caller declares, so a build from unadjusted bars
+    can adjust it.
+
+    Databento serves the prices the venue published (`adjusted=False`), so
+    a 10:1 split is a -90% bar that every label and feature spanning it
+    reads as a return. No corporate-actions source is wired to the
+    builder; this is the caller saying where a split falls. The builder
+    back-adjusts: every bar of `entity` dated before `ex_date` has Open,
+    High, Low and Close divided by `split_ratio` and Volume multiplied by
+    it, which puts the earlier bars in the units of the later ones -- the
+    adjustment a split-adjusting provider applies. Dividends are not
+    adjusted by anything here.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    entity: str = Field(
+        ...,
+        min_length=1,
+        description="The universe key whose bars are adjusted (it must be in "
+        "DatasetSpec.universe).",
+    )
+    ex_date: str = Field(
+        ...,
+        description="The ex-date, YYYY-MM-DD: the first session priced after "
+        "the split. Bars dated before it are adjusted.",
+    )
+    split_ratio: float = Field(
+        ...,
+        gt=0,
+        allow_inf_nan=False,
+        description="New shares per old share: 10 for a 10:1 split, 1.5 for "
+        "3:2, 0.1 for a 1:10 reverse split. Must not be 1.",
+    )
+
+    @field_validator("ex_date")
+    @classmethod
+    def _ex_date_is_a_date(cls, v: str) -> str:
+        parsed = _parse_date(v, "corporate_actions.ex_date")
+        if parsed != parsed.normalize():
+            raise ValueError(
+                f"corporate_actions.ex_date={v!r} carries a time of day; an "
+                "ex-date is a session date. Give it as YYYY-MM-DD."
+            )
+        # One spelling per date, so two specs declaring the same split
+        # hash the same.
+        return parsed.strftime("%Y-%m-%d")
+
+    @field_validator("split_ratio")
+    @classmethod
+    def _ratio_is_a_split(cls, v: float) -> float:
+        if v == 1.0:
+            raise ValueError(
+                "corporate_actions.split_ratio=1 is not a split: it adjusts "
+                "nothing. Give new shares per old share (10 for 10:1, 0.1 "
+                "for a 1:10 reverse split)."
+            )
+        return float(v)
+
+
 class DatasetSpec(BaseModel):
     # extra="forbid" like every top-level input model. Without it a
     # nested typo was silently dropped: `validate_model_spec` -- the
@@ -577,6 +639,22 @@ class DatasetSpec(BaseModel):
             "observations. See MissingDataSpec. A dataset built with the "
             "default hashes identically to one built before this field "
             "existed."
+        ),
+    )
+    corporate_actions: List[CorporateActionSpec] = Field(
+        default_factory=list,
+        max_length=10_000,
+        description=(
+            "Stock splits to adjust, each {entity, ex_date, split_ratio}. "
+            "For a provider that serves unadjusted bars (Databento reports "
+            "adjusted=False): every bar of the entity before the ex-date has "
+            "Open/High/Low/Close divided by the ratio and Volume multiplied by "
+            "it, before any feature or label is computed. Refused when the "
+            "provider reports adjusted=True, where it would adjust twice. A "
+            "declared split whose ex-date bar does not move by about the "
+            "ratio is applied as declared and named in a warning. Dividends "
+            "are not adjusted. Empty (the default) leaves the bars as served, "
+            "and a spec without it hashes exactly as before it existed."
         ),
     )
 
@@ -701,6 +779,56 @@ class DatasetSpec(BaseModel):
                 f"produce. Its feature output names are {sorted(names)}. Name "
                 "the alias where one is set."
             )
+        return self
+
+    @model_validator(mode="after")
+    def _declared_splits_name_the_universe(self) -> "DatasetSpec":
+        """
+        A declared split must name an entity of this universe, by the same
+        canonical key the universe holds, and at most once per ex-date.
+
+        Kept in (entity, ex_date) order, so two specs declaring the same
+        splits in a different order are one dataset and hash the same.
+        """
+        if not self.corporate_actions:
+            return self
+        from standard_quant_tools.error import ValidationError
+
+        from .assets import canonical_universe
+
+        members = set(self.universe)
+        actions: List[CorporateActionSpec] = []
+        for action in self.corporate_actions:
+            try:
+                key = canonical_universe([action.entity])[0]
+            except ValidationError as exc:
+                raise ValueError(str(exc)) from exc
+            if key not in members:
+                raise ValueError(
+                    f"corporate_actions names {action.entity!r} "
+                    f"({action.ex_date}), which is not in the universe. A "
+                    "declared split adjusts one universe entity's bars; name "
+                    "it by its universe key."
+                )
+            actions.append(
+                action
+                if key == action.entity
+                else action.model_copy(update={"entity": key})
+            )
+        seen: Dict[tuple, float] = {}
+        for action in actions:
+            slot = (action.entity, action.ex_date)
+            if slot in seen:
+                raise ValueError(
+                    f"corporate_actions declares {action.entity} on "
+                    f"{action.ex_date} twice. Give one split per entity and "
+                    "ex-date, with the combined ratio if two took effect on "
+                    "the same session."
+                )
+            seen[slot] = action.split_ratio
+        ordered = sorted(actions, key=lambda a: (a.entity, a.ex_date))
+        if [id(a) for a in ordered] != [id(a) for a in self.corporate_actions]:
+            self.corporate_actions = ordered
         return self
 
 

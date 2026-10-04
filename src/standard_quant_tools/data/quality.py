@@ -29,12 +29,16 @@ proven defects.
 """
 
 import logging
-from typing import Any, Dict, List, Optional
+import math
+from fractions import Fraction
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools.constants import SPLIT_SCREEN_THRESHOLD
 from standard_quant_tools.data.databento import DATASET_CONSOLIDATED
+from standard_quant_tools.error import ValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -269,6 +273,149 @@ def detect_price_jumps(
     return [
         {"date": str(idx.date()), "pct_change": round(float(val), 4)}
         for idx, val in flagged.items()
+    ]
+
+
+#: The split ratios a split-sized move is named after, as new shares per old
+#: share: 3:2, 2:1, ... 50:1. A reverse split is the reciprocal (1:10 is
+#: 0.1), so each of these is also tried the other way up.
+SPLIT_RATIOS: Tuple[float, ...] = (
+    1.5,
+    2.0,
+    3.0,
+    4.0,
+    5.0,
+    8.0,
+    10.0,
+    15.0,
+    20.0,
+    25.0,
+    30.0,
+    40.0,
+    50.0,
+)
+
+#: How close, on a log scale, a move's implied ratio must sit to a listed
+#: ratio to be named after it: |ln(implied / ratio)| <= 0.10, about 10%.
+#: The six splits in a live 2022-2026 Databento window all sat within 3%
+#: (the split day's own move is the rest). Where a move is within reach of
+#: two listed ratios -- 25 and 30 are 0.18 apart -- the nearer is named.
+SPLIT_RATIO_TOLERANCE = 0.10
+
+
+def split_ratio_label(ratio: float) -> str:
+    """'10:1' for 10, '3:2' for 1.5, '1:10' for a 0.1 reverse split; a
+    ratio with no small fraction is printed as a number."""
+    fraction = Fraction(float(ratio)).limit_denominator(1000)
+    if abs(float(fraction) - float(ratio)) > 1e-9 * max(1.0, abs(float(ratio))):
+        return f"{float(ratio):g}:1"
+    return f"{fraction.numerator}:{fraction.denominator}"
+
+
+def nearest_split_ratio(factor: float) -> Tuple[float, float]:
+    """
+    The listed split ratio nearest `factor`, and how far it is.
+
+    `factor` is the close before the bar over the close on it, so a 10:1
+    split gives 10 and a 1:10 reverse split 0.1. Distance is
+    |ln(factor / ratio)|, a proportion rather than a difference: 9.5 and
+    10.5 are both about 5% from 10, as 1.9 and 2.1 are from 2.
+    """
+    if not (factor > 0 and math.isfinite(factor)):
+        raise ValidationError(
+            f"nearest_split_ratio: factor must be a positive finite number, "
+            f"got {factor!r}."
+        )
+    candidates = SPLIT_RATIOS if factor >= 1.0 else tuple(1.0 / k for k in SPLIT_RATIOS)
+    log_factor = math.log(factor)
+    ratio = min(candidates, key=lambda k: abs(log_factor - math.log(k)))
+    return float(ratio), abs(log_factor - math.log(ratio))
+
+
+def split_like_moves_at(
+    close: pd.Series, threshold: float = SPLIT_SCREEN_THRESHOLD
+) -> List[Tuple[int, float, Optional[float], Optional[float]]]:
+    """
+    The bars `detect_split_like_moves` reports, by POSITION in `close`:
+    (position, close_move, split_ratio or None, ratio_error or None).
+
+    The form a caller needs to count what reads each bar -- a dataset
+    build counts the labels and feature rows within reach of each one --
+    and the single definition of which bars are screened, so the reported
+    form cannot drift from it.
+    """
+    if not (isinstance(threshold, (int, float)) and math.isfinite(threshold)):
+        raise ValidationError(
+            f"detect_split_like_moves: threshold must be a finite number, got "
+            f"{threshold!r}."
+        )
+    if threshold <= 0:
+        raise ValidationError(
+            f"detect_split_like_moves: threshold must be positive, got "
+            f"{threshold!r}; it is the size of move (0.35 = 35%) to screen."
+        )
+    values = pd.to_numeric(pd.Series(close), errors="coerce").to_numpy(dtype=float)
+    if len(values) < 2:
+        return []
+    before = values[:-1]
+    after = values[1:]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        moves = after / before - 1.0
+    flagged = np.flatnonzero(np.abs(moves) > threshold)
+    out: List[Tuple[int, float, Optional[float], Optional[float]]] = []
+    for i in flagged:
+        move = float(moves[i])
+        prior, current = float(before[i]), float(after[i])
+        ratio: Optional[float] = None
+        error: Optional[float] = None
+        if prior > 0 and current > 0:
+            nearest, distance = nearest_split_ratio(prior / current)
+            error = distance
+            if distance <= SPLIT_RATIO_TOLERANCE:
+                ratio = nearest
+        out.append((int(i) + 1, move, ratio, error))
+    return out
+
+
+def detect_split_like_moves(
+    close: "pd.Series | pd.DataFrame", threshold: float = SPLIT_SCREEN_THRESHOLD
+) -> List[Dict[str, Any]]:
+    """
+    Close-to-close moves large enough to be an unadjusted split, each named
+    after the split ratio it is consistent with.
+
+    The screen the backtest runs (`backtest.screens`, same 35% threshold),
+    in the form a dataset build records: a move beyond `threshold` is
+    listed, and when the price ratio across the bar is within 10% (on a
+    log scale) of a listed split ratio -- 3:2, 2:1, 3:1, 4:1, 5:1, 8:1,
+    10:1, 15:1, 20:1, 25:1, 30:1, 40:1, 50:1, or any of them reversed --
+    that ratio is named. Being named is consistency, not proof: a genuine
+    -90% day reads exactly like a 10:1 split, and a 3:2 split (-33%) is
+    below the default threshold and not listed at all.
+
+    Args:
+        close: Close prices in bar order (a frame's 'Close' column is used
+            when a frame is passed).
+        threshold: The fractional move to screen (default 0.35 = 35%).
+
+    Returns:
+        [{"date", "close_move", "split_ratio", "ratio_error"}] in bar order.
+        `split_ratio` is new shares per old share (10.0 for a 10:1 split,
+        0.1 for a 1:10 reverse split) or None when no listed ratio is near;
+        `ratio_error` is |ln(implied / nearest listed ratio)|, None only for
+        a non-positive price.
+    """
+    if isinstance(close, pd.DataFrame):
+        close = close["Close"]
+    index = close.index
+    return [
+        {
+            "date": _stamp(index[position]),
+            "close_move": round(move, 4),
+            "split_ratio": ratio,
+            "ratio_error": None if error is None else round(error, 4),
+        }
+        for position, move, ratio, error in split_like_moves_at(close, threshold)
     ]
 
 

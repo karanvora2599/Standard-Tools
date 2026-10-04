@@ -74,6 +74,11 @@ def provider_guarantee_warnings(metadata: Optional[Any]) -> List[str]:
     is a statement about the formula and says nothing about whether the
     data underneath it gets revised — so a dataset could pass that gate
     while being built entirely from a source that makes no such guarantee.
+
+    `adjusted` was not read either. Databento reports False, and every
+    label here is computed from raw Close, so its return targets are price
+    returns and a split in the window is a price fall; the line below says
+    so, and the price-jump screen (dataset/splits.py) names any split.
     """
     if metadata is None:
         # "metadata retrieval failed" and "the provider guarantees
@@ -109,6 +114,18 @@ def provider_guarantee_warnings(metadata: Optional[Any]) -> List[str]:
             "queryable, so any universe assembled from currently-listed symbols is a "
             "survivors-only sample. Backtested returns on such a universe are biased "
             "upward, and no amount of walk-forward validation corrects for it."
+        )
+    # `is False`, not falsiness: only a provider that SAYS its bars are
+    # unadjusted gets the line. A mocked provider's attribute is not a bool,
+    # and a provider that adjusts says True.
+    if getattr(metadata, "adjusted", None) is False:
+        warnings.append(
+            f"provider {provider!r} serves unadjusted bars (adjusted=False): a "
+            "dividend is a price drop on its ex-date, so return targets built "
+            "here are price returns, not the total returns an adjusting provider "
+            "gives; a split is a price fall, which the price-jump screen names "
+            "when one is in the window. DatasetSpec.corporate_actions adjusts a "
+            "split declared there; nothing here adjusts a dividend."
         )
     return warnings
 

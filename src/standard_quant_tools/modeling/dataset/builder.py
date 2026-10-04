@@ -61,6 +61,15 @@ from .pit_features import (
     join_point_in_time_features,
     point_in_time_requests,
 )
+from .splits import (
+    adjust_for_declared_splits,
+    apply_declared_splits,
+    bars_adjusted_flag,
+    declared_split_warnings,
+    price_jump_warnings,
+    refuse_declared_splits_on_adjusted_bars,
+    screen_price_jumps,
+)
 from .target import (
     CROSS_SECTIONAL_TARGETS,
     apply_cross_sectional_target,
@@ -336,6 +345,12 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
     # fetch as one symbol are refused here rather than blended into one
     # entity; the panel's `entity` column carries the canonical key.
     plan = fetch_plan(list(spec.universe))
+    # Read once, before the fetch: whether the bars come split-adjusted is
+    # a statement about the feed, and a declared split on a feed that
+    # adjusts is refused for that price rather than after a download.
+    metadata = _provider_metadata(provider, plan[spec.universe[0]], spec.interval)
+    if spec.corporate_actions and bars_adjusted_flag(metadata, []) is True:
+        refuse_declared_splits_on_adjusted_bars(spec.corporate_actions, "get_metadata")
     fetched = fetch_universe_ohlcv(
         provider, list(plan.values()), spec.start, spec.end, spec.interval
     )
@@ -355,6 +370,37 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
     benchmark_df = _fetch_ohlcv(
         provider, fetch_symbol(spec.benchmark), spec.start, spec.end, spec.interval
     )
+    # ── Splits: the provider's word, then the caller's table ──────────────
+    # The flag is resolved ONCE: the metadata when it answers, else the
+    # frames' own stamps when they all agree, else unknown. A declared split
+    # is applied before anything reads the bars, so every feature, label
+    # and the returns panel see the same adjusted prices; the benchmark is
+    # adjusted with the entity it is, when it is one.
+    bars_adjusted = bars_adjusted_flag(
+        metadata, [*ohlcv_by_entity.values(), benchmark_df]
+    )
+    declared_splits: List[Dict[str, Any]] = []
+    if spec.corporate_actions:
+        if bars_adjusted is True:
+            refuse_declared_splits_on_adjusted_bars(
+                spec.corporate_actions, "the fetched frames' attrs"
+            )
+        ohlcv_by_entity, declared_splits = apply_declared_splits(
+            ohlcv_by_entity, spec.corporate_actions
+        )
+        benchmark_entity = next(
+            (
+                entity
+                for entity, symbol in plan.items()
+                if symbol == fetch_symbol(spec.benchmark)
+            ),
+            None,
+        )
+        if benchmark_entity is not None:
+            benchmark_df, _ = adjust_for_declared_splits(
+                benchmark_df,
+                [a for a in spec.corporate_actions if a.entity == benchmark_entity],
+            )
     # interval carried into the context so a feature that ANNUALIZES scales
     # by the right constant instead of assuming daily bars -- see
     # features/risk.py::_annualization.
@@ -377,11 +423,7 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
     )
     warnings: List[str] = []
     warnings.extend(interval_warnings(spec.interval))
-    warnings.extend(
-        provider_guarantee_warnings(
-            _provider_metadata(provider, plan[spec.universe[0]], spec.interval)
-        )
-    )
+    warnings.extend(provider_guarantee_warnings(metadata))
     warnings.extend(entity_coverage_warnings(ohlcv_by_entity, spec.start, spec.end))
     warnings.extend(
         intersection_warnings(ohlcv_by_entity, returns_panel, has_universe_scope)
@@ -665,6 +707,31 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
     warnings.extend(
         missing_policy_warnings(spec.missing, drop_attribution, fill_counts)
     )
+    # ── The price-jump screen ─────────────────────────────────────────────
+    # On the bars the panel was computed from (after any declared split),
+    # counting what in the FINAL panel reads each move. It reads the panel
+    # and never changes it, so data_hash is what it was without it.
+    jump_screen = screen_price_jumps(
+        ohlcv_by_entity,
+        (spec.benchmark, benchmark_df),
+        spec.features,
+        feature_defs,
+        resolved_params,
+        long_panel,
+    )
+    warnings.extend(declared_split_warnings(declared_splits, bars_adjusted))
+    warnings.extend(
+        price_jump_warnings(
+            jump_screen,
+            bars_adjusted,
+            n_declared_applied=sum(
+                1 for record in declared_splits if record["status"] == "applied"
+            ),
+            cross_sectional_target=(
+                include_target and spec.target.type in CROSS_SECTIONAL_TARGETS
+            ),
+        )
+    )
 
     # dropna() (inside stack_long/stack_features_only) removes NaN but
     # not +/-inf -- a degenerate feature computation (e.g. division by a
@@ -756,4 +823,11 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
         if include_target and len(spec.target.horizons or []) > 1
         else []
     )
+    # What the split screen found and what the declared table did, for
+    # dataset_meta.json; `price_jump_rows` (the panel rows reading each
+    # move) stays in memory for score_model.
+    result["price_jumps"] = jump_screen.jumps
+    result["price_jump_rows"] = jump_screen.rows
+    result["bars_adjusted"] = bars_adjusted
+    result["corporate_actions_applied"] = declared_splits
     return result

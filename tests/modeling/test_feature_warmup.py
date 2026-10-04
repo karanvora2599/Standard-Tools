@@ -96,6 +96,7 @@ RECURSIVE = [
     ("technical.rsi", {"period": 30}),
     ("technical.adx", {"period": 20}),
     ("technical.macd_histogram", {"fast": 8, "slow": 21, "signal": 5}),
+    ("technical.macd_histogram_pct", {}),
 ]
 
 
@@ -148,6 +149,7 @@ class TestTheClosedForms:
             ("technical.rsi", {}, 14 + 125),
             ("risk.atr_pct", {}, 14 + 125),
             ("technical.macd_histogram", {}, 26 + 120 + 42),
+            ("technical.macd_histogram_pct", {}, 26 + 120 + 42),
             ("technical.adx", {}, 187),
             ("market.psar_trend", {}, 100),
             ("market.psar_trend", {"af_start": 0.01}, 200),

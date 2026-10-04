@@ -38,6 +38,30 @@ def _technical_macd_histogram(
     return _macd(ohlcv["Close"], fast=fast, slow=slow, signal=signal)["Histogram"]
 
 
+def _technical_macd_histogram_pct(
+    ohlcv: pd.DataFrame,
+    context: FeatureContext,
+    fast: int = 12,
+    slow: int = 26,
+    signal: int = 9,
+) -> pd.Series:
+    """The MACD histogram as a fraction of Close.
+
+    The histogram is a difference of EMAs of price, so it is in price
+    units: across a live 30-name panel its standard deviation ran from
+    0.23 (KO) to 22.4 (GOOGL), a cross-sectional rank of it sorts names by
+    price level as much as by momentum, and a 20:1 split changes its scale
+    for good. Divided by Close it is comparable across names and returns
+    to its scale once the smoothers have forgotten the pre-split bars.
+
+    The denominator is guarded like risk.atr_pct's: a Close of zero or
+    below gives NaN, which alignment drops, rather than an infinity that
+    would refuse the whole panel."""
+    close = ohlcv["Close"]
+    histogram = _macd(close, fast=fast, slow=slow, signal=signal)["Histogram"]
+    return histogram / close.where(close > 0)
+
+
 def _technical_stochastic_k(
     ohlcv: pd.DataFrame, context: FeatureContext, k_period: int = 14, d_period: int = 3
 ) -> pd.Series:
@@ -83,8 +107,34 @@ register_feature(
 register_feature(
     FeatureDefinition(
         id="technical.macd_histogram",
-        description="MACD histogram (MACD line minus its signal line) — trend-momentum divergence.",
+        # The function above is never edited: its source is the
+        # implementation hash a registered model is scored against. The
+        # description is not part of that hash.
+        description=(
+            "MACD histogram (MACD line minus its signal line) — trend-momentum "
+            "divergence. In price units, so its scale follows each name's price "
+            "level and changes at a split; technical.macd_histogram_pct is the "
+            "same quantity divided by Close."
+        ),
         fn=_technical_macd_histogram,
+        default_params={"fast": 12, "slow": 26, "signal": 9},
+        temporal_support=TemporalSupport.PIT_SAFE,
+        scope=FeatureScope.ENTITY,
+        requires=["Close"],
+        lookback=26,
+    )
+)
+register_feature(
+    FeatureDefinition(
+        id="technical.macd_histogram_pct",
+        description=(
+            "MACD histogram divided by Close — the histogram as a fraction of "
+            "price, comparable across names. A split disturbs it only until the "
+            "smoothers forget the bars before it (188 bars at the defaults), "
+            "where the raw histogram's scale changes for good. NaN where Close "
+            "is not positive."
+        ),
+        fn=_technical_macd_histogram_pct,
         default_params={"fast": 12, "slow": 26, "signal": 9},
         temporal_support=TemporalSupport.PIT_SAFE,
         scope=FeatureScope.ENTITY,

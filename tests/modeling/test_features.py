@@ -387,6 +387,7 @@ class TestFeatureRegistry:
             "technical.rsi",
             "technical.adx",
             "technical.macd_histogram",
+            "technical.macd_histogram_pct",
             "technical.stochastic_k",
             "technical.williams_r",
             "market.momentum",
@@ -428,6 +429,7 @@ class TestFeatureRegistry:
             "technical.rsi",
             "technical.adx",
             "technical.macd_histogram",
+            "technical.macd_histogram_pct",
             "technical.stochastic_k",
             "technical.williams_r",
             "market.momentum",
@@ -484,6 +486,7 @@ class TestFeatureRegistry:
             "technical.rsi",
             "technical.adx",
             "technical.macd_histogram",
+            "technical.macd_histogram_pct",
             "technical.stochastic_k",
             "technical.williams_r",
         }

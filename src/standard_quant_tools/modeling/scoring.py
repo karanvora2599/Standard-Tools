@@ -43,6 +43,7 @@ from . import artifacts as _artifacts
 from .adapters import accepts_missing, get_adapter
 from .assets import canonical_universe
 from .dataset.builder import build_dataset
+from .dataset.splits import scored_row_jump_warnings
 from .estimators.registry import get_estimator_class
 from .features.base import FeatureScope
 from .features.registry import get_feature
@@ -511,9 +512,21 @@ def _scoring_context(
     # validators in pydantic v2, so it would silently bypass the
     # duplicate-symbol/start-before-end checks DatasetSpec defines for
     # every other caller.
-    scoring_spec = DatasetSpec(
-        **{**original_spec_dict, "universe": universe, "start": start, "end": as_of}
-    )
+    #
+    # The declared splits travel with the bundled spec, so the scoring bars
+    # are adjusted exactly as the training bars were. Only those of entities
+    # being scored are kept: the spec refuses a declared split naming an
+    # entity outside its universe, and a scored subset is a smaller one.
+    scored = set(universe)
+    declared = [
+        action
+        for action in original_spec_dict.get("corporate_actions") or []
+        if canonical_universe([action["entity"]])[0] in scored
+    ]
+    overrides: Dict[str, Any] = {"universe": universe, "start": start, "end": as_of}
+    if original_spec_dict.get("corporate_actions"):
+        overrides["corporate_actions"] = declared
+    scoring_spec = DatasetSpec(**{**original_spec_dict, **overrides})
     short_window = _unconverged_window_warning(scoring_spec, lookback_days, caller)
     if short_window:
         warnings.append(short_window)
@@ -551,6 +564,20 @@ def _scoring_context(
         )
     }
     latest = latest.loc[~stale_mask]
+    # ── A split the scored rows read ──────────────────────────────────────
+    # The build screens the scoring window's bars and records, per move,
+    # which panel rows carry a feature computed across it. Its warnings
+    # are not forwarded (they describe a training build), so a move the
+    # SCORED rows read is said here, by name; one only earlier rows read
+    # changes nothing returned.
+    warnings.extend(
+        scored_row_jump_warnings(
+            built.get("price_jumps") or [],
+            built.get("price_jump_rows") or [],
+            latest.index,
+            built.get("bars_adjusted"),
+        )
+    )
     if cross_sectional and universe_differs:
         width = manifest.training_cross_section or {}
         trained_width = (
@@ -577,7 +604,15 @@ def _scoring_context(
     # requested; only enforced when the caller states one, because how much
     # staleness is still decision-useful is a property of the strategy, not
     # something this function can pick on their behalf.
-    staleness_days = int((as_of_ts - effective_ts).days)
+    # On one clock: `as_of` is a date, and a provider that stamps its bars
+    # in UTC (Databento's daily bars are UTC midnights) makes the panel's
+    # dates zone-aware, which pandas refuses to subtract from a naive date.
+    effective_clock = (
+        effective_ts.tz_convert(None)
+        if effective_ts.tzinfo is not None
+        else effective_ts
+    )
+    staleness_days = int((as_of_ts - effective_clock).days)
     if max_staleness_days is not None and staleness_days > max_staleness_days:
         raise ValidationError(
             f"{caller}: the newest available observation is "

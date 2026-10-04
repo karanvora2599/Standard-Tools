@@ -236,6 +236,24 @@ def _dataset_extent(panel) -> Dict[str, Any]:
     }
 
 
+def _unscreened_bars_note(meta: Dict[str, Any], dataset_id: str) -> List[str]:
+    """
+    One line for a Databento dataset built before builds screened for
+    splits: its metadata has no `price_jumps` key, so nothing on record
+    says whether a split falls inside it. A dataset built since records the
+    key on every build, an empty list included.
+    """
+    if meta.get("provider") != "databento" or "price_jumps" in meta:
+        return []
+    return [
+        f"NOTE: dataset {dataset_id!r} was built from Databento's unadjusted "
+        "bars before builds screened for splits, so nothing on record says "
+        "whether a split falls inside it; a split in these bars is a price "
+        "fall that every label and feature spanning it reads as a return. "
+        "Rebuild it to have any split named."
+    ]
+
+
 def build_model_dataset(input_data: BuildModelDatasetInput) -> BuildModelDatasetResult:
     """Fetch OHLCV for DatasetSpec.universe, compute the requested
     features/target, and persist the resulting panel — never returned
@@ -337,6 +355,17 @@ def build_model_dataset(input_data: BuildModelDatasetInput) -> BuildModelDataset
             "data_sources": built.get("data_sources", {}),
             # rows / n_dates / start_date / end_date.
             **_dataset_extent(built["panel"]),
+            # What the split screen found: every close-to-close move beyond
+            # 35% in the bars, its nearest split ratio, and the labels and
+            # feature rows that read it. Recorded on every build -- an
+            # empty list says the bars were screened and nothing was
+            # found, which a missing key cannot say.
+            "price_jumps": built.get("price_jumps", []),
+            # The provider's adjusted flag as resolved for this build:
+            # True, False, or None when nothing said.
+            "bars_adjusted": built.get("bars_adjusted"),
+            # What each split declared in DatasetSpec.corporate_actions did.
+            "corporate_actions_applied": built.get("corporate_actions_applied", []),
         },
     )
 
@@ -869,7 +898,9 @@ def run_model_experiment(
         # .get, not [...]: datasets built before coverage diagnostics
         # existed have no such key, and a missing warning list is not the
         # same claim as an empty one -- see ModelManifest.dataset_warnings.
-        "warnings": list(meta.get("warnings", [])) + selection_notes,
+        "warnings": list(meta.get("warnings", []))
+        + _unscreened_bars_note(meta, input_data.dataset_id)
+        + selection_notes,
         # The feed per entity, for the manifest. Empty for a dataset
         # persisted before it was recorded.
         "data_sources": dict(meta.get("data_sources") or {}),

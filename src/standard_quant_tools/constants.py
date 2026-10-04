@@ -29,7 +29,7 @@ what a caller passes instead.
 
 from __future__ import annotations
 
-__all__ = ["EULER_MASCHERONI", "TRADING_DAYS_PER_YEAR"]
+__all__ = ["EULER_MASCHERONI", "SPLIT_SCREEN_THRESHOLD", "TRADING_DAYS_PER_YEAR"]
 
 #: US equity trading days in a calendar year: 365 days, less weekends, less
 #: the nine NYSE holidays. The standard convention, and the default
@@ -41,3 +41,11 @@ TRADING_DAYS_PER_YEAR = 252
 #: is the bar a Sharpe ratio has to clear to survive being one of N trials --
 #: and it was written out twice for that one use.
 EULER_MASCHERONI = 0.5772156649015329
+
+#: A close-to-close move beyond this is screened as a probable split (or a
+#: bad print). No equity moves 35% in a day often; a 2:1 split moves -50%
+#: every time, and a 3:2 split's -33% is below it. Here because two screens
+#: read it -- the backtest's (`backtest.screens`) and the dataset build's
+#: (`data.quality.detect_split_like_moves`) -- and each importing it from the
+#: other's package would load that whole package to read one number.
+SPLIT_SCREEN_THRESHOLD = 0.35

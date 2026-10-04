@@ -271,6 +271,10 @@ _RECURSIVE_WARMUP: Dict[str, Any] = {
     + smoother_decay_bars(2.0 / (p["signal"] + 1.0), eps),
     "market.psar_trend": _psar_warmup,
 }
+# The same smoothers divided by the bar's own Close, which adds no memory.
+_RECURSIVE_WARMUP["technical.macd_histogram_pct"] = _RECURSIVE_WARMUP[
+    "technical.macd_histogram"
+]
 
 
 def is_recursive(definition: FeatureDefinition) -> bool:

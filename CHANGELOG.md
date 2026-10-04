@@ -1,5 +1,99 @@
 # Changelog
 
+## A dataset built from unadjusted bars names the splits in them, and adjusts the ones its spec declares
+
+- **Nothing under `modeling/` read the provider's `adjusted` flag.**
+  Databento serves the prices the venue published and says so
+  (`get_metadata().adjusted` is False), and every label and feature here is
+  computed from raw Close, so a split is a −67% to −95% bar that every label
+  spanning it, and every feature whose window or smoother reaches back
+  across it, reads as a return. A live 2022–2026 Databento panel of 30 names
+  spanned six splits (AMZN and GOOGL 20:1, TSLA and WMT 3:1, NVDA and AVGO
+  10:1): 25 labels and 1,131 feature rows read one, and masking those rows
+  took ridge's out-of-sample rank IC from 0.0090 to 0.0196, against 0.0075 ±
+  0.0041 for twelve random masks of the same size.
+- **The build screens its bars.** Every entity's Close, and the benchmark's
+  when a feature reads the benchmark, is screened for close-to-close moves
+  beyond the backtest's 35%. Each move is named after the split ratio it is
+  within 10% of on a log scale (3:2 to 50:1, or a reverse) and counted: the
+  labels dated before it that end on or after it, and the panel rows
+  carrying a feature computed across it — from the move through each
+  feature's converged warm-up plus its deepest lag, on the bars of the
+  series that moved. A universe-scope feature spreads one entity's move to
+  every entity; a benchmark move reaches every entity through the features
+  that read it. One `PRICE JUMPS` warning names the first six and counts the
+  rest, worded by the flag — the metadata's, else the frames'
+  `attrs["adjusted"]` when they all agree, else "not known" — and for a rank
+  or market-neutral target adds the other rows on the spanning labels'
+  dates, whose labels can move too. `dataset_meta.json` records
+  `price_jumps`, `bars_adjusted` and `corporate_actions_applied` on every
+  build; an empty list means screened and clean.
+- **Measured on bars shaped like the live panel** (30 names on the XNYS
+  calendar 2022-01-03 to 2026-09-30, META 90 bars short, the six splits
+  written in as an unadjusted feed serves them; pandas 3.0.5): six moves
+  named, each within 2–4% of its ratio, and "In this panel 25 of 31,680
+  targets span one of these bars and 1,108 rows (3.5%) carry a feature
+  computed across one." Adjusting the six splits moves 948 rows by more than
+  1e-3 of a feature's standard deviation (the MACD histogram aside); all 948
+  are inside the 1,108, and the other 160 are counted through the MACD
+  histogram's 188-bar converged warm-up. The screen costs 7 ms of a 0.8 s
+  build.
+- **Nothing it reads changes.** The screen reads the bars and the finished
+  panel and writes neither: a build's panel, `data_hash` and `spec_hash` are
+  bit-identical to before, and builds on the test suite's providers
+  (adjusted=True, 1.2% daily volatility) give the warnings they did.
+  `SPLIT_SCREEN_THRESHOLD` moved to `constants`, one object read by
+  `backtest.screens` (which still exports the name and keeps its wording)
+  and by the new `data.quality.detect_split_like_moves`.
+- **A provider line for unadjusted bars**: "provider 'databento' serves
+  unadjusted bars (adjusted=False): a dividend is a price drop on its
+  ex-date, so return targets built here are price returns, not the total
+  returns an adjusting provider gives; a split is a price fall, which the
+  price-jump screen names when one is in the window."
+- **`DatasetSpec.corporate_actions` declares splits** as `{entity, ex_date,
+  split_ratio}`, new shares per old share. Before any feature or label is
+  computed, each listed entity's bars before the ex-date have Open, High,
+  Low and Close divided by the ratio and Volume multiplied by it, and the
+  benchmark's too when it is that entity; the screen then runs on the
+  adjusted bars and no longer names those dates, and a `DECLARED SPLITS`
+  note says what was adjusted. A declared build equals a build from
+  hand-adjusted bars bit for bit. Dividends are not adjusted. Refused,
+  naming each entity and date, when the provider reports adjusted=True —
+  before the fetch when `get_metadata` says so. A declared split whose
+  ex-date bar does not move within 10% of its ratio is applied as declared
+  and named: declared a session late, NVDA's −90% stays in the bars, a +928%
+  follows it, and the screen names both. A split outside the fetched bars
+  changes nothing and says so. An empty table is the default and stays out
+  of `spec_hash` like every default, so every existing dataset hashes as it
+  did.
+- **`score_model` adjusts the same way and names what its scored rows
+  read.** It rebuilds from the model's bundled spec, keeping the declared
+  splits of the entities it scores. A move inside what a scored row's
+  features read is a warning: "NVDA: a -90% close-to-close move on
+  2024-06-10 (within 4% of a 10:1 split) is inside the 188 bars this score's
+  features read, and the provider reports adjusted=False, so the score reads
+  the split as a return." On the live-shaped bars, a model trained through
+  2024-03-28 and scored on 2024-07-31 gave three (WMT, NVDA, AVGO); the same
+  model with the six splits declared gave none.
+- **`score_model` scores a UTC-stamped panel.** Databento's daily bars are
+  UTC midnights, so its panels' dates are zone-aware, and the staleness
+  subtraction against a date-only `as_of` raised `TypeError` for every such
+  model. It is taken on one clock now.
+- **Older Databento datasets say they were not screened.**
+  `run_model_experiment` adds one line to the manifest's dataset warnings
+  when a Databento dataset's metadata has no `price_jumps` key.
+- **`technical.macd_histogram_pct`**: the MACD histogram divided by Close,
+  guarded like `risk.atr_pct`. The histogram is a difference of EMAs of
+  price and so in price units: on the live panel its standard deviation ran
+  from 0.23 (KO) to 22.4 (GOOGL), a rank of it sorted names by price level
+  as much as by momentum, and a 20:1 split changed its scale for good.
+  `technical.macd_histogram` is unchanged — its implementation hash, which
+  `score_model` checks, is its function's source — and its description now
+  says it is in price units. The catalog holds 31 features.
+- **Not covered:** a 3:2 split moves −33%, below the threshold, and is not
+  screened. No corporate-actions source feeds the builder, so a split is
+  adjusted only when declared.
+
 ## A dataset built under one pandas loads under the other
 
 - **The refusal.** A modeling dataset's integrity hash was
