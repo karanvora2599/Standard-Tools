@@ -9,11 +9,24 @@ document at all -- not because anyone decided they should not, but because
 adding a tool and remembering to document it are two actions and only one
 of them was enforced.
 
-This makes them one action. `tests/docs/test_documentation.py` regenerates
-the file and fails if what is on disk differs, so a tool added without
+This makes them one action. `tests/docs/test_documentation.py` renders the
+index and fails if what is on disk differs, so a tool added without
 regenerating breaks the suite in the same commit that added it.
 
 RUN IT WITH:  python scripts/generate_tool_index.py
+              python scripts/generate_tool_index.py --check   (writes nothing)
+
+WHAT "DIFFERS" MEANS. Every tool name, description, argument list, count
+and heading must match exactly. The one figure that need not is each
+runtime's schema cost: it is a whole number of KB from serialized JSON
+Schema, which a different pydantic release can lengthen or shorten by a few
+bytes without any tool changing, and a runtime that sits near a half
+kilobyte then rounds the other way. A cost within `KB_TOLERANCE` of the
+live one passes; a larger move still fails, so the figure on disk is never
+more than that far from the truth.
+
+The file is written with LF on every platform, as `.gitattributes` stores
+it; a CRLF write on Windows showed as a modification in `git status`.
 
 The descriptions are not rewritten here -- they are the same strings the
 model sees when it chooses a tool. That is deliberate. If a description
@@ -24,13 +37,28 @@ can disagree with it.
 
 from __future__ import annotations
 
+import argparse
+import difflib
+import re
 import sys
 from pathlib import Path
+from typing import Dict, List, Optional
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "src"))
+if str(ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(ROOT / "src"))
 
 OUTPUT = ROOT / "Documentation" / "20_tool_index.md"
+
+#: How far, in whole KB, a runtime's schema cost on disk may sit from the
+#: live one. See the module docstring.
+KB_TOLERANCE = 1
+
+#: A row of the runtimes table, with the schema cost as its own group.
+_COST_ROW = re.compile(
+    r"^(?P<head>\| `(?P<runtime>[^`]+)` \| \d+ \| )(?P<kb>\d+)(?P<tail> KB \|)",
+    re.MULTILINE,
+)
 
 #: Where the deep documentation for each runtime lives, when it has one.
 #:
@@ -57,7 +85,7 @@ HEADER = """# Tool index
 
 Every tool in the library, by runtime, with the description the model
 actually sees. **Generated from the live registry** by
-`scripts/generate_tool_index.py` -- a test regenerates it and fails if
+`scripts/generate_tool_index.py` -- a test renders it and fails if
 this file has drifted, so a tool added without regenerating breaks the
 suite in the commit that added it.
 
@@ -87,7 +115,8 @@ scoped to four categories rather than all of them, so it advertises 58 of the
 """
 
 
-def main() -> None:
+def render() -> str:
+    """The index as the live registry describes it, LF line endings."""
     from standard_quant_tools.agent.runtimes import all_runtimes
     from standard_quant_tools.mcp.catalog import build_catalog, select_runtimes
     from standard_quant_tools.mcp.server import LONG_RUNNING
@@ -155,11 +184,74 @@ def main() -> None:
                 lines.append(f"{description}{flag}\n")
                 lines.append(f"{signature}\n")
 
-    OUTPUT.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
-    print(
-        f"wrote {OUTPUT.relative_to(ROOT)} — {total} tools across {len(runtimes)} runtimes"
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _costs(text: str) -> Dict[str, int]:
+    return {m["runtime"]: int(m["kb"]) for m in _COST_ROW.finditer(text)}
+
+
+def _masked(text: str) -> str:
+    return _COST_ROW.sub(lambda m: f"{m['head']}#{m['tail']}", text)
+
+
+def drift(on_disk: str, generated: str, tolerance_kb: int = KB_TOLERANCE) -> List[str]:
+    """
+    Why `on_disk` is not the index `generated` describes; empty when it is.
+
+    Everything but the runtimes' schema costs is compared exactly, line
+    endings aside. Each cost may differ from the generated one by at most
+    `tolerance_kb`.
+    """
+    on_disk = on_disk.replace("\r\n", "\n")
+    generated = generated.replace("\r\n", "\n")
+    problems: List[str] = []
+    if _masked(on_disk) != _masked(generated):
+        lines = difflib.unified_diff(
+            _masked(on_disk).splitlines(),
+            _masked(generated).splitlines(),
+            "on disk",
+            "generated",
+            lineterm="",
+            n=0,
+        )
+        problems.append("the text differs:\n" + "\n".join(list(lines)[:40]))
+    live = _costs(generated)
+    for runtime, kilobytes in _costs(on_disk).items():
+        if runtime in live and abs(live[runtime] - kilobytes) > tolerance_kb:
+            problems.append(
+                f"`{runtime}` schema cost is {kilobytes} KB on disk and "
+                f"{live[runtime]} KB live, more than {tolerance_kb} KB apart"
+            )
+    return problems
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0])
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="compare the index on disk with the live registry, write nothing, "
+        "and exit 1 if it is out of date",
     )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=OUTPUT,
+        help="where to write the index, or with --check the index to compare",
+    )
+    options = parser.parse_args(argv)
+    text = render()
+    if options.check:
+        problems = drift(options.output.read_text(encoding="utf-8"), text)
+        for problem in problems:
+            print(problem)
+        return 1 if problems else 0
+    options.output.write_text(text, encoding="utf-8", newline="\n")
+    tools, runtimes = text.count("\n#### `"), text.count("\n## `")
+    print(f"wrote {options.output} — {tools} tools across {runtimes} runtimes")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

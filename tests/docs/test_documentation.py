@@ -10,9 +10,11 @@ was checking.
 
 WHAT IS ENFORCED HERE:
 
-- **The tool index is generated, and current.** It is rebuilt from the live
-  registry and compared byte-for-byte, so adding a tool without
-  regenerating fails in the same commit that added it.
+- **The tool index is generated, and current.** It is rendered from the
+  live registry and compared exactly -- every name, description and
+  argument list -- with each runtime's schema cost allowed 1 KB of slack,
+  so adding a tool without regenerating fails in the same commit that
+  added it.
 - **Every tool appears somewhere.** A tool nobody can find is a tool nobody
   uses, however good it is.
 - **Every count that appears in prose is the real one.** A number in a
@@ -29,8 +31,6 @@ a standard.
 from __future__ import annotations
 
 import re
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -62,29 +62,104 @@ def doc_text():
     return "\n".join(parts)
 
 
+@pytest.fixture(scope="module")
+def index_generator():
+    """`scripts/generate_tool_index.py`, imported into this process."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("generate_tool_index", GENERATOR)
+    assert spec and spec.loader, f"could not load {GENERATOR}"
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 class TestTheToolIndexIsGenerated:
-    def test_the_index_matches_the_live_registry(self):
+    def test_the_index_matches_the_live_registry(self, index_generator):
         """
-        Regenerate and compare. This is the mechanism that makes the other
+        Render and compare. This is the mechanism that makes the other
         documentation tests unnecessary for the index itself: it cannot be
         stale, because staleness is a test failure rather than a thing
         someone has to notice.
+
+        Rendered in this process, from the package these tests import, and
+        never written to disk. The generator used to run as a subprocess and
+        rewrite the file in place: under an interpreter whose editable
+        install points at another checkout, that subprocess imported the
+        other checkout's registry and compared it with this tree's index.
+        Each runtime's schema cost may differ by `KB_TOLERANCE` (see the
+        CHANGELOG entry of 2026-10-04); nothing else may.
         """
-        before = INDEX.read_text(encoding="utf-8")
-        result = subprocess.run(
-            [sys.executable, str(GENERATOR)],
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
-            timeout=300,
+        problems = index_generator.drift(
+            INDEX.read_text(encoding="utf-8"), index_generator.render()
         )
-        assert result.returncode == 0, result.stderr
-        after = INDEX.read_text(encoding="utf-8")
-        assert before == after, (
+        assert not problems, (
             "Documentation/20_tool_index.md is out of date with the tool "
             "registry. Run `python scripts/generate_tool_index.py` and "
-            "commit the result -- the index is generated, not written."
+            "commit the result -- the index is generated, not written.\n"
+            + "\n".join(problems)
         )
+
+    def test_a_stale_description_fails_the_check(self, index_generator):
+        """The slack is in the schema costs only: one word of one description
+        that no longer matches the registry is drift."""
+        current = INDEX.read_text(encoding="utf-8")
+        heading = re.search(r"^#### `([a-z_0-9]+)`\n\n(\S+)", current, re.MULTILINE)
+        assert heading, "the index has no tool entries"
+        stale = current.replace(heading.group(0), heading.group(0) + " formerly", 1)
+        problems = index_generator.drift(stale, current)
+        assert problems and "formerly" in problems[0]
+
+    def test_a_changed_argument_list_fails_the_check(self, index_generator):
+        current = INDEX.read_text(encoding="utf-8")
+        stale = current.replace("**Optional:** `", "**Optional:** `retired`, `", 1)
+        assert stale != current
+        assert index_generator.drift(stale, current)
+
+    @pytest.mark.parametrize("delta", [-1, 1])
+    def test_a_one_kb_difference_in_a_schema_cost_passes(self, index_generator, delta):
+        """What a different pydantic release can do to a runtime that sits
+        near half a kilobyte, with no tool changed."""
+        current = INDEX.read_text(encoding="utf-8")
+        shifted, count = re.subn(
+            r"^(\| `modeling` \| \d+ \| )(\d+)( KB \|)",
+            lambda m: f"{m.group(1)}{int(m.group(2)) + delta}{m.group(3)}",
+            current,
+            flags=re.MULTILINE,
+        )
+        assert count == 1, "the runtimes table has no `modeling` row"
+        assert index_generator.drift(shifted, current) == []
+
+    @pytest.mark.parametrize("delta", [-2, 2])
+    def test_a_larger_schema_cost_difference_fails(self, index_generator, delta):
+        current = INDEX.read_text(encoding="utf-8")
+        shifted = re.sub(
+            r"^(\| `modeling` \| \d+ \| )(\d+)( KB \|)",
+            lambda m: f"{m.group(1)}{int(m.group(2)) + delta}{m.group(3)}",
+            current,
+            flags=re.MULTILINE,
+        )
+        problems = index_generator.drift(shifted, current)
+        assert len(problems) == 1 and "`modeling` schema cost" in problems[0]
+
+    def test_the_generator_writes_lf_and_check_writes_nothing(
+        self, index_generator, tmp_path, monkeypatch
+    ):
+        """`.gitattributes` stores the index with LF; a CRLF write on Windows
+        read as a modification in `git status`. `--check` reports drift
+        through its exit status and leaves the file alone."""
+        text = INDEX.read_text(encoding="utf-8")
+        monkeypatch.setattr(index_generator, "render", lambda: text)
+        written = tmp_path / "index.md"
+        assert index_generator.main(["--output", str(written)]) == 0
+        assert written.read_bytes() == text.encode("utf-8")
+        assert b"\r" not in written.read_bytes()
+
+        assert index_generator.main(["--check", "--output", str(written)]) == 0
+        stale = text.replace("#### `", "#### `x", 1)
+        written.write_bytes(stale.encode("utf-8"))
+        assert index_generator.main(["--check", "--output", str(written)]) == 1
+        assert written.read_bytes() == stale.encode("utf-8")
 
     def test_every_tool_appears_in_the_index(self, all_tools):
         text = INDEX.read_text(encoding="utf-8")
@@ -474,9 +549,6 @@ class TestNoStaleWholeSurfaceCountSurvivesInAnyPhrasing:
 
     #: (file, number) -> why this three-digit count is not a surface claim.
     ALLOWED = {
-        ("18_mcp.md", 104): "capacity: 180,000 bytes divided by the average "
-        "schema size, not a count of anything that exists",
-        ("19_runtimes.md", 104): "the same capacity figure",
         ("25_testing.md", 157): "history: the surface size BEFORE tests/docs "
         "existed, in a sentence that says so",
     }
@@ -528,22 +600,24 @@ class TestTheModelingReferenceIsGenerated:
     """
     The modeling guide carried a hand-written feature table that said 21
     entries when the registry held 23. The catalog is generated now, on
-    the same terms as the tool index: regenerate and compare, so a feature,
+    the same terms as the tool index: render and compare, so a feature,
     estimator or target added without regenerating fails in its own commit.
     """
 
     def test_the_reference_matches_the_live_registries(self):
-        before = MODELING_REFERENCE.read_text(encoding="utf-8")
-        result = subprocess.run(
-            [sys.executable, str(MODELING_GENERATOR)],
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
-            timeout=300,
+        """Rendered in this process, from the package these tests import,
+        and never written to disk, as the tool index is (see the CHANGELOG
+        entry of 2026-10-04)."""
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "generate_modeling_reference", MODELING_GENERATOR
         )
-        assert result.returncode == 0, result.stderr
-        after = MODELING_REFERENCE.read_text(encoding="utf-8")
-        assert before == after, (
+        assert spec and spec.loader, f"could not load {MODELING_GENERATOR}"
+        generator = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(generator)
+        on_disk = MODELING_REFERENCE.read_text(encoding="utf-8")
+        assert on_disk == generator.render(), (
             "Documentation/29_modeling_reference.md is out of date with the "
             "modeling registries. Run "
             "`python scripts/generate_modeling_reference.py` and commit "

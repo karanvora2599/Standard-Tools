@@ -32,16 +32,25 @@ ADDING ONE: append to `MUTATIONS`. If the anchor no longer matches, the run
 reports it as SKIPPED rather than silently passing -- a mutation that does
 not apply is not a mutation that was survived, and conflating the two is
 how a mutation suite quietly stops testing anything.
+
+A RUN LEAVES THE TREE AS IT FOUND IT, byte for byte and with the same
+modification time. Each file is put back from the bytes read before it was
+mutated, not re-encoded from decoded text: a text round trip rewrote an LF
+working copy as CRLF on Windows (and a CRLF one as LF elsewhere), git then
+listed every mutated file as modified with no diff to show, and the next
+run refused to start.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List
+from typing import Iterator, List
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src" / "standard_quant_tools"
@@ -264,13 +273,36 @@ def run_tests(target: str) -> bool:
     return result.returncode == 0
 
 
-def _git(*arguments: str) -> subprocess.CompletedProcess:
+def _git(*arguments: str, root: Path = ROOT) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["git", *arguments], cwd=ROOT, capture_output=True, text=True, timeout=120
+        ["git", *arguments], cwd=root, capture_output=True, text=True, timeout=120
     )
 
 
-def require_clean_tree(paths: List[Path]) -> None:
+def uncommitted_change(path: Path, root: Path = ROOT) -> str:
+    """
+    Why `git checkout --` could not give this file back as it is now, or ""
+    when it could.
+
+    CONTENT, NOT STAT. `git status` lists a file whose size changed without
+    comparing what it holds, so a file rewritten with other line endings --
+    which is what this tool's restore used to do -- reads as modified while
+    `git diff` shows nothing. That is not work `git checkout --` would
+    lose. These three are: a file git does not track, a change staged but
+    not committed, and a working copy whose content (after the line-ending
+    rules in `.gitattributes` and `core.autocrlf`) differs from the index.
+    """
+    relative = path.relative_to(root).as_posix()
+    if _git("ls-files", "--error-unmatch", "--", relative, root=root).returncode:
+        return "not tracked by git"
+    if _git("diff", "--cached", "--quiet", "--", relative, root=root).returncode:
+        return "staged, not committed"
+    if _git("diff", "--quiet", "--", relative, root=root).returncode:
+        return "modified"
+    return ""
+
+
+def require_clean_tree(paths: List[Path], root: Path = ROOT) -> None:
     """
     Refuse to start with uncommitted changes in a file about to be mutated.
 
@@ -285,14 +317,14 @@ def require_clean_tree(paths: List[Path]) -> None:
     Requiring a clean tree makes that recoverable unconditionally, because
     `git checkout --` restores the original whatever state the process died
     in. `--restore` does exactly that, and is what to run after an
-    interrupted session.
+    interrupted session. "Clean" is judged on content; see
+    `uncommitted_change`.
     """
     dirty = []
-    for path in {p for p in paths}:
-        relative = path.relative_to(ROOT).as_posix()
-        result = _git("status", "--porcelain", "--", relative)
-        if result.stdout.strip():
-            dirty.append(relative)
+    for path in sorted({p for p in paths}):
+        reason = uncommitted_change(path, root)
+        if reason:
+            dirty.append(f"{path.relative_to(root).as_posix()} ({reason})")
     if dirty:
         raise SystemExit(
             "Refusing to run: these files have uncommitted changes and are "
@@ -300,6 +332,41 @@ def require_clean_tree(paths: List[Path]) -> None:
             "Restoration relies on `git checkout --`, which would discard "
             "your work. Commit or stash first."
         )
+
+
+@contextmanager
+def applied(mutation: Mutation) -> Iterator[bool]:
+    """
+    Apply `mutation` for the body of the block, then put the file back.
+
+    Yields False, and writes nothing, when the anchor does not match exactly
+    once. The anchors are written with "\\n"; in a working copy checked out
+    with CRLF they are matched, and the replacement written, with CRLF, so
+    only the anchor's bytes change while the mutation is live.
+
+    THE RESTORE WRITES THE ORIGINAL BYTES and then the original access and
+    modification times, so the file is what it was before the run in every
+    respect `git status` reads but the inode change time. It runs in a
+    `finally`, so a failing or interrupted test run still restores; a killed
+    process does not, which is what `require_clean_tree` and `--restore`
+    are for.
+    """
+    path = mutation.path
+    original = path.read_bytes()
+    before = path.stat()
+    text = original.decode("utf-8")
+    newline = "\r\n" if "\r\n" in text else "\n"
+    old = mutation.old.replace("\n", newline)
+    if text.count(old) != 1:
+        yield False
+        return
+    mutated = text.replace(old, mutation.new.replace("\n", newline), 1)
+    try:
+        path.write_bytes(mutated.encode("utf-8"))
+        yield True
+    finally:
+        path.write_bytes(original)
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
 
 
 def main() -> int:
@@ -351,25 +418,19 @@ def main() -> int:
     survivors: List[str] = []
     skipped: List[str] = []
     for mutation in selected:
-        original = mutation.path.read_text(encoding="utf-8")
-        if original.count(mutation.old) != 1:
-            skipped.append(
-                f"{mutation.name} (anchor matched {original.count(mutation.old)})"
-            )
+        # Restored in a `finally` inside `applied`, AND recoverable through
+        # git if the process is killed before the `finally` can run -- which
+        # is why `require_clean_tree` refuses to start otherwise. A mutated
+        # source that looks committed is the one way this tool could do real
+        # harm, and it has happened once.
+        with applied(mutation) as live:
+            if live:
+                still_passing = run_tests(mutation.tests)
+        if not live:
+            found = mutation.path.read_text(encoding="utf-8").count(mutation.old)
+            skipped.append(f"{mutation.name} (anchor matched {found})")
             print(f"  SKIP      {mutation.name}", flush=True)
             continue
-        mutation.path.write_text(
-            original.replace(mutation.old, mutation.new, 1), encoding="utf-8"
-        )
-        try:
-            still_passing = run_tests(mutation.tests)
-        finally:
-            # Restored in a `finally`, AND recoverable through git if the
-            # process is killed before the `finally` can run -- which is why
-            # `require_clean_tree` refuses to start otherwise. A mutated
-            # source that looks committed is the one way this tool could do
-            # real harm, and it has happened once.
-            mutation.path.write_text(original, encoding="utf-8")
         if still_passing:
             survivors.append(mutation.name)
             print(f"  SURVIVED  {mutation.name}", flush=True)

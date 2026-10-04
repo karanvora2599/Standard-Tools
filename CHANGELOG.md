@@ -1,5 +1,59 @@
 # Changelog
 
+## The mutation harness leaves the tree as it found it, the tool index check reads the tree it tests, and the surface fixtures end with the surface tests
+
+- **`scripts/mutation_testing.py` puts back the bytes it read.** It
+  restored each mutated file by re-encoding the decoded text, which on
+  Windows rewrote an LF working copy as CRLF (and elsewhere a CRLF copy
+  as LF). `git status` then listed the file as modified with nothing for
+  `git diff` to show, and the next run refused to start. Each file is now
+  written back from the bytes read before the mutation, with its original
+  access and modification times, and the mutation keeps the file's own
+  line endings. One run of the `vanna` mutation left
+  `analysis/derivatives.py` CRLF and the second run refused; it now
+  leaves the file at the same 76,118 bytes, SHA-256 and modification
+  time, `git status` clean, and a second run starts.
+- **The clean-tree refusal compares content, not stat.** A run still
+  refuses a file git does not track, a staged change and an edit that
+  `git diff` shows; a file that differs from the index only in its stat
+  or in line endings git normalizes away no longer stops it.
+- **The tool index check renders the index in the test process and
+  writes nothing.** It ran the generator as a subprocess that rewrote
+  `Documentation/20_tool_index.md` in place, and under an interpreter
+  whose editable install points at another checkout that subprocess
+  imported the other checkout's registry. Every tool name, description,
+  argument list and count must match exactly; each runtime's schema cost
+  may sit 1 KB from the live figure, so a pydantic release that changes
+  a schema by a few bytes does not fail the check, and a cost 2 KB off
+  still does. pydantic 2.13.4 (Python 3.12, pandas 2.3.3) and 2.13.5
+  (Python 3.11, pandas 3.0.5) give byte-identical input schemas for all
+  238 tools and the same index; `modeling` is 186,399 bytes, 182.03 KB,
+  543 bytes above where it rounds to 181. The failure under the 3.11
+  interpreter was the other checkout's registry, not the interpreter.
+- **The modeling reference check does the same.** It ran
+  `generate_modeling_reference.py` as a subprocess that rewrote
+  `Documentation/29_modeling_reference.md` in place, with the same
+  other-checkout hazard; it now compares the file with the generator's
+  `render()` in the test process, exactly, and writes nothing.
+- **`scripts/generate_tool_index.py` writes LF on every platform** and
+  takes `--check`, which compares without writing and exits 1 on drift.
+  On Windows it wrote CRLF, 159,468 bytes for the 157,702-byte index,
+  which `git status` listed as modified.
+- **The surface fixtures are package-scoped.** The fake market, the
+  switched-off Parquet tier, the skipped retry backoff and the surface
+  audit directory were session-scoped, so they stayed in place for every
+  test after `tests/surface`: running it, then
+  `tests/audit/test_audit.py::TestVerifyReplay` and
+  `tests/data/test_parquet_cache.py`, failed 15 tests that pass on their
+  own. They are now torn down after the package's last test. That run
+  passes on Python 3.12 (1,864 passed), so does the reverse order, and on
+  Python 3.11 the surface layer followed by all of `tests/data` gives
+  2,706 passed. Each fixture is still built once; the `not slow` surface
+  subset took 293 s and 241 s at session scope and 178 s and 226 s at
+  package scope, alternating, on a machine shared with other jobs. A test
+  runs one surface test and then one outside the package in a fresh
+  session, and fails if any of the four is still installed.
+
 ## A covariance is built on one BLAS thread too, so a whole portfolio or PCA answer is the same bits on any machine
 
 - **The products that build a covariance run on one BLAS thread.** The

@@ -7,7 +7,7 @@ and seven docstrings quoted a 6-tool, 46-tool or 16-tool surface long
 after the counts had moved. `modeling_capabilities()` already treats the
 live registries as the truth for an agent; this makes the documentation
 follow the same principle, the way `generate_tool_index.py` already does
-for the tool surface. `tests/docs/test_documentation.py` regenerates this
+for the tool surface. `tests/docs/test_documentation.py` renders this
 file and fails if what is on disk differs, so a feature, estimator or
 target added without regenerating breaks the suite in the same commit.
 
@@ -35,7 +35,7 @@ HEADER = """# Modeling reference
 
 Every feature, estimator, target and spec option the modeling runtime
 knows, read from its registries. **Generated** by
-`scripts/generate_modeling_reference.py` -- a test regenerates it and
+`scripts/generate_modeling_reference.py` -- a test renders it and
 fails if this file has drifted, so an entry added without regenerating
 breaks the suite in the commit that added it. The prose that explains
 these lives in [15_modeling.md](15_modeling.md); this is the catalog.

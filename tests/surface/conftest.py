@@ -24,8 +24,18 @@ test. Isolating the directory removes both problems at once, and it is the
 correct scope anyway -- these tests are about the tool surface, not about
 whatever happens to be in a developer's cache.
 
-The fixture is session-scoped and autouse: no test in this package should
-have to remember to ask for it, because forgetting is silent.
+The fixture is autouse: no test in this package should have to remember to
+ask for it, because forgetting is silent.
+
+PACKAGE-SCOPED, NOT SESSION-SCOPED. The fixtures here are built once for
+every test in `tests/surface` and torn down when the last of them finishes.
+At session scope they outlived the package: the fake market, the Parquet
+tier switched off and this audit directory stayed in place for every test
+collected after it, so a run of `tests/surface` followed by
+`tests/audit/test_audit.py::TestVerifyReplay` and
+`tests/data/test_parquet_cache.py` failed 15 tests that pass on their own --
+each looked for a Parquet file the patched provider never wrote. See the
+CHANGELOG entry of 2026-10-04.
 """
 
 from __future__ import annotations
@@ -36,10 +46,11 @@ from pathlib import Path
 import pytest
 
 
-@pytest.fixture(scope="session", autouse=True)
+@pytest.fixture(scope="package", autouse=True)
 def _isolated_audit_log(tmp_path_factory: pytest.TempPathFactory):
     """
-    Point the audit trail at a throwaway directory for this session.
+    Point the audit trail at a throwaway directory while this package's
+    tests run, and back where it was when they finish.
 
     `audit.paths._audit_dir()` reads the environment on every call rather
     than caching it, so setting the variable here is enough -- nothing has
@@ -69,12 +80,12 @@ def _isolated_audit_log(tmp_path_factory: pytest.TempPathFactory):
             os.environ["SQT_AUDIT_DIR"] = previous
 
 
-@pytest.fixture(scope="session", autouse=True)
+@pytest.fixture(scope="package", autouse=True)
 def _hermetic_market():
     """
     Every fetch in this layer is answered by `hermetic.FakeTicker`.
 
-    Session-wide, so the determinism and invariant layers see the same bars
+    Package-wide, so the determinism and invariant layers see the same bars
     the adversarial one does, and none of them depends on a connection or on
     what the market did today. The provider's own code still runs; only the
     call to yfinance is replaced. See `hermetic.install` for the caches.
@@ -90,10 +101,14 @@ def _hermetic_market():
         hermetic.uninstall()
 
 
-@pytest.fixture(scope="session")
-def published(tmp_path_factory: pytest.TempPathFactory):
+@pytest.fixture(scope="package")
+def published(
+    _isolated_audit_log, _hermetic_market, tmp_path_factory: pytest.TempPathFactory
+):
     """The references, dataset, models and record ids a baseline can name,
-    built once per session (about twenty seconds)."""
+    built once for the package (about twenty seconds). It names the other
+    two fixtures so it is built under the fake market and into this
+    package's audit directory whatever order they are set up in."""
     from . import hermetic
 
     return hermetic.publish_fixtures(
