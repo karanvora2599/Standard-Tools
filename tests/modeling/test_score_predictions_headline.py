@@ -48,7 +48,9 @@ from standard_quant_tools.modeling.specs import (
     TargetSpec,
     ValidationSpec,
 )
-from standard_quant_tools.modeling.validation.comparison import headline_lag
+from standard_quant_tools.modeling.validation.comparison import (
+    headline_degrees_of_freedom,
+)
 from standard_quant_tools.modeling.validation.metrics import cross_sectional_ic
 
 REPO = Path(__file__).resolve().parents[2]
@@ -88,7 +90,8 @@ class TestTheTwoVerdicts:
         assert headline["metric"] == "cs_rank_ic_mean"
         assert headline["value"] == result.metrics["cs_rank_ic_mean"]
         assert headline["n_dates"] == 120
-        assert headline["hac_lag"] == headline_lag(120, 5) == 10
+        assert headline["hac_lag"] is None
+        assert headline["hac_degrees_of_freedom"] == headline_degrees_of_freedom(120, 5)
         assert headline["t_stat"] > 2 and headline["p_value"] < 0.05
         note = next(n for n in result.notes if "does not beat baseline_r2" in n)
         assert "`beats_null`" in note
@@ -112,13 +115,19 @@ class TestTheTwoVerdicts:
         )
         assert result.headline == expected
 
-    def test_the_horizon_sets_the_lag(self):
+    def test_the_horizon_sets_the_degrees_of_freedom(self):
+        """120 dates: floor(0.4 x 120^(2/3)) = 9 frequencies at horizon 1,
+        and at most 120 / (3 x 5) = 8 for a 5-bar label."""
         frame = _frame(signal=0.0)
         one = _score(frame, "lag_one")
         five = _score(frame, "lag_five", horizon=5)
-        assert one.headline["hac_lag"] == headline_lag(120, None) == 4
-        assert five.headline["hac_lag"] == 10
-        assert any("Andrews bandwidth alone at horizon=1" in n for n in one.notes)
+        assert one.headline["hac_degrees_of_freedom"] == 9
+        assert five.headline["hac_degrees_of_freedom"] == 8
+        assert one.headline["hac_lag"] is None and five.headline["hac_lag"] is None
+        assert any(
+            "reads floor(0.4 n^(2/3)) cosine frequencies of n dates at horizon=1" in n
+            for n in one.notes
+        )
 
 
 class TestWhatTheRunWouldSay:

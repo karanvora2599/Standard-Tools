@@ -1,5 +1,120 @@
 # Changelog
 
+## A mean over dates is tested against Student's t on its lowest cosine frequencies, the selection embargo drops each row whose label reaches the holdout, and the uniqueness weights' fallback reads instants
+
+- **The overlap rule still over-rejected.** A Newey-West variance at max(2h,
+  the Andrews bandwidth), read against the normal, rejected a true zero mean
+  7.2% of the time at a nominal 5% on simulated per-date rank ICs of a
+  persistent feature (AR(1) 0.98) against an h-bar forward return over 30
+  names, for a 5-bar label over 504 dates; 10.9% for a 20-bar label, and
+  21.9% for a 20-bar label over 126 dates. On simulated Diebold-Mariano loss
+  differentials (the mean of h shocks) it rejected 7.6% (5-bar) and 9.9%
+  (20-bar) over 504 dates.
+- **The rule was chosen by simulation.** Every candidate was run on horizons
+  1, 5, 10 and 20 by 126, 252, 504, 1,000 and 2,000 dates, 5,000 draws a
+  cell for the IC series and 20,000 for the differential: Bartlett at 3h and
+  4h; the same with a Kiefer-Vogelsang fixed-b critical value or Sun's
+  scaled-t approximation; Parzen and quadratic-spectral kernels;
+  Hansen-Hodrick uniform weights at h - 1, alone and with the
+  Harvey-Leybourne-Newbold factor and a t(n - 1); and the equal-weighted
+  cosine estimator at min(floor(0.4 n^(2/3)), floor(n / (c h))) frequencies,
+  c = 2, 3, 4, read against Student's t with as many degrees of freedom.
+  Only the cosine estimator stayed within a point of 5% in every cell. At
+  c = 3 it rejects 4.6% to 5.9% (IC series) and 4.8% to 5.6% (differential);
+  the best Newey-West variant, lag 4h with Sun's fixed-b approximation,
+  rejected 6.1% to 6.9% for a 20-bar label over 252 to 2,000 dates, and
+  Hansen-Hodrick with the small-sample factor 12.2% for a 20-bar label over
+  126. c = 2 reached 6.7% at 20 bars; c = 4 sized like c = 3 and lost more
+  power there. On eight cells of a 30-name panel's squared-error
+  differential between two no-skill forecasts the rule rejects 4.7% to 6.3%,
+  where the previous test rejected 7.4% to 10.3% (4,000 draws a cell).
+- **What it costs in power.** At 504 dates and a 5-bar label, against a
+  planted mean IC of about 0.02, 0.03 and 0.05 (2,000 draws each), the rule
+  rejects 19%, 38% and 76% of the time; the previous rule 26%, 46% and 84%,
+  at a size of 7.2%. At 126 dates and a 20-bar label, about six
+  non-overlapping labels, 6%, 7% and 10% (previous 24%, 27% and 34% at a
+  size of 21.9%). Against a differential whose mean is 2.5 true standard
+  errors it rejects 67% at 504 dates and a 5-bar label, where a test that
+  knew the variance would reject 70%.
+- **One rule, read everywhere.** `headline_degrees_of_freedom(n, h)` gives
+  the frequency count (25 at 504 dates for a 1- or 5-bar label, 16 for 10
+  bars, 8 for 20), `cosine_variance` the variance and
+  `mean_vs_null_test(values, horizon=h)` the test. The run's headline,
+  `score_predictions`' headline, the Diebold-Mariano test of
+  `compare_models(method='paired')` and `compare_signals(mode='paired')`,
+  and `compare_signals(mode='ic_series')`'s `hac` all read it. The
+  Diebold-Mariano statistic no longer carries the Harvey-Leybourne-Newbold
+  factor: Student's t at the frequencies' degrees of freedom is its
+  small-sample reference. A lag the caller names is used as named, as
+  before: `mean_vs_null_test(lag=...)`, `diebold_mariano(lag=...)` and
+  `compare_signals(hac_lag=...)` read a Newey-West variance at that lag
+  against the normal, and `lag=headline_lag(n, h)` (with `horizon=h` for
+  `diebold_mariano`) returns the previous numbers to the bit. `headline_lag`
+  stays, described as the previous rule.
+- **New fields.** The headline block (`validation_report["headline"]`,
+  `score_predictions.headline`) gains `hac_degrees_of_freedom`; its
+  `hac_lag` is null under the rule. A Diebold-Mariano result gains
+  `degrees_of_freedom`, its `lag` null unless named. `compare_signals`'
+  `hac` gains `hac_degrees_of_freedom`, its `hac_lag` null unless named. The
+  cosine variance is noisier than a Bartlett one, so `ic_series`' "the
+  difference series is autocorrelated" sentence waits for the larger of 1.25
+  and the 95th percentile of chi-squared over its degrees of freedom (1.51
+  at 25): on 2,000 white-noise differences of 400 dates it is said of 4.2%
+  of them, where 1.25 alone would have said it of 19.9%. A series whose
+  values are all equal is no longer tested: its rounded mean left deviations
+  of a few ulps, and fifty values of 0.2 made a t of 1e31.
+- **What moves on the live panel** (504 out-of-sample dates, 5-day label, 25
+  degrees of freedom; Python 3.11, pandas 3). The three runs' headlines:
+  ridge t 0.30 -> 0.29 (p 0.768 -> 0.776), hist_gradient_boosting t 1.79 ->
+  1.81 (p 0.074 -> 0.083), random_forest t 0.10 -> 0.10 (p 0.923 -> 0.921);
+  none beats the null, as before, and each warning now names the degrees of
+  freedom instead of the lag. `score_predictions` gives the same numbers at
+  horizon 1 as at 5, since both read 25 frequencies at 504 dates (horizon 1
+  was t 0.31, 1.82, 0.10 at lag 5). `compare_models(method='paired')`
+  against ridge: hist_gradient_boosting t -4.82 -> -4.21 (p 1.4e-6 ->
+  2.9e-4), random_forest t -1.74 -> -1.61 (p 0.082 -> 0.120).
+  `compare_signals(mode='paired')` at horizon 1: t -5.76 -> -4.21.
+  `ic_series`' `hac_variance` for ridge against hist_gradient_boosting
+  0.000699 (horizon 1) and 0.000831 (horizon 5) -> 0.000880, `hac_ratio`
+  3.13 and 3.72 -> 3.93. The bootstrap intervals and p-values, the Holm
+  adjustment, the verdicts and every other field are unchanged.
+- **The selection embargo is by row.** `select_features` dropped the
+  window's last `embargo_dates` dates. On a panel where an entity misses
+  dates, its h-th bar comes later than the panel's, so its recorded
+  `label_end_date` can reach the holdout from earlier in the window: on a
+  150-date, 15-name panel with one name missing the 8 dates before the
+  window's end, four such rows were read. Every row whose recorded end falls
+  on or after the holdout's first date is now dropped as well; a row with no
+  recorded end is taken to end `embargo_dates` panel dates after its own,
+  which is the date rule. The result gains `embargo_rows`, and the warning
+  names the earlier rows when there are any. On the live panel the 150 rows
+  whose ends reach the holdout are exactly the last five dates', and the
+  selection is the same to the bit (`embargo_rows` 150 aside).
+  `embargo_dates=0`, the library default, is unchanged.
+- **`compare_feature_sets` and `summarize_feature_set` embargo too.** With a
+  holdout they now leave out the same rows: `embargo_dates` (library default
+  0; the tool's default is the target horizon, as for `select_features`),
+  and each summary carries `embargo_dates`, `embargo_window` and
+  `embargo_rows`. On the live panel, the two selected features against them
+  plus mom_126, rsi_14 and mom_20 at `holdout_fraction=0.3`: the window goes
+  from 741 dates to 736, the smaller set's mean |rank IC| 0.0608 -> 0.0593
+  and its largest 0.0672 -> 0.0649 (beta_60), the larger set's mean 0.0299
+  -> 0.0288, condition numbers 1.599 -> 1.598 and 12.59 -> 12.64; the
+  holdout numbers do not move. Without a holdout, the tool's default,
+  nothing changes.
+- **The label-uniqueness weights' Python fallback reads instants.**
+  `label_uniqueness_weights` without the native kernel sorted and searched
+  the arrays as given. A direct caller's zoned column arrives as an object
+  array of Timestamps, where NaT compares false against everything and
+  numpy's search placed the keys after a missing label end wrongly: weights
+  up to 2.7 (mean 1) off the kernel's on a 720-row panel with label ends
+  missing at its end and at nine rows inside it. A missing date, which numpy
+  sorts last and the kernel first, put even a naive column up to 3.7 off.
+  The fallback now converts both columns to the int64 nanoseconds the kernel
+  reads and agrees with it to the bit in UTC, New York and Tokyo, at [s] and
+  [ns], with ends and a date missing. The engine passes instants already;
+  its weights, and the kernel's, are unchanged.
+
 ## The sanitizer job fails the build
 
 - **The ASan/UBSan job is no longer `continue-on-error`.** It ran that

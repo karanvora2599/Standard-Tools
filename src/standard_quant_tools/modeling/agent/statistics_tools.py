@@ -58,7 +58,8 @@ from ..validation.comparison import (
     bh_adjust,
     bonferroni_adjust,
     compare_ic_series,
-    headline_lag,
+    cosine_variance,
+    headline_degrees_of_freedom,
     holm_adjust,
     newey_west_variance,
     paired_comparison,
@@ -620,7 +621,7 @@ COMPARE_SIGNALS_DESCRIPTION = (
     "has a loss with units -- with no registry and no shared manifest "
     "required, so an externally computed alpha compares against a model "
     "here. mode='ic_series' takes two per-date information-coefficient "
-    "series inline from anywhere and adds the Newey-West variance of the "
+    "series inline from anywhere and adds the long-run variance of the "
     "difference beside the ordinary one: the ratio says how much a "
     "t-statistic computed without the correction was overstated, and on a "
     "real series it has been measured at 2.8. mode='adjust' applies Holm, "
@@ -767,32 +768,75 @@ def _hac_block(
     """
     The variance of the mean difference, without and with the correction.
 
-    The lag defaults to `headline_lag(n, horizon)`, the rule a run's
-    headline is tested at: max(2 x horizon, the Andrews bandwidth
-    floor(4 (n/100)^(2/9))), capped at n - 1. At the default horizon of 1
-    that is the Andrews bandwidth from five dates up, which is what this
-    used before the horizon was read. A lag the caller names is used as
-    named. `hac_ratio` above 1 means the difference series is positively
+    Unless a lag is named, the correction is the one a run's headline is
+    tested with: the long-run variance from the difference's lowest
+    `headline_degrees_of_freedom(n, horizon)` cosine frequencies, reported
+    as `hac_degrees_of_freedom` with `hac_lag` null. A lag the caller names
+    is used as named, a Newey-West variance at that lag, as before.
+    `hac_ratio` above 1 means the difference series is positively
     autocorrelated, so the ordinary standard error is too small and any
     t-statistic built on it is overstated by its square root.
     """
     n = int(difference.size)
-    if requested_lag is None:
-        lag = headline_lag(n, horizon)
-    else:
-        lag = int(requested_lag)
-    lag = max(0, min(lag, max(n - 1, 0)))
     variance_lag0 = newey_west_variance(difference, 0)
-    variance = newey_west_variance(difference, lag)
+    lag: Optional[int] = None
+    degrees: Optional[int] = None
+    if requested_lag is None:
+        degrees = headline_degrees_of_freedom(n, horizon)
+        variance = cosine_variance(difference, degrees)
+    else:
+        lag = max(0, min(int(requested_lag), max(n - 1, 0)))
+        variance = newey_west_variance(difference, lag)
     ratio: Optional[float] = None
     if math.isfinite(variance_lag0) and variance_lag0 > 0.0:
         ratio = float(variance / variance_lag0)
     return {
         "hac_variance_lag0": float(variance_lag0),
         "hac_variance": float(variance),
-        "hac_lag": float(lag),
+        "hac_lag": None if lag is None else float(lag),
+        "hac_degrees_of_freedom": None if degrees is None else float(degrees),
         "hac_ratio": ratio,
     }
+
+
+def _autocorrelation_warning(hac: Dict[str, Optional[float]]) -> Optional[str]:
+    """
+    The sentence saying the difference series is autocorrelated, when its
+    variance ratio says so.
+
+    With a named lag the threshold is a ratio of 1.25, as before. The
+    cosine variance is an average of nu squared projections, so on an
+    independent series the ratio is distributed about as chi-squared with
+    nu degrees of freedom over nu, and 1.25 alone would be crossed by
+    noise: 18% of the time at nu = 25. The threshold is then the larger of
+    1.25 and that distribution's 95th percentile (1.51 at nu = 25), so the
+    sentence is said of an independent series at most one time in twenty.
+    """
+    from scipy.stats import chi2
+
+    ratio = hac["hac_ratio"]
+    if ratio is None:
+        return None
+    degrees = hac.get("hac_degrees_of_freedom")
+    threshold = 1.25
+    if degrees:
+        threshold = max(threshold, float(chi2.ppf(0.95, degrees)) / degrees)
+    if ratio <= threshold:
+        return None
+    if degrees:
+        where = (
+            f"its long-run variance over its {int(degrees)} lowest cosine "
+            "frequencies"
+        )
+    else:
+        where = f"its long-run variance at lag {int(hac['hac_lag'] or 0)}"
+    return (
+        f"The difference series is autocorrelated: {where} is {ratio:.2f}x "
+        "the ordinary one, so a t-statistic computed without the correction "
+        f"is overstated by about {math.sqrt(ratio):.2f}x. The bootstrap "
+        "interval above resamples in blocks and already accounts for this; "
+        "an ordinary OLS standard error on the same series does not."
+    )
 
 
 def compare_signals(input_data: CompareSignalsInput) -> CompareSignalsResult:
@@ -896,16 +940,9 @@ def _compare_ic_series_mode(input_data: CompareSignalsInput) -> CompareSignalsRe
             "it means 'not enough dates to tell', not 'the same'."
         )
     ratio = hac["hac_ratio"]
-    if ratio is not None and ratio > 1.25:
-        warnings.append(
-            f"The difference series is autocorrelated: its long-run "
-            f"variance at lag {int(hac['hac_lag'] or 0)} is {ratio:.2f}x the "
-            "ordinary one, so a t-statistic computed without the correction "
-            f"is overstated by about {math.sqrt(ratio):.2f}x. The bootstrap "
-            "interval above resamples in blocks and already accounts for "
-            "this; an ordinary OLS standard error on the same series does "
-            "not."
-        )
+    autocorrelated = _autocorrelation_warning(hac)
+    if autocorrelated:
+        warnings.append(autocorrelated)
     logger.debug(
         "[compare_signals] mode=ic_series dates=%d hac_ratio=%s",
         n_dates,

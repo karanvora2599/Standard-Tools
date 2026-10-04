@@ -13,7 +13,10 @@ hold:
 - `embargo_dates=k` drops the window's last k dates from every number the
   selection computes, leaves the holdout where it was, records what it
   dropped, and on a panel with recorded label ends leaves no selection row
-  whose label ends inside the holdout;
+  whose label ends inside the holdout -- by row: on a panel with dates
+  missing for an entity, the earlier rows whose recorded ends reach the
+  holdout are dropped too, and `compare_feature_sets` /
+  `summarize_feature_set` with a holdout read the same rows;
 - the tool's default is the target horizon from `target_id`, with a note
   when the id names none;
 - `correction='bh'` passes a feature on its Benjamini-Hochberg adjusted
@@ -32,10 +35,14 @@ from pydantic import ValidationError as SchemaError
 
 import standard_quant_tools.modeling.analysis.feature_selection as selection_module
 from standard_quant_tools.error import ValidationError
-from standard_quant_tools.modeling.agent.feature_models import SelectFeaturesInput
+from standard_quant_tools.modeling.agent.feature_models import (
+    CompareFeatureSetsInput,
+    SelectFeaturesInput,
+)
 from standard_quant_tools.modeling.agent.feature_tools import (
     FEATURE_TOOL_DEFS,
     _selection_embargo,
+    compare_feature_sets,
     select_features,
 )
 from standard_quant_tools.modeling.agent.models import RegisterExternalPanelInput
@@ -47,10 +54,19 @@ from standard_quant_tools.modeling.analysis.feature_report import (
     feature_predictive_stats,
 )
 from standard_quant_tools.modeling.analysis.feature_selection import (
+    compare_feature_sets as compare_feature_sets_on,
+)
+from standard_quant_tools.modeling.analysis.feature_selection import (
     select_features as select_features_on,
+)
+from standard_quant_tools.modeling.analysis.feature_selection import (
+    summarize_feature_set as summarize_feature_set_on,
 )
 from standard_quant_tools.modeling.analysis.feature_stability import (
     permutation_test_ic,
+)
+from standard_quant_tools.modeling.dataset.external_panel import (
+    _label_end_from_horizon,
 )
 from standard_quant_tools.modeling.validation.comparison import bh_adjust
 
@@ -239,6 +255,174 @@ class TestTheToolEmbargoesTheHorizon:
         embargo, note = _selection_embargo(None, {"target_id": "external:None"})
         assert embargo == 0
         assert "names no horizon" in note and "embargo_dates" in note
+
+
+class TestTheEmbargoIsByRow:
+    """The embargo drops each row whose label ends in the holdout, not only
+    the window's last h dates (the CHANGELOG entry of 2026-10-04). On a
+    panel where an entity misses dates, its h-th bar comes later than the
+    panel's, and its recorded `label_end_date` reaches the holdout from
+    before those dates."""
+
+    @staticmethod
+    def _ragged(with_ends=True):
+        """150 dates x 15 entities; E00 misses the 8 dates before the
+        selection window's last one (dates 96-103), so its rows on dates
+        92-95 have labels, 5 of its own rows long, ending on or after the
+        holdout's first date (105). Ends recorded as the registration
+        derives them: 5 rows ahead on the entity's own dates."""
+        panel, features = _panel()
+        dates = pd.DatetimeIndex(sorted(panel["date"].unique()))
+        gap = (panel["entity"] == "E00") & panel["date"].isin(dates[96:104])
+        panel = panel[~gap].reset_index(drop=True)
+        if with_ends:
+            panel["label_end_date"] = _label_end_from_horizon(panel, 5).to_numpy()
+        return panel, features, dates
+
+    def test_a_row_reaching_the_holdout_from_earlier_is_dropped(self):
+        panel, features, dates = self._ragged()
+        result = select_features_on(panel, features, embargo_dates=5)
+        assert result["holdout_window"]["start"] == str(dates[105].date())
+        assert result["embargo_window"]["start"] == str(dates[100].date())
+        # The last five dates' 71 rows (E00 misses four of those dates) and
+        # E00's four earlier ones.
+        assert result["embargo_rows"] == (5 * 15 - 4) + 4 == 75
+        last = pd.Timestamp(result["selection_window"]["end"])
+        assert last == dates[99]
+        stats = feature_predictive_stats(
+            panel[
+                (panel["date"] <= last)
+                & ~((panel["entity"] == "E00") & panel["date"].isin(dates[92:96]))
+            ],
+            features,
+        )
+        for feature in features:
+            assert result["selection_ic"][feature] == stats[feature]["rank_ic_mean"]
+        (said,) = [w for w in result["warnings"] if "were embargoed" in w]
+        assert "and so were 4 earlier row(s) whose recorded label_end_date" in said
+
+    def test_the_rows_dropped_are_the_rows_whose_labels_reach_it(self):
+        """Without the embargo, 75 rows the selection reads have a
+        recorded end on or after the holdout's first date: 70 on the last
+        five dates and E00's five (one of them on those dates). The embargo
+        drops those 75 and no other."""
+        panel, features, dates = self._ragged()
+        ends = pd.to_datetime(panel["label_end_date"])
+        plain = select_features_on(
+            panel, features, embargo_dates=0, significance="none"
+        )
+        window = panel["date"] <= pd.Timestamp(plain["selection_window"]["end"])
+        assert int((window & (ends >= dates[105])).sum()) == 75
+        embargoed = select_features_on(
+            panel, features, embargo_dates=5, significance="none"
+        )
+        assert embargoed["embargo_rows"] == 75
+
+    def test_without_recorded_ends_it_is_the_window_s_last_dates(self):
+        """A row with no recorded end is taken to end h of the panel's
+        dates after its own: the embargo as it was."""
+        panel, features, dates = self._ragged(with_ends=False)
+        result = select_features_on(panel, features, embargo_dates=5)
+        assert result["embargo_rows"] == 5 * 15 - 4
+        assert result["selection_window"]["end"] == str(dates[99].date())
+        (said,) = [w for w in result["warnings"] if "were embargoed" in w]
+        assert "earlier row" not in said and "no label of up to 5 bar(s)" in said
+
+    def test_on_a_full_panel_the_recorded_ends_drop_the_same_rows(self):
+        """Every entity on every date, ends 5 rows ahead: the rows whose
+        ends reach the holdout are exactly the last five dates' rows, as on
+        the live panel (150 of them, 30 names), and the result is the one
+        the date rule gives, warnings included."""
+        panel, features = _panel()
+        recorded = panel.assign(
+            label_end_date=_label_end_from_horizon(panel, 5).to_numpy()
+        )
+        with_ends = select_features_on(recorded, features, embargo_dates=5)
+        without = select_features_on(panel, features, embargo_dates=5)
+        assert with_ends["embargo_rows"] == without["embargo_rows"] == 5 * 15
+        assert with_ends == without
+
+    def test_a_zoned_date_and_a_naive_end_are_refused_by_name(self):
+        panel, features, _dates = self._ragged()
+        panel["date"] = pd.to_datetime(panel["date"]).dt.tz_localize("UTC")
+        with pytest.raises(ValidationError, match="select_features: the panel's"):
+            select_features_on(panel, features, embargo_dates=5)
+        # Without an embargo the column is not read, and nothing is refused.
+        select_features_on(panel, features, significance="none")
+
+
+class TestTheFeatureSetsEmbargoToo:
+    """`compare_feature_sets` and `summarize_feature_set` with a holdout
+    read the same rows a selection does (the CHANGELOG entry of
+    2026-10-04)."""
+
+    def test_zero_is_the_old_summary_to_the_bit(self):
+        panel, features, _dates = TestTheEmbargoIsByRow._ragged()
+        for kwargs in ({}, {"holdout_fraction": 0.3}, {"selection_end": "2022-05-31"}):
+            default = compare_feature_sets_on(panel, features[:2], features, **kwargs)
+            zero = compare_feature_sets_on(
+                panel, features[:2], features, embargo_dates=0, **kwargs
+            )
+            assert zero == default
+            assert zero["left"]["embargo_dates"] == 0
+            assert zero["left"]["embargo_window"] is None
+
+    def test_the_summaries_and_the_table_read_the_embargoed_rows(self):
+        panel, features, dates = TestTheEmbargoIsByRow._ragged()
+        result = compare_feature_sets_on(
+            panel, features[:2], features, holdout_fraction=0.3, embargo_dates=5
+        )
+        read = panel[
+            (panel["date"] <= dates[99])
+            & ~((panel["entity"] == "E00") & panel["date"].isin(dates[92:96]))
+        ]
+        stats = feature_predictive_stats(read, features)
+        for row in result["features"]:
+            assert row["abs_rank_ic"] == abs(stats[row["feature"]]["rank_ic_mean"])
+        alone = summarize_feature_set_on(
+            panel, features, holdout_fraction=0.3, embargo_dates=5
+        )
+        for side in ("left", "right"):
+            summary = result[side]
+            assert summary["selection_window"]["end"] == str(dates[99].date())
+            assert summary["embargo_dates"] == 5 and summary["embargo_rows"] == 75
+            assert summary["holdout_window"]["start"] == str(dates[105].date())
+        assert result["right"] == alone
+        (said,) = [w for w in result["warnings"] if "were embargoed" in w]
+        assert "4 earlier row(s)" in said and "either summary read" in said
+
+    def test_the_tool_embargoes_the_target_horizon_with_a_holdout(self, tmp_path):
+        panel, features = _panel()
+        dataset_id = _register(panel, tmp_path, horizon=5)
+        held = compare_feature_sets(
+            CompareFeatureSetsInput(
+                dataset_id=dataset_id,
+                left=features[:2],
+                right=features,
+                holdout_fraction=0.3,
+            )
+        )
+        assert held.left.embargo_dates == 5 and held.left.embargo_rows == 5 * 15
+        zero = compare_feature_sets(
+            CompareFeatureSetsInput(
+                dataset_id=dataset_id,
+                left=features[:2],
+                right=features,
+                holdout_fraction=0.3,
+                embargo_dates=0,
+            )
+        )
+        assert zero.left.embargo_dates == 0
+        assert (
+            zero.left.selection_window["n_dates"]
+            == held.left.selection_window["n_dates"] + 5
+        )
+        whole = compare_feature_sets(
+            CompareFeatureSetsInput(
+                dataset_id=dataset_id, left=features[:2], right=features
+            )
+        )
+        assert whole.left.embargo_dates == 0 and whole.left.holdout_window is None
 
 
 # ── the correction ───────────────────────────────────────────────────────

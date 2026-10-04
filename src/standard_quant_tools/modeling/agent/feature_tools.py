@@ -388,8 +388,9 @@ def _selection_embargo(
     requested: Optional[int], meta: Dict[str, Any]
 ) -> Tuple[int, Optional[str]]:
     """
-    The dates `select_features` leaves between its selection window and
-    the holdout, and a note when the default could not be resolved.
+    The dates `select_features` and `compare_feature_sets` leave between
+    their window and the holdout, and a note when the default could not be
+    resolved.
 
     Unset, it is the horizon of the dataset's label (`target_id`
     "<type>:<horizon>"), the dates whose labels reach into the holdout. A
@@ -500,6 +501,7 @@ def select_features(input_data: SelectFeaturesInput) -> SelectFeaturesResult:
         holdout_window=result["holdout_window"],
         embargo_dates=result["embargo_dates"],
         embargo_window=result["embargo_window"],
+        embargo_rows=result["embargo_rows"],
         selection_ic=result["selection_ic"],
         selection_p_value=result["selection_p_value"],
         selection_p_value_adjusted=result["selection_p_value_adjusted"],
@@ -529,16 +531,20 @@ def compare_feature_sets(
     of either one's out-of-sample strength. Pass `holdout_fraction` (or
     `selection_end`) and each set is summarised on the earlier dates and
     re-measured on the later ones as `holdout_mean_abs_rank_ic`, which is
-    the number a set should be chosen on.
+    the number a set should be chosen on. With a holdout, the rows whose
+    labels end inside it are embargoed as `select_features` embargoes them
+    -- `embargo_dates`, the target horizon unless the caller names a
+    number; 0 keeps the window as it was.
     """
     from standard_quant_tools.modeling.agent.tools import _load_dataset_panel
 
     logger.debug("[compare_feature_sets] dataset_id=%s", input_data.dataset_id)
-    panel, _meta, _dir = _load_dataset_panel(input_data.dataset_id)
+    panel, meta, _dir = _load_dataset_panel(input_data.dataset_id)
     _require_features(
         panel, [*input_data.left, *input_data.right], input_data.dataset_id
     )
 
+    embargo, embargo_note = _selection_embargo(input_data.embargo_dates, meta)
     result = _compare_feature_sets(
         panel,
         input_data.left,
@@ -546,7 +552,10 @@ def compare_feature_sets(
         cluster_threshold=input_data.cluster_threshold,
         selection_end=input_data.selection_end,
         holdout_fraction=input_data.holdout_fraction,
+        embargo_dates=embargo,
     )
+    if embargo_note and result["left"]["holdout_window"] is not None:
+        result["warnings"].append(embargo_note)
     return CompareFeatureSetsResult(dataset_id=input_data.dataset_id, **result)
 
 
@@ -1331,7 +1340,9 @@ FEATURE_TOOL_DEFS: List[tuple] = [
         "one number hides half of that trade. By default both sets are "
         "summarised on every date, which is in-sample by construction and "
         "warned about; holdout_fraction summarises on an earlier window and "
-        "re-measures each set on the dates neither summary read.",
+        "re-measures each set on the dates neither summary read, with the "
+        "last `embargo_dates` dates before the holdout (the target horizon "
+        "by default) read by neither.",
         CompareFeatureSetsInput,
     ),
     (

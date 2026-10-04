@@ -53,9 +53,9 @@ from .registry.model_registry import new_model_id, save_model
 from .samples import SampleIndex, datetime_values
 from .specs import TASKS, ModelSpec, targets_for_task
 from .validation.comparison import (
+    COSINE_FREQUENCY_SCALE,
+    HORIZONS_PER_FREQUENCY,
     MIN_HEADLINE_DATES,
-    andrews_lag,
-    headline_lag,
     mean_vs_null_test,
 )
 from .validation.conformal import conformal_radius, held_out_residuals
@@ -437,13 +437,16 @@ def _r2_note(
     ]
 
 
-def _lag_reason(lag: int, n_dates: int, horizon: "int | None") -> str:
-    """Why the headline test used the lag it did, as a clause."""
-    if lag >= n_dates - 1 and lag < max(andrews_lag(n_dates), 2 * (horizon or 0)):
-        return ", one less than the number of dates"
-    if horizon and lag == 2 * int(horizon):
-        return f", twice the {int(horizon)}-day label horizon"
-    return f", the Andrews bandwidth for {n_dates:,} dates"
+def _frequency_reason(n_dates: int, horizon: "int | None") -> str:
+    """Why the headline test read the frequencies it did, as a clause."""
+    h = int(horizon) if horizon and int(horizon) > 0 else 1
+    by_dates = math.floor(COSINE_FREQUENCY_SCALE * float(n_dates) ** (2.0 / 3.0))
+    if h > 1 and n_dates // (HORIZONS_PER_FREQUENCY * h) < by_dates:
+        return (
+            f"at most one per {HORIZONS_PER_FREQUENCY * h} dates, "
+            f"{HORIZONS_PER_FREQUENCY} times the {h}-day label horizon"
+        )
+    return f"{COSINE_FREQUENCY_SCALE:g} x {n_dates:,}^(2/3)"
 
 
 def _headline_report(
@@ -464,14 +467,15 @@ def _headline_report(
     not be.
 
     For a headline that is the mean of a per-date series (the
-    cross-sectional rank IC of a regression or a ranker) the test is a
-    Newey-West t on the pooled series -- under cpcv, each date's mean across
-    the paths that tested it -- at `headline_lag`, two-sided at 5%. For one
-    that is not (a classifier's AUC, a survival model's concordance) it is
-    a point comparison with 0.5. Measured on a 30-name daily equity panel,
-    none of sixteen recorded runs beat zero at 5% (ridge t 0.31, hist
-    gradient boosting t 1.82 at lag 5, random forest t 0.10), and every run
-    had reported the headline with nothing to say so.
+    cross-sectional rank IC of a regression or a ranker) the test is a t
+    on the pooled series -- under cpcv, each date's mean across the paths
+    that tested it -- over a long-run variance from its lowest cosine
+    frequencies, read against Student's t at
+    `headline_degrees_of_freedom` for the dates and the horizon, two-sided
+    at 5%. For one that is not (a classifier's AUC, a survival model's
+    concordance) it is a point comparison with 0.5. Measured on a 30-name
+    daily equity panel, none of sixteen recorded runs beat zero at 5%, and
+    every run had reported the headline with nothing to say so.
     """
     metric = adapter.headline
     null = adapter.headline_null
@@ -485,6 +489,7 @@ def _headline_report(
         "t_stat_uncorrected": None,
         "p_value": None,
         "hac_lag": None,
+        "hac_degrees_of_freedom": None,
         "ic_autocorrelation_lag1": None,
         "beats_null": None,
     }
@@ -521,17 +526,17 @@ def _headline_report(
     if n < MIN_HEADLINE_DATES:
         return block, [
             f"{metric} is {value:.4f} over {n} {scope} date(s), fewer than "
-            f"the {MIN_HEADLINE_DATES} a Newey-West test needs, so whether it "
-            "differs from zero was not tested."
+            f"the {MIN_HEADLINE_DATES} a long-run variance needs, so whether "
+            "it differs from zero was not tested."
         ]
-    lag = headline_lag(n, horizon)
-    test = mean_vs_null_test(values, null=float(null), lag=lag)
+    test = mean_vs_null_test(values, null=float(null), horizon=horizon)
+    degrees = test["degrees_of_freedom"]
     block.update(
         {
             "t_stat": test["t_stat"],
             "t_stat_uncorrected": test["t_stat_uncorrected"],
             "p_value": test["p_value"],
-            "hac_lag": lag,
+            "hac_degrees_of_freedom": degrees,
             "ic_autocorrelation_lag1": test["autocorrelation_lag1"],
         }
     )
@@ -547,8 +552,10 @@ def _headline_report(
     if beats:
         return block, []
     variance = (
-        f"t = {t_stat:.2f}, two-sided p = {p_value:.3f}, from a Newey-West "
-        f"variance at lag {lag}{_lag_reason(lag, n, horizon)}"
+        f"t = {t_stat:.2f}, two-sided p = {p_value:.3f} on Student's t with "
+        f"{degrees} degrees of freedom, from a long-run variance over the "
+        f"series' {degrees} lowest cosine frequencies "
+        f"({_frequency_reason(n, horizon)})"
     )
     if p_value < 0.05:
         return block, [

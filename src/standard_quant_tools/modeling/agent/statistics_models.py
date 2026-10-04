@@ -438,19 +438,18 @@ class CompareSignalsInput(BaseModel):
         ge=1,
         description=(
             "mode='paired' or 'ic_series': bars the label looks forward. "
-            "Sets the Newey-West lag of the Diebold-Mariano test (paired) "
-            "and of `hac` (ic_series, unless hac_lag is given) to "
-            "max(2 x horizon, floor(4 * (n/100)^(2/9))), capped at n - 1 "
-            "for n dates -- the lag a run's headline is tested at. Not "
-            "horizon - 1: two rows that many bars apart still share a bar, "
-            "but Bartlett weights cut there recover 68% of a 5-bar label's "
-            "long-run variance. Simulated on a 5-bar overlap over 504 "
-            "dates, the Diebold-Mariano test rejected a true zero 11.3% of "
-            "the time at a nominal 5% at lag horizon - 1 and 7.9% at this "
-            "lag. Left at 1 on an overlapping label, the lag is the Andrews "
-            "bandwidth alone (5 at 504 dates, against 10 for a 5-bar label) "
-            "and the p-value is too confident: 10.0% on the same "
-            "simulation."
+            "The Diebold-Mariano test (paired) and `hac` (ic_series, "
+            "unless hac_lag is given) are the test a run's headline makes: "
+            "a long-run variance from the series' lowest cosine "
+            "frequencies, min(floor(0.4 n^(2/3)), floor(n / (3 x "
+            "horizon))) of them for n dates, and a Student t with that many "
+            "degrees of freedom. Simulated on 5-bar overlapping loss "
+            "differentials over 504 dates, it rejected a true zero 5.2% of "
+            "the time at a nominal 5% (20-bar: 5.6%), where the previous "
+            "Newey-West rule rejected 7.6% (9.9%). Left at 1 on a 20-bar "
+            "label over 504 dates it reads 25 frequencies instead of 8 and "
+            "rejects 8.4% of the time; on a 5-bar label over 504 dates the "
+            "two coincide."
         ),
     )
 
@@ -478,12 +477,13 @@ class CompareSignalsInput(BaseModel):
         None,
         ge=0,
         description=(
-            "mode='ic_series': Bartlett-kernel lag for the "
+            "mode='ic_series': Bartlett-kernel (Newey-West) lag for the "
             "autocorrelation-consistent variance of the mean difference, "
-            "used as given. Unset, max(2 x horizon, floor(4 * "
-            "(n/100)^(2/9))), capped at n - 1: at the default horizon of 1 "
-            "the usual data-driven rule alone. Zero is the ordinary "
-            "variance of the mean and makes hac_ratio exactly 1."
+            "used as given. Unset, the variance is the one a run's "
+            "headline is tested with: the difference's lowest "
+            "min(floor(0.4 n^(2/3)), floor(n / (3 x horizon))) cosine "
+            "frequencies, reported as hac_degrees_of_freedom. Zero is the "
+            "ordinary variance of the mean and makes hac_ratio exactly 1."
         ),
     )
 
@@ -585,8 +585,9 @@ class CompareSignalsResult(BaseModel):
         description=(
             "mode='ic_series': the variance of the MEAN difference without "
             "and with the autocorrelation correction -- `hac_variance_lag0`, "
-            "`hac_variance`, the `hac_lag` used, and `hac_ratio` between "
-            "them. Above 1 the difference series is positively "
+            "`hac_variance`, the `hac_degrees_of_freedom` (cosine "
+            "frequencies) it read or the `hac_lag` named, and `hac_ratio` "
+            "between them. Above 1 the difference series is positively "
             "autocorrelated and any t-statistic computed from the ordinary "
             "variance is overstated by sqrt(hac_ratio); on a real series "
             "that factor has been measured at 2.8. Near 1 the correction "

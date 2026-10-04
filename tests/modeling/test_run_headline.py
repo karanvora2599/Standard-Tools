@@ -35,6 +35,8 @@ from standard_quant_tools.modeling.specs import (
 from standard_quant_tools.modeling.validation.comparison import (
     MIN_HEADLINE_DATES,
     andrews_lag,
+    cosine_variance,
+    headline_degrees_of_freedom,
     headline_lag,
     mean_vs_null_test,
     newey_west_variance,
@@ -49,6 +51,7 @@ HEADLINE_KEYS = {
     "t_stat_uncorrected",
     "p_value",
     "hac_lag",
+    "hac_degrees_of_freedom",
     "ic_autocorrelation_lag1",
     "beats_null",
 }
@@ -131,11 +134,33 @@ class TestTheLag:
 
 
 class TestTheMeanAgainstTheNull:
+    def test_unless_a_lag_is_named_the_t_reads_the_cosine_variance(self):
+        """The headline's test since the CHANGELOG entry of 2026-10-04: the
+        variance from the series' lowest cosine frequencies, and the
+        p-value from Student's t with as many degrees of freedom."""
+        from scipy import stats
+
+        rng = np.random.default_rng(0)
+        x = 0.1 + rng.normal(size=400)
+        out = mean_vs_null_test(x, null=0.0, horizon=5)
+        degrees = headline_degrees_of_freedom(400, 5)
+        assert out["lag"] is None and out["degrees_of_freedom"] == degrees == 21
+        assert out["t_stat"] == pytest.approx(
+            x.mean() / math.sqrt(cosine_variance(x, degrees)), rel=1e-12
+        )
+        assert out["p_value"] == pytest.approx(
+            2 * stats.t.sf(abs(out["t_stat"]), degrees), rel=1e-9
+        )
+        assert out["t_stat_uncorrected"] == pytest.approx(
+            x.mean() / math.sqrt(newey_west_variance(x, 0))
+        )
+
     def test_the_t_is_the_newey_west_one(self):
         rng = np.random.default_rng(0)
         x = 0.1 + rng.normal(size=400)
         out = mean_vs_null_test(x, null=0.0, lag=7)
         assert out["n"] == 400 and out["lag"] == 7
+        assert out["degrees_of_freedom"] is None
         assert out["t_stat"] == pytest.approx(
             x.mean() / math.sqrt(newey_west_variance(x, 7))
         )
@@ -152,9 +177,12 @@ class TestTheMeanAgainstTheNull:
         rng = np.random.default_rng(1)
         e = rng.normal(size=600)
         x = np.convolve(e, np.ones(5) / 5, mode="valid") + 0.05
-        out = mean_vs_null_test(x, lag=headline_lag(len(x), 5))
-        assert out["autocorrelation_lag1"] > 0.6
-        assert abs(out["t_stat"]) < abs(out["t_stat_uncorrected"])
+        for out in (
+            mean_vs_null_test(x, horizon=5),
+            mean_vs_null_test(x, lag=headline_lag(len(x), 5)),
+        ):
+            assert out["autocorrelation_lag1"] > 0.6
+            assert abs(out["t_stat"]) < abs(out["t_stat_uncorrected"])
 
     def test_nan_dropped_and_degenerate_series_are_nan(self):
         out = mean_vs_null_test([1.0, np.nan, 1.0, 1.0])
@@ -194,11 +222,16 @@ class TestTheHeadlineInARun:
         assert headline["metric"] == "cs_rank_ic_mean"
         assert headline["value"] == result["oos_metrics"]["cs_rank_ic_mean"]
         assert headline["n_dates"] == result["oos_metrics"]["cs_rank_ic_n_dates"]
-        assert headline["hac_lag"] == headline_lag(headline["n_dates"], 5)
+        degrees = headline_degrees_of_freedom(headline["n_dates"], 5)
+        assert headline["hac_lag"] is None
+        assert headline["hac_degrees_of_freedom"] == degrees
         assert headline["beats_null"] is False
         (line,) = _headline_warnings(result)
         assert "is not distinguishable from zero" in line
-        assert f"lag {headline['hac_lag']}, twice the 5-day label horizon" in line
+        assert (
+            f"on Student's t with {degrees} degrees of freedom, from a long-run "
+            f"variance over the series' {degrees} lowest cosine frequencies"
+        ) in line
         assert "read as independent, the same series gives t =" in line
         assert "rank regression models by" in line
 

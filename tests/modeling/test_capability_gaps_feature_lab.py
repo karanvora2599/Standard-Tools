@@ -379,7 +379,23 @@ class TestCompareFeatureSetsSaysWhenItIsInSample:
             assert side.holdout_max_abs_rank_ic is not None
 
     def test_selection_end_names_the_cutoff_for_both_sides(self, dataset, features):
+        """Without an embargo the window ends on the date named. By default
+        the tool embargoes the label's horizon before the holdout, as
+        `select_features` does (the CHANGELOG entry of 2026-10-04): the
+        embargo then ends on the named date, and the window before it."""
         result = compare_feature_sets(
+            CompareFeatureSetsInput(
+                dataset_id=dataset,
+                left=features[:1],
+                right=features,
+                selection_end="2023-06-30",
+                embargo_dates=0,
+            )
+        )
+        assert result.left.selection_window["end"] == "2023-06-30"
+        assert result.right.selection_window["end"] == "2023-06-30"
+        assert result.left.holdout_window == result.right.holdout_window
+        embargoed = compare_feature_sets(
             CompareFeatureSetsInput(
                 dataset_id=dataset,
                 left=features[:1],
@@ -387,9 +403,11 @@ class TestCompareFeatureSetsSaysWhenItIsInSample:
                 selection_end="2023-06-30",
             )
         )
-        assert result.left.selection_window["end"] == "2023-06-30"
-        assert result.right.selection_window["end"] == "2023-06-30"
-        assert result.left.holdout_window == result.right.holdout_window
+        for side in (embargoed.left, embargoed.right):
+            assert side.embargo_dates > 0
+            assert side.embargo_window["end"] == "2023-06-30"
+            assert side.selection_window["end"] < "2023-06-30"
+            assert side.holdout_window == result.left.holdout_window
 
     def test_a_one_date_panel_is_refused_by_name(self):
         """`_selection_cutoff`'s refusal, reached through the compare path:

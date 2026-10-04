@@ -2635,8 +2635,10 @@ def score_predictions(input_data: ScorePredictionsInput) -> ScorePredictionsResu
     THE HEADLINE TEST. `beats_null` and `headline` are the test a run makes
     of its own headline (see `modeling.engine._headline_report`), on these
     predictions: for a regression or ranking frame the per-date
-    cross-sectional rank IC's mean against zero, with a Newey-West t at
-    `headline_lag` for the scored dates and `horizon`, two-sided at 5%;
+    cross-sectional rank IC's mean against zero, with a t over its
+    long-run variance read against Student's t at
+    `headline_degrees_of_freedom` for the scored dates and `horizon`,
+    two-sided at 5%;
     for a classifier the AUC against 0.5, for survival the concordance
     against 0.5, as points. On a frame from `attach_model_outcomes` with
     the label's horizon it reproduces the run's own test.
@@ -2829,8 +2831,8 @@ def score_predictions(input_data: ScorePredictionsInput) -> ScorePredictionsResu
             "For a forward return over h bars pass horizon=h: the count of "
             "independent observations is roughly n / h, and a t-statistic read "
             "off the raw count is overstated by that factor. The headline "
-            "test's Newey-West lag is the Andrews bandwidth alone at "
-            "horizon=1, and max(2h, that bandwidth) at horizon=h."
+            "test reads floor(0.4 n^(2/3)) cosine frequencies of n dates at "
+            "horizon=1, and at most n / (3h) at horizon=h."
         )
 
     # The run's headline test, on these predictions. The adapter names the
@@ -3608,8 +3610,9 @@ _MODELING_TOOL_DEFS: List[tuple] = [
         "Score a predictions reference against its realized outcome — "
         "accuracy metrics, cross-sectional IC and ICIR, a predict-the-mean "
         "baseline, the headline test a run makes (`beats_null`: the mean "
-        "per-date rank IC against zero with a Newey-West t at the label's "
-        "horizon, or an AUC or concordance against 0.5), and an effective "
+        "per-date rank IC against zero with a long-run-variance t at the "
+        "label's horizon, or an AUC or concordance against 0.5), and an "
+        "effective "
         "sample size adjusted for overlapping forward returns and for "
         "outcomes that move together across entities, with the two bounds "
         "it lies between. `beats_baseline` compares r2 only. Works on "

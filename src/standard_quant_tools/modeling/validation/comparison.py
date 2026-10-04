@@ -26,13 +26,13 @@ rule that function uses, and its block indexer is reused rather than
 rewritten.
 
 THE LOSS TEST IS DIEBOLD-MARIANO, where a loss exists. For a regression
-the per-date mean squared error differential is tested against a
-Newey-West long-run variance at `headline_lag` -- max(2h, the Andrews
-bandwidth) for an h-bar label, the lag a run's headline is tested at --
-with the Harvey-Leybourne-Newbold small-sample correction; for a
-classifier the Brier differential; for a ranker there is no loss with
-units, so there is no DM and the IC difference carries the comparison
-alone.
+the per-date mean squared error differential's mean is tested the way a
+run's headline is: a long-run variance from the series' lowest cosine
+frequencies, their number set by `headline_degrees_of_freedom` for the
+dates and the label's horizon, and Student's t with that many degrees of
+freedom; for a classifier the Brier differential; for a ranker there is no
+loss with units, so there is no DM and the IC difference carries the
+comparison alone.
 
 MANY CANDIDATES AGAINST ONE REFERENCE need a multiple-testing correction,
 and the p-values come back Holm-adjusted. What Holm does not do is control
@@ -164,11 +164,12 @@ def newey_west_variance(values: np.ndarray, lag: int) -> float:
     Long-run variance of the MEAN of `values`, Bartlett kernel to `lag`.
 
     gamma_0 + 2 * sum_{k=1..lag} (1 - k/(lag+1)) * gamma_k, divided by n.
-    `lag=0` is the ordinary variance of the mean. For a series of dates
-    whose labels look h bars forward the lag is `headline_lag(n, h)`, not
-    h - 1: two rows h - 1 bars apart still share a bar, but these weights
-    shrink the autocorrelations they keep, and cut at h - 1 they recover
-    68% of a 5-bar overlap's long-run variance (see `headline_lag`).
+    `lag=0` is the ordinary variance of the mean. It is what a test reads
+    when its caller names a lag; with none named the tests here read
+    `cosine_variance` instead (see `headline_degrees_of_freedom` for why).
+    For a series of dates whose labels look h bars forward, these weights
+    shrink the autocorrelations they keep: cut at h - 1 they recover 68%
+    of a 5-bar overlap's long-run variance, at 2h 85%.
     """
     x = np.asarray(values, dtype=np.float64)
     n = x.size
@@ -183,10 +184,56 @@ def newey_west_variance(values: np.ndarray, lag: int) -> float:
     return variance / n
 
 
+def cosine_variance(values: np.ndarray, n_frequencies: int) -> float:
+    """
+    Long-run variance of the MEAN of `values` from its `n_frequencies`
+    lowest cosine frequencies, each weighted equally.
+
+    The series is projected on the orthonormal cosines
+    sqrt(2/n) * cos(pi * j * (t + 1/2) / n), j = 1..nu, each of which sums
+    to zero over the dates, so the mean does not enter them. The average
+    of the nu squared projections estimates the spectral density at zero
+    frequency, which is n times the variance of the mean; it is a sum of
+    squares, so it is never negative. Under a normal series whose spectrum
+    is flat over those frequencies, mean / sqrt(this) is distributed as
+    Student's t with nu degrees of freedom exactly: the reference
+    distribution `mean_vs_null_test` and `diebold_mariano` read the
+    p-value from. NaN with fewer than two values or no frequency.
+    """
+    x = np.asarray(values, dtype=np.float64)
+    n = int(x.size)
+    count = int(n_frequencies)
+    if n < 2 or count < 1:
+        return float("nan")
+    count = min(count, n - 1)
+    centered = x - x.mean()
+    # cos(pi * j * (2t + 1) / (2n)) depends on j * (2t + 1) only modulo 4n,
+    # so one table of 4n values serves every frequency, each angle read
+    # from its reduced integer rather than from a large float product.
+    period = 4 * n
+    table = np.cos(np.arange(period, dtype=np.float64) * (math.pi / (2.0 * n)))
+    odd = 2 * np.arange(n, dtype=np.int64) + 1
+    total = 0.0
+    for j in range(1, count + 1):
+        projection = float(np.dot(table[(j * odd) % period], centered))
+        total += projection * projection
+    return (2.0 / n) * total / count / n
+
+
 #: Fewer finite dates than this and a headline is not tested against its
 #: null: a long-run variance read off a handful of dates is not an
 #: estimate of anything. The same floor `compare_ic_series` refuses at.
 MIN_HEADLINE_DATES = 10
+
+#: The cosine frequencies a test of a mean over n dates averages, before
+#: the label's horizon caps them: floor(0.4 * n ** (2/3)), the rule
+#: Lazarus, Lewis, Stock and Watson (2018) give for this estimator.
+COSINE_FREQUENCY_SCALE = 0.4
+
+#: An h-bar label gets at most n / (3h) frequencies, so the highest one
+#: read has a period of at least 6h dates, where the spectrum of an h-bar
+#: overlap is still within 9% of its value at zero frequency.
+HORIZONS_PER_FREQUENCY = 3
 
 
 def andrews_lag(n_dates: int) -> int:
@@ -199,29 +246,16 @@ def andrews_lag(n_dates: int) -> int:
 
 def headline_lag(n_dates: int, horizon: Optional[int]) -> int:
     """
-    The Newey-West lag a run's headline is tested at: max(2h, the Andrews
-    bandwidth), capped at `n_dates - 1`, with h the target horizon. Without
-    a horizon, the Andrews bandwidth alone.
+    The Newey-West lag a run's headline was tested at before the CHANGELOG
+    entry of 2026-10-04 that replaced it: max(2h, the Andrews bandwidth),
+    capped at `n_dates - 1`, with h the target horizon; without a horizon,
+    the Andrews bandwidth alone.
 
-    ONE RULE FOR EVERY MEAN OVER DATES. The same lag is used wherever a
-    per-date series is tested and its horizon is known: the run's headline
-    (`modeling.engine`), `score_predictions`' headline, the Diebold-Mariano
-    test of `paired_comparison` (`compare_models(method='paired')`,
-    `compare_signals(mode='paired')`) and `compare_signals(mode=
-    'ic_series')`'s long-run variance. A lag the caller names is used as
-    named.
-
-    WHY 2h AND NOT h - 1. Daily ICs of an h-day forward-return label share
-    up to h - 1 days of outcome, so their autocorrelation falls roughly
-    linearly to zero at lag h, and the overlap contributes a long-run
-    variance of h times the daily one. Bartlett weights cut off at lag
-    h - 1 discount those same autocorrelations a second time and recover
-    1 + 2 * sum_{k<h} (1 - k/h)^2 of the h: 3.4 of 5, 68%, for a 5-day
-    label. A selection-side simulation of the plain h - 1 rule rejected a
-    true zero mean 9.6% of the time at a nominal 5%. At lag 2h the same
-    weights recover 4.27 of 5 (85%), and the Andrews term keeps the lag
-    growing with the sample for a short horizon whose ICs persist for
-    other reasons.
+    No test here reads it unless asked: a lag named to `mean_vs_null_test`,
+    `diebold_mariano` or `compare_signals(hac_lag=...)` is used as named,
+    and `mean_vs_null_test(values, lag=headline_lag(n, h))` returns the
+    t and p a run reported before, to the bit. See
+    `headline_degrees_of_freedom` for the rule that replaced it and why.
     """
     n = int(n_dates)
     if n < 2:
@@ -232,17 +266,81 @@ def headline_lag(n_dates: int, horizon: Optional[int]) -> int:
     return int(min(lag, n - 1))
 
 
+def headline_degrees_of_freedom(n_dates: int, horizon: Optional[int]) -> int:
+    """
+    How many cosine frequencies a test of a mean over `n_dates` dates
+    averages, which is also the degrees of freedom of the Student t it is
+    read against: min(floor(0.4 * n^(2/3)), floor(n / (3h))), at least 1
+    and at most n - 1, with h the label's horizon (1 without one). 25 at
+    504 dates for a 1- or 5-bar label, 16 for a 10-bar, 8 for a 20-bar.
+
+    ONE RULE FOR EVERY MEAN OVER DATES. The run's headline
+    (`modeling.engine`), `score_predictions`' headline, the Diebold-
+    Mariano test of `paired_comparison` (`compare_models(method=
+    'paired')`, `compare_signals(mode='paired')`) and `compare_signals(
+    mode='ic_series')`'s long-run variance all read it. A Newey-West lag the
+    caller names is used as named, at the normal critical value, as before.
+
+    WHY NOT A NEWEY-WEST LAG. Daily values built on an h-bar label share
+    up to h - 1 bars, so their autocorrelation falls roughly linearly to
+    zero at lag h. Bartlett weights shrink those autocorrelations a second
+    time, and a variance estimated from the same dates it is applied to is
+    biased low and noisy besides; read against the normal, the t is too
+    large. The previous rule, Bartlett at max(2h, the Andrews bandwidth),
+    rejected a true zero mean, at a nominal 5%, 7.2% of the time for a
+    5-bar label over 504 dates (10.9% for a 20-bar label) on simulated
+    per-date rank ICs of a persistent feature against a 30-name cross-
+    section, and 21.9% for a 20-bar label over 126 dates. The best
+    Newey-West variant tried, lag 4h with a fixed-b critical value, still
+    rejected 6.1% to 6.9% for a 20-bar label over 252 to 2,000 dates.
+
+    This rule rejects 4.6% to 5.9% of the time on every one of the twenty
+    cells of horizon 1, 5, 10, 20 by 126, 252, 504, 1,000, 2,000 dates
+    (5,000 draws each), and 4.8% to 5.6% on simulated Diebold-Mariano loss
+    differentials (20,000 each). The cost is power where the dates are few
+    for the horizon: against a mean of 2.5 true standard errors it rejects
+    67% of the time at 504 dates and a 5-bar label, where a test that knew
+    the variance would reject 70%, and 34% at 126 dates and a 20-bar label,
+    where only six non-overlapping labels exist (see the CHANGELOG entry of
+    2026-10-04).
+    """
+    n = int(n_dates)
+    if n < 2:
+        return 0
+    h = int(horizon) if horizon is not None and int(horizon) > 0 else 1
+    nu = int(math.floor(COSINE_FREQUENCY_SCALE * float(n) ** (2.0 / 3.0)))
+    nu = min(nu, n // (HORIZONS_PER_FREQUENCY * h))
+    return int(max(1, min(nu, n - 1)))
+
+
+def _student_t_p_value(statistic: float, degrees_of_freedom: int) -> float:
+    """Two-sided p-value of `statistic` under Student's t."""
+    from scipy.special import stdtr
+
+    return float(2.0 * stdtr(float(degrees_of_freedom), -abs(statistic)))
+
+
 def mean_vs_null_test(
-    values: Any, *, null: float = 0.0, lag: int = 0
+    values: Any,
+    *,
+    null: float = 0.0,
+    lag: Optional[int] = None,
+    horizon: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Whether the mean of a serially correlated series differs from `null`.
 
-    The t statistic divides the mean's distance from `null` by the square
-    root of `newey_west_variance(values, lag)`; the p-value is two-sided
-    under the normal approximation. `t_stat_uncorrected` is the same
-    statistic at lag 0 -- the series read as independent -- reported beside
-    it so a reader can see how much the correction moved it, and
+    Unless a `lag` is named, the t statistic divides the mean's distance
+    from `null` by the square root of `cosine_variance` at
+    `headline_degrees_of_freedom(n, horizon)` frequencies, and the p-value
+    is two-sided under Student's t with that many degrees of freedom
+    (`degrees_of_freedom`; `lag` is then None). A named `lag` is used as
+    named: a Newey-West variance at that lag and a two-sided normal
+    p-value, which at `headline_lag(n, horizon)` is the test a run's
+    headline made before the CHANGELOG entry of 2026-10-04, to the bit.
+    `t_stat_uncorrected` is the same distance over the ordinary standard
+    error -- the series read as independent -- reported beside it so a
+    reader can see how much the correction moved it, and
     `autocorrelation_lag1` is the plainest sign of why. Non-finite values
     are dropped first. With fewer than two values, or no variance, the
     statistics are NaN rather than a number that means nothing.
@@ -251,11 +349,15 @@ def mean_vs_null_test(
     x = x[np.isfinite(x)]
     n = int(x.size)
     nan = float("nan")
+    degrees: Optional[int] = None
+    if lag is None:
+        degrees = headline_degrees_of_freedom(n, horizon) if n >= 2 else None
     out: Dict[str, Any] = {
         "n": n,
         "mean": float(x.mean()) if n else nan,
         "null": float(null),
-        "lag": int(lag),
+        "lag": None if lag is None else int(lag),
+        "degrees_of_freedom": degrees,
         "t_stat": nan,
         "t_stat_uncorrected": nan,
         "p_value": nan,
@@ -269,12 +371,23 @@ def mean_vs_null_test(
         out["autocorrelation_lag1"] = float(
             np.dot(centered[1:], centered[:-1]) / denominator
         )
+    if float(np.ptp(x)) == 0.0:
+        # Every value the same. Their mean is rounded, so the deviations
+        # from it are a few ulps rather than zero, and a variance of those
+        # made a t of 1e31 out of a constant.
+        return out
     distance = float(x.mean()) - float(null)
-    variance = newey_west_variance(x, int(lag))
+    if lag is None:
+        variance = cosine_variance(x, int(degrees or 0))
+    else:
+        variance = newey_west_variance(x, int(lag))
     if math.isfinite(variance) and variance > 0.0:
         t_stat = distance / math.sqrt(variance)
         out["t_stat"] = float(t_stat)
-        out["p_value"] = float(math.erfc(abs(t_stat) / math.sqrt(2.0)))
+        if lag is None:
+            out["p_value"] = _student_t_p_value(t_stat, int(degrees or 0))
+        else:
+            out["p_value"] = float(math.erfc(abs(t_stat) / math.sqrt(2.0)))
     plain = newey_west_variance(x, 0)
     if math.isfinite(plain) and plain > 0.0:
         out["t_stat_uncorrected"] = float(distance / math.sqrt(plain))
@@ -291,22 +404,24 @@ def diebold_mariano(
     """
     Diebold-Mariano on the per-date loss differential `loss_a - loss_b`.
 
-    A POSITIVE statistic means B's loss is smaller. The variance is
-    Newey-West at `lag`, or, when no lag is named, at `headline_lag` for
-    the dates and `horizon` -- max(2h, the Andrews bandwidth), the Andrews
-    bandwidth alone without a horizon. The statistic carries the Harvey-
-    Leybourne-Newbold correction for the small samples this is used on, at
-    the forecast horizon: `horizon` when given, else `lag + 1` for a named
-    lag (the reading of a lag as h - 1 this function used to take), else
-    one. The p-value is two-sided normal. NaN when the differential has no
-    variance, which two identical models produce and which is not evidence
-    of anything.
+    A POSITIVE statistic means B's loss is smaller. Unless a lag is named,
+    the variance is `cosine_variance` at `headline_degrees_of_freedom` for
+    the dates and `horizon`, and the p-value is two-sided under Student's t
+    with that many degrees of freedom (`degrees_of_freedom`; `lag` is then
+    None) -- the test a run's headline makes. NaN when the differential
+    has no variance, which two identical models produce and which is not
+    evidence of anything.
 
-    The lag used to be h - 1 for an h-bar label. These Bartlett weights cut
-    there recover 68% of a 5-bar overlap's long-run variance: on 4,000
-    simulated differentials of a 5-bar overlap over 504 dates the test
-    rejected a true zero 11.3% of the time at a nominal 5% at lag 4, and
-    7.9% at lag 10 (see the CHANGELOG entry of 2026-10-04).
+    A NAMED LAG is used as named, as before: a Newey-West variance at that
+    lag, the Harvey-Leybourne-Newbold correction at the forecast horizon
+    (`horizon` when given, else `lag + 1`), and a normal p-value.
+    `lag=h - 1` is the statistic this function returned first and
+    `lag=headline_lag(n, h), horizon=h` the one it returned until the
+    CHANGELOG entry of 2026-10-04, each to the bit. On 20,000 simulated
+    differentials of a 5-bar overlap over 504 dates the second rejected a
+    true zero 7.6% of the time at a nominal 5% (20-bar: 9.9%), and the
+    first more (11.3% on 4,000); the default now rejects 5.2% (20-bar:
+    5.6%).
     """
     from scipy.stats import norm
 
@@ -320,14 +435,27 @@ def diebold_mariano(
         )
     differential = (joined["a"] - joined["b"]).to_numpy(dtype=np.float64)
     mean = float(differential.mean())
+    if lag is None:
+        degrees = headline_degrees_of_freedom(n, horizon)
+        variance = cosine_variance(differential, degrees)
+        result: Dict[str, Any] = {
+            "statistic": float("nan"),
+            "p_value": float("nan"),
+            "mean_differential": mean,
+            "lag": None,
+            "degrees_of_freedom": int(degrees),
+            "n_dates": n,
+        }
+        if math.isfinite(variance) and variance > 0.0:
+            statistic = float(mean / math.sqrt(variance))
+            result["statistic"] = statistic
+            result["p_value"] = _student_t_p_value(statistic, degrees)
+        return result
+
     if horizon is not None and int(horizon) > 0:
         h = int(horizon)
-    elif lag is not None:
-        h = int(lag) + 1
     else:
-        h = 1
-    if lag is None:
-        lag = headline_lag(n, horizon)
+        h = int(lag) + 1
     variance = newey_west_variance(differential, int(lag))
     if not math.isfinite(variance) or variance <= 0.0:
         return {
@@ -335,6 +463,7 @@ def diebold_mariano(
             "p_value": float("nan"),
             "mean_differential": mean,
             "lag": int(lag),
+            "degrees_of_freedom": None,
             "n_dates": n,
         }
     correction = math.sqrt(max((n + 1 - 2 * h + h * (h - 1) / n) / n, 1e-12))
@@ -344,6 +473,7 @@ def diebold_mariano(
         "p_value": float(2.0 * norm.sf(abs(statistic))),
         "mean_differential": mean,
         "lag": int(lag),
+        "degrees_of_freedom": None,
         "n_dates": n,
     }
 
@@ -473,7 +603,7 @@ def paired_comparison(
     labels under the same name. The per-date `metric` is computed for each
     on the joined rows, the difference series is bootstrapped, and where
     the task has a loss with units the Diebold-Mariano test is reported
-    beside it, its Newey-West lag `headline_lag` of the shared dates and
+    beside it, at `headline_degrees_of_freedom` of the shared dates and
     `horizon`.
     """
     if metric not in COMPARISON_METRICS:
@@ -525,9 +655,11 @@ def paired_comparison(
     loss_a = _per_date_loss(joined, "a", task)
     loss_b = _per_date_loss(joined, "b", task)
     if loss_a is not None and loss_b is not None:
-        # The lag is `headline_lag` for the shared dates and the horizon, the
-        # run headline's rule. It was horizon - 1 (zero without a horizon),
-        # which under-corrects an overlapping label: see `headline_lag`.
+        # The run headline's test, at `headline_degrees_of_freedom` for the
+        # shared dates and the horizon. It was a Newey-West variance at
+        # horizon - 1, then at `headline_lag`, both read against the normal,
+        # and both too confident on an overlapping label: see
+        # `headline_degrees_of_freedom`.
         dm = diebold_mariano(loss_a, loss_b, horizon=horizon)
         dm["loss"] = "squared_error" if task == "regression" else "brier"
 
@@ -558,13 +690,17 @@ def paired_comparison(
 
 __all__ = [
     "COMPARISON_METRICS",
+    "COSINE_FREQUENCY_SCALE",
+    "HORIZONS_PER_FREQUENCY",
     "MIN_HEADLINE_DATES",
     "REQUIRED_COLUMNS",
     "andrews_lag",
     "bh_adjust",
     "bonferroni_adjust",
     "compare_ic_series",
+    "cosine_variance",
     "diebold_mariano",
+    "headline_degrees_of_freedom",
     "headline_lag",
     "holm_adjust",
     "mean_vs_null_test",

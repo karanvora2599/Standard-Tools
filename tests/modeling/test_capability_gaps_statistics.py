@@ -568,8 +568,10 @@ class TestTheIcSeries:
         )
         assert persistent.hac["hac_ratio"] > 1.0
         assert persistent.hac["hac_variance"] > persistent.hac["hac_variance_lag0"]
-        # floor(4 * (400/100)^(2/9)) = 5 on four hundred dates.
-        assert persistent.hac["hac_lag"] == pytest.approx(5.0)
+        # floor(0.4 * 400^(2/3)) = 21 cosine frequencies on four hundred
+        # dates; no lag was named.
+        assert persistent.hac["hac_degrees_of_freedom"] == pytest.approx(21.0)
+        assert persistent.hac["hac_lag"] is None
         assert noise.hac["hac_ratio"] == pytest.approx(1.0, abs=0.25)
         assert any("autocorrelated" in note for note in persistent.warnings)
         assert not any("autocorrelated" in note for note in noise.warnings)

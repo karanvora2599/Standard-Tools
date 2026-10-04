@@ -512,9 +512,11 @@ class RunModelExperimentResult(BaseModel):
         "the result, or expose how much of the walk-forward schedule "
         "actually ran. `headline` is the task's headline metric (the one "
         "compare_models and list_models rank by) against what a model with "
-        "no skill scores: for a cross-sectional rank IC, the Newey-West t "
-        "of its pooled per-date series at lag max(2 x horizon, Andrews), "
-        "with the uncorrected t, two-sided p and the series' lag-1 "
+        "no skill scores: for a cross-sectional rank IC, the t of its "
+        "pooled per-date series over a long-run variance from its lowest "
+        "cosine frequencies, two-sided against Student's t with "
+        "`hac_degrees_of_freedom` = min(0.4 n^(2/3), n / (3 x horizon)) "
+        "for n dates, with the uncorrected t and the series' lag-1 "
         "autocorrelation; for an AUC or a concordance, a comparison with "
         "0.5; `beats_null` is true when it beats the null at 5%. "
         "`importance_source` says where feature_importance_summary came "
@@ -1791,9 +1793,11 @@ class PairedComparison(BaseModel):
         None,
         description="The loss test where the task has a loss with units; "
         "None for a ranker. A positive statistic means the candidate's loss "
-        "is smaller. `lag` is its Newey-West lag, max(2 x horizon, "
-        "floor(4 * (n/100)^(2/9))) capped at n - 1 for the n shared dates "
-        "and the label's horizon: the lag a run's headline is tested at.",
+        "is smaller. It is the test a run's headline makes: a long-run "
+        "variance from the differential's lowest cosine frequencies and a "
+        "two-sided Student's t with `degrees_of_freedom` = min(0.4 "
+        "n^(2/3), n / (3 x horizon)) for the n shared dates and the "
+        "label's horizon; `lag` is null.",
     )
     warnings: List[str] = Field(default_factory=list)
 
@@ -2070,9 +2074,9 @@ class ScorePredictionsInput(BaseModel):
         ge=1,
         description=(
             "The label's forward horizon in bars, for the effective sample "
-            "size under overlapping labels and the Newey-West lag of the "
-            "headline test, max(2 x horizon, the Andrews bandwidth). 1 "
-            "applies no overlap adjustment; pass the horizon the target was "
+            "size under overlapping labels and the headline test, which "
+            "reads at most n / (3 x horizon) cosine frequencies of n dates. "
+            "1 applies no overlap adjustment; pass the horizon the target was "
             "built with (TargetSpec.horizon, or attach_model_outcomes' "
             "`horizon`) and the count of independent observations is "
             "deflated accordingly."
@@ -2146,8 +2150,9 @@ class ScorePredictionsResult(ExplainsNulls):
             "Whether the headline metric beats what a model with no skill "
             "scores, the test run_model_experiment makes of its own "
             "headline: for regression and ranking, the mean per-date "
-            "cross-sectional rank IC above zero at 5%, two-sided, by a "
-            "Newey-West t; for classification, the AUC above 0.5; for "
+            "cross-sectional rank IC above zero at 5%, two-sided, by a t "
+            "over the series' long-run variance against Student's t; for "
+            "classification, the AUC above 0.5; for "
             "survival, the concordance above 0.5. None when it was not "
             "tested (fewer than 10 dates, a single entity, or daily values "
             "that do not vary), and `warnings` says which."
@@ -2160,9 +2165,12 @@ class ScorePredictionsResult(ExplainsNulls):
             "validation_report.headline: `metric` (cs_rank_ic_mean, auc or "
             "cs_concordance_mean), `null`, `value`, `n_dates`, `t_stat`, "
             "`t_stat_uncorrected` (the same series read as independent), "
-            "`p_value`, `hac_lag` (max(2 x horizon, floor(4 * "
-            "(n/100)^(2/9))), capped at n - 1), `ic_autocorrelation_lag1` "
-            "and `beats_null`. The test statistics are null for a metric "
+            "`p_value`, `hac_degrees_of_freedom` (min(floor(0.4 n^(2/3)), "
+            "floor(n / (3 x horizon))) for n dates: the cosine frequencies "
+            "the long-run variance averages and the Student t's degrees of "
+            "freedom), `hac_lag` (null: the variance has no lag), "
+            "`ic_autocorrelation_lag1` and `beats_null`. The test "
+            "statistics are null for a metric "
             "compared as a point. Read at the Spearman rank IC whatever "
             "ic_method says."
         ),

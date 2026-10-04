@@ -32,7 +32,9 @@ from standard_quant_tools.modeling.specs import (
     TargetSpec,
     ValidationSpec,
 )
-from standard_quant_tools.modeling.validation.comparison import headline_lag
+from standard_quant_tools.modeling.validation.comparison import (
+    headline_degrees_of_freedom,
+)
 
 UNIVERSE = ["AAA", "BBB", "CCC", "DDD", "EEE", "FFF"]
 
@@ -118,12 +120,12 @@ class TestADifferentCandidate:
         }
         assert pair.diebold_mariano is not None
         assert pair.diebold_mariano["loss"] == "squared_error"
-        # A five-bar label: max(2 x 5, the Andrews bandwidth), the run
-        # headline's lag, not the four bars two labels share.
-        assert pair.diebold_mariano["lag"] == headline_lag(
-            pair.diebold_mariano["n_dates"], 5
-        )
-        assert pair.diebold_mariano["lag"] == 10
+        # A five-bar label: the run headline's test, at the cosine
+        # frequencies its rule gives the shared dates and the horizon.
+        assert pair.diebold_mariano["lag"] is None
+        assert pair.diebold_mariano[
+            "degrees_of_freedom"
+        ] == headline_degrees_of_freedom(pair.diebold_mariano["n_dates"], 5)
         # The headline ranking is still reported beside it.
         assert {c.model_id for c in result.comparisons} == {a, b}
 

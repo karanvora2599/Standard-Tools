@@ -664,6 +664,6 @@ class TestTheExperimentResultKeepsTheEnginesWarnings:
         assert headline["beats_null"] is False
         assert len(result.warnings) == 1
         assert result.warnings[0].startswith("cs_rank_ic_mean is ")
-        assert "Newey-West" in result.warnings[0]
+        assert "lowest cosine frequencies" in result.warnings[0]
         # `notes` arrives beside it, always a list.
         assert isinstance(result.notes, list)

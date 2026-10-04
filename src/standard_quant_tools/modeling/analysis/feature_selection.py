@@ -31,7 +31,9 @@ import pandas as pd
 
 from standard_quant_tools.error import ValidationError
 
+from ..dataset.alignment import LABEL_END_COL
 from ..limits import MAX_PERMUTATION_DRAWS
+from ..preprocessing.base import refuse_mixed_time_zones
 from ..validation.comparison import bh_adjust
 from .feature_report import (
     _abs_rank_ic,
@@ -151,6 +153,132 @@ def _window(dates: pd.DatetimeIndex) -> Dict[str, Any]:
         "end": _date_label(dates[-1]),
         "n_dates": int(len(dates)),
     }
+
+
+def _split_at_holdout(
+    panel: pd.DataFrame,
+    dates: pd.DatetimeIndex,
+    cutoff: Optional[pd.Timestamp],
+    embargo_dates: int,
+    caller: str,
+) -> Dict[str, Any]:
+    """
+    The rows a selection or a summary reads, the rows it holds out, and the
+    embargo between them.
+
+    THE EMBARGO IS BY ROW. With `embargo_dates` = h above zero, a row of
+    the selection window is dropped when it is dated on one of the
+    window's last h dates -- its label, h bars long, ends on or after the
+    holdout's first date -- or when its recorded `label_end_date` falls on
+    or after that date. The second catches what the first cannot: on a
+    ragged panel, an entity with dates missing reaches its h-th bar later
+    than the panel's own calendar does, so its label can end in the holdout
+    from earlier in the window. A row with no recorded end is taken to end
+    h of the panel's dates after its own. Zero is no embargo, the window as
+    it was. The holdout is the same either way.
+
+    Returns `selection` and `holdout` (the rows), `selection_window`,
+    `holdout_window` (None without a holdout), `embargoed` (the window's
+    last h dates), `embargo_rows` (every row dropped) and `reach_rows` (the
+    earlier rows dropped for their recorded end).
+    """
+    empty = dates[0:0]
+    if cutoff is None:
+        return {
+            "selection": panel,
+            "holdout": panel.iloc[0:0],
+            "selection_window": _window(dates),
+            "holdout_window": None,
+            "embargoed": empty,
+            "embargo_rows": 0,
+            "reach_rows": 0,
+        }
+    date_values = pd.to_datetime(panel["date"])
+    held = dates[dates > cutoff]
+    holdout = panel[date_values > cutoff]
+    if not embargo_dates:
+        return {
+            "selection": panel[date_values <= cutoff],
+            "holdout": holdout,
+            # `end` is the cutoff as asked for, not the last date at or
+            # before it: a caller who named `selection_end` should read
+            # their own date back rather than the nearest trading day to it.
+            "selection_window": {
+                "start": _date_label(dates[0]),
+                "end": _date_label(cutoff),
+                "n_dates": int((dates <= cutoff).sum()),
+            },
+            "holdout_window": _window(held),
+            "embargoed": empty,
+            "embargo_rows": 0,
+            "reach_rows": 0,
+        }
+
+    h = int(embargo_dates)
+    before = dates[dates <= cutoff]
+    if h >= len(before):
+        raise ValidationError(
+            f"{caller}: embargo_dates={embargo_dates} would "
+            f"leave no date to select on: the selection window holds "
+            f"{len(before)} date(s) through {_date_label(cutoff)}. "
+            "Lower embargo_dates, or hold out fewer dates."
+        )
+    embargoed = before[-h:]
+    last_read = before[-h - 1]
+    in_window = date_values <= cutoff
+    dropped = in_window & (date_values > last_read)
+    reach_rows = 0
+    if LABEL_END_COL in panel.columns:
+        refuse_mixed_time_zones(panel["date"], panel[LABEL_END_COL], caller)
+        ends = pd.to_datetime(panel[LABEL_END_COL])
+        reaching = in_window & ~dropped & (ends >= held[0])
+        reach_rows = int(reaching.sum())
+        dropped = dropped | reaching
+    read = in_window & ~dropped
+    read_dates = dates[dates <= last_read]
+    if reach_rows:
+        present = pd.DatetimeIndex(date_values[read].unique())
+        read_dates = read_dates[read_dates.isin(present)]
+        if len(read_dates) == 0:
+            raise ValidationError(
+                f"{caller}: every row of the selection window through "
+                f"{_date_label(last_read)} has a recorded label_end_date "
+                f"on or after the holdout's first date, {_date_label(held[0])}, "
+                "so the embargo leaves nothing to select on. Hold out fewer "
+                "dates, or check the label_end_date column."
+            )
+    return {
+        "selection": panel[read],
+        "holdout": holdout,
+        "selection_window": {
+            "start": _date_label(read_dates[0]),
+            "end": _date_label(read_dates[-1]),
+            "n_dates": int(len(read_dates)),
+        },
+        "holdout_window": _window(held),
+        "embargoed": embargoed,
+        "embargo_rows": int(dropped.sum()),
+        "reach_rows": reach_rows,
+    }
+
+
+def _embargo_sentence(split: Dict[str, Any], what: str) -> str:
+    """What the embargo dropped, as the clause that follows "Selected on
+    dates through <end>; " or "Summarised on dates through <end>; "."""
+    window = _window(split["embargoed"])
+    count = window["n_dates"]
+    if split["reach_rows"]:
+        return (
+            f"the {count} date(s) after it, through {window['end']}, were "
+            f"embargoed, and so were {split['reach_rows']} earlier row(s) "
+            "whose recorded label_end_date falls in the holdout, so no "
+            f"label {what} read ends inside the holdout."
+        )
+    return (
+        f"the {count} date(s) after it, through {window['end']}, were "
+        f"embargoed, so no label of up to {count} bar(s) that {what} read "
+        "ends inside the holdout."
+    )
 
 
 def _check_gate_arguments(
@@ -411,25 +539,11 @@ def select_features(
         )
 
     dates, cutoff = _selection_cutoff(panel, selection_end, holdout_fraction)
-    embargoed = dates[0:0]
-    if cutoff is None:
-        selection_panel, holdout_panel = panel, panel.iloc[0:0]
-    else:
-        date_values = pd.to_datetime(panel["date"])
-        last_read = cutoff
-        if embargo_dates:
-            before = dates[dates <= cutoff]
-            if int(embargo_dates) >= len(before):
-                raise ValidationError(
-                    f"select_features: embargo_dates={embargo_dates} would "
-                    f"leave no date to select on: the selection window holds "
-                    f"{len(before)} date(s) through {_date_label(cutoff)}. "
-                    "Lower embargo_dates, or hold out fewer dates."
-                )
-            embargoed = before[-int(embargo_dates) :]
-            last_read = before[-int(embargo_dates) - 1]
-        selection_panel = panel[date_values <= last_read]
-        holdout_panel = panel[date_values > cutoff]
+    split = _split_at_holdout(
+        panel, dates, cutoff, int(embargo_dates), "select_features"
+    )
+    selection_panel, holdout_panel = split["selection"], split["holdout"]
+    embargoed = split["embargoed"]
 
     predictive = feature_predictive_stats(selection_panel, feature_ids)
     redundancy = redundancy_report(
@@ -553,9 +667,9 @@ def select_features(
 
     warnings: List[str] = []
     holdout_ic: Dict[str, Optional[float]] = {}
-    holdout_window: Optional[Dict[str, Any]] = None
+    selection_window = split["selection_window"]
+    holdout_window = split["holdout_window"]
     if cutoff is None:
-        selection_window = _window(dates)
         warnings.append(
             "WARNING: the selection read the WHOLE panel, holdout included. "
             "Every selection IC below is in-sample by construction, and a "
@@ -566,29 +680,16 @@ def select_features(
             "and read the holdout IC instead."
         )
     else:
-        held = dates[dates > cutoff]
-        # `end` is the cutoff as asked for, not the last date at or before
-        # it: a caller who named `selection_end` should read their own date
-        # back rather than the nearest trading day to it. Under an embargo
-        # it is the last date the selection read.
-        selection_window = {
-            "start": _date_label(dates[0]),
-            "end": _date_label(cutoff if not len(embargoed) else last_read),
-            "n_dates": int((dates <= cutoff).sum()) - int(len(embargoed)),
-        }
-        holdout_window = _window(held)
+        # Under an embargo `end` is the last date the selection read;
+        # without one, the cutoff as asked for (see `_split_at_holdout`).
         if kept:
             holdout_stats = feature_predictive_stats(holdout_panel, kept)
             holdout_ic = {f: _signed_rank_ic(holdout_stats, f) for f in kept}
         if len(embargoed):
-            embargo_window = _window(embargoed)
             warnings.append(
-                f"Selected on dates through {selection_window['end']}; the "
-                f"{embargo_window['n_dates']} date(s) after it, through "
-                f"{embargo_window['end']}, were embargoed, so no label of up "
-                f"to {embargo_window['n_dates']} bar(s) that the selection "
-                "read ends inside the holdout. `holdout_ic` is each "
-                "selected feature's rank IC on the "
+                f"Selected on dates through {selection_window['end']}; "
+                + _embargo_sentence(split, "the selection")
+                + " `holdout_ic` is each selected feature's rank IC on the "
                 f"{holdout_window['n_dates']} date(s) after the embargo, which "
                 "the selection never read. That is the number to believe: "
                 "`selection_ic` chose the features and is optimistic by "
@@ -642,6 +743,7 @@ def select_features(
         "holdout_window": holdout_window,
         "embargo_dates": int(len(embargoed)),
         "embargo_window": _window(embargoed) if len(embargoed) else None,
+        "embargo_rows": int(split["embargo_rows"]),
         "selection_ic": {f: _signed_rank_ic(predictive, f) for f in feature_ids},
         "selection_p_value": p_values,
         "selection_p_value_adjusted": adjusted,
@@ -757,6 +859,7 @@ def summarize_feature_set(
     selection_end: Any = None,
     holdout_fraction: float = 0.0,
     caller: str = "summarize_feature_set",
+    embargo_dates: int = 0,
 ) -> Dict[str, Any]:
     """
     One feature set, as the handful of numbers worth comparing.
@@ -772,26 +875,26 @@ def summarize_feature_set(
     `holdout_max_abs_rank_ic`. The default is 0.0 -- every date, no holdout
     -- so the numbers a caller already has do not move; a zero fraction is
     then a statement the caller's warnings have to make, not a silence.
+
+    `embargo_dates` is the embargo `select_features` applies, by the same
+    rule (see `_split_at_holdout`): with a holdout, the summary does not
+    read the rows whose labels end inside it. 0, the default, reads the
+    window as it was, to the bit.
     """
     feature_ids = list(feature_ids)
     _named_once(panel, feature_ids, caller)
+    if int(embargo_dates) < 0:
+        raise ValidationError(
+            f"{caller}: embargo_dates={embargo_dates!r} must be zero or more."
+        )
     dates, cutoff = _selection_cutoff(
         panel, selection_end, holdout_fraction, caller=caller
     )
-    holdout_window: Optional[Dict[str, Any]] = None
-    if cutoff is None:
-        selection_panel, holdout_panel = panel, panel.iloc[0:0]
-        selection_window = _window(dates)
-    else:
-        date_values = pd.to_datetime(panel["date"])
-        selection_panel = panel[date_values <= cutoff]
-        holdout_panel = panel[date_values > cutoff]
-        selection_window = {
-            "start": _date_label(dates[0]),
-            "end": _date_label(cutoff),
-            "n_dates": int((dates <= cutoff).sum()),
-        }
-        holdout_window = _window(dates[dates > cutoff])
+    split = _split_at_holdout(panel, dates, cutoff, int(embargo_dates), caller)
+    selection_panel, holdout_panel = split["selection"], split["holdout"]
+    selection_window = split["selection_window"]
+    holdout_window = split["holdout_window"]
+    embargoed = split["embargoed"]
 
     predictive = feature_predictive_stats(selection_panel, feature_ids)
     redundancy = redundancy_report(
@@ -820,6 +923,9 @@ def summarize_feature_set(
         "condition_number": float(redundancy["condition_number"]),
         "selection_window": selection_window,
         "holdout_window": holdout_window,
+        "embargo_dates": int(len(embargoed)),
+        "embargo_window": _window(embargoed) if len(embargoed) else None,
+        "embargo_rows": int(split["embargo_rows"]),
         "holdout_mean_abs_rank_ic": holdout_mean,
         "holdout_max_abs_rank_ic": holdout_max,
     }
@@ -833,6 +939,7 @@ def compare_feature_sets(
     cluster_threshold: float = 0.9,
     selection_end: Any = None,
     holdout_fraction: float = 0.0,
+    embargo_dates: int = 0,
 ) -> Dict[str, Any]:
     """
     Two feature sets on the same panel, with the cost of the difference
@@ -859,7 +966,10 @@ def compare_feature_sets(
 
     Pass `holdout_fraction` (or `selection_end`) and each set is summarised
     on the earlier dates and re-measured on the later ones, which is the
-    comparison worth acting on.
+    comparison worth acting on. `embargo_dates` then leaves out the rows
+    whose labels end inside the holdout, by the rule `select_features`
+    applies (see `_split_at_holdout`); 0, the default, reads the window as
+    it was.
     """
     left, right = list(left), list(right)
     if not left or not right:
@@ -873,17 +983,21 @@ def compare_feature_sets(
     _named_once(panel, right, "compare_feature_sets", field="right")
 
     everything = sorted(set(left) | set(right))
-    _dates, cutoff = _selection_cutoff(
+    if int(embargo_dates) < 0:
+        raise ValidationError(
+            f"compare_feature_sets: embargo_dates={embargo_dates!r} must be "
+            "zero or more."
+        )
+    dates, cutoff = _selection_cutoff(
         panel, selection_end, holdout_fraction, caller="compare_feature_sets"
     )
-    # The per-feature table reads the same window the summaries do. A table
+    # The per-feature table reads the same rows the summaries do. A table
     # measured on the whole panel beside a summary that held dates out would
     # be two answers to one question, and the wider one is the optimistic one.
-    if cutoff is None:
-        summary_panel = panel
-    else:
-        summary_panel = panel[pd.to_datetime(panel["date"]) <= cutoff]
-    predictive = feature_predictive_stats(summary_panel, everything)
+    split = _split_at_holdout(
+        panel, dates, cutoff, int(embargo_dates), "compare_feature_sets"
+    )
+    predictive = feature_predictive_stats(split["selection"], everything)
 
     left_summary = summarize_feature_set(
         panel,
@@ -892,6 +1006,7 @@ def compare_feature_sets(
         selection_end=selection_end,
         holdout_fraction=holdout_fraction,
         caller="compare_feature_sets",
+        embargo_dates=embargo_dates,
     )
     right_summary = summarize_feature_set(
         panel,
@@ -900,6 +1015,7 @@ def compare_feature_sets(
         selection_end=selection_end,
         holdout_fraction=holdout_fraction,
         caller="compare_feature_sets",
+        embargo_dates=embargo_dates,
     )
 
     warnings: List[str] = []
@@ -916,12 +1032,24 @@ def compare_feature_sets(
         )
     else:
         n_held = int(left_summary["holdout_window"]["n_dates"])
-        warnings.append(
-            f"Summarised on dates through {left_summary['selection_window']['end']};"
-            f" `holdout_mean_abs_rank_ic` is each set's mean |rank IC| on the "
-            f"{n_held} date(s) after it, which neither summary read. Compare "
-            "the sets on that: `mean_abs_rank_ic` is in-sample."
-        )
+        if len(split["embargoed"]):
+            warnings.append(
+                "Summarised on dates through "
+                f"{left_summary['selection_window']['end']}; "
+                + _embargo_sentence(split, "either summary")
+                + " `holdout_mean_abs_rank_ic` is each set's mean |rank IC| "
+                f"on the {n_held} date(s) after the embargo, which neither "
+                "summary read. Compare the sets on that: `mean_abs_rank_ic` "
+                "is in-sample."
+            )
+        else:
+            warnings.append(
+                "Summarised on dates through "
+                f"{left_summary['selection_window']['end']};"
+                f" `holdout_mean_abs_rank_ic` is each set's mean |rank IC| on "
+                f"the {n_held} date(s) after it, which neither summary read. "
+                "Compare the sets on that: `mean_abs_rank_ic` is in-sample."
+            )
         if n_held < 20:
             warnings.append(
                 f"NOTE: the holdout is {n_held} date(s), too few for a rank IC "

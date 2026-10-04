@@ -673,9 +673,12 @@ class SelectFeaturesInput(BaseModel):
         "ends inside the holdout. Unset (default), the dataset's target "
         "horizon (5 for forward_return_rank:5): a label dated on one of the "
         "window's last h dates looks h bars forward, into the dates the "
-        "holdout is scored on. The holdout is unchanged. 0 selects on the "
-        "window as it was before the embargo, to the bit. Applies only when "
-        "there is a holdout.",
+        "holdout is scored on. Any earlier row whose recorded "
+        "label_end_date falls in the holdout is dropped too, which on a "
+        "panel with dates missing for some entities can happen before the "
+        "last h dates. The holdout is unchanged. 0 selects on the window as "
+        "it was before the embargo, to the bit. Applies only when there is "
+        "a holdout.",
     )
     holdout_fraction: float = Field(
         0.3,
@@ -728,6 +731,12 @@ class SelectFeaturesResult(BaseModel):
         None,
         description="start/end/n_dates of the embargoed dates, or None when "
         "none were.",
+    )
+    embargo_rows: int = Field(
+        0,
+        description="Selection-window rows the embargo dropped: every row on "
+        "the embargoed dates and every earlier one whose recorded "
+        "label_end_date falls in the holdout. 0 without an embargo.",
     )
     selection_ic: Dict[str, Stat] = Field(
         default_factory=dict,
@@ -835,6 +844,22 @@ class FeatureSetSummary(BaseModel):
         description="start/end/n_dates of the dates held out, or None when "
         "the summary read the whole panel.",
     )
+    embargo_dates: int = Field(
+        0,
+        description="Dates between the summary's window and the holdout "
+        "that neither read; 0 without a holdout or an embargo.",
+    )
+    embargo_window: Optional[Dict[str, Any]] = Field(
+        None,
+        description="start/end/n_dates of the embargoed dates, or None when "
+        "none were.",
+    )
+    embargo_rows: int = Field(
+        0,
+        description="Rows of the summary's window the embargo dropped: every "
+        "row on the embargoed dates and every earlier one whose recorded "
+        "label_end_date falls in the holdout.",
+    )
     holdout_mean_abs_rank_ic: Stat = Field(
         None,
         description="Mean |rank IC| over the set on the held-out dates, "
@@ -905,6 +930,17 @@ class CompareFeatureSetsInput(BaseModel):
         "which is in-sample by construction and warned about in so many "
         "words. 0.3 summarises on the first 70% and reports each set's IC on "
         "the last 30%, which is the comparison worth acting on.",
+    )
+    embargo_dates: Optional[int] = Field(
+        None,
+        ge=0,
+        description="With a holdout, dates dropped from the end of the "
+        "summaries' window so that no label they read ends inside the "
+        "holdout, as select_features drops them: the window's last "
+        "embargo_dates dates and any earlier row whose recorded "
+        "label_end_date falls in the holdout. Unset (default), the "
+        "dataset's target horizon. 0 summarises the window as it was, to "
+        "the bit. Nothing is embargoed without a holdout.",
     )
 
     @field_validator("selection_end")

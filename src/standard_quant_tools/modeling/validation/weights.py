@@ -80,6 +80,10 @@ except ImportError:
 # the final whole-panel refit.
 
 
+#: NaT as `_as_int64_ns` returns it, the sentinel the kernel tests for.
+_NAT_NS = np.iinfo(np.int64).min
+
+
 def _as_int64_ns(values: np.ndarray) -> np.ndarray:
     """
     Datetime values as int64 nanoseconds, without a pandas round trip when
@@ -144,13 +148,26 @@ def label_uniqueness_weights(
     if missing.any():
         entity_codes = np.where(missing, int(entity_codes.max()) + 1, entity_codes)
 
+    # Both backends read the same int64 nanoseconds, NaT as INT64_MIN. The
+    # Python path used to sort and search the arrays as given. A direct
+    # caller's zoned column arrives as an object array of Timestamps, where
+    # NaT compares false against everything and numpy's search, which
+    # narrows its range from the previous key, placed the keys after a
+    # missing label end wrongly: weights up to 2.7 (mean 1) off the
+    # kernel's on a 720-row panel. A missing DATE, which numpy sorts last
+    # and the kernel first, put even a naive column up to 3.7 off. On the
+    # same integers the two agree to the bit (see the CHANGELOG entry of
+    # 2026-10-04).
+    date_ns = _as_int64_ns(dates)
+    end_ns = _as_int64_ns(label_end_dates)
+
     if HAS_CPP:
         # Timestamps rather than integer offsets because `horizon` counts
         # each ENTITY's own bars: with entities on different calendars,
         # t+horizon of one entity is not t+horizon of the global date axis.
         native = _cpp_core.label_uniqueness(
-            _as_int64_ns(dates),
-            _as_int64_ns(label_end_dates),
+            date_ns,
+            end_ns,
             np.ascontiguousarray(entity_codes, dtype=np.int64),
             int(entity_codes.max()) + 1 if entity_codes.size else 0,
         )
@@ -161,8 +178,8 @@ def label_uniqueness_weights(
         rows = np.flatnonzero(entity_codes == code)
         if rows.size == 0:
             continue
-        row_dates = dates[rows]
-        row_ends = label_end_dates[rows]
+        row_dates = date_ns[rows]
+        row_ends = end_ns[rows]
         order = np.argsort(row_dates, kind="stable")
         rows = rows[order]
         row_dates = row_dates[order]
@@ -173,7 +190,7 @@ def label_uniqueness_weights(
         # different calendar is handled without assuming a shared grid.
         axis = row_dates
         start_pos = np.arange(row_dates.size)
-        finite_end = pd.notna(row_ends)
+        finite_end = row_ends != _NAT_NS
         end_pos = np.where(
             finite_end,
             np.searchsorted(axis, row_ends, side="right") - 1,

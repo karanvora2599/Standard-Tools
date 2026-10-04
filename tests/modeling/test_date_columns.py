@@ -177,6 +177,53 @@ class TestTheIndexAndTheWeights:
         )
         assert got.tobytes() == want.tobytes()
 
+    @pytest.mark.parametrize("tz", [None, *ZONES])
+    @pytest.mark.parametrize("unit", ["s", "ns"])
+    @pytest.mark.parametrize(
+        "method", ["label_uniqueness", "uniqueness_and_time_decay"]
+    )
+    def test_a_direct_caller_s_timestamps_weigh_the_same_on_both_backends(
+        self, monkeypatch, tz, unit, method
+    ):
+        """A caller of `build_sample_weights` who passes a zoned column's
+        `to_numpy()` hands over an object array of Timestamps, here with
+        label ends missing at the end of the sample and inside it, and one
+        missing date. The Python backend sorted and searched those objects
+        directly: the keys after a missing end were placed wrongly (weights
+        up to 2.7, mean 1, off the kernel's on this panel), and the missing
+        date, which numpy sorts last and the kernel first, put even the
+        naive column up to 3.7 off (see the CHANGELOG entry of 2026-10-04).
+        It now converts its inputs to the nanoseconds the kernel reads, and
+        the two agree to the bit, and with the same column as naive UTC
+        instants."""
+        if not weights_module.HAS_CPP:
+            pytest.skip("native extension not built")
+        panel = _panel(tz, missing_ends=3, gaps=9).sample(frac=1.0, random_state=2)
+        zone = "" if tz is None else f", {tz}"
+        for column in ("date", "label_end_date"):
+            panel[column] = panel[column].astype(f"datetime64[{unit}{zone}]")
+        panel.loc[panel.index[17], "date"] = pd.NaT
+        dates = panel["date"].to_numpy()
+        ends = panel["label_end_date"].to_numpy()
+        assert (dates.dtype == object) == (tz is not None)
+        entities = panel["entity"].to_numpy()
+        weights = {}
+        for native in (True, False):
+            monkeypatch.setattr(weights_module, "HAS_CPP", native)
+            weights[native] = build_sample_weights(method, dates, ends, entities, 30.0)
+        assert weights[True].tobytes() == weights[False].tobytes()
+        if tz is not None:
+            instants = _naive(panel)
+            monkeypatch.setattr(weights_module, "HAS_CPP", False)
+            utc = build_sample_weights(
+                method,
+                instants["date"].to_numpy(),
+                instants["label_end_date"].to_numpy(),
+                entities,
+                30.0,
+            )
+            assert utc.tobytes() == weights[False].tobytes()
+
 
 class TestARun:
     SPEC = ModelSpec(
