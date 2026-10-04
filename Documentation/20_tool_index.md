@@ -35,7 +35,7 @@ scoped to four categories rather than all of them, so it advertises 58 of the
 | Runtime | Tools | Schema cost | Categories | Deep documentation |
 |---|---:|---:|---|---|
 | `research` | 42 | 62 KB | `screener`, `analysis`, `quant_research` | [08_analysis.md](08_analysis.md), [23_inference.md](23_inference.md) |
-| `modeling` | 38 | 181 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
+| `modeling` | 38 | 182 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
 | `backtest` | 35 | 86 KB | `backtest_execution`, `backtest_validation`, `custom_signal` | [04_backtesting.md](04_backtesting.md), [24_overfitting.md](24_overfitting.md) |
 | `meta` | 25 | 24 KB | `discovery`, `provenance` | [27_meta.md](27_meta.md), [10_auditability.md](10_auditability.md) |
 | `data` | 21 | 36 KB | *(one surface)* | [26_data.md](26_data.md) |
@@ -43,7 +43,7 @@ scoped to four categories rather than all of them, so it advertises 58 of the
 | `delta_one` | 18 | 44 KB | *(one surface)* | [28_delta_one.md](28_delta_one.md) |
 | `microstructure` | 17 | 31 KB | *(one surface)* | [22_microstructure.md](22_microstructure.md) |
 | `derivatives` | 12 | 23 KB | *(one surface)* | [21_derivatives.md](21_derivatives.md) |
-| `feature_lab` | 11 | 44 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
+| `feature_lab` | 11 | 46 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
 | **Total** | **238** | | | |
 
 ---
@@ -600,7 +600,7 @@ Score the quantile and interval columns of a published predictions reference aga
 
 #### `score_predictions`
 
-Score a predictions reference against its realized outcome — accuracy metrics, cross-sectional IC and ICIR, a predict-the-mean baseline, and an effective sample size adjusted for overlapping forward returns and for outcomes that move together across entities, with the two bounds it lies between. Works on predictions this library never produced.
+Score a predictions reference against its realized outcome — accuracy metrics, cross-sectional IC and ICIR, a predict-the-mean baseline, the headline test a run makes (`beats_null`: the mean per-date rank IC against zero with a Newey-West t at the label's horizon, or an AUC or concordance against 0.5), and an effective sample size adjusted for overlapping forward returns and for outcomes that move together across entities, with the two bounds it lies between. `beats_baseline` compares r2 only. Works on predictions this library never produced.
 
 **Required:** `predictions_ref`, `task`  
 **Optional:** `target_column`, `prediction_column`, `ic_method`, `ndcg_cutoffs`, `horizon`, `train_mean`, `event_column`
@@ -1760,7 +1760,7 @@ Every feature's drift and every feature's regime dependence in one pass: PSI and
 
 #### `select_features`
 
-Choose a feature set from a built dataset: keep one feature per redundancy cluster, apply an optional IC floor, drop what does not pass a permutation test against the target, and return a reason for every exclusion. The test (significance='entity_shuffle', default) runs on the selection window only, before the holdout is read: each cluster representative's mean rank IC against the same feature series handed to randomly permuted entities, kept at p < alpha (0.05); drops are reason 'insignificant' with their p-value, and selection_p_value carries every tested p. On the live panel it kept 2 of 8. 'circular_shift' is the screen's null; 'none' keeps every non-redundant feature above the floor, as before the test existed, and warns. Needs at least 4-5 entities. Deliberately has no greedy search -- a selector scored on the panel it selects from manufactures overfit that looks like evidence. Redundancy is resolved before the floor and the test, because a cluster is one signal. The redundancy work comes back with the answer -- the clusters get_feature_redundancy would return, the keeper each duplicate was dropped for, VIF, condition number and collinear_features -- so the diagnostics need no second call.
+Choose a feature set from a built dataset: keep one feature per redundancy cluster, apply an optional IC floor, drop what does not pass a permutation test against the target, and return a reason for every exclusion. The test (significance='entity_shuffle', default) runs on the selection window only, before the holdout is read: each cluster representative's mean rank IC against the same feature series handed to randomly permuted entities, kept at p < alpha (0.05); drops are reason 'insignificant' with their p-value, and selection_p_value carries every tested p. On the live panel it kept 2 of 8. correction='bh' passes on Benjamini-Hochberg adjusted p-values instead (off by default). 'circular_shift' is the screen's null; 'none' keeps every non-redundant feature above the floor, as before the test existed, and warns. Needs at least 4-5 entities. The last `embargo_dates` dates before the holdout (the target horizon by default) are read by neither side, so no label the selection reads ends inside the holdout. Deliberately has no greedy search -- a selector scored on the panel it selects from manufactures overfit that looks like evidence. Redundancy is resolved before the floor and the test, because a cluster is one signal. The redundancy work comes back with the answer -- the clusters get_feature_redundancy would return, the keeper each duplicate was dropped for, VIF, condition number and collinear_features -- so the diagnostics need no second call.
 
 **Required:** `dataset_id`  
-**Optional:** `features`, `cluster_threshold`, `min_abs_rank_ic`, `max_features`, `significance`, `alpha`, `n_permutations`, `random_seed`, `max_draws`, `selection_end`, `holdout_fraction`, `include_correlation`
+**Optional:** `features`, `cluster_threshold`, `min_abs_rank_ic`, `max_features`, `significance`, `alpha`, `correction`, `n_permutations`, `random_seed`, `max_draws`, `selection_end`, `embargo_dates`, `holdout_fraction`, `include_correlation`
