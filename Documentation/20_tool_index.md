@@ -2,7 +2,7 @@
 
 Every tool in the library, by runtime, with the description the model
 actually sees. **Generated from the live registry** by
-`scripts/generate_tool_index.py` -- a test regenerates it and fails if
+`scripts/generate_tool_index.py` -- a test renders it and fails if
 this file has drifted, so a tool added without regenerating breaks the
 suite in the commit that added it.
 
@@ -37,13 +37,13 @@ scoped to four categories rather than all of them, so it advertises 58 of the
 | `research` | 42 | 62 KB | `screener`, `analysis`, `quant_research` | [08_analysis.md](08_analysis.md), [23_inference.md](23_inference.md) |
 | `modeling` | 38 | 182 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
 | `backtest` | 35 | 86 KB | `backtest_execution`, `backtest_validation`, `custom_signal` | [04_backtesting.md](04_backtesting.md), [24_overfitting.md](24_overfitting.md) |
-| `meta` | 25 | 24 KB | `discovery`, `provenance` | [27_meta.md](27_meta.md), [10_auditability.md](10_auditability.md) |
+| `meta` | 25 | 25 KB | `discovery`, `provenance` | [27_meta.md](27_meta.md), [10_auditability.md](10_auditability.md) |
 | `data` | 21 | 36 KB | *(one surface)* | [26_data.md](26_data.md) |
 | `portfolio` | 19 | 36 KB | `portfolio_risk` | [05_portfolio.md](05_portfolio.md) |
 | `delta_one` | 18 | 44 KB | *(one surface)* | [28_delta_one.md](28_delta_one.md) |
 | `microstructure` | 17 | 31 KB | *(one surface)* | [22_microstructure.md](22_microstructure.md) |
 | `derivatives` | 12 | 23 KB | *(one surface)* | [21_derivatives.md](21_derivatives.md) |
-| `feature_lab` | 11 | 46 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
+| `feature_lab` | 11 | 47 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
 | **Total** | **238** | | | |
 
 ---
@@ -420,7 +420,7 @@ Rank registered models side by side on their out-of-sample metrics, or -- with m
 
 #### `compare_signals`
 
-Decide whether one signal actually beat another, and correct a family of p-values for having asked more than once. Three modes. mode='paired' compares two published prediction frames on the rows both predicted -- the per-date difference series, a block-bootstrap interval on its mean, and a Diebold-Mariano loss test where the task has a loss with units -- with no registry and no shared manifest required, so an externally computed alpha compares against a model here. mode='ic_series' takes two per-date information-coefficient series inline from anywhere and adds the Newey-West variance of the difference beside the ordinary one: the ratio says how much a t-statistic computed without the correction was overstated, and on a real series it has been measured at 2.8. mode='adjust' applies Holm, Bonferroni or Benjamini-Hochberg to p-values from ANY source -- the correction that a researcher with twelve candidate signals otherwise has no way to reach. Read the verdict, not the headline: a difference of 0.006 in daily IC is routinely inside the noise of one out-of-sample sample, and sorting on it selects the model that got the friendlier draw. None of these corrections controls for the candidates having been SELECTED on this same sample; that is what run_reality_check exists for, and the result says so.
+Decide whether one signal actually beat another, and correct a family of p-values for having asked more than once. Three modes. mode='paired' compares two published prediction frames on the rows both predicted -- the per-date difference series, a block-bootstrap interval on its mean, and a Diebold-Mariano loss test where the task has a loss with units -- with no registry and no shared manifest required, so an externally computed alpha compares against a model here. mode='ic_series' takes two per-date information-coefficient series inline from anywhere and adds the long-run variance of the difference beside the ordinary one: the ratio says how much a t-statistic computed without the correction was overstated, and on a real series it has been measured at 2.8. mode='adjust' applies Holm, Bonferroni or Benjamini-Hochberg to p-values from ANY source -- the correction that a researcher with twelve candidate signals otherwise has no way to reach. Read the verdict, not the headline: a difference of 0.006 in daily IC is routinely inside the noise of one out-of-sample sample, and sorting on it selects the model that got the friendlier draw. None of these corrections controls for the candidates having been SELECTED on this same sample; that is what run_reality_check exists for, and the result says so.
 
 **Required:** `mode`  
 **Optional:** `predictions_ref_a`, `predictions_ref_b`, `task`, `metric`, `horizon`, `ic_a`, `ic_b`, `hac_lag`, `n_bootstrap`, `block_size`, `confidence`, `seed`, `p_values`, `method`, `alpha`
@@ -600,7 +600,7 @@ Score the quantile and interval columns of a published predictions reference aga
 
 #### `score_predictions`
 
-Score a predictions reference against its realized outcome — accuracy metrics, cross-sectional IC and ICIR, a predict-the-mean baseline, the headline test a run makes (`beats_null`: the mean per-date rank IC against zero with a Newey-West t at the label's horizon, or an AUC or concordance against 0.5), and an effective sample size adjusted for overlapping forward returns and for outcomes that move together across entities, with the two bounds it lies between. `beats_baseline` compares r2 only. Works on predictions this library never produced.
+Score a predictions reference against its realized outcome — accuracy metrics, cross-sectional IC and ICIR, a predict-the-mean baseline, the headline test a run makes (`beats_null`: the mean per-date rank IC against zero with a long-run-variance t at the label's horizon, or an AUC or concordance against 0.5), and an effective sample size adjusted for overlapping forward returns and for outcomes that move together across entities, with the two bounds it lies between. `beats_baseline` compares r2 only. Works on predictions this library never produced.
 
 **Required:** `predictions_ref`, `task`  
 **Optional:** `target_column`, `prediction_column`, `ic_method`, `ndcg_cutoffs`, `horizon`, `train_mean`, `event_column`
@@ -1042,7 +1042,7 @@ Search the decision log by tool, status and date, and get back the request ids e
 
 #### `replay_decision`
 
-Re-run a recorded call and classify the result: reproduced, data_changed (the inputs were revised, so a different answer is expected), code_changed (inputs identical, output differs — the only case implicating the library), or not_comparable.
+Re-run a recorded call and classify the result: reproduced, reproduced_to_12_digits (a bit-level miss that agrees to twelve digits on a different build), data_changed (the inputs were revised, so a different answer is expected), data_undecided (only earlier-form input hashes differ, and the replay cannot tell a revision from a pandas difference), code_changed (inputs identical, output differs — the only case implicating the library), or not_comparable.
 
 **Required:** `request_id`
 
@@ -1690,10 +1690,10 @@ Interrogate the FEATURES of a built dataset, before and independently of fitting
 
 #### `compare_feature_sets`
 
-Two feature sets measured on the same panel, with the cost of the difference attached: per-set IC, independent-signal count and condition number, what is unique to each side, and the per-feature IC table. Not a single score, because a larger set almost always has a higher maximum IC and almost always more collinearity, and one number hides half of that trade. By default both sets are summarised on every date, which is in-sample by construction and warned about; holdout_fraction summarises on an earlier window and re-measures each set on the dates neither summary read.
+Two feature sets measured on the same panel, with the cost of the difference attached: per-set IC, independent-signal count and condition number, what is unique to each side, and the per-feature IC table. Not a single score, because a larger set almost always has a higher maximum IC and almost always more collinearity, and one number hides half of that trade. By default both sets are summarised on every date, which is in-sample by construction and warned about; holdout_fraction summarises on an earlier window and re-measures each set on the dates neither summary read, with the last `embargo_dates` dates before the holdout (the target horizon by default) read by neither.
 
 **Required:** `dataset_id`, `left`, `right`  
-**Optional:** `cluster_threshold`, `selection_end`, `holdout_fraction`
+**Optional:** `cluster_threshold`, `selection_end`, `holdout_fraction`, `embargo_dates`
 
 #### `get_feature_drift`
 

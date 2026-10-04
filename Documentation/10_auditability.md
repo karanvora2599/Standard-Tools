@@ -711,7 +711,14 @@ miss means the data changed. An entry without the key holds
 spelled str`) and is unchanged data. A miss under every variant is reported
 as undecided: the record does not say which pandas wrote it, so the check
 cannot tell a revision from a pandas difference, and the note says so
-rather than blaming the provider. Every entry carries `hash_version`;
+rather than blaming the provider. Such an entry carries `undecided: true`;
+its `match` stays `false`, because the hashes differ. When the output
+misses and every differing source is undecided, `replay_decision` returns
+`data_undecided`, not `data_changed`: the replay cannot say whether the
+data, the code or the pandas version moved the output, and the note about
+a provider that does not guarantee point-in-time values is not added.
+`sqt replay` prints `undecided` beside such a source and exits `1`. Every
+entry carries `hash_version`;
 `match` is `null` when the record and the replay hashed in forms that
 cannot be compared (an unversioned digest from a provider outside the
 library against a versioned one).
@@ -777,7 +784,7 @@ it saw.**
 | The C runtime's version | `exp`, `log`, `erf` and the rest are the C runtime's. On Windows that is `ucrtbase.dll`, an OS component Windows Update replaces, so an OS update can move the last bits of an unchanged build. | `platform.crt`, with `platform.os` and `platform.machine` | yes |
 | The C runtime's FMA3 path | The UCRT has FMA3 implementations of its transcendental functions and takes them on a CPU that supports them. Measured: 0.146% of `exp` and 0.112% of `erf` inputs give different bits on the two paths. This reaches the **pure-Python path** too, through `math.exp` and `math.erf`. | `platform.crt_fma3` | yes |
 | The extension's instruction-set path | The AVX2+FMA kernels fuse and reorder (below). | `native_isa` | yes |
-| The BLAS thread count, for outputs computed through LAPACK | OpenBLAS's factorizations change in the last bits with its thread count. The library's own covariance-sized factorizations run on one BLAS thread (see [16_performance.md](16_performance.md#runtime-defaults-openmp-wait-policy-and-blas-threads)), so for those the result no longer depends on the machine's core count; a LAPACK call the library does not wrap still does. | not recorded | no |
+| The BLAS thread count, for outputs computed through BLAS and LAPACK | OpenBLAS's products and factorizations change in the last bits with its thread count. The library's own covariance-sized products and factorizations run on one BLAS thread (see [16_performance.md](16_performance.md#runtime-defaults-openmp-wait-policy-and-blas-threads)), so for those the result no longer depends on the machine's core count; a call the library does not wrap still does. | not recorded | no |
 | NumPy, SciPy and pandas, and the BLAS they load | Their own reductions and SIMD kernels round too, and change between releases. | not recorded (`package_version` is this library's) | no |
 
 Every recorded condition is compared, even ones where measurement found no
@@ -842,7 +849,7 @@ replay compares the rounded hash and every condition the record names:
 |---|---|---|---|---|
 | any | match | — | `reproduced` | 0 |
 | a recorded condition differs | miss | match | `reproduced_to_12_digits` — not a code change | 3 |
-| every recorded condition the same | miss | match or miss | unchanged: `code_changed`, or `data_changed` if an input moved; a note says when twelve digits agree and names what the record cannot see | 1 |
+| every recorded condition the same | miss | match or miss | unchanged: `code_changed`, `data_changed` if an input moved, or `data_undecided` if every input that differs is an undecided earlier-form hash; a note says when twelve digits agree and names what the record cannot see | 1 |
 | a recorded condition differs | miss | miss | unchanged, with a note that the difference does not account for it on its own | 1 |
 | record predates the rounded hash | miss | — | unchanged, with a note | 1 |
 
@@ -878,9 +885,9 @@ confirmed mismatch (1) — so automation can tell a different build or
 platform from a regression.
 
 The record still cannot see three things: compiler flags given only on the
-command line, the BLAS thread count for LAPACK calls the library does not
-wrap, and the NumPy, SciPy and pandas versions. When a miss on the same
-recorded conditions agrees to twelve digits, its note says so and names
+command line, the BLAS thread count for BLAS and LAPACK calls the library
+does not wrap, and the NumPy, SciPy and pandas versions. When a miss on the
+same recorded conditions agrees to twelve digits, its note says so and names
 what the record does not cover: compiler flags given outside the build
 files, the Python-side libraries, and the BLAS they load. A record written
 before `native_detail` and `platform` keeps its old note word for word.
@@ -984,7 +991,9 @@ terminal instead of a `ReplayResult` object.
 
 **Exit codes (`sqt replay` only):** `0` — `output_match` is `True` (the
 output reproduced exactly); `1` — `output_match` is `False` (a confirmed
-mismatch — code or data changed the result); `2` — `output_match` is `None`
+mismatch — code or data changed the result; also when every input that
+differs is an undecided earlier-form hash, `data_undecided`, where the
+replay cannot tell which); `2` — `output_match` is `None`
 (the stored record has no `output_hash` to compare against, so replay
 success is indeterminate, not confirmed); `3` — the exact hash missed, but
 the output agrees to twelve significant digits and the record names a

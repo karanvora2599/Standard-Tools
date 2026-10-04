@@ -415,8 +415,9 @@ OpenBLAS 0.3.31). The answers also differ in their last bits with the thread
 count. The PSD repair (`_repair_psd`), `max_diversification`'s
 pseudo-inverse and condition number, `pca_returns`' SVD,
 `estimate_covariance`'s eigenvalues, the portfolio optimizers' condition
-numbers, the exact mean-variance solve and every fit on a modeling pool run
-on one thread, through a reference-counted, process-wide limit so concurrent
+numbers, the exact mean-variance solve, the closed-form frontier's and
+Black-Litterman's inverses and every fit on a modeling pool run on one
+thread, through a reference-counted, process-wide limit so concurrent
 callers cannot undo each other. The result is the same bits on any core
 count, at 1.3–10× the speed. At 235 assets, before and after (medians of
 15–30 repetitions on a shared workstation):
@@ -436,18 +437,46 @@ The already-PSD row is mostly a second change: a Cholesky factorization now
 decides that no repair is needed (see
 [05_portfolio.md](05_portfolio.md#an-indefinite-covariance-is-repaired-and-the-repair-is-named)).
 The Ledoit-Wolf row includes no longer computing a precision matrix nothing
-read. Products that gain from threads keep them — the sample and Ledoit-Wolf
-Gram matrices, the EWMA product, PCA's factor-return product — so an EWMA
-covariance and PCA's `factor_returns` still vary in their last bits with the
-core count. So can a sample or Ledoit-Wolf covariance, including the one
-`DataFrame.cov()` computes for the optimizers, on some OpenBLAS builds:
-numpy's on CI's Linux and Windows runners gave the 1,260 × 235 product
-different last bits at one and four threads, where this machine's did not.
-A condition number or eigenvalue reported from such a matrix is still the
-one-thread value of that matrix. While any caller is inside the limit, BLAS work on other threads
-of the process also runs on one thread. `SQT_BLAS_THREADS` sets another
-count; 0 disables the limit. `threadpoolctl`, a declared dependency, applies
-it; where it finds no BLAS it can control, the limit does nothing.
+read.
+
+**The products that build a covariance run on one thread too.** The
+sample, Ledoit-Wolf and EWMA covariances, the `DataFrame.cov()` the
+optimizers read (np.cov when nothing is missing; with gaps it is pandas'
+own pairwise loop, which uses no BLAS), PCA's factor returns, and the
+network features' and lead-lag correlations are matrix products whose last
+bits followed the thread count: np.cov's on CI's Linux and Windows runners,
+the others under OpenBLAS 0.3.27 and 0.3.31 at 16 threads. So did every
+output built from them. Under the same limit, `estimate_covariance`, the
+optimizers, `pca_returns`, `lead_lag_matrix` and the network features
+return the same bits on any machine with the same BLAS. Matrix-vector
+products outside these blocks (a portfolio's variance, an optimizer's
+gradient) keep the caller's setting; they gave the same bits at 1, 2, 4 and
+16 threads on every build measured. The cost, run before and after call by
+call in lockstep on a shared 16-thread machine, as the range of the minimum
+and median ratios after/before on both interpreters:
+
+| Call | 1,260 × 235 | 2,106 × 500 |
+|---|---|---|
+| `estimate_covariance`, sample | 0.15–0.59× | 0.46–0.91× |
+| `estimate_covariance`, Ledoit-Wolf | 0.13–0.46× | 0.34–0.95× |
+| `estimate_covariance`, EWMA | 0.36–0.69× | 0.84–1.19× |
+| `mean_variance_optimize`, long-only minimum volatility | 0.23–0.64× | 0.52–0.91× |
+| `mean_variance_optimize`, closed form (shorting, no cap) | 0.11–0.21× | — |
+| `hierarchical_risk_parity` | 0.79–0.92× | — |
+| `pca_returns` | 0.97–1.03× | 1.05–1.22× |
+| `lead_lag_matrix` (235 / 500 names over 1,260 days) | 0.26–0.59× | 0.79–1.30× |
+| network correlation, 126 days × 1,000 names | — | 1.17–1.50× |
+
+At 30 assets the median ratios are 0.87–1.04×, inside the noise of an
+unchanged control call. The product that loses most is PCA's factor-return
+product at 2,106 × 500, 3.0–7.2× as long on one thread; the network
+features' four products over 1,000 names take 1.8–3.4× as long.
+`SQT_BLAS_THREADS=0` gives the products, with the factorizations, the
+caller's threads back. While any caller is inside the limit, BLAS work on
+other threads of the process also runs on one thread. `SQT_BLAS_THREADS`
+sets another count; 0 disables the limit. `threadpoolctl`, a declared
+dependency, applies it; where it finds no BLAS it can control, the limit
+does nothing.
 
 ---
 ## When a kernel goes parallel

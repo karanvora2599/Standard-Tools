@@ -175,7 +175,7 @@ A request that's actually infeasible (e.g. a `target_return` no long-only portfo
 
 `objective="target_return"`/`"target_volatility"` need the matching `target_return`/`target_volatility` argument (annualized). A `target_volatility` below the global minimum-variance portfolio's own volatility is infeasible and raises `ValidationError` immediately.
 
-`result["warnings"]` carries the optimizer's own caveats: the small-sample covariance warning, the ill-conditioning warning below, and anything the independent weight check found. `result["condition_number"]` is reported as a number at every level, not only above a threshold. It is computed on one BLAS thread — here, and for the portfolio optimization tool's risk parity and Black-Litterman alike — so the same covariance reports the same `condition_number` on any machine, where at 235 assets it used to change in the last bits with the number of threads.
+`result["warnings"]` carries the optimizer's own caveats: the small-sample covariance warning, the ill-conditioning warning below, and anything the independent weight check found. `result["condition_number"]` is reported as a number at every level, not only above a threshold. It is computed on one BLAS thread — here, and for the portfolio optimization tool's risk parity and Black-Litterman alike — and so is the covariance it is the condition number of, so the same returns report the same `condition_number` on any machine with the same BLAS, where at 235 assets it used to change in the last bits with the number of threads.
 
 `result["solver"]` holds:
 
@@ -193,7 +193,7 @@ The agent tool's `SolverReport` carries `certificate`, `certified` and `fallback
 2. SLSQP as before, then the fast method started from its answer.
 3. SLSQP's own answer, with `certified=False` and a warning carrying its residuals.
 
-Every exact stage ends with the same KKT solve on its final active set, so stages reaching the same active set give the same bits. The exact solve and its certificate run on one BLAS thread, so the same input gives the same bits on any core count.
+Every exact stage ends with the same KKT solve on its final active set, so stages reaching the same active set give the same bits. The exact solve and its certificate run on one BLAS thread, so the same input gives the same bits on any core count. So do the covariance product and the closed form's inverse (`allow_short=True` with no `max_weight`), whose weights moved by up to 3e-13 relative between one and two threads before 2026-10-04.
 
 **A stopped solver says what happened.** `warnings` names SLSQP's status and message and the residual against each requested constraint (sum to 1, bounds, target), plus the KKT residuals where they apply. Status 8 is a line search that could not improve at the requested precision; measured, its weights met sum-to-1 to 2e-11 and sat within 2e-9 of the optimum — it does not mean the constraints are infeasible. It used to be logged as weights that "may violate the sum-to-1 constraint", and the agent tool added "constraints may be infeasible"; neither was true.
 
@@ -786,13 +786,16 @@ unbiasing denominator `1 − Σw²` was exactly zero and a raw numpy
 `LinAlgError` escaped, and between 0.019 and 0.05 a matrix with a condition
 number of 1e12–1e17 came back without a warning.
 
-The condition number and smallest eigenvalue are computed on one BLAS
-thread, so the same matrix gives the same bits on any machine. The matrix's
-own product keeps its threads: an EWMA matrix's last bits follow the core
-count, and on some OpenBLAS builds a sample or Ledoit-Wolf matrix's do too. A
-Ledoit-Wolf estimate no longer has scikit-learn compute the precision matrix
-it stores by default, which nothing read: that was 15–27 ms of a 23–33 ms
-fit at 235 assets, and skipping it leaves the bits identical.
+The matrix, its condition number and its smallest eigenvalue are computed
+on one BLAS thread, the product that builds the matrix as well as the
+eigendecomposition, so the same returns give the same bits on any machine
+with the same BLAS. Until 2026-10-04 the product kept the caller's threads:
+an EWMA matrix's last bits followed the core count, by up to 1.8e-12
+relative at 235 assets, and on CI's OpenBLAS a sample or Ledoit-Wolf
+matrix's did too. A Ledoit-Wolf estimate no longer has scikit-learn compute
+the precision matrix it stores by default, which nothing read: that was
+15–27 ms of a 23–33 ms fit at 235 assets, and skipping it leaves the bits
+identical.
 
 ## Planning the transition
 

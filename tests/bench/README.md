@@ -49,8 +49,8 @@ copy, so the import-time source check still matches.
 out to 500/2,000 tickers. The multiplication is printed alongside the measured
 unit cost so the extrapolation is visible and checkable, not baked in.
 
-`bench_modeling.py` backs every modelling figure in the CHANGELOG.
-It patches `DataFactory` with a synthetic in-memory universe, so no measurement
+`bench_modeling.py` backs the CHANGELOG's synthetic-panel modelling figures:
+the IC kernel, dataset builds, engine runs and per-estimator runs. It patches `DataFactory` with a synthetic in-memory universe, so no measurement
 includes network time. Its `build` section attributes time to feature
 computation directly rather than A/B-ing whole builds: repeated on an ordinary
 workstation, a whole-build A/B of the same change returned ratios from 0.62x to

@@ -1,5 +1,49 @@
 # Changelog
 
+## The guides say what the code does now, with their figures measured again
+
+- **The guides describe these changes**: the cosine-frequency test and
+  the embargo by row (15_modeling), `data_undecided` and the external
+  panel's refusal (10_auditability, 27_meta, 15_modeling), yfinance's
+  errors read from its data layer (01_data_fetching), the mutation
+  harness, the index check and the surface fixtures (25_testing), and the
+  covariance products on one BLAS thread (16_performance, 05_portfolio,
+  04_backtesting, 10_auditability, 08_analysis, 15_modeling).
+- **The context budget's figures.** 18_mcp and 19_runtimes said a tool
+  averages 1,730 bytes over the wire and that a 189,000-byte ceiling buys
+  about 104 tools. The ceiling was 180,000 (`mcp/config.py`); it became
+  189,000 in the commit of 2026-09-22 that took the tool count from 180
+  to 189. At full detail the 238 tools are 660,487 bytes over the wire,
+  2,775 a tool, so that ceiling buys about 65; in registry order the
+  surface crosses it at its 85th tool, and smallest first 129 of the 238
+  fit. The schema table is `sqt-mcp --print-budget` again: 586,374 bytes
+  in all, `modeling` 186,399.
+- **The split screen's cost** was quoted as 7 ms of a 0.8 s build. With
+  the 3:2 band and the second screen, on a mock-provider build of the
+  live dataset's spec (1,191 sessions, 31,710 rows, six splits written in
+  unadjusted), it is 20–25 ms of a 0.95–1.2 s build, 2.1%, on a shared
+  16-thread machine.
+- **hist_gradient_boosting's early stopping is described.** scikit-learn's
+  default applies above 10,000 training rows: a shuffled 10% of the
+  training window, rows whose overlapping labels share outcomes with the
+  rows fitted, decides when boosting stops, and the model is fitted on the
+  other 90%. The split is reproducible (`random_seed`, default 42), and a
+  spec cannot turn it off. On the live panel's 14,940-row window the
+  default 100 iterations ran out first; at `max_iter=1000` it stopped at
+  246, and its predictions correlated 0.91 with a fit without early
+  stopping.
+- **The features an unadjusted split moves are named**:
+  `risk.rolling_drawdown`, `volume.amihud_illiquidity`, `volume.obv_roc`,
+  `market.new_high_breakout`, `market.psar_trend`, `technical.stochastic_k`,
+  `technical.williams_r` and `technical.adx`, each with what it reads.
+- **Which figures `bench_modeling.py` produces** is said precisely (the IC
+  kernel, dataset builds, engine and estimator runs on a synthetic panel),
+  in 15_modeling, the script's docstring and `tests/bench/README.md`,
+  where each said every modelling figure came from it.
+- **README**: 15,280 tests; with the extension required, `-m "not
+  integration"` gives 15,119 passing and 83 skipped (12:21 on a quiet
+  16-thread machine); 238 tools.
+
 ## The mutation harness leaves the tree as it found it, the tool index check reads the tree it tests, and the surface fixtures end with the surface tests
 
 - **`scripts/mutation_testing.py` puts back the bytes it read.** It

@@ -163,16 +163,17 @@ that most often causes the disconnect.
 
 ## Choosing what to serve
 
-The 238 tools cost about **572 KB of schema, ~146,000 tokens**, held for the
+The 238 tools cost about **573 KB of schema, ~147,000 tokens**, held for the
 whole session. That is the constraint the whole design manages, so this is
 the first decision, not a tuning knob.
 
-That wall has already been hit and passed. Over the wire a tool averages
-1,730 bytes and the session ceiling that used to be 189,000 would buy about 104 tools.
-There are 238. **The whole surface has not fitted in one session since the
-83rd tool**, and no amount of schema-shrinking brings it back — which is why
-scoping stopped being an optimization and became the way the server is
-meant to be run. Serving `--runtime all` is a diagnostic, not a deployment.
+That wall has already been hit and passed. Over the wire, at full detail, a
+tool averages 2,775 bytes, and the session ceiling that used to be 180,000
+would buy about 65 tools. There are 238. **In registry order the whole
+surface crosses that ceiling at its 85th tool, and taken smallest first only
+129 of the 238 fit.** No amount of schema-shrinking brings it back — which
+is why scoping stopped being an optimization and became the way the server
+is meant to be run. Serving `--runtime all` is a diagnostic, not a deployment.
 
 Two flags, and they are nested rather than alternative:
 
@@ -186,23 +187,23 @@ sqt-mcp --print-budget
 
 ```
 runtime              tools    bytes   ~tokens
-modeling                38  186,377    46,594
+modeling                38  186,399    46,599
 backtest                35   88,403    22,100
 research                42   63,867    15,966
-feature_lab             11   47,186    11,796
+feature_lab             11   47,988    11,997
 delta_one               18   45,178    11,294
 data                    21   37,374     9,343
 portfolio               19   37,268     9,317
 microstructure          17   31,620     7,905
-meta                    25   24,976     6,244
+meta                    25   25,190     6,297
 derivatives             12   23,087     5,771
-all                    238  585,336   146,334
+all                    238  586,374   146,593
 
-  a client is served ONE runtime: modeling is the most expensive at 186,377 bytes (32% of the total).
+  a client is served ONE runtime: modeling is the most expensive at 186,399 bytes (32% of the total).
 
 category             tools    bytes   ~tokens
-modeling                38  186,377    46,594
-feature_lab             11   47,186    11,796
+modeling                38  186,399    46,599
+feature_lab             11   47,988    11,997
 delta_one               18   45,178    11,294
 backtest_validation     21   41,295    10,323
 backtest_execution      12   39,562     9,890
@@ -213,7 +214,7 @@ microstructure          17   31,620     7,905
 analysis                14   27,791     6,947
 derivatives             12   23,087     5,771
 discovery               17   17,369     4,342
-provenance               8    7,607     1,901
+provenance               8    7,821     1,955
 custom_signal            2    7,546     1,886
 screener                 2    2,716       679
 ```

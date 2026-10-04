@@ -142,7 +142,7 @@ the run that introduced it, 6,514 passed and 519 skipped — the extra skips
 are the parity and benchmark tests that `importorskip` the extension,
 correctly — and it took 11:22 against 6:54, which is the compiled path's
 contribution measured at suite scale rather than per kernel. The suite is
-15,012 tests now (14,851 passed, 83 skipped with the extension and `SQT_EXPECT_NATIVE=1`, in 10:39 to 25:04 on the same machine depending on its load), so
+15,280 tests now (15,119 passed, 83 skipped with the extension and `SQT_EXPECT_NATIVE=1`, in 10:39 to 25:04 on the same machine depending on its load), so
 that pair of clocks is a ratio to re-measure, not a figure to quote.
 
 ### Why this is a testing concern and not a packaging one
@@ -228,12 +228,15 @@ saying why, or a refusal of the input that produces it. A guard fails if the
 capture stops seeing results, so the check cannot go vacuous again.
 
 **The market is fake and the fixtures are real** (`tests/surface/hermetic.py`,
-wired in `tests/surface/conftest.py` for the whole surface session).
-`FakeTicker` replaces only `yfinance.Ticker`; the provider's own interval
-checks, inclusive-end trim, session cache and audit data-access records still
-run, the Parquet tier is off for the session so fake bars are never read back
-as real ones by a later test, and a provider retry sleeps for nothing. Once
-per session (about 13 s) `publish_fixtures` builds what a baseline can name:
+wired in `tests/surface/conftest.py` for the surface package: set up before
+its first test and torn down after its last, so a test collected after it
+sees the real provider, the Parquet tier and the suite's own audit
+directory). `FakeTicker` replaces only `yfinance.Ticker`; the provider's own
+interval checks, inclusive-end trim, session cache and audit data-access
+records still run, the Parquet tier is off while the package runs so fake
+bars are never read back as real ones by a later test, and a provider retry
+sleeps for nothing. Once per run of the package (about 13 s)
+`publish_fixtures` builds what a baseline can name:
 price, returns, score, signal and weight panels, an equity curve, a trade
 log, a tick tape and quotes, registered order-book and order-event files, an
 indicator panel, a data bundle, a dataset, two ridge models, predictions with
@@ -386,8 +389,16 @@ document, the README advertised 95 tools across six runtimes, and three
 guides quoted a count that had been wrong for months.
 
 - `Documentation/20_tool_index.md` is **generated** from the live registry.
-  A test regenerates it and compares byte-for-byte, so adding a tool without
-  regenerating fails in the commit that added it.
+  A test renders it from the package under test, writes nothing, and
+  compares it with the file: every tool name, description, argument list
+  and count exactly, and each runtime's schema cost to within 1 KB, the
+  margin a pydantic release can move a schema by without a tool changing.
+  Adding a tool without regenerating fails in the commit that added it.
+  `python scripts/generate_tool_index.py --check` runs the same comparison.
+- `Documentation/29_modeling_reference.md` is generated the same way from
+  the modeling registries. Its test renders it in the test process, writes
+  nothing, and compares it with the file exactly, so a feature, estimator
+  or target added without regenerating fails in its own commit.
 - Every count appearing in prose is checked against reality — whole-surface
   counts, per-runtime counts quoted in `sqt-mcp` commands, the rows of the
   runtime table.
@@ -450,8 +461,12 @@ explaining why it was necessary.
 Three defences, in order of how much they cover:
 
 - **`require_clean_tree`** refuses to start when a file about to be mutated
-  has uncommitted changes. This protects *your* work from the harness, and
-  makes `git checkout --` an unconditional recovery.
+  holds work `git checkout --` would lose: an edit `git diff` shows, a
+  staged change, or a file git does not track. It reads content, not stat,
+  so a file that differs from the index only in its modification time or in
+  line endings git normalizes away does not stop a run. This protects *your*
+  work from the harness, and makes `git checkout --` an unconditional
+  recovery.
 - **`.mutation_active`** is written for the duration of a run. It cannot
   stop another process committing — nothing can — but it makes the state
   diagnosable afterwards.
@@ -461,6 +476,12 @@ Three defences, in order of how much they cover:
   so an escaped mutation fails the ordinary test run. It is a worthwhile
   check independently: `if False:` in committed code is either dead code or
   a disabled guard, and neither should survive review.
+
+A run leaves each file it mutated byte-identical, with the same
+modification time: the restore writes back the bytes read before the
+mutation. It used to re-encode the decoded text, which on Windows turned an
+LF working copy into CRLF; `git status` then listed the file and the next
+run refused to start.
 
 A fourth test, `test_the_mutation_catalogue_anchors_all_still_match`, fails
 in the normal run when an anchor has drifted. A mutation whose anchor no

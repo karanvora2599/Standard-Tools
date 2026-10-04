@@ -1,8 +1,11 @@
 """
 Where the modeling pipeline spends its time.
 
-Every modelling figure quoted in the CHANGELOG comes from this
-script, so a claim there can be re-checked rather than taken on trust. It
+The CHANGELOG's figures for the IC kernel, dataset builds, engine runs by
+validation scheme and per-estimator runs on a synthetic panel come from
+this script, so a claim there can be re-checked rather than taken on
+trust; figures from runs on a live-shaped panel and from simulations say
+where they came from. It
 builds a synthetic OHLCV universe in memory and patches DataFactory, so no
 measurement includes network time and the numbers are reproducible.
 
