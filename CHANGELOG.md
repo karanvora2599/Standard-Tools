@@ -1,5 +1,75 @@
 # Changelog
 
+## A run reads its dates as instants, a score predicts under the OpenMP limit, and two steps refuse an infinity
+
+- **A timezone-aware date column is no longer boxed into a Timestamp per
+  row.** `to_numpy()` on the panel's `datetime64[ns, UTC]` `date` and
+  `label_end_date` columns builds one `pd.Timestamp` per row. One ridge
+  walk-forward run on the live 31,680-row panel (8 folds) made 58 such
+  calls, 0.85 s of its 1.52 s under the profiler, and the object arrays
+  they returned made every sort and search on the dates slow too. The
+  sample index, the preprocessing context, the experiment plan, the fold
+  loop and the effective sample size now read those columns as their UTC
+  instants (`preprocessing.base.datetime_values`), which order, compare,
+  group and subtract as the zoned Timestamps did. Warm wall time on that
+  panel, median of five runs, on a 16-thread machine shared with other
+  jobs, Python 3.11 with pandas 3.0 and then Python 3.12 with pandas 2.3:
+  ridge walk-forward 2.17-2.80 s to 0.36-0.49 s and 1.55-1.74 s to
+  0.32-0.38 s; hist_gradient_boosting 4.47-6.05 s to 2.74-3.36 s and
+  3.78-3.82 s to 2.33-2.68 s; ridge cpcv 5.75-6.91 s to 1.07-1.32 s and
+  4.14-4.24 s to 0.96-1.50 s.
+- **Every number a run records is unchanged.** The live runs reproduce
+  their `oos_predictions` content hashes (ridge `c4405a8bb8f96084`,
+  hist_gradient_boosting `8681ee1eee5b9fe1`, random forest
+  `7eb22cbc34f8ffab`), and on both interpreters 25 further runs agree with
+  the previous code in every output, manifest field and artifact hash
+  except `model.skops`, which already differed between identical runs:
+  purged k-fold, cpcv, label-uniqueness and time-decay weights,
+  cross-sectional preprocessing, conformal intervals, a grid search, a
+  non-default step pipeline, and external panels in UTC, New York, a
+  +09:00 offset, naive, and CSV dates that parse to `[ms]` under pandas 3.
+  A ranker, and classification and survival runs on UTC, Tokyo and naive
+  `[s]` panels, agree too.
+- **What a custom step or adapter is handed changes for a zoned panel.**
+  `SampleIndex.dates`, `SampleIndex.label_end` and `FoldContext.dates`
+  read off a timezone-aware frame are naive `datetime64` UTC instants of
+  the column's unit, as a naive panel's already were, where they were an
+  object array of zoned Timestamps. A calendar date read off them is the
+  UTC date; the run's own fold labels are still read off the frame, in
+  its zone.
+- **The label-uniqueness weights' Python backend agrees with the kernel
+  on a zoned panel.** Handed Timestamps, it searched an object array, and
+  numpy's search went wrong on the keys after a missing label end:
+  weights of mean 1 were up to 1.36 off the kernel's. On instants they
+  match it to the bit. Only the backend without the extension was
+  affected, on a timezone-aware panel with a label end missing before an
+  entity's last date.
+- **A date column and a label-end column of which only one has a time
+  zone are refused by name** when the run is planned. pandas raised
+  `TypeError: Cannot compare tz-naive and tz-aware timestamps` from
+  inside the purge; compared as instants, the naive one would be read as
+  UTC, hours away from the zone it was recorded in, and a row whose label
+  ends on the first test date would not be purged.
+- **`score_model` and `survival_curves` predict under the OpenMP limit.**
+  A run holds every fit and fold prediction to its share of the budget;
+  scoring held nothing, so a 30-row, 8-feature hist_gradient_boosting
+  score started an OpenMP team on all 16 logical CPUs: a median 5.0-9.2 ms
+  against 0.75-0.93 ms on one thread, over 500 interleaved predictions
+  each, with the same predictions to the bit. The deployed model now
+  predicts at the count the run gives one fit of the scored matrix on the
+  budget it recorded (`validation_report.fits.max_parallelism`): one
+  thread under `"auto"` for a one-date score, the budget when it is a
+  number. An estimator that does not run on OpenMP is left alone.
+- **The `winsorize` and `zscore` steps refuse an infinite value**, at fit
+  with the default fit's own message (`winsorize: the training rows hold
+  infinite values in column(s) ...`) and at transform with the same
+  wording for the rows being transformed. A non-default pipeline fitted
+  the infinity: a winsorize bound read through it was infinite or NaN,
+  `zscore` passed it on as an infinite feature value, and `winsorize`
+  clipped a test-row infinity to a bound as though it were an ordinary
+  extreme. The default pipeline is unchanged: it refuses an infinity in
+  the training rows and clips one in the rows it applies to.
+
 ## A failed info request is the vendor's, a universe fetch asks the source it names, and a 3:2 split is named
 
 - **`get_ticker_info` and `get_financial_ratios` no longer read a failure

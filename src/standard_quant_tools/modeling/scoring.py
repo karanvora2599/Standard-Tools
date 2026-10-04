@@ -683,6 +683,54 @@ def _scoring_context(
     )
 
 
+def _prediction_thread_limit(model_id: str, manifest: Any, X: pd.DataFrame) -> Any:
+    """
+    The OpenMP limit a deployed model predicts under: the count the run
+    gives one fit of `X`'s cells on the whole budget, which is how the
+    refit is limited (`engine._fit_threads`).
+
+    Histogram boosting, LightGBM and XGBoost start an OpenMP team on every
+    logical CPU for each prediction unless held. The run holds every fit
+    and fold prediction to its share of the budget; scoring held nothing,
+    so a 30-row, 8-feature histogram-boosting prediction took a median
+    5.0-9.2 ms on sixteen threads where one thread takes 0.75-0.93 ms,
+    with the same predictions. Under budget 'auto' a one-date score is far
+    below 2,000,000 cells and runs on one thread; an explicit budget is
+    taken as the spec asked. Any other estimator runs under no limit, as
+    before.
+
+    The budget is the one the run recorded as asked
+    (`validation_report.fits.max_parallelism`), read off the manifest
+    already in hand, or else the model's own spec; one that cannot be read
+    leaves the default, 'auto'. The count decides only how long the
+    prediction takes, never what it returns.
+    """
+    from standard_quant_tools._blas import openmp_thread_limit
+
+    from .engine import _fit_threads
+    from .estimators.registry import estimator_cost
+    from .specs import ComputeBudgetSpec
+
+    cost = estimator_cost(manifest.task, manifest.estimator_type)
+    if cost is None or cost.threads != "openmp":
+        return openmp_thread_limit(None)
+    fits = (getattr(manifest, "validation_report", None) or {}).get("fits") or {}
+    try:
+        if fits.get("max_parallelism") is not None:
+            budget = ComputeBudgetSpec(max_parallelism=fits["max_parallelism"])
+        else:
+            budget = load_model_spec(model_id).budget
+    except (ValidationError, ValueError, OSError):
+        budget = ComputeBudgetSpec()
+    _jobs, threads = _fit_threads(
+        cost.threads,
+        budget.max_parallelism,
+        budget.resolved_max_parallelism(),
+        int(X.shape[0]) * int(X.shape[1]),
+    )
+    return openmp_thread_limit(threads)
+
+
 def score_model(
     model_id: str,
     as_of: str,
@@ -737,16 +785,19 @@ def score_model(
     # adapter already answers "how do I get a score out of this task's
     # estimator" for the engine; scoring asking the question its own way
     # is how the two drift.
-    predictions = get_adapter(manifest.task).score(estimator, X)
-
+    #
     # The distribution the model was registered with, emitted under the
     # same columns the validation reported on: one per quantile level, and
     # `lower`/`upper` from the deployed conformal radius. Empty for a
     # point-only model, so its frame is exactly what it was.
     distribution, quantile_models = load_distribution(model_id)
     extra_columns: Dict[str, Any] = {}
-    for column, quantile_model in quantile_models.items():
-        extra_columns[column] = np.asarray(quantile_model.predict(X.to_numpy()))
+    # Under the OpenMP limit, at the thread count the run would give one fit
+    # of this many cells (see `_prediction_thread_limit`).
+    with _prediction_thread_limit(model_id, manifest, X):
+        predictions = get_adapter(manifest.task).score(estimator, X)
+        for column, quantile_model in quantile_models.items():
+            extra_columns[column] = np.asarray(quantile_model.predict(X.to_numpy()))
     conformal = distribution.get("conformal") or None
     if conformal:
         radius = float(conformal["radius"])
@@ -1011,9 +1062,12 @@ def survival_curves(
         )
 
     grid, knots = _survival_time_grid(estimator, manifest, model_id, times, n_times)
-    matrix = np.asarray(
-        estimator.predict_survival_function(context.X.to_numpy(), grid), dtype=float
-    )
+    # Under the OpenMP limit score_model predicts under, as is the risk below.
+    with _prediction_thread_limit(model_id, manifest, context.X):
+        matrix = np.asarray(
+            estimator.predict_survival_function(context.X.to_numpy(), grid),
+            dtype=float,
+        )
     entities = [str(entity) for entity in context.latest["entity"].to_numpy()]
     if matrix.shape != (len(entities), grid.size):
         raise ValidationError(
@@ -1026,9 +1080,10 @@ def survival_curves(
         )
     # The same adapter score_model uses, so a curve and a score for the
     # same call carry the SAME risk numbers rather than two paths' worth.
-    risk = np.asarray(
-        get_adapter(manifest.task).score(estimator, context.X), dtype=float
-    )
+    with _prediction_thread_limit(model_id, manifest, context.X):
+        risk = np.asarray(
+            get_adapter(manifest.task).score(estimator, context.X), dtype=float
+        )
 
     # The first grid point at or below 0.5. `np.argmax` on the boolean
     # returns 0 for a row that never crosses, which is why the crossing

@@ -9,6 +9,12 @@ to those functions to 1e-12, on the Python path and on the native one.
 arithmetic is not reimplemented: the pipeline routes the default pair to
 the fused native kernel when the extension is present, and the steps here
 are the reference the kernel is tested against.
+
+An infinite value is refused by `winsorize` and `zscore` with the default
+fit's own refusal, in the rows they are fitted on and in the rows they
+transform. The default pair goes through the fused path, which refuses an
+infinity in the training rows and clips one in the rows it applies to, as
+it always has; the two agree on every finite frame.
 """
 
 from __future__ import annotations
@@ -24,11 +30,44 @@ from standard_quant_tools.modeling.estimators.bounds import (
     ParamBound,
 )
 from standard_quant_tools.modeling.features.transforms import (
+    _refuse_infinite_training_values,
     standardize_cross_sectional,
 )
 
 from .base import FoldContext, Preprocessor, PreprocessorDefinition
 from .registry import register_preprocessor
+
+
+def _refuse_infinite_rows(X: pd.DataFrame, func: str) -> None:
+    """
+    Refuse +/-inf in the rows a fitted step is about to transform, worded
+    as the default fit's refusal (`_refuse_infinite_training_values`) is.
+
+    The fit refuses an infinity among the training rows; this is the same
+    door at transform, where an infinity would come out of `zscore` as an
+    infinite feature value and out of `winsorize` clipped to a bound, as
+    though it were an ordinary extreme.
+    """
+    numeric = X.select_dtypes(include="number")
+    if numeric.shape[1] == 0:
+        return
+    bad = np.isinf(numeric.to_numpy(dtype=np.float64))
+    if not bad.any():
+        return
+    per_column = bad.sum(axis=0)
+    named = [
+        f"{col!r} ({int(count)})"
+        for col, count in zip(numeric.columns, per_column)
+        if count
+    ]
+    raise ValidationError(
+        f"{func}: the rows to transform hold infinite values in column(s) "
+        f"{', '.join(named[:5])}{' and more' if len(named) > 5 else ''}. An "
+        "infinity has no z-score and lies beyond every fitted bound, so the "
+        "transformed value would be infinite, or clipped to a bound as though "
+        "it were an ordinary extreme. Mark the value missing with NaN, which "
+        "the transform keeps as NaN, or repair or drop the rows."
+    )
 
 
 def _per_column(state: Dict[str, Any], key: str, columns) -> np.ndarray:
@@ -103,10 +142,12 @@ class Winsorize(Preprocessor):
             raise ValidationError(
                 f"winsorize: lower={lower} must be below upper={upper}."
             )
+        _refuse_infinite_training_values(X, "winsorize")
         lo, hi = _column_quantiles(X, lower, upper)
         return {"lo": lo, "hi": hi}
 
     def transform(self, X: pd.DataFrame, state: Dict[str, Any], ctx: FoldContext):
+        _refuse_infinite_rows(X, "winsorize")
         lo = _per_column(state, "lo", X.columns)
         hi = _per_column(state, "hi", X.columns)
         values = X.to_numpy(dtype=np.float64)
@@ -132,6 +173,7 @@ class ZScore(Preprocessor):
     column_wise = True
 
     def fit(self, X: pd.DataFrame, ctx: FoldContext) -> Dict[str, Any]:
+        _refuse_infinite_training_values(X, "zscore")
         mean: Dict[str, float] = {}
         std: Dict[str, float] = {}
         for c in X.columns:
@@ -144,6 +186,7 @@ class ZScore(Preprocessor):
         return {"mean": mean, "std": std}
 
     def transform(self, X: pd.DataFrame, state: Dict[str, Any], ctx: FoldContext):
+        _refuse_infinite_rows(X, "zscore")
         mean = _per_column(state, "mean", X.columns)
         std = _per_column(state, "std", X.columns)
         values = (X.to_numpy(dtype=np.float64) - mean) / std

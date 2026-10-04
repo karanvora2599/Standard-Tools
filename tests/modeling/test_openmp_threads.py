@@ -39,6 +39,22 @@ def _openmp_threads():
     return max(counts) if counts else None
 
 
+def _openmp_counts():
+    """Each loaded OpenMP runtime's count on the calling thread, by file."""
+    return {
+        i["filepath"]: i["num_threads"]
+        for i in threadpool_info()
+        if i["user_api"] == "openmp"
+    }
+
+
+class _Runtime:
+    """Just enough of a library controller for the kind check."""
+
+    def __init__(self, filepath):
+        self.filepath = filepath
+
+
 @pytest.fixture
 def openmp():
     """Skip where no OpenMP runtime is loaded to be limited."""
@@ -118,11 +134,9 @@ class TestTheLimit:
         the limit for the main thread while the worker is still inside; a
         per-thread one (libgomp, libomp) gives the main thread its own count
         back as soon as it leaves. Either way every thread ends where it
-        began."""
-        shared = any(
-            _blas.openmp_count_is_process_wide(library)
-            for library in _blas._openmp_libraries()
-        )
+        began. Each runtime is held to its own kind: a broad run can have
+        both kinds loaded at once (vcomp beside an estimator's libomp)."""
+        before = _openmp_counts()
         inside = threading.Barrier(2)
         leave = threading.Event()
         seen = []
@@ -136,12 +150,22 @@ class TestTheLimit:
         worker.start()
         with _blas.openmp_thread_limit(1):
             inside.wait()
-            seen.append(_openmp_threads())
-        seen.append(_openmp_threads())
+            seen.append(_openmp_counts())
+        seen.append(_openmp_counts())
         leave.set()
         worker.join()
-        seen.append(_openmp_threads())
-        assert seen == [1, 1 if shared else openmp, openmp]
+        seen.append(_openmp_counts())
+
+        def kind_held(path):
+            return (
+                1
+                if _blas.openmp_count_is_process_wide(_Runtime(path))
+                else before[path]
+            )
+
+        assert seen[0] == {path: 1 for path in before}
+        assert seen[1] == {path: kind_held(path) for path in before}
+        assert seen[2] == before
 
 
 class _PerThreadRuntime:

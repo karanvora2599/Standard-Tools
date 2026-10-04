@@ -134,18 +134,35 @@ class TestTheStateIsThePerColumnStateToTheBit:
         assert 0.0 in state["lo"].values() and 0.0 in state["hi"].values()
 
     @pytest.mark.parametrize("seed", range(4))
-    def test_nan_gaps_infinities_and_an_all_nan_column(self, seed):
+    def test_nan_gaps_and_an_all_nan_column(self, seed):
         rng = np.random.default_rng(seed)
         values = rng.normal(0, 1, (300, 8))
         values[rng.random((300, 8)) < 0.1] = np.nan
-        values[rng.random((300, 8)) < 0.02] = np.inf
-        values[rng.random((300, 8)) < 0.02] = -np.inf
         values[:, 3] = np.nan
         values[rng.random(300) < 0.5, 5] = -0.0
         X = pd.DataFrame(values, columns=list("abcdefgh"))
         for lower, upper in QUANTILE_PAIRS:
             state = _assert_same_fit(X, lower, upper)
             assert math.isnan(state["lo"]["d"]) and math.isnan(state["hi"]["d"])
+
+    @pytest.mark.parametrize("seed", range(4))
+    def test_infinities_are_refused_not_fitted(self, seed):
+        """These frames were fitted, to the bit of the per-column fit, until
+        the step took the default fit's refusal of an infinity (see the
+        CHANGELOG entry of 2026-10-04): a bound read through an infinity is
+        infinite or NaN, and the clip it sets is not usable."""
+        rng = np.random.default_rng(seed)
+        values = rng.normal(0, 1, (300, 8))
+        values[rng.random((300, 8)) < 0.1] = np.nan
+        values[rng.random((300, 8)) < 0.02] = np.inf
+        values[rng.random((300, 8)) < 0.02] = -np.inf
+        X = pd.DataFrame(values, columns=list("abcdefgh"))
+        for lower, upper in QUANTILE_PAIRS:
+            step = build_step("winsorize", {"lower": lower, "upper": upper})
+            with pytest.raises(
+                ValidationError, match="winsorize: the training rows hold infinite"
+            ):
+                step.fit(X, CTX)
 
     def test_constant_columns_and_ties(self):
         rng = np.random.default_rng(3)

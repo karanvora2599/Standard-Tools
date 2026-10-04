@@ -37,12 +37,15 @@ import pandas as pd
 from standard_quant_tools.error import ValidationError
 
 from .dataset.alignment import LABEL_END_COL
-from .preprocessing.base import FoldContext
+from .preprocessing.base import FoldContext, datetime_values
 
 
 @dataclass(frozen=True)
 class SampleIndex:
-    """Dates, entities and label ends of a set of rows, in row order."""
+    """Dates, entities and label ends of a set of rows, in row order.
+
+    Read off a frame, the dates and label ends are `datetime64`; a
+    timezone-aware column's are its UTC instants (see `datetime_values`)."""
 
     dates: np.ndarray
     entities: np.ndarray
@@ -69,10 +72,10 @@ class SampleIndex:
                 "SampleIndex.from_frame needs `date` and `entity` columns."
             )
         return cls(
-            dates=frame["date"].to_numpy(),
+            dates=datetime_values(frame["date"]),
             entities=frame["entity"].to_numpy(),
             label_end=(
-                frame[LABEL_END_COL].to_numpy()
+                datetime_values(frame[LABEL_END_COL])
                 if LABEL_END_COL in frame.columns
                 else None
             ),
@@ -99,4 +102,4 @@ class SampleIndex:
         return FoldContext(dates=self.dates, entities=self.entities)
 
 
-__all__ = ["SampleIndex"]
+__all__ = ["SampleIndex", "datetime_values"]

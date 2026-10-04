@@ -50,7 +50,7 @@ from .preprocessing import (
     step_types,
 )
 from .registry.model_registry import new_model_id, save_model
-from .samples import SampleIndex
+from .samples import SampleIndex, datetime_values
 from .specs import TASKS, ModelSpec, targets_for_task
 from .validation.comparison import (
     MIN_HEADLINE_DATES,
@@ -206,7 +206,7 @@ def _oos_effective_sample_size(
     tested = panel.loc[tested_rows, ["date", "entity", "target"]]
     labels = pd.to_numeric(tested["target"], errors="coerce").to_numpy(dtype=float)
     rho = label_cross_sectional_corr(
-        tested["date"].to_numpy(), tested["entity"].to_numpy(), labels
+        datetime_values(tested["date"]), tested["entity"].to_numpy(), labels
     )
     return effective_sample_size_report(n_oos_rows, horizon, n_oos_dates, rho)
 
@@ -1579,8 +1579,10 @@ def run_experiment(
     # every row's date is in it by construction, so searchsorted is exact.
     # A fold then selects rows by gathering a small per-date boolean, which
     # also keeps working for splitters whose folds are not contiguous
-    # (purged K-fold) -- an interval slice would not.
-    date_code = np.searchsorted(dates.to_numpy(), panel["date"].to_numpy())
+    # (purged K-fold) -- an interval slice would not. Both sides as
+    # datetime64 instants: a timezone-aware column's `to_numpy()` builds a
+    # Timestamp per row and searchsorted then compares them one at a time.
+    date_code = np.searchsorted(datetime_values(dates), datetime_values(panel["date"]))
     # The whole panel's features as ONE C-contiguous float64 matrix, built
     # here rather than per fold. A fold then gathers its rows with a numpy
     # take (5.5 ms on 100,000 rows) instead of a pandas column selection
@@ -1953,7 +1955,7 @@ def run_experiment(
                 estimator,
                 test_X,
                 test_y,
-                test_df["date"].to_numpy(),
+                datetime_values(test_df["date"]),
                 train_y=train_y,
             )
             # ── The distribution beside the point ────────────────────────

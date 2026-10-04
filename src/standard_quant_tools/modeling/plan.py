@@ -44,6 +44,7 @@ import pandas as pd
 from standard_quant_tools.error import ValidationError
 
 from .dataset.alignment import LABEL_END_COL
+from .preprocessing.base import datetime_values, refuse_mixed_time_zones
 from .specs import ModelSpec
 from .validation.search import inner_fold_count, n_search_candidates
 from .validation.walk_forward import (
@@ -280,13 +281,20 @@ def plan_experiment(
     }
     features = list(feature_ids) if feature_ids is not None else None
 
+    # The labels are read off `date_values`; the rows are cut on instants
+    # (`datetime_values`), which order, compare and count the same as a
+    # timezone-aware column's Timestamps without building one per row.
     date_values = dates.to_numpy()
-    panel_dates = panel_label_end = date_code = None
+    date_axis = panel_dates = panel_label_end = date_code = None
     if panel is not None:
-        panel_dates = panel["date"].to_numpy()
-        date_code = np.searchsorted(date_values, panel_dates)
+        date_axis = datetime_values(dates)
+        panel_dates = datetime_values(panel["date"])
+        date_code = np.searchsorted(date_axis, panel_dates)
         if LABEL_END_COL in panel.columns:
-            panel_label_end = panel[LABEL_END_COL].to_numpy()
+            refuse_mixed_time_zones(
+                panel["date"], panel[LABEL_END_COL], "plan_experiment"
+            )
+            panel_label_end = datetime_values(panel[LABEL_END_COL])
 
     folds: List[FoldPlan] = []
     total_purged = 0
@@ -312,8 +320,8 @@ def plan_experiment(
                         train_mask,
                         panel_dates,
                         panel_label_end,
-                        date_values[first],
-                        date_values[last],
+                        date_axis[first],
+                        date_axis[last],
                     )
             purged_rows = np.flatnonzero(overlaps)
             n_purged = int(purged_rows.size)
