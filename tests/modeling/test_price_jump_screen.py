@@ -23,7 +23,7 @@ import pandas as pd
 import pytest
 from pydantic import ValidationError as PydanticValidationError
 
-from standard_quant_tools import constants
+from standard_quant_tools import _split_screen, constants
 from standard_quant_tools.backtest import screens
 from standard_quant_tools.data import quality
 from standard_quant_tools.data.factory import DataFactory
@@ -198,6 +198,21 @@ class TestTheDetector:
         assert default.default is constants.SPLIT_SCREEN_THRESHOLD
         assert constants.SPLIT_SCREEN_THRESHOLD == 0.35
 
+    def test_the_backtest_and_the_build_run_one_rule(self):
+        """Which bars are named is one function, and the tolerance and the
+        ratios it names below the threshold are one object each, read by
+        both screens (the CHANGELOG entry of 2026-10-04)."""
+        assert screens.screen_moves is _split_screen.screen_moves
+        assert quality.screen_moves is _split_screen.screen_moves
+        assert quality.SPLIT_RATIO_TOLERANCE is _split_screen.SPLIT_RATIO_TOLERANCE
+        assert (
+            screens.RATIOS_NAMED_BELOW_THRESHOLD
+            is quality.RATIOS_NAMED_BELOW_THRESHOLD
+            is _split_screen.RATIOS_NAMED_BELOW_THRESHOLD
+        )
+        assert _split_screen.RATIOS_NAMED_BELOW_THRESHOLD == (1.5,)
+        assert _split_screen.SPLIT_RATIO_TOLERANCE == 0.10
+
     @pytest.mark.parametrize(
         "ratio,label", [(2.0, "2:1"), (3.0, "3:1"), (10.0, "10:1"), (20.0, "20:1")]
     )
@@ -220,12 +235,16 @@ class TestTheDetector:
         assert move["close_move"] > 5
         assert split_ratio_label(move["split_ratio"]) == "1:10"
 
-    def test_a_three_for_two_split_is_below_the_threshold(self):
-        """-33% does not cross 35%: the documented gap of keeping the
-        backtest's threshold."""
+    def test_a_three_for_two_split_below_the_threshold_is_named(self):
+        """-33% does not cross 35%; it is named because it is the size of a
+        3:2 split (the CHANGELOG entry of 2026-10-04 closes the gap the
+        entry before it left)."""
         close = _unadjusted(_adjusted("XYZ"), "2023-01-03", 1.5)["Close"]
-        assert detect_split_like_moves(close) == []
-        assert detect_split_like_moves(close, threshold=0.30)[0]["split_ratio"] == 1.5
+        [move] = detect_split_like_moves(close)
+        assert move["date"] == "2023-01-03"
+        assert move["split_ratio"] == 1.5 and move["ratio_error"] < 0.05
+        assert -0.35 < move["close_move"] < -0.30
+        assert detect_split_like_moves(close, threshold=0.30) == [move]
 
     def test_a_move_between_ratios_is_listed_but_not_named(self):
         """-42%: the price ratio 1.72 is 0.14 from 3:2 and 0.15 from 2:1 on a
@@ -420,6 +439,70 @@ class TestTheBuildScreen:
         assert jump["labels"] == 15
         n_rows = len(built["panel"])
         assert f"15 of {2 * n_rows:,} targets" in _jump_warning(built["warnings"])
+
+
+class TestAThreeForTwoSplit:
+    """A 3:2 split moves -33%, below the 35% threshold, and the build used
+    to read it as a return without a word. It is named now, counted like
+    any other move, and still only named (the CHANGELOG entry of
+    2026-10-04)."""
+
+    def test_it_is_named_with_the_labels_and_rows_that_read_it(self, serve):
+        serve(_frames(split=(SPLIT_ENTITY, SPLIT_DATE, 1.5)))
+        built = build_dataset(_spec())
+        [jump] = built["price_jumps"]
+        assert (jump["entity"], jump["date"]) == (SPLIT_ENTITY, SPLIT_DATE)
+        assert jump["split_ratio"] == 1.5
+        assert (jump["labels"], jump["feature_rows"]) == (5, 20)
+        warning = _jump_warning(built["warnings"])
+        assert warning.startswith(
+            "PRICE JUMPS: 1 close-to-close move beyond 35%, or falls of 26% to "
+            "35% near a 3:2 split, in the bars this dataset was built from: "
+            f"BBB {SPLIT_DATE} (-3"
+        )
+        assert "of a 3:2 split)" in warning
+
+    def test_null_a_move_beyond_the_threshold_keeps_the_old_header(self, serve):
+        """The added clause appears only when a listed move is below 35%."""
+        serve(_frames())
+        warning = _jump_warning(build_dataset(_spec())["warnings"])
+        assert warning.startswith("PRICE JUMPS: 1 close-to-close move beyond 35% in")
+
+    def test_naming_it_changes_nothing_in_the_panel(self, serve):
+        """Warnings only: the same 3:2 bars build the same panel and hashes
+        whatever the provider says about adjustment."""
+        frames = _frames(split=(SPLIT_ENTITY, SPLIT_DATE, 1.5))
+        serve(frames, adjusted=False)
+        unadjusted = build_dataset(_spec())
+        serve(frames, adjusted=True)
+        adjusted = build_dataset(_spec())
+        assert unadjusted["data_hash"] == adjusted["data_hash"]
+        pd.testing.assert_frame_equal(unadjusted["panel"], adjusted["panel"])
+        assert len(unadjusted["price_jumps"]) == len(adjusted["price_jumps"]) == 1
+
+    def test_declared_it_is_adjusted_and_no_longer_named(self, serve):
+        serve(_frames(split=(SPLIT_ENTITY, SPLIT_DATE, 1.5)))
+        built = build_dataset(_spec(corporate_actions=_declared(ratio=1.5)))
+        assert built["price_jumps"] == []
+        assert not any(
+            w.startswith("DECLARED SPLIT NOT SEEN") for w in built["warnings"]
+        )
+
+    def test_declared_a_session_late_both_moves_are_named(self, serve):
+        """The real -33% stays in the bars, and dividing the bars before the
+        late date makes a +50% after it: both are named, the first only
+        because of the 3:2 rule."""
+        serve(_frames(split=(SPLIT_ENTITY, SPLIT_DATE, 1.5)))
+        late = "2023-09-05"
+        built = build_dataset(
+            _spec(corporate_actions=_declared(ex_date=late, ratio=1.5))
+        )
+        assert [j["date"] for j in built["price_jumps"]] == [SPLIT_DATE, late]
+        assert [j["split_ratio"] for j in built["price_jumps"]] == [
+            1.5,
+            pytest.approx(1 / 1.5),
+        ]
+        assert any(w.startswith("DECLARED SPLIT NOT SEEN") for w in built["warnings"])
 
 
 class TestTheProviderLine:

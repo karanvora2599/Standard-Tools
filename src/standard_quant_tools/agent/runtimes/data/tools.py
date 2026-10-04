@@ -63,7 +63,7 @@ from standard_quant_tools.data.continuous import build_continuous_futures
 from standard_quant_tools.data.databento import SCHEMA_KINDS
 from standard_quant_tools.data.external import book_levels
 from standard_quant_tools.data.external_validation import validate_external
-from standard_quant_tools.data.factory import DataFactory
+from standard_quant_tools.data.factory import DEFAULT_SOURCE, DataFactory
 from standard_quant_tools.data.ratios import implausible_value_warnings
 from standard_quant_tools.data.temporal import contract_for_frame
 from standard_quant_tools.error import ValidationError, VendorUnavailableError
@@ -236,6 +236,20 @@ def _provider(input_data: Any):
     only ever reach the default before (findings, the plumbing)."""
     source = getattr(input_data, "source", None)
     return DataFactory.get_provider(source) if source else DataFactory.get_provider()
+
+
+#: The source `DataFactory.get_provider()` builds when none is named: the
+#: factory's own constant, not read off `get_provider`'s signature, which a
+#: test or a host may have replaced by the time this module is imported.
+_DEFAULT_SOURCE = DEFAULT_SOURCE
+
+
+def _source_named(input_data: Any) -> str:
+    """ "source='databento'", or "the default source ('yfinance')"."""
+    source = getattr(input_data, "source", None)
+    if source:
+        return f"source={source!r}"
+    return f"the default source ({_DEFAULT_SOURCE!r})"
 
 
 def _fetched(what: str, call, tool: str) -> pd.DataFrame:
@@ -451,6 +465,10 @@ def fetch_ohlcv_panel(input_data: FetchOhlcvPanelInput) -> FetchResult:
     # partial panel is produced. Translating it names the universe, because
     # the raw error names only the symbol that happened to raise first and
     # a caller cannot tell from it whether the other forty are fine.
+    #
+    # The provider is the one `source` names, as for fetch_ohlcv; the panel
+    # used to ask the default whatever `source` said.
+    provider = _provider(input_data)
     try:
         with collect_served_bars() as served:
             by_symbol: Dict[str, pd.DataFrame] = fetch_ohlcv_panel_sync(
@@ -458,6 +476,7 @@ def fetch_ohlcv_panel(input_data: FetchOhlcvPanelInput) -> FetchResult:
                 input_data.start_date,
                 input_data.end_date,
                 input_data.interval,
+                provider=provider,
             )
     except (ValidationError, ValueError):
         raise
@@ -467,9 +486,10 @@ def fetch_ohlcv_panel(input_data: FetchOhlcvPanelInput) -> FetchResult:
             # The vendor failed, not a symbol: dropping one would not help,
             # and the advice below used to say to.
             raise VendorUnavailableError(
-                f"fetching {len(input_data.tickers)} ticker(s) failed because "
-                f"the data vendor failed on its side{_outage_detail(outage)}, "
-                f"not because of any symbol: {outage}. The whole batch fails "
+                f"fetching {len(input_data.tickers)} ticker(s) from "
+                f"{_source_named(input_data)} failed because the data vendor "
+                f"failed on its side{_outage_detail(outage)}, not because of "
+                f"any symbol: {outage}. The whole batch fails "
                 "together -- there is no partial panel -- and dropping a symbol "
                 "will not help: run it again later.",
                 status=outage.status,
@@ -529,12 +549,14 @@ def fetch_returns_panel(input_data: FetchReturnsPanelInput) -> FetchResult:
     # The per-ticker frames do not survive into the wide panel, and their
     # attrs with them; what each provider dropped or flagged is collected
     # as it is served instead.
+    provider = _provider(input_data)
     with collect_served_bars() as served:
         panel = fetch_returns_sync(
             list(input_data.tickers),
             input_data.start_date,
             input_data.end_date,
             input_data.interval,
+            provider=provider,
         )
     warnings: List[str] = served.warnings()
     missing = [t for t in input_data.tickers if t not in list(panel.columns)]

@@ -44,8 +44,10 @@ EULER_MASCHERONI = 0.5772156649015329
 
 #: A close-to-close move beyond this is screened as a probable split (or a
 #: bad print). No equity moves 35% in a day often; a 2:1 split moves -50%
-#: every time, and a 3:2 split's -33% is below it. Here because two screens
-#: read it -- the backtest's (`backtest.screens`) and the dataset build's
-#: (`data.quality.detect_split_like_moves`) -- and each importing it from the
-#: other's package would load that whole package to read one number.
+#: every time, and a 3:2 split's -33% is below it, so a fall that size is
+#: named by its ratio instead (`_split_screen`, the rule both screens run).
+#: Here because two screens read it -- the backtest's (`backtest.screens`)
+#: and the dataset build's (`data.quality.detect_split_like_moves`) -- and
+#: each importing it from the other's package would load that whole package
+#: to read one number.
 SPLIT_SCREEN_THRESHOLD = 0.35

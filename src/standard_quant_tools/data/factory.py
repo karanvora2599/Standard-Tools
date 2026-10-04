@@ -16,6 +16,9 @@ logger = logging.getLogger(__name__)
 ProviderName = Literal["yfinance", "polygon", "bloomberg", "databento"]
 PROVIDER_NAMES = get_args(ProviderName)
 
+#: The provider `get_provider()` builds when none is named.
+DEFAULT_SOURCE = "yfinance"
+
 
 class DataFactory:
     """
@@ -24,7 +27,7 @@ class DataFactory:
 
     @staticmethod
     def get_provider(
-        source: str = "yfinance",
+        source: str = DEFAULT_SOURCE,
         api_key: Optional[str] = None,
         host: Optional[str] = None,
         port: Optional[int] = None,

@@ -7,19 +7,27 @@ cannot drift apart again:
 - the date index must be sorted and unique, because every engine here
   reads bar order as time order; and
 - a close-to-close move large enough to be an unadjusted split is named,
-  because every engine here compounds through it as a real return.
+  because every engine here compounds through it as a real return: one
+  beyond 35%, or a fall the size of a 3:2 split (26% to 35%).
 """
 
 from __future__ import annotations
 
 from typing import List, Optional
 
+import numpy as np
 import pandas as pd
 
-# SPLIT_SCREEN_THRESHOLD (35%) is defined once, in `constants`, and read
-# here and by the dataset build's screen
-# (`data.quality.detect_split_like_moves`), so a backtest and a dataset
-# built from the same bars name the same moves.
+# Which moves are named is one rule, `_split_screen.screen_moves` (with
+# SPLIT_SCREEN_THRESHOLD, 35%, from `constants`), read here and by the
+# dataset build's screen (`data.quality.detect_split_like_moves`), so a
+# backtest and a dataset built from the same bars name the same moves.
+from standard_quant_tools._split_screen import (
+    RATIOS_NAMED_BELOW_THRESHOLD,
+    below_threshold_band,
+    screen_moves,
+    split_ratio_label,
+)
 from standard_quant_tools.constants import SPLIT_SCREEN_THRESHOLD
 from standard_quant_tools.error import ValidationError
 
@@ -60,17 +68,30 @@ def require_sorted_unique_index(
 def split_screen_warnings(prices: pd.Series, adjusted: Optional[bool]) -> List[str]:
     """
     One warning naming every bar whose |return| exceeds the split
-    threshold, phrased by what is known about the bars' adjustment.
+    threshold, or that falls by about a 3:2 split's -33%, phrased by what
+    is known about the bars' adjustment.
     """
-    moves = prices.pct_change(fill_method=None)
-    jumps = moves[moves.abs() > SPLIT_SCREEN_THRESHOLD]
-    if jumps.empty:
+    values = pd.to_numeric(pd.Series(prices), errors="coerce").to_numpy(dtype=float)
+    screened = screen_moves(values, SPLIT_SCREEN_THRESHOLD)
+    flagged = np.flatnonzero(screened.flagged)
+    if len(flagged) == 0:
         return []
-    listed = ", ".join(
-        f"{pd.Timestamp(at).date()} ({float(move):+.1%})"
-        for at, move in list(jumps.items())[:5]
-    )
-    more = f" and {len(jumps) - 5} more" if len(jumps) > 5 else ""
+    labels = " or ".join(split_ratio_label(r) for r in RATIOS_NAMED_BELOW_THRESHOLD)
+
+    def _listed(i: int) -> str:
+        at = pd.Timestamp(prices.index[i + 1]).date()
+        near = f", near a {labels} split" if screened.by_ratio[i] else ""
+        return f"{at} ({float(screened.moves[i]):+.1%}{near})"
+
+    listed = ", ".join(_listed(int(i)) for i in flagged[:5])
+    more = f" and {len(flagged) - 5} more" if len(flagged) > 5 else ""
+    size = f"move more than {SPLIT_SCREEN_THRESHOLD:.0%} close to close"
+    if screened.by_ratio.any():
+        smallest, largest = below_threshold_band(SPLIT_SCREEN_THRESHOLD)
+        size += (
+            f", or fall {smallest:.0%} to {largest:.0%} as a {labels} split does "
+            f"({1 / RATIOS_NAMED_BELOW_THRESHOLD[0] - 1:+.0%})"
+        )
     if adjusted is False:
         provenance = (
             "The provider reports adjusted=False, so a split is a real bar "
@@ -89,7 +110,5 @@ def split_screen_warnings(prices: pd.Series, adjusted: Optional[bool]) -> List[s
             "is wrong (a 10:1 split read as -90%)"
         )
     return [
-        f"SPLIT SCREEN: {len(jumps)} bar(s) move more than "
-        f"{SPLIT_SCREEN_THRESHOLD:.0%} close to close: {listed}{more}. "
-        f"{provenance}."
+        f"SPLIT SCREEN: {len(flagged)} bar(s) {size}: {listed}{more}. {provenance}."
     ]

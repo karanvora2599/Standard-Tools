@@ -1,5 +1,72 @@
 # Changelog
 
+## A failed info request is the vendor's, a universe fetch asks the source it names, and a 3:2 split is named
+
+- **`get_ticker_info` and `get_financial_ratios` no longer read a failure
+  to reach Yahoo as missing data.** Both read yfinance's `ticker.info`,
+  which cannot be asked to raise. With its HTTP layer stubbed, yfinance
+  0.2.65 and 1.7.0 both catch a 5xx on the two quote requests behind
+  `info`, log "HTTP Error 503: ..." and carry on: 0.2.65 then fails with a
+  TypeError, and 1.7.0 returns `{'trailingPegRatio': None}` — the dict
+  Yahoo's answer for an unknown symbol gives — which read as "No metadata
+  found". A 5xx on one of the two requests returned the other's fields, so
+  a sector read "Unknown". The provider now reads yfinance's log from the
+  calling thread while `info` runs. A connection error, a timeout, a 408,
+  a rate limit (429), Yahoo's maintenance page and a 5xx, raised or
+  logged, are retried three times and then raised as
+  `VendorUnavailableError` naming the symbol and the status; an answer
+  missing a request that failed this way is not returned.
+- **Yahoo's own empty answer stays `DataNotFoundError`, now for the ratios
+  too.** An unknown symbol's `{'trailingPegRatio': None}` passed
+  `get_financial_ratios`' emptiness check and came back as
+  `FinancialRatios` with every field None, which a screen read as failing
+  its first filter; it is now "No financial data found for 'X'.", and a
+  404 that 0.2.65 then fails on is "No metadata found". A refused request
+  (a 401, Yahoo's "Invalid Crumb") is not a transport failure: it keeps
+  its old type, and its message names the status yfinance logged. A
+  process that sets yfinance's logger above ERROR suppresses the line, and
+  a 5xx under 1.7.0 then still reads as no metadata.
+- **`fetch_ohlcv_panel` and `fetch_returns_panel` ask the provider their
+  `source` names.** Both went through the portfolio helpers, which built
+  the default provider whatever `source` said, so `source='databento'`
+  published Yahoo's bars. They now build the provider as `fetch_ohlcv`
+  does and pass it to `fetch_ohlcv_panel_sync` and `fetch_returns_sync`,
+  which take an optional keyword-only `provider`; with no `source` the
+  default is built exactly as before. A vendor failure names the source:
+  "fetching 3 ticker(s) from source='databento' failed because the data
+  vendor failed on its side (EQUS.SUMMARY, HTTP 504) ...".
+- **A 3:2 split is named.** The backtest's `SPLIT SCREEN` and the dataset
+  build's `PRICE JUMPS` named moves beyond 35%, and a 3:2 split moves
+  −33.3%. A fall within 10% on a log scale of a 3:2 split — 26.3% to
+  39.7% — is now named by both, through one rule
+  (`_split_screen.screen_moves`) both screens call, so they still name the
+  same bars. Warnings only: nothing is adjusted. On bars shaped like the
+  live panel (30 names, 1,190 bars, six splits, t(4) returns at 1.5% and
+  3% daily volatility, and with one more 3:2 split), every build's panel,
+  `data_hash` and `spec_hash`, and every backtest's equity, are what they
+  were; the warnings and `price_jumps` add the bars in the band. A warning
+  with no such bar is word for word what it was. The screen costs 2.1 ms
+  for 31 series of 1,190 bars, from 1.0 ms.
+- **How often an ordinary move is named.** On 2,000 simulated series of
+  10,000 bars each (GARCH(1,1) with Student-t(4) innovations, long-run
+  daily volatility 2%, 3% and 4%) the 3:2 band below 35% named an ordinary
+  fall once per 75, 22 and 9 name-years, against once per 57, 16 and 6 for
+  the 35% threshold; with four earnings jumps a year at three times the
+  daily volatility, once per 53, 15 and 6. Falls of 30% to 36%, all named
+  now, came once per 161, 44 and 19 name-years. Under Gaussian returns at
+  the same volatilities no move reached the band. On the live-shaped bars
+  at 3% volatility one ordinary −32% fall in about 140 name-years was
+  named; at 1.5%, none.
+- **4:3 and 5:4 are not listed.** Their bands reach down to falls of 17.1%
+  and 11.6%; on the same series a 4:3 band would have named an ordinary
+  fall once per 14, 4 and 2 name-years and a 5:4 band once per 3.9, 1.2
+  and 0.5.
+- **A declared split's check does not read the threshold.** "DECLARED
+  SPLIT NOT SEEN" compares the ex-date bar with the declared ratio within
+  the same 10%; a 3:2 split declared a session late now has both of its
+  moves named, the −33% left in the bars and the +50% the adjustment
+  makes.
+
 ## One Newey-West lag for overlapping labels, an embargo before the selection holdout, and score_predictions tests its headline
 
 - **The Diebold-Mariano test used lag h − 1, which under-corrects an h-bar

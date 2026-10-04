@@ -72,11 +72,23 @@ class TestTheSplitScreenRunsInThePortfolioEngine:
         assert "adjusted=True" in warning
 
     def test_an_ordinary_large_move_is_not_screened(self, engine_path):
-        """Null case: -28% is under the threshold."""
-        prices = {"A": _bars(1, drop_at=250, factor=0.72), "B": _bars(2)}
+        """Null case: -22% is under the threshold and smaller than the
+        26% to 35% fall a 3:2 split makes. (The -28% this case used is now
+        named as 3:2-sized; see the CHANGELOG entry of 2026-10-04.)"""
+        prices = {"A": _bars(1, drop_at=250, factor=0.78), "B": _bars(2)}
         assert not _screen(
             run_portfolio_simulation(prices, _monthly({"A": 0.5, "B": 0.5}))
         )
+
+    def test_a_fall_the_size_of_a_3_2_split_is_screened(self, engine_path):
+        """-28% is under the threshold but within 10% (log scale) of a 3:2
+        split's -33%: named, prefixed with the ticker."""
+        prices = {"A": _bars(1, drop_at=250, factor=0.72), "B": _bars(2)}
+        (warning,) = _screen(
+            run_portfolio_simulation(prices, _monthly({"A": 0.5, "B": 0.5}))
+        )
+        assert warning.startswith("A: SPLIT SCREEN: 1 bar(s)")
+        assert "near a 3:2 split" in warning
 
     def test_a_split_in_a_ticker_never_held_is_not_screened(self, engine_path):
         """Null case: a name that never carries a weight cannot move equity."""

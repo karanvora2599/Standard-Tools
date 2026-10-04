@@ -30,12 +30,20 @@ proven defects.
 
 import logging
 import math
-from fractions import Fraction
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 
+# Which moves are named is one rule, `_split_screen.screen_moves`, read
+# here and by the backtest's screen (`backtest.screens`). The tolerance and
+# the ratio label live with it and are re-exported here under their names.
+from standard_quant_tools._split_screen import (  # noqa: F401
+    RATIOS_NAMED_BELOW_THRESHOLD,
+    SPLIT_RATIO_TOLERANCE,
+    screen_moves,
+    split_ratio_label,
+)
 from standard_quant_tools.constants import SPLIT_SCREEN_THRESHOLD
 from standard_quant_tools.data.databento import DATASET_CONSOLIDATED
 from standard_quant_tools.error import ValidationError
@@ -295,21 +303,8 @@ SPLIT_RATIOS: Tuple[float, ...] = (
     50.0,
 )
 
-#: How close, on a log scale, a move's implied ratio must sit to a listed
-#: ratio to be named after it: |ln(implied / ratio)| <= 0.10, about 10%.
-#: The six splits in a live 2022-2026 Databento window all sat within 3%
-#: (the split day's own move is the rest). Where a move is within reach of
-#: two listed ratios -- 25 and 30 are 0.18 apart -- the nearer is named.
-SPLIT_RATIO_TOLERANCE = 0.10
-
-
-def split_ratio_label(ratio: float) -> str:
-    """'10:1' for 10, '3:2' for 1.5, '1:10' for a 0.1 reverse split; a
-    ratio with no small fraction is printed as a number."""
-    fraction = Fraction(float(ratio)).limit_denominator(1000)
-    if abs(float(fraction) - float(ratio)) > 1e-9 * max(1.0, abs(float(ratio))):
-        return f"{float(ratio):g}:1"
-    return f"{fraction.numerator}:{fraction.denominator}"
+# SPLIT_RATIO_TOLERANCE (0.10 on a log scale) and `split_ratio_label` are
+# imported above from `_split_screen`, where the rule that reads them lives.
 
 
 def nearest_split_ratio(factor: float) -> Tuple[float, float]:
@@ -359,9 +354,9 @@ def split_like_moves_at(
         return []
     before = values[:-1]
     after = values[1:]
-    with np.errstate(divide="ignore", invalid="ignore"):
-        moves = after / before - 1.0
-    flagged = np.flatnonzero(np.abs(moves) > threshold)
+    screened = screen_moves(values, threshold)
+    moves = screened.moves
+    flagged = np.flatnonzero(screened.flagged)
     out: List[Tuple[int, float, Optional[float], Optional[float]]] = []
     for i in flagged:
         move = float(moves[i])
@@ -384,14 +379,16 @@ def detect_split_like_moves(
     Close-to-close moves large enough to be an unadjusted split, each named
     after the split ratio it is consistent with.
 
-    The screen the backtest runs (`backtest.screens`, same 35% threshold),
-    in the form a dataset build records: a move beyond `threshold` is
-    listed, and when the price ratio across the bar is within 10% (on a
-    log scale) of a listed split ratio -- 3:2, 2:1, 3:1, 4:1, 5:1, 8:1,
+    The screen the backtest runs (`backtest.screens`, one rule in
+    `_split_screen`), in the form a dataset build records: a move beyond
+    `threshold` is listed, and so is a fall within 10% (on a log scale) of
+    a 3:2 split however small -- 26.3% to 39.7%, so a 3:2 split's -33% is
+    listed under the default 35%. When the price ratio across a listed bar
+    is within 10% of a listed split ratio -- 3:2, 2:1, 3:1, 4:1, 5:1, 8:1,
     10:1, 15:1, 20:1, 25:1, 30:1, 40:1, 50:1, or any of them reversed --
     that ratio is named. Being named is consistency, not proof: a genuine
-    -90% day reads exactly like a 10:1 split, and a 3:2 split (-33%) is
-    below the default threshold and not listed at all.
+    -90% day reads exactly like a 10:1 split, and a genuine -30% day like a
+    3:2 split.
 
     Args:
         close: Close prices in bar order (a frame's 'Close' column is used

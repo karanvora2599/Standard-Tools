@@ -302,8 +302,176 @@ class _YahooUnreachable(APIError):
         self.status = status
 
 
-#: Attempts the retry layer makes on a Yahoo history request.
+#: Attempts the retry layer makes on a Yahoo history or info request.
 _ATTEMPTS = 3
+
+
+# ── `ticker.info` has no `raise_errors` ──────────────────────────────────
+#
+# yfinance reads a symbol's info from three requests -- the quote summary,
+# the quote, and a time series for one field (trailingPegRatio) -- and
+# cannot be asked to raise. Stubbed at its HTTP layer, the two installed
+# versions answer a failed request like this:
+#
+#   failure                        0.2.65                 1.7.0
+#   connection error, timeout      raised                 raised
+#   429                            YFRateLimitError       YFRateLimitError
+#   200 with a maintenance page    JSONDecodeError        JSONDecodeError
+#   5xx on both quote requests     TypeError              {'trailingPegRatio':
+#                                                          None}, or the
+#                                                          time series' error
+#   5xx on one quote request       TypeError, or the      the other request's
+#                                  other's fields         fields
+#   unknown symbol (Yahoo's 404)   {'trailingPegRatio':   {'trailingPegRatio':
+#                                  None}                  None}
+#
+# A 5xx is caught inside yfinance and logged on its logger as "HTTP Error
+# 503: Service Unavailable" (1.7.0 appends the body), which is the only
+# trace of it: under 1.7.0 the dict it leaves is the one Yahoo gives for a
+# symbol it does not know. The log line is read from the calling thread
+# while `info` runs, as the timezone lookup's is for the history call; a
+# process that sets yfinance's logger above ERROR suppresses the line, and
+# then a 5xx under 1.7.0 still reads as "no metadata".
+
+#: A failed request as yfinance logs it: "HTTP Error 503: Service Unavailable".
+_YF_HTTP_ERROR_RE = re.compile(r"HTTP Error (\d{3})(?::[ ]?([A-Za-z][A-Za-z' -]*))?")
+
+#: What `ticker.info` holds when Yahoo has no entry for the symbol: the
+#: one field yfinance asks the time-series endpoint for, set to None.
+_INFO_ONLY_FROM_TIMESERIES = frozenset({"trailingPegRatio"})
+
+
+def _is_vendor_status(status: int) -> bool:
+    """An HTTP status that is not an answer about the request: a timeout
+    (408), a rate limit (429) or a server failure (5xx)."""
+    return status in (408, 429) or 500 <= status <= 599
+
+
+class _LoggedHttpErrors(logging.Handler):
+    """Records the HTTP errors yfinance logs from THIS thread, as
+    (status, "HTTP 503 Service Unavailable")."""
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.ERROR)
+        self._thread = threading.get_ident()
+        self.errors: list = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if record.thread != self._thread:
+            return
+        try:
+            text = record.getMessage()
+        except Exception:  # noqa: BLE001 - an unformattable line says nothing
+            return
+        found = _YF_HTTP_ERROR_RE.search(text)
+        if found:
+            reason = (found.group(2) or "").strip()
+            self.errors.append(
+                (int(found.group(1)), f"HTTP {found.group(1)} {reason}".strip())
+            )
+
+    @property
+    def statuses(self) -> list:
+        return [status for status, _ in self.errors]
+
+
+def _raised_status(exc: BaseException) -> Optional[int]:
+    """The HTTP status of a raised HTTP error (yfinance 1.x raises its
+    requests' errors when `hide_exceptions` is off), or None."""
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    return status if isinstance(status, int) else None
+
+
+def _info_failure(exc: BaseException, logged: _LoggedHttpErrors) -> Optional[tuple]:
+    """
+    (cause, status) when an info read failed without an answer from Yahoo
+    -- or None when the failure is Yahoo's answer or not known to be the
+    vendor's.
+    """
+    for status, text in logged.errors:
+        if _is_vendor_status(status):
+            # 0.2.65 raises TypeError once a quote request has failed: the
+            # failure is the request's, logged before it.
+            return f"Yahoo answered {text}", status
+    status = _raised_status(exc)
+    if status is not None:
+        if _is_vendor_status(status):
+            return f"Yahoo answered HTTP {status}", status
+        return None
+    cause = _yahoo_failure(exc, [])
+    if cause is None:
+        return None
+    found = re.search(r"HTTP (\d{3})", cause)
+    return cause, int(found.group(1)) if found else None
+
+
+def _read_info(symbol: str, not_found: str, failed: str) -> tuple:
+    """
+    `yf.Ticker(symbol).info` and the HTTP errors yfinance logged reading
+    it.
+
+    Raises `_YahooUnreachable` when a request got no answer from Yahoo --
+    raised, or logged and answered with what was left -- so the retry
+    layer asks again; `DataNotFoundError(not_found)` when Yahoo's only
+    answer was 404; and an `APIError` starting `failed` for anything else
+    that went wrong, as before.
+    """
+    logged = _LoggedHttpErrors()
+    yf_logger = logging.getLogger("yfinance")
+    yf_logger.addHandler(logged)
+    try:
+        info = yf.Ticker(symbol).info
+    except Exception as exc:  # noqa: BLE001 - sorted below
+        failure = _info_failure(exc, logged)
+        if failure is not None:
+            cause, status = failure
+            raise _YahooUnreachable(
+                f"yfinance could not get an answer from Yahoo for '{symbol}': "
+                f"{cause}.",
+                status=status,
+            ) from exc
+        statuses = set(logged.statuses)
+        raised = _raised_status(exc)
+        if raised is not None:
+            statuses.add(raised)
+        if statuses == {404}:
+            # Yahoo said it has no such symbol; 0.2.65 then fails on the
+            # empty answer instead of returning it.
+            raise DataNotFoundError(not_found) from exc
+        seen = "; ".join(dict.fromkeys(text for _, text in logged.errors))
+        raise APIError(
+            f"{failed}: {exc}" + (f" (yfinance logged {seen})" if seen else "")
+        ) from exc
+    finally:
+        yf_logger.removeHandler(logged)
+    for status, text in logged.errors:
+        if _is_vendor_status(status):
+            raise _YahooUnreachable(
+                f"yfinance could not get an answer from Yahoo for '{symbol}': "
+                f"Yahoo answered {text}, and yfinance returned what was left "
+                f"({len(info or {})} field(s)).",
+                status=status,
+            )
+    return info, logged
+
+
+def _has_no_entry(info: Optional[dict]) -> bool:
+    """Whether `info` is Yahoo's answer for a symbol it does not know: empty,
+    or holding only the time-series field yfinance adds to every answer."""
+    return not info or set(info) <= _INFO_ONLY_FROM_TIMESERIES
+
+
+def _not_found(message: str, logged: _LoggedHttpErrors) -> str:
+    """`message`, with the status Yahoo refused a request with when that
+    was not a 404: an empty answer to a refused request is not an answer
+    about the symbol."""
+    refused = [text for status, text in logged.errors if status != 404]
+    if not refused:
+        return message
+    return (
+        f"{message} Yahoo answered {refused[-1]} to the request, so this may be "
+        "a refused request rather than an answer about the symbol."
+    )
 
 
 class YFinanceProvider(DataProvider):
@@ -585,15 +753,36 @@ class YFinanceProvider(DataProvider):
         ctx = contextvars.copy_context()
         return await loop.run_in_executor(None, lambda: ctx.run(fn))  # type: ignore[arg-type]
 
-    @retry(times=3, delay=1)
+    @retry(times=_ATTEMPTS, delay=1)
+    def _info_attempts(self, symbol: str, not_found: str, failed: str) -> tuple:
+        return _read_info(symbol, not_found, failed)
+
+    def _info(self, symbol: str, what: str, not_found: str, failed: str) -> tuple:
+        """`ticker.info` after the retry layer's attempts, with a failure to
+        reach Yahoo named as the vendor's (see `_read_info`)."""
+        try:
+            return self._info_attempts(symbol, not_found, failed)
+        except _YahooUnreachable as exc:
+            raise VendorUnavailableError(
+                f"Yahoo Finance failed on its side for {symbol!r} ({what}) on "
+                f"all {_ATTEMPTS} attempts: {exc} This is a network or service "
+                "failure, not an answer about the symbol -- it does not mean the "
+                f"symbol is wrong or has no {what}. Asking again later may "
+                "succeed, or ask another provider (source=...).",
+                status=exc.status,
+                dataset=None,
+                original_exception=exc,
+            ) from exc
+
     def get_ticker_info(self, symbol: str) -> TickerInfo:
         if not symbol:
             raise InvalidSymbolError("Symbol cannot be empty.")
+        not_found = f"No metadata found for '{symbol}'."
+        failed = f"Error fetching ticker info for '{symbol}'"
+        info, logged = self._info(symbol, "ticker info", not_found, failed)
+        if _has_no_entry(info) or len(info) < 2:
+            raise DataNotFoundError(_not_found(not_found, logged))
         try:
-            ticker = yf.Ticker(symbol)
-            info = ticker.info
-            if not info or len(info) < 2:
-                raise DataNotFoundError(f"No metadata found for '{symbol}'.")
             return TickerInfo(
                 symbol=symbol,
                 name=info.get("longName", "Unknown"),
@@ -604,10 +793,8 @@ class YFinanceProvider(DataProvider):
                 country=info.get("country"),
                 website=info.get("website"),
             )
-        except (DataNotFoundError, InvalidSymbolError):
-            raise
         except Exception as e:
-            raise APIError(f"Error fetching ticker info for '{symbol}': {e}") from e
+            raise APIError(f"{failed}: {e}") from e
 
     def get_metadata(self, symbol: str, interval: str = "1d") -> DataSetMetadata:
         """
@@ -645,15 +832,18 @@ class YFinanceProvider(DataProvider):
             ],
         )
 
-    @retry(times=3, delay=1)
     def get_financial_ratios(self, symbol: str) -> FinancialRatios:
         if not symbol:
             raise InvalidSymbolError("Symbol cannot be empty.")
+        not_found = f"No financial data found for '{symbol}'."
+        failed = f"Error fetching financials for '{symbol}'"
+        info, logged = self._info(symbol, "financial data", not_found, failed)
+        # Yahoo's answer for a symbol it does not know holds one field set
+        # to None, which used to pass as financial data with every ratio
+        # missing.
+        if _has_no_entry(info):
+            raise DataNotFoundError(_not_found(not_found, logged))
         try:
-            ticker = yf.Ticker(symbol)
-            info = ticker.info
-            if not info:
-                raise DataNotFoundError(f"No financial data found for '{symbol}'.")
             # yfinance's units, field by field. debtToEquity is the one
             # that differs from this package's canonical unit: yfinance
             # reports it as a PERCENTAGE (150.5 meaning debt is 1.505x
@@ -683,7 +873,5 @@ class YFinanceProvider(DataProvider):
             for warning in implausible_value_warnings(ratios):
                 logger.warning("[yfinance:%s] %s", symbol, warning)
             return ratios
-        except (DataNotFoundError, InvalidSymbolError):
-            raise
         except Exception as e:
-            raise APIError(f"Error fetching financials for '{symbol}': {e}") from e
+            raise APIError(f"{failed}: {e}") from e

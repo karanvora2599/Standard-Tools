@@ -202,14 +202,18 @@ async def fetch_returns_async(
     start_date: str,
     end_date: str,
     interval: str = "1d",
+    *,
+    provider: Any = None,
 ) -> pd.DataFrame:
     """
     Fetch OHLCV for multiple tickers concurrently and return a returns DataFrame.
-    One network round-trip per ticker, fully async.
+    One network round-trip per ticker, fully async. `provider` is the data
+    provider to ask; None asks the default.
     """
     from standard_quant_tools.data.factory import DataFactory
 
-    provider = DataFactory.get_provider()
+    if provider is None:
+        provider = DataFactory.get_provider()
 
     tasks = [
         provider.get_ohlcv_async(ticker, start_date, end_date, interval)
@@ -252,9 +256,13 @@ def fetch_returns_sync(
     start_date: str,
     end_date: str,
     interval: str = "1d",
+    *,
+    provider: Any = None,
 ) -> pd.DataFrame:
     """Synchronous wrapper around fetch_returns_async."""
-    return asyncio.run(fetch_returns_async(tickers, start_date, end_date, interval))
+    return asyncio.run(
+        fetch_returns_async(tickers, start_date, end_date, interval, provider=provider)
+    )
 
 
 async def fetch_ohlcv_panel_async(
@@ -262,6 +270,8 @@ async def fetch_ohlcv_panel_async(
     start_date: str,
     end_date: str,
     interval: str = "1d",
+    *,
+    provider: Any = None,
 ) -> Dict[str, pd.DataFrame]:
     """
     Fetch full OHLCV for multiple tickers concurrently. One network
@@ -273,11 +283,13 @@ async def fetch_ohlcv_panel_async(
     fetch_returns_sync above is the right, cheaper choice; this exists for
     callers that also need Volume/OHLC (e.g. a portfolio simulation's ADV/
     volatility-based transaction cost model), which a returns-only frame
-    can't supply.
+    can't supply. `provider` is the data provider to ask; None asks the
+    default.
     """
     from standard_quant_tools.data.factory import DataFactory
 
-    provider = DataFactory.get_provider()
+    if provider is None:
+        provider = DataFactory.get_provider()
 
     tasks = [
         provider.get_ohlcv_async(ticker, start_date, end_date, interval)
@@ -292,6 +304,12 @@ def fetch_ohlcv_panel_sync(
     start_date: str,
     end_date: str,
     interval: str = "1d",
+    *,
+    provider: Any = None,
 ) -> Dict[str, pd.DataFrame]:
     """Synchronous wrapper around fetch_ohlcv_panel_async."""
-    return asyncio.run(fetch_ohlcv_panel_async(tickers, start_date, end_date, interval))
+    return asyncio.run(
+        fetch_ohlcv_panel_async(
+            tickers, start_date, end_date, interval, provider=provider
+        )
+    )

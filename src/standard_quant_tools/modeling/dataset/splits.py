@@ -14,10 +14,11 @@ Two things live here, both run by `build_dataset`:
 
 THE SCREEN. Every entity's Close, and the benchmark's when a feature
 reads the benchmark, is screened for close-to-close moves beyond the
-backtest's threshold (35%,
-`constants.SPLIT_SCREEN_THRESHOLD`, the same object
-`backtest.screens` reads), each named after the split ratio it is
-consistent with (`data.quality.detect_split_like_moves`). For each move
+backtest's threshold (35%, `constants.SPLIT_SCREEN_THRESHOLD`) and for
+falls the size of a 3:2 split below it (26% to 35%) -- one rule,
+`_split_screen.screen_moves`, the one `backtest.screens` reads -- each
+named after the split ratio it is consistent with
+(`data.quality.detect_split_like_moves`). For each move
 the build counts the labels that span it and the panel rows carrying a
 feature computed across it, using each feature's converged warm-up
 (`features.params.resolved_warmup`) plus its deepest lag on the bars of
@@ -44,6 +45,10 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools._split_screen import (
+    RATIOS_NAMED_BELOW_THRESHOLD,
+    below_threshold_band,
+)
 from standard_quant_tools.constants import SPLIT_SCREEN_THRESHOLD
 from standard_quant_tools.data.quality import (
     SPLIT_RATIO_TOLERANCE,
@@ -549,9 +554,13 @@ def price_jump_warnings(
     jumps = screen.jumps
     listing = ", ".join(describe_jump(j) for j in jumps[:_LISTED])
     more = f" and {len(jumps) - _LISTED} more" if len(jumps) > _LISTED else ""
+    size = f"beyond {threshold:.0%}"
+    if any(abs(j["close_move"]) < threshold for j in jumps):
+        smallest, largest = below_threshold_band(threshold)
+        labels = " or ".join(split_ratio_label(r) for r in RATIOS_NAMED_BELOW_THRESHOLD)
+        size += f", or falls of {smallest:.0%} to {largest:.0%} near a {labels} split,"
     parts = [
-        f"PRICE JUMPS: {_count(len(jumps), 'close-to-close move')} beyond "
-        f"{threshold:.0%} "
+        f"PRICE JUMPS: {_count(len(jumps), 'close-to-close move')} {size} "
         f"in the bars this dataset was built from: {listing}{more}."
     ]
     if n_declared_applied:
