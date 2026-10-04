@@ -285,10 +285,14 @@ class TestTheHonestFloorIsAPropertyOfThePanel:
         assert result.n_kept_at_floor == 0
         assert result.honest_floor > 0.02
 
-        floor_sentence = next(w for w in result.warnings if "min_abs_rank_ic=" in w)
+        floor_sentence = next(w for w in result.warnings if "honest_floor=" in w)
         assert f"A floor of 0.02 keeps {len(naive)} of 10 features" in floor_sentence
-        assert "the measured floor keeps 0" in floor_sentence
-        assert "select_features(min_abs_rank_ic=" in floor_sentence
+        assert "honest_floor keeps 0" in floor_sentence
+        # It no longer recommends itself as a selection floor: it is the
+        # widest null applied to every feature, measured on every date (the
+        # CHANGELOG entry of 2026-10-04).
+        assert "not a min_abs_rank_ic for select_features" in floor_sentence
+        assert "select_features(min_abs_rank_ic=" not in floor_sentence
 
     def test_the_family_wise_sentence_counts_the_questions_asked(self, tmp_path):
         dataset_id = _register(_only_noise(), tmp_path, "family_wise")

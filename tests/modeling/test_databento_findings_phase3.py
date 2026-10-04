@@ -123,7 +123,9 @@ class TestSelectionDoesNotReadTheHoldout:
 
     def test_the_selection_window_and_the_holdout_are_reported(self):
         panel, features = _noise_panel()
-        result = select_features_on(panel, features, max_features=5)
+        result = select_features_on(
+            panel, features, max_features=5, significance="none"
+        )
         assert result["selection_window"]["n_dates"] == 210
         assert result["holdout_window"]["n_dates"] == 90
         assert result["selection_window"]["end"] < result["holdout_window"]["start"]
@@ -133,7 +135,9 @@ class TestSelectionDoesNotReadTheHoldout:
 
     def test_the_selected_noise_is_optimistic_in_sample_and_not_out(self):
         panel, features = _noise_panel()
-        result = select_features_on(panel, features, max_features=5)
+        result = select_features_on(
+            panel, features, max_features=5, significance="none"
+        )
         chosen = result["selected"]
         in_sample = np.mean([abs(result["selection_ic"][f]) for f in chosen])
         # Signed by the selection's own sign, so a feature that flipped

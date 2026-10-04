@@ -298,10 +298,89 @@ class FeatureCluster(BaseModel):
     )
     max_abs_correlation: Stat = Field(
         ...,
-        description="Strongest absolute pairwise correlation inside the "
-        "cluster. 1.0 means an exact restatement.",
+        description="Strongest absolute pairwise Pearson correlation inside "
+        "the cluster. 1.0 means an exact restatement. None for a "
+        "single-member cluster, which has no pair.",
     )
     size: int
+
+
+#: What the three collinearity fields say, shared by every result that
+#: carries them so the two tools describe one number one way.
+_CONDITION_NUMBER = (
+    "Condition number of the feature correlation matrix: its largest "
+    "eigenvalue over its smallest. The warnings name it at 1000 and above, "
+    "where a linear model's coefficients trade off against each other "
+    "almost freely (Montgomery, Peck & Vining, s.9.4). Belsley's line of 30 "
+    "is for the condition INDEX, the square root of this number, and is 900 "
+    "on this scale. None when the matrix is singular -- some feature is an "
+    "exact linear combination of others, and the warnings say so -- or "
+    "could not be computed."
+)
+_VIF = (
+    "Variance inflation factor per feature, 1 / (1 - R^2) of the feature "
+    "regressed on all the others, never below 1. 5 and 10 are the usual "
+    "lines (80% and 90% of its variance explained by the others); "
+    "collinear_features names what explains every feature at or above 5. "
+    "None for a feature that is an exact linear combination of others "
+    "(VIF infinite)."
+)
+
+
+class CollinearContributor(BaseModel):
+    """One of the features behind a high VIF."""
+
+    model_config = _NO_PROTECTED
+
+    feature: str
+    partial_correlation: Stat = Field(
+        None,
+        description="Correlation with the collinear feature once every other "
+        "feature is held fixed, from the inverse correlation matrix. What "
+        "this feature adds to the explanation that the rest do not. None "
+        "when the matrix is singular, where it is undefined.",
+    )
+    correlation: Stat = Field(
+        ..., description="Plain pairwise Pearson correlation, for comparison."
+    )
+
+
+class CollinearFeature(BaseModel):
+    """A feature the others jointly explain, whether or not any one pair
+    is close enough to cluster."""
+
+    model_config = _NO_PROTECTED
+
+    feature: str
+    vif: Stat = Field(
+        ...,
+        description="Its VIF. None when it is an exact linear combination "
+        "of others (infinite).",
+    )
+    r_squared: Stat = Field(
+        ...,
+        description="Share of its variance the other features explain "
+        "together: 1 - 1/VIF, and 1.0 for an exact combination.",
+    )
+    vif_from_strongest_pair: Stat = Field(
+        None,
+        description="The VIF its single most correlated partner would give on "
+        "its own. Well below `vif` means no pair explains it -- several "
+        "features do, together -- which is the case pairwise clustering "
+        "cannot see. None when that pair is an exact restatement.",
+    )
+    in_cluster: bool = Field(
+        ...,
+        description="Whether a multi-member redundancy cluster holds it. "
+        "False is the case the clusters and the VIFs disagree on.",
+    )
+    explained_by: List[CollinearContributor] = Field(
+        default_factory=list,
+        description="The other features that explain it, strongest partial "
+        "correlation first: the shortest such list whose regression reaches "
+        "90% of its R^2, at most five. For an exact combination, the other "
+        "members of the combination, heaviest first.",
+    )
 
 
 class FeatureRedundancyResult(BaseModel):
@@ -317,19 +396,18 @@ class FeatureRedundancyResult(BaseModel):
     redundant_features: List[str] = Field(
         ...,
         description="Every non-representative member of every multi-feature "
-        "cluster: the drop list, already worked out.",
+        "cluster: the drop list, already worked out. Clusters join PAIRS at "
+        "|r| >= cluster_threshold, so a feature that several others explain "
+        "together, with no one pair that close, is not on it -- "
+        "collinear_features lists those.",
     )
-    condition_number: Stat = Field(
-        ...,
-        description="Condition number of the feature correlation matrix. "
-        "Above ~30 the panel is collinear enough that linear coefficients "
-        "stop meaning what they appear to mean.",
-    )
-    vif: Dict[str, Stat] = Field(
-        ...,
-        description="Variance inflation factor per feature. Above 10 is the "
-        "usual line; above 100 the feature is nearly a linear combination of "
-        "the others.",
+    condition_number: Stat = Field(..., description=_CONDITION_NUMBER)
+    vif: Dict[str, Stat] = Field(..., description=_VIF)
+    collinear_features: List[CollinearFeature] = Field(
+        default_factory=list,
+        description="Every feature with VIF at or above 5, or infinite, "
+        "highest first, with the features that explain it. The pairwise "
+        "clusters and the VIFs can disagree; this is where the VIFs say why.",
     )
     correlation: Dict[str, Dict[str, Stat]] = Field(
         ..., description="Pearson correlation matrix."
@@ -428,7 +506,9 @@ class DroppedFeature(BaseModel):
     reason: str = Field(
         ...,
         description="'redundant' (the same signal as a kept feature), "
-        "'weak' (below the IC floor), or 'capped' (past max_features).",
+        "'weak' (below the IC floor), 'insignificant' (did not reach p < "
+        "alpha against the permutation null on the selection window, or "
+        "could not be tested) or 'capped' (past max_features).",
     )
     detail: str = Field(..., description="The specific numbers behind the reason.")
     duplicate_of: Optional[str] = Field(
@@ -436,8 +516,35 @@ class DroppedFeature(BaseModel):
         description="For a 'redundant' drop, the kept feature this one "
         "restates -- the same name its cluster reports as representative. "
         "It is here so that 'dropped as a duplicate of what' is a field "
-        "rather than a sentence to parse. None for 'weak' and 'capped', "
-        "which are not about another feature.",
+        "rather than a sentence to parse. None for every other reason, "
+        "which is not about another feature.",
+    )
+    p_value: Stat = Field(
+        None,
+        description="For an 'insignificant' drop, its two-sided permutation "
+        "p-value on the selection window; None when it could not be tested, "
+        "and for every other reason.",
+    )
+
+
+class SelectionSignificance(BaseModel):
+    """How the significance test of a selection was run, and what it found."""
+
+    model_config = _NO_PROTECTED
+
+    null: str = Field(..., description="'entity_shuffle' or 'circular_shift'.")
+    alpha: float = Field(..., description="A feature passed at p < alpha.")
+    n_permutations: int
+    random_seed: int
+    n_tested: int = Field(
+        ...,
+        description="Cluster representatives that cleared min_abs_rank_ic "
+        "and were tested.",
+    )
+    n_passed: int = Field(
+        ...,
+        description="How many of them reached p < alpha. Compare with "
+        "alpha x n_tested, the number noise alone passes on average.",
     )
 
 
@@ -463,18 +570,67 @@ class SelectFeaturesInput(BaseModel):
         0.0,
         ge=0.0,
         le=1.0,
-        description="Drop a surviving feature whose |rank IC| is below this. "
-        "0.0 (default) keeps everything that is not redundant. A floor around "
-        "0.01-0.02 is where a cross-sectional signal stops being measurable "
-        "on a few hundred dates -- but set it from what THIS panel supports, "
-        "which run_feature_permutation_test answers directly.",
+        description="Drop a surviving feature whose |rank IC| on the "
+        "selection window is below this, before the significance test. 0.0 "
+        "(default) applies no floor and leaves the decision to "
+        "`significance`. A floor is a size requirement, not a test: whether "
+        "an IC is distinguishable from noise is what `significance` answers, "
+        "on the selection window only. screen_feature_significance's "
+        "honest_floor is not a value for this: it is the widest null among "
+        "all the features, measured on every date including the holdout.",
     )
     max_features: int = Field(
         0,
         ge=0,
-        description="Hard cap after both filters, by |rank IC|. 0 (default) "
+        description="Hard cap after every filter, by |rank IC|. 0 (default) "
         "means no cap. A cap for a caller with a budget, not a ranking to "
         "trust -- the gap between the 20th and 21st feature is usually noise.",
+    )
+    significance: Literal["entity_shuffle", "circular_shift", "none"] = Field(
+        "entity_shuffle",
+        description="The test each cluster representative that clears "
+        "min_abs_rank_ic must pass, on the selection window only, before the "
+        "holdout is read. 'entity_shuffle' (default) compares its mean rank "
+        "IC with the same feature series handed to randomly permuted "
+        "entities -- one permutation for every date, so each series keeps "
+        "its serial correlation and only the feature-entity link is broken; "
+        "in simulation it rejected a true null 4-7% of the time at alpha "
+        "0.05. 'circular_shift' rolls each entity's series in time instead, "
+        "which keeps a feature's static cross-sectional tilt in the null and "
+        "so cannot detect one. 'none' applies no test: every feature that is "
+        "not redundant and clears min_abs_rank_ic is kept, as before the "
+        "test existed. Needs at least 4-5 entities: with E entities there are "
+        "E! assignments, and three give only six.",
+    )
+    alpha: float = Field(
+        0.05,
+        gt=0.0,
+        lt=1.0,
+        description="A feature passes at a two-sided permutation p-value "
+        "below this. Not corrected for the number of features tested: at "
+        "0.05, about one candidate in twenty passes from noise alone, and "
+        "the warnings say how many that is here.",
+    )
+    n_permutations: int = Field(
+        200,
+        ge=20,
+        le=5000,
+        description="Draws of the null per tested feature. 200 resolves a "
+        "p-value to about 0.005. Cost is linear in this and in the number of "
+        "features tested.",
+    )
+    random_seed: Seed = Field(
+        0, description="Seed for the null's draws, so the selection is reproducible."
+    )
+    max_draws: int = Field(
+        20_000,
+        ge=1,
+        le=MAX_PERMUTATION_DRAWS,
+        description="Refuse to start the test if tested features x "
+        "n_permutations exceeds this; counted after redundancy and the floor, "
+        "before the first draw. A draw costs about 10 ns a panel row under "
+        "'entity_shuffle' on a panel with missing rows (under 1 ns when every "
+        "date has every entity) and about 50 ns under 'circular_shift'.",
     )
     selection_end: Optional[str] = Field(
         None,
@@ -528,6 +684,20 @@ class SelectFeaturesResult(BaseModel):
         description="Each candidate's rank IC on the selection window. "
         "In-sample for the features it chose.",
     )
+    selection_p_value: Dict[str, Stat] = Field(
+        default_factory=dict,
+        description="Two-sided permutation p-value on the selection window "
+        "for each feature the significance test was run on (the cluster "
+        "representatives that cleared min_abs_rank_ic); None for one that "
+        "could not be tested. Empty when significance='none'. Not corrected "
+        "for the number of features tested.",
+    )
+    significance: Optional[SelectionSignificance] = Field(
+        None,
+        description="The test that was run -- null, alpha, permutations, "
+        "seed, how many were tested and how many passed -- or None when "
+        "significance='none' and nothing was tested.",
+    )
     holdout_ic: Dict[str, Stat] = Field(
         default_factory=dict,
         description="Each SELECTED feature's rank IC on the held-out dates, "
@@ -537,8 +707,9 @@ class SelectFeaturesResult(BaseModel):
     dropped: List[DroppedFeature] = Field(
         ...,
         description="Every exclusion with its reason. Read this before "
-        "accepting the selection: a feature dropped as 'weak' may simply be "
-        "unmeasurable on this panel rather than useless.",
+        "accepting the selection: a feature dropped as 'weak' or "
+        "'insignificant' may simply be unmeasurable on this panel rather "
+        "than useless.",
     )
     n_considered: int
     n_selected: int
@@ -557,15 +728,21 @@ class SelectFeaturesResult(BaseModel):
     )
     vif: Dict[str, Stat] = Field(
         default_factory=dict,
-        description="Variance inflation factor per candidate, over the "
-        "selection window. Above 10 is the usual line; above 100 the feature "
-        "is nearly a linear combination of the others.",
+        description="Over every CANDIDATE on the selection window, not only "
+        "the selected ones. " + _VIF,
     )
     condition_number: Stat = Field(
         None,
-        description="Condition number of the candidates' correlation matrix "
-        "over the selection window. Above ~30 the panel is collinear enough "
-        "that linear coefficients stop meaning what they appear to mean.",
+        description="Over every CANDIDATE on the selection window. "
+        + _CONDITION_NUMBER,
+    )
+    collinear_features: List[CollinearFeature] = Field(
+        default_factory=list,
+        description="Every candidate with VIF at or above 5, or infinite, on "
+        "the selection window, with the features that explain it -- the "
+        "block get_feature_redundancy returns for the same dates. The "
+        "redundancy drops are made for pairs only, so a feature here can be "
+        "in no cluster.",
     )
     correlation: Dict[str, Dict[str, Stat]] = Field(
         default_factory=dict,
@@ -821,6 +998,55 @@ class FeatureStabilityResult(BaseModel):
 
 # ── permutation ─────────────────────────────────────────────────────────
 
+#: The three nulls, said once for the single-feature test and the screen.
+_NULL_CHOICE = (
+    "How the null is drawn. 'circular_shift' (default) rolls each entity's "
+    "feature series by a random offset, destroying its link to the target "
+    "while keeping the feature's own serial correlation, so an "
+    "autocorrelated feature against an overlapping label is tested against "
+    "the null it actually lives under -- but it also keeps the entity's "
+    "average level, so a feature whose ranking of the entities barely moves "
+    "keeps much of its IC in the null (see null_mean). 'entity_shuffle' "
+    "hands each entity's whole series to another entity, one permutation "
+    "for every date: serial correlation kept, the feature-entity link and "
+    "any static tilt broken; it is what select_features tests with by "
+    "default, and with E entities it has only E! assignments, so it needs "
+    "at least 4-5. 'within_date' shuffles within each date, which also "
+    "destroys the serial correlation and rejected a true null 27-35% of the "
+    "time on live features."
+)
+
+#: Shared field texts: the same numbers mean the same thing in the
+#: single-feature result and in each row of the screen.
+_NULL_P95_ABS = (
+    "95th percentile of |IC| across the null's draws. Against a null centred "
+    "on zero it is the |IC| noise reaches 5% of the time; against one that "
+    "is not (see null_mean) it is the null's offset plus its spread, not a "
+    "noise level around zero, and an observed IC below it is not by that "
+    "alone noise."
+)
+_P_VALUE = (
+    "Two-sided empirical p-value: the share of draws whose |IC| is at least "
+    "the observed |IC|, with the +1 correction in numerator and denominator "
+    "so an exact 0 is never claimed -- 200 draws cannot tell 'p < 0.005' "
+    "from 'p = 0'. It measures distance from zero, so against a null not "
+    "centred on zero (null_mean) it is not the distance from the null's "
+    "centre."
+)
+_IC_AUTOCORRELATION = (
+    "Lag-1 autocorrelation of the observed per-date IC series. Near zero the "
+    "within-date null agrees with the other two; at +0.6, where every live "
+    "feature sat, only 'circular_shift' and 'entity_shuffle' keep the serial "
+    "correlation the observed ICs have."
+)
+_NULL_MEAN = (
+    "Mean IC across the null's draws: where the null is centred. Near zero "
+    "for 'within_date' and 'entity_shuffle'; a feature whose ranking of the "
+    "entities barely moves keeps much of its IC when its series is rolled "
+    "in time, so its 'circular_shift' null can sit far from zero (beta_60 "
+    "on the live panel: +0.041 against an observed +0.051)."
+)
+
 
 class PermutationTestInput(BaseModel):
     model_config = _FORBID_EXTRA
@@ -841,15 +1067,9 @@ class PermutationTestInput(BaseModel):
         "spearman", description="'spearman' or 'pearson'."
     )
     random_seed: Seed = Field(0, description="Seed, so the p-value is reproducible.")
-    null: Literal["circular_shift", "within_date"] = Field(
+    null: Literal["circular_shift", "within_date", "entity_shuffle"] = Field(
         "circular_shift",
-        description="How the null is drawn. 'circular_shift' (default) rolls "
-        "each entity's feature series by a random offset, destroying its link "
-        "to the target while keeping the feature's own serial correlation, so "
-        "an autocorrelated feature against an overlapping label is tested "
-        "against the null it actually lives under. 'within_date' shuffles "
-        "within each date, which also destroys the serial correlation and "
-        "rejected a true null 27-35% of the time on live features.",
+        description=_NULL_CHOICE,
     )
 
 
@@ -861,29 +1081,14 @@ class PermutationTestResult(BaseModel):
     observed_ic: Stat
     n_permutations: int
     n_usable_permutations: int
-    null_mean: Stat
+    null_mean: Stat = Field(..., description=_NULL_MEAN)
     null_std: Stat
-    null_p95_abs: Stat = Field(
-        ...,
-        description="95th percentile of |IC| under the null: the IC this "
-        "panel produces from noise alone 5% of the time. An observed IC below "
-        "it is not evidence of anything.",
-    )
-    p_value: Stat = Field(
-        ...,
-        description="Two-sided empirical p-value, with the +1 correction in "
-        "numerator and denominator so an exact 0 is never claimed -- 200 "
-        "shuffles cannot tell 'p < 0.005' from 'p = 0'.",
-    )
+    null_p95_abs: Stat = Field(..., description=_NULL_P95_ABS)
+    p_value: Stat = Field(..., description=_P_VALUE)
     significant_at_05: bool
     random_seed: int
     null: str = Field("within_date", description="The null the p-value is against.")
-    ic_autocorrelation_lag1: Stat = Field(
-        None,
-        description="Lag-1 autocorrelation of the observed per-date IC series. "
-        "Near zero the two nulls agree; at +0.6, where every live feature "
-        "sat, only circular_shift is calibrated.",
-    )
+    ic_autocorrelation_lag1: Stat = Field(None, description=_IC_AUTOCORRELATION)
     warnings: List[str] = Field(default_factory=list)
 
 
@@ -903,23 +1108,10 @@ class FeatureSignificance(BaseModel):
         "rank correlation, and 0.0 would read as 'no signal' where the "
         "answer is 'no measurement'.",
     )
-    p_value: Stat = Field(
-        ...,
-        description="Two-sided empirical p-value against the null, with the "
-        "+1 correction in numerator and denominator so an exact 0 is never "
-        "claimed.",
-    )
-    null_p95_abs: Stat = Field(
-        ...,
-        description="95th percentile of |IC| under the null for THIS "
-        "feature: the IC noise alone produces 5% of the time.",
-    )
-    ic_autocorrelation_lag1: Stat = Field(
-        ...,
-        description="Lag-1 autocorrelation of the observed per-date IC "
-        "series. Near zero the two nulls agree; at +0.6 only "
-        "'circular_shift' is calibrated.",
-    )
+    p_value: Stat = Field(..., description=_P_VALUE)
+    null_mean: Stat = Field(None, description=_NULL_MEAN)
+    null_p95_abs: Stat = Field(..., description="For THIS feature. " + _NULL_P95_ABS)
+    ic_autocorrelation_lag1: Stat = Field(..., description=_IC_AUTOCORRELATION)
     significant_at_05: bool
     n_usable_permutations: int = Field(
         ...,
@@ -953,14 +1145,9 @@ class ScreenFeatureSignificanceInput(BaseModel):
         description="Correlation used for the IC: 'spearman' (default, "
         "rank) or 'pearson'.",
     )
-    null: Literal["circular_shift", "within_date"] = Field(
+    null: Literal["circular_shift", "within_date", "entity_shuffle"] = Field(
         "circular_shift",
-        description="How the null is drawn. 'circular_shift' (default) "
-        "rolls each entity's feature series by a random offset, destroying "
-        "its link to the target while keeping its own serial correlation. "
-        "'within_date' shuffles inside each date, which destroys that "
-        "serial correlation too and rejected a true null 27-35% of the time "
-        "on autocorrelated features.",
+        description=_NULL_CHOICE,
     )
     random_seed: Seed = Field(0, description="Seed, so the floor is reproducible.")
     max_draws: int = Field(
@@ -968,9 +1155,12 @@ class ScreenFeatureSignificanceInput(BaseModel):
         ge=1,
         le=MAX_PERMUTATION_DRAWS,
         description="Refuse to start if features x n_permutations exceeds "
-        "this. At about 1.6 ms a draw the default is roughly half a minute "
-        "and the ceiling several minutes; the product is computed before "
-        "the first shuffle and the screen is REFUSED rather than truncated.",
+        "this. A draw costs about 50 ns a panel row under 'circular_shift' "
+        "(1.3-1.4 ms on a 31,680-row panel, so the default is about half a "
+        "minute there), about 10 ns under 'entity_shuffle' when some dates "
+        "miss an entity and under 1 ns when none do, and about 2 ns under "
+        "'within_date'. The product is computed before the first shuffle "
+        "and the screen is REFUSED rather than truncated.",
     )
 
 
@@ -984,9 +1174,12 @@ class ScreenFeatureSignificanceResult(BaseModel):
     honest_floor: Stat = Field(
         ...,
         description="The largest null_p95_abs across the screened features: "
-        "the min_abs_rank_ic that select_features can be given on THIS "
-        "panel without keeping features whose IC this panel's noise "
-        "reproduces. None when nothing was testable.",
+        "the widest null among them, applied to all. Stricter than each "
+        "feature's own test (on the live panel it kept 0 of 8 while one "
+        "feature had p < 0.05 against its own null), and measured on every "
+        "date, so it is not a min_abs_rank_ic for select_features -- whose "
+        "significance test reads the selection window only. None when "
+        "nothing was testable.",
     )
     floor_feature: Optional[str] = Field(
         None, description="The feature whose null set the floor."
@@ -1249,6 +1442,9 @@ class FeatureAblationResult(BaseModel):
 
 __all__ = [
     "BlockPSI",
+    "CollinearContributor",
+    "CollinearFeature",
+    "SelectionSignificance",
     "FeatureContribution",
     "FeatureAblationResult",
     "FeatureAblationInput",

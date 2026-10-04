@@ -1,5 +1,99 @@
 # Changelog
 
+## select_features tests what it keeps, and redundancy says what VIF says
+
+- **A call with no arguments kept every feature that was not a duplicate.**
+  `min_abs_rank_ic` defaults to 0.0, so on the live panel of 2026-10-03
+  `select_features` kept all eight features while
+  `screen_feature_significance` called one of them significant. The floor
+  that screen recommended for it, `honest_floor` (the largest per-feature
+  null p95), kept none, and it was measured on every date, the holdout
+  included.
+- **`select_features` now tests each cluster representative on its selection
+  window, before the holdout is read.** `significance="entity_shuffle"`
+  (default) compares the mean rank IC with the same feature series handed to
+  permuted entities, one permutation for every date. Each series keeps its
+  serial correlation; the feature–entity link, a static tilt included, is
+  broken. Order: redundancy, then `min_abs_rank_ic`, then the test, then
+  `max_features`. A drop is reason `insignificant` with its `p_value`; the
+  result carries `selection_p_value` and a `significance` block; `alpha`
+  0.05, `n_permutations` 200, `random_seed` 0, and a `max_draws` refusal
+  counted before the first draw. On the live panel it keeps beta_60 (p
+  0.005, holdout IC +0.0147) and rvol_20 (p 0.005, +0.0274) and drops the
+  other six (p 0.279–0.886). `significance="circular_shift"` is available;
+  `"none"` returns the previous selection bit for bit and says that no test
+  was applied. The p-values are not corrected for the number tested, and the
+  warning says how many noise alone would pass. With E entities the null has
+  E! assignments; at four or fewer the result says it cannot reliably reach
+  alpha.
+- **The entity shuffle is offered on `run_feature_permutation_test` and
+  `screen_feature_significance`; their default stays `circular_shift` and
+  their numbers do not move.** The circular shift keeps each entity's level,
+  so a feature whose ranking barely moves keeps its IC in the null:
+  beta_60's circular-shift null centres at +0.041 against an observed +0.051
+  (p 0.070), its entity-shuffle null at +0.003 (p 0.005). Each screen row
+  gains `null_mean`. The `p_value` and `null_p95_abs` descriptions now say
+  that against a null not centred on zero they measure distance from zero.
+- **The entity-shuffle draw costs a gather, not a pass over the panel.** On
+  dates where every entity has a row, a draw is the trace of one
+  entities-by-entities matrix under the permutation; other dates are
+  recomputed per draw. It matches a brute-force reassignment to 1e-16 on
+  complete, ragged and tied panels, for both correlations. Draws come from
+  numpy's `default_rng`, entities ordered by name, so the same seed draws
+  the same permutations on every machine and backend. It compares against
+  the observed assignment computed by the same arithmetic: on three
+  entities, 31 of 200 draws were that assignment and each fell 1e-16 below
+  the IC `cross_sectional_ic` reports, which put p at 0.005 instead of
+  0.159.
+- **The circular-shift screen is about ten times faster, with the same
+  numbers.** `permutation_test_ic` re-factorized the panel's zoned dates on
+  every draw: 17 of 18 ms per IC pass on the live panel. It now hands every
+  pass the sorted date codes, which factorize to themselves. The live screen
+  took 25.1 s and takes 2.3 s, with every p-value, null and floor
+  bit-identical. The refusal's single "about 1.6 ms a draw" is now priced
+  per null and per panel row (about 50 ns a row for circular_shift, 10 for
+  entity_shuffle with missing rows, 2 for within_date).
+- **`honest_floor` is no longer offered as a `min_abs_rank_ic`.** It applies
+  the widest null to every feature and reads every date, holdout included.
+  The screen's sentence, its field description and the permutation test's
+  description no longer recommend it, and `select_features`' description no
+  longer promises an IC floor it did not apply.
+  `run_feature_permutation_test`'s description named the within-date shuffle
+  as its null; it names all three.
+- **`collinear_features` says what VIF says.** `get_feature_redundancy`
+  returned `redundant_features: []` beside a VIF of 7.46 for rsi_14:
+  clusters join pairs at |r| >= 0.9, and rsi_14 is explained by several
+  features together. Every feature with VIF >= 5 is now listed, highest
+  first, with `r_squared`, `vif_from_strongest_pair`, `in_cluster` and
+  `explained_by`: the other features by |partial correlation|, the shortest
+  prefix reaching 90% of the full R-squared, at most five. On the live
+  panel: rsi_14 (VIF 7.46, its strongest pair alone 4.18, explained by
+  pctb_20 and mom_20) and pctb_20 (5.09). `select_features` carries the same
+  block for its window; `analyze_features` carries it as
+  `report.redundancy.collinear`. A note at VIF 5, an action at 10, and one
+  sentence when a flagged feature is in no cluster.
+- **One condition-number line, at 1000, worded once.**
+  `get_feature_redundancy` warned above 30, Belsley's line for the condition
+  index (the square root of this number); `analyze_features` warned above
+  1000; `select_features` never warned. All three now say the same sentence
+  at 1000 and above.
+- **A singular correlation matrix is reported as one.** An exact copy
+  reported VIFs of 0.25 and an exact sum 0.62, beside a finite condition
+  number of about 1e16. When the smallest eigenvalue is at most 1e-12 of the
+  largest, the condition number is infinite and each feature in the exact
+  dependency has an infinite VIF (null), named in `collinear_features` with
+  the other members of the combination. Every non-singular matrix takes the
+  old path, to the bit.
+- **A single-member cluster reports `max_abs_correlation: null`, not 1.0,
+  and one builder makes the clusters for both tools.** The record was
+  written twice, once in each tool. The cluster warning says |r|, since the
+  correlation is Pearson.
+- **The single-feature tools point at their screens.** `get_feature_drift`
+  and `get_feature_regime_stability` point to `screen_feature_stability`,
+  `run_feature_permutation_test` and `screen_feature_significance` point to
+  each other, and `get_feature_ic_decay` points to `analyze_features`'
+  `report.leakage`.
+
 ## A dataset built from unadjusted bars names the splits in them, and adjusts the ones its spec declares
 
 - **Nothing under `modeling/` read the provider's `adjusted` flag.**

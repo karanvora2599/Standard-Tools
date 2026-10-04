@@ -169,10 +169,15 @@ class TestSelectFeaturesReturnsWhatItPaidFor:
     def test_the_clusters_are_the_redundancy_tools_clusters(self, dataset):
         """On the same window and threshold, field for field. A threshold of
         0.0 puts every feature in one cluster, which is the case where the
-        representative choice actually has to be made."""
+        representative choice actually has to be made. No significance test:
+        the pin is the redundancy mechanics, and on three entities the
+        default null cannot pass a representative."""
         selected = select_features(
             SelectFeaturesInput(
-                dataset_id=dataset, cluster_threshold=0.0, holdout_fraction=0.0
+                dataset_id=dataset,
+                cluster_threshold=0.0,
+                holdout_fraction=0.0,
+                significance="none",
             )
         )
         redundancy = get_feature_redundancy(
@@ -249,7 +254,10 @@ class TestSelectFeaturesReturnsWhatItPaidFor:
         every redundant drop points at that cluster's representative."""
         selected = select_features(
             SelectFeaturesInput(
-                dataset_id=dataset, cluster_threshold=0.0, holdout_fraction=0.0
+                dataset_id=dataset,
+                cluster_threshold=0.0,
+                holdout_fraction=0.0,
+                significance="none",
             )
         )
         by_member = {
@@ -270,7 +278,11 @@ class TestSelectFeaturesReturnsWhatItPaidFor:
         one of the two is dropped and names the other, and that `beta`,
         which is independent of both, is untouched."""
         panel, feature_ids = _duplicate_panel()
-        result = select_features_on(panel, feature_ids, holdout_fraction=0.0)
+        # `beta` is noise by construction: kept here because no test is
+        # asked for, which is the mechanics this pins.
+        result = select_features_on(
+            panel, feature_ids, holdout_fraction=0.0, significance="none"
+        )
 
         cluster = next(c for c in result["clusters"] if c["size"] > 1)
         assert cluster["members"] == ["alpha", "alpha_copy"]
@@ -290,7 +302,11 @@ class TestSelectFeaturesReturnsWhatItPaidFor:
         would be a different claim."""
         panel, feature_ids = _duplicate_panel()
         result = select_features_on(
-            panel, feature_ids, min_abs_rank_ic=1.0, holdout_fraction=0.0
+            panel,
+            feature_ids,
+            min_abs_rank_ic=1.0,
+            holdout_fraction=0.0,
+            significance="none",
         )
         assert result["selected"] == []
         weak = [d for d in result["dropped"] if d["reason"] == "weak"]
@@ -411,9 +427,11 @@ class TestCherryPickedNoiseSurvivesTheInSampleComparison:
         # Chosen on the SELECTION window only, which is the fair version of
         # the cherry-pick: the holdout is untouched, so its collapse is the
         # noise being noise rather than an artifact of having peeked.
-        chosen = select_features_on(panel, noise, max_features=5, holdout_fraction=0.3)[
-            "selected"
-        ]
+        # No significance test: the cherry-pick is the point, and the test
+        # would refuse most of it.
+        chosen = select_features_on(
+            panel, noise, max_features=5, holdout_fraction=0.3, significance="none"
+        )["selected"]
         assert len(chosen) == 5
         return panel, chosen
 

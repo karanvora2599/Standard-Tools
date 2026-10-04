@@ -51,8 +51,9 @@ MAX_PARALLELISM_CEILING = 64
 #: Shuffles a panel-wide significance screen may draw: features times
 #: permutations, counted before the first shuffle and REFUSED over the
 #: ceiling rather than truncated. A draw is one reshuffle plus one pass of
-#: cross-sectional IC over the panel -- about 1.6 ms on a twelve-name
-#: panel -- so this is roughly five minutes of one call, the point past
+#: cross-sectional IC over the panel -- 1.3 to 1.5 ms for the default
+#: circular shift on a 31,680-row panel, 0.3 to 0.4 ms for the entity
+#: shuffle -- so this is roughly five minutes of one call, the point past
 #: which a caller wants a shorter feature list rather than a longer wait.
 MAX_PERMUTATION_DRAWS = 200_000
 

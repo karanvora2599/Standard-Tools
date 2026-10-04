@@ -39,7 +39,7 @@ from standard_quant_tools.modeling.validation.metrics import (
     check_ic_method,
 )
 
-from ..validation.metrics import cross_sectional_ic
+from ..validation.metrics import _rank_rows, cross_sectional_ic
 from .feature_report import _boundary_date, _panel_dates
 
 logger = logging.getLogger(__name__)
@@ -519,6 +519,173 @@ def _circular_shift_null(
     return null
 
 
+def _unit_rows(block: np.ndarray) -> np.ndarray:
+    """Each row centred and scaled to unit length; a row with no spread
+    (a constant cross-section) becomes zeros, so its correlation with
+    anything is 0.0 -- the value `cross_sectional_ic` gives such a date."""
+    centred = block - block.mean(axis=1, keepdims=True)
+    norms = np.sqrt(np.einsum("ij,ij->i", centred, centred))
+    with np.errstate(invalid="ignore", divide="ignore"):
+        unit = centred / norms[:, None]
+    unit[~(np.isfinite(norms) & (norms > 0))] = 0.0
+    return unit
+
+
+def _entity_shuffle_null(
+    target: np.ndarray,
+    values: np.ndarray,
+    dates: np.ndarray,
+    entities: np.ndarray,
+    n_permutations: int,
+    method: str,
+    random_seed: int,
+) -> "tuple[np.ndarray, float]":
+    """
+    One mean IC per draw, each draw handing every entity's WHOLE feature
+    series to another entity: one permutation of the entities, applied on
+    every date. Returned with the observed assignment's mean IC computed by
+    the same arithmetic, which is what a draw is compared against.
+
+    What it keeps and what it breaks. Each series keeps its serial
+    correlation and its own history, and every date keeps the same set of
+    feature values; the only thing destroyed is which entity a series
+    belongs to. That includes a static tilt -- a feature whose ranking of
+    the entities barely moves (beta's cross-sectional rank correlates 0.94
+    with itself 20 days later on the live panel) carries its average IC
+    into a circular shift, because rolling a series in time leaves the
+    entity's level where it was. Measured on that panel's selection window,
+    beta_60's IC is +0.067, its circular-shift null centres at +0.060 (p
+    0.075) and its entity-shuffle null at +0.002 (p 0.005). In simulation
+    (741 dates, 30 entities, a five-bar overlapping label, AR(1) 0.98
+    features) it rejected a true null 4-7% of the time at alpha 0.05 and
+    kept its power on a static signal, where the circular shift had none.
+
+    THE DRAW IS CHEAP ON COMPLETE DATES. On a date where every entity has a
+    row, the per-date correlation of the reassigned series is a sum over
+    entities of (unit-scaled feature rank of entity pi(e)) x (unit-scaled
+    target rank of entity e), and ranking commutes with reassigning whole
+    columns. Summed over those dates it is the trace of one
+    entities-by-entities matrix under the permutation, built once -- so a
+    draw costs a gather of `n_entities` numbers instead of a pass over the
+    panel. Dates where some entity is missing are recomputed per draw
+    through `cross_sectional_ic`, because which rows survive there depends
+    on the permutation.
+
+    Reproducible across machines and backends: the permutations come from
+    numpy's `default_rng(random_seed)`, not from the native kernel's own
+    generator, and the same seed draws the same permutations everywhere.
+    Entities are ordered by name before the draw, so the row order of the
+    panel does not change which series goes where.
+
+    With E entities there are only E! assignments. At three entities, one
+    draw in six is the observed assignment itself, so no p-value can fall
+    much below 1/6 -- `select_features` warns when the panel is that small.
+    """
+    date_codes, date_index = pd.factorize(dates, sort=True)
+    entity_codes, entity_index = pd.factorize(entities, sort=True)
+    n_dates, n_entities = len(date_index), len(entity_index)
+    if n_entities < 2:
+        return np.full(n_permutations, np.nan), float("nan")
+    cells = date_codes.astype(np.int64) * n_entities + entity_codes.astype(np.int64)
+    if np.unique(cells).size != cells.size:
+        raise ValidationError(
+            "permutation_test_ic: null='entity_shuffle' reassigns each "
+            "entity's series as a whole, so it needs one row per (date, "
+            f"entity), and the panel has {cells.size - np.unique(cells).size} "
+            "repeated pair(s). Drop the duplicate rows, or pass "
+            "null='circular_shift'."
+        )
+    feature_grid = np.full(n_dates * n_entities, np.nan)
+    target_grid = np.full(n_dates * n_entities, np.nan)
+    feature_grid[cells] = values
+    target_grid[cells] = target
+    feature_grid = feature_grid.reshape(n_dates, n_entities)
+    target_grid = target_grid.reshape(n_dates, n_entities)
+
+    # Every row handed in has both values, so an empty cell is a missing
+    # row and the two grids are empty in the same places.
+    complete = ~np.isnan(feature_grid).any(axis=1)
+    n_complete = int(complete.sum())
+    cross = np.zeros((n_entities, n_entities))
+    if n_complete:
+        left = feature_grid[complete]
+        right = target_grid[complete]
+        if method == "spearman":
+            left, right = _rank_rows(left), _rank_rows(right)
+        # einsum rather than a matrix product: no BLAS call, so the sum
+        # does not depend on the caller's thread count.
+        cross = np.einsum("di,dj->ij", _unit_rows(left), _unit_rows(right))
+
+    partial = np.flatnonzero(~complete)
+    partial_feature = feature_grid[partial]
+    partial_target = target_grid[partial]
+    target_present = ~np.isnan(partial_target)
+    partial_rows = np.broadcast_to(
+        np.arange(partial.size)[:, None], partial_feature.shape
+    )
+
+    columns = np.arange(n_entities)
+
+    def _draw(order: np.ndarray) -> float:
+        # Entity e is handed the series of entity order[e].
+        total = float(cross[order, columns].sum())
+        count = n_complete
+        if partial.size:
+            shuffled = partial_feature[:, order]
+            usable = target_present & ~np.isnan(shuffled)
+            series = cross_sectional_ic(
+                partial_target[usable],
+                shuffled[usable],
+                partial_rows[usable],
+                method=method,
+            )
+            total += float(series.sum())
+            count += len(series)
+        return total / count if count else np.nan
+
+    rng = np.random.default_rng(random_seed)
+    null = np.empty(n_permutations, dtype=float)
+    for i in range(n_permutations):
+        null[i] = _draw(rng.permutation(n_entities))
+    # The observed assignment through the same arithmetic. A draw that
+    # reproduces it -- the identity permutation, one draw in E! -- must tie
+    # it exactly, and the trace above sums in a different order from
+    # `cross_sectional_ic`, so the observed IC itself can sit a rounding
+    # error away. Measured on three entities and 200 draws: 31 were the
+    # identity, each 1e-16 below the observed IC, so against the observed
+    # IC p came out at 0.005; against this it is 0.159.
+    return null, _draw(columns)
+
+
+#: The nulls `permutation_test_ic` draws from, in the order its refusal
+#: names them.
+PERMUTATION_NULLS = ("circular_shift", "within_date", "entity_shuffle")
+
+#: Seconds one draw costs per panel row, by null: what a refusal quotes
+#: before the first draw. Measured 2026-10-04 on panels of 5,000-250,000
+#: rows (Python 3.11 and 3.12, native kernel present): circular_shift
+#: 39-55 ns a row (1.3-1.4 ms a draw at 31,680 rows; 100-130 ns a row
+#: under 5,000 rows, where fixed costs dominate), within_date 1-2 ns,
+#: entity_shuffle 9-26 ns when one date in ten is missing an entity and
+#: under 1 ns when every date is complete. A single quote of "about 1.6 ms
+#: a draw" stood for every null and every panel size; on the live panel's
+#: zoned dates the circular shift then cost 16.9 ms a draw, because each
+#: draw re-factorized the dates (fixed in `permutation_test_ic`).
+_DRAW_SECONDS_PER_ROW = {
+    "circular_shift": 5e-8,
+    "within_date": 2e-9,
+    "entity_shuffle": 1e-8,
+}
+
+
+def estimate_draw_seconds(null: str, n_rows: int) -> float:
+    """Roughly what one permutation draw costs on a panel of `n_rows`, under
+    `null`. A budget refusal quotes it so a caller can weigh the wait; it is
+    an order of magnitude, not a promise."""
+    rate = _DRAW_SECONDS_PER_ROW.get(null, _DRAW_SECONDS_PER_ROW["circular_shift"])
+    return rate * max(int(n_rows), 1)
+
+
 def permutation_test_ic(
     panel: pd.DataFrame,
     feature: str,
@@ -544,10 +711,22 @@ def permutation_test_ic(
     and p=0.07 (findings D10). `ic_autocorrelation_lag1` in the result says
     which regime a feature is in.
 
+    `null='entity_shuffle'` hands each entity's whole series to another
+    entity, one permutation for every date (see `_entity_shuffle_null`).
+    It keeps the serial correlation as the circular shift does, and it
+    also breaks a static tilt the circular shift keeps: a feature whose
+    ranking of the entities barely moves over time keeps most of its IC
+    when rolled in time, so its circular-shift null is centred near its
+    own IC rather than near zero. `null_mean` in the result shows where
+    each null is centred.
+
     Returns a two-sided empirical p-value with the +1 correction in both
     numerator and denominator, so a p of exactly 0 is never reported --
     200 permutations cannot distinguish "p < 0.005" from "p = 0", and
-    printing 0.0 claims a precision the sample size does not have.
+    printing 0.0 claims a precision the sample size does not have. It
+    counts draws whose |IC| is at least the observed |IC|, which is
+    distance from zero: against a null not centred on zero it is not the
+    distance from the null's centre.
 
     Rows with a NaN feature or target are dropped from both the observed IC
     and the null. A +/-inf feature or target is refused with a
@@ -557,10 +736,10 @@ def permutation_test_ic(
     _require(panel, feature)
     if n_permutations < 1:
         raise ValidationError("n_permutations must be at least 1")
-    if null not in ("circular_shift", "within_date"):
+    if null not in PERMUTATION_NULLS:
         raise ValidationError(
-            f"permutation_test_ic: null={null!r}; expected 'circular_shift' or "
-            "'within_date'."
+            f"permutation_test_ic: null={null!r}; expected 'circular_shift', "
+            "'within_date' or 'entity_shuffle'."
         )
 
     frame = panel[["date", "entity", feature, "target"]].dropna(
@@ -569,7 +748,15 @@ def permutation_test_ic(
     if frame.empty:
         raise ValidationError(f"feature {feature!r} has no usable observations")
 
-    dates = frame["date"].to_numpy()
+    # The dates as their sorted codes, computed once. `cross_sectional_ic`
+    # factorizes whatever it is handed on every call, and a zoned date
+    # column arrives as an object array of Timestamps: on the live panel
+    # (31,680 rows) that factorization was 17 of the 18 ms one IC pass took,
+    # paid again on every draw. Codes in sorted order factorize to
+    # themselves, so every IC below -- observed and drawn -- is the same
+    # number it was; only the index of the per-date series changes, and
+    # nothing here reads it.
+    dates = pd.factorize(frame["date"], sort=True)[0]
     target = frame["target"].to_numpy(dtype=float)
     values = frame[feature].to_numpy(dtype=float)
 
@@ -602,9 +789,25 @@ def permutation_test_ic(
             "to test for significance"
         )
 
+    # What a draw is compared against: the observed IC, except under the
+    # entity shuffle, whose null includes the observed assignment itself and
+    # hands back that assignment's IC through the draws' own arithmetic (see
+    # `_entity_shuffle_null`). The two agree to rounding; only exact ties
+    # depend on which is used.
+    reference = observed
     if null == "within_date":
         draws = _null_distribution(
             target, values, dates, n_permutations, method, random_seed
+        )
+    elif null == "entity_shuffle":
+        draws, reference = _entity_shuffle_null(
+            target,
+            values,
+            dates,
+            frame["entity"].to_numpy(),
+            n_permutations,
+            method,
+            random_seed,
         )
     else:
         draws = _circular_shift_null(
@@ -623,7 +826,7 @@ def permutation_test_ic(
     )
 
     usable = _finite(draws)
-    at_least_as_extreme = int(np.sum(np.abs(usable) >= abs(observed)))
+    at_least_as_extreme = int(np.sum(np.abs(usable) >= abs(reference)))
     p_value = (at_least_as_extreme + 1) / (usable.size + 1)
 
     return {
@@ -645,8 +848,10 @@ def permutation_test_ic(
 
 
 __all__ = [
+    "PERMUTATION_NULLS",
     "PSI_MODERATE",
     "PSI_SIGNIFICANT",
+    "estimate_draw_seconds",
     "feature_drift",
     "feature_stability",
     "ks_statistic",

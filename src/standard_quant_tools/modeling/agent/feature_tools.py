@@ -77,6 +77,10 @@ from standard_quant_tools.modeling.analysis.feature_ablation import (
     summarize_ablation,
 )
 from standard_quant_tools.modeling.analysis.feature_report import (
+    cluster_records,
+    cluster_representative,
+    collinearity_warnings,
+    condition_warning,
     feature_distribution_stats,
     feature_predictive_stats,
     lead_lag_ic_curve,
@@ -97,6 +101,7 @@ from standard_quant_tools.modeling.analysis.feature_selection import (
 from standard_quant_tools.modeling.analysis.feature_stability import (
     PSI_MODERATE,
     PSI_SIGNIFICANT,
+    estimate_draw_seconds,
 )
 from standard_quant_tools.modeling.analysis.feature_stability import (
     feature_drift as _feature_drift,
@@ -172,14 +177,11 @@ def _pick_representative(
     name, so the answer is stable across runs rather than dependent on dict
     ordering. A representative that moved between identical calls would make
     every downstream drop-list unreproducible.
+
+    The rule itself is `cluster_representative`, the one `select_features`
+    uses: this tool and that one used to carry a copy each.
     """
-
-    def key(name: str):
-        stats = predictive.get(name) or {}
-        ic = stats.get("rank_ic_mean")
-        return (-abs(ic) if isinstance(ic, (int, float)) else 0.0, name)
-
-    return sorted(members, key=key)[0]
+    return cluster_representative(members, predictive)
 
 
 def _ic_decay_result(
@@ -273,14 +275,19 @@ def get_feature_redundancy(
     """
     Which features are restatements of one another, and which one to keep.
 
-    RSI, 20-day momentum, MACD and stochastic are one momentum cluster, not
-    four independent sources of alpha. A panel that treats them as four
-    will report a model leaning on "many" features while it leans on one
-    idea, and will size positions as though it had diversified.
+    RSI, 20-day momentum, MACD and stochastic can form one momentum
+    cluster rather than four independent sources of alpha -- whether they
+    do is a property of the panel. A panel that treats one idea as four
+    will report a model leaning on "many" features while it leans on one,
+    and will size positions as though it had diversified.
 
     Returns the clusters with a representative each, the drop list already
     worked out, and the collinearity diagnostics (VIF, condition number)
-    that say whether linear coefficients on this panel mean anything.
+    that say whether linear coefficients on this panel mean anything. The
+    clusters join PAIRS above the threshold; `collinear_features` names
+    every feature the others explain together (VIF at or above 5), and
+    the warnings reconcile the two when a feature is in the second and not
+    the first.
     """
     from standard_quant_tools.modeling.agent.tools import _load_dataset_panel
 
@@ -295,26 +302,16 @@ def get_feature_redundancy(
     predictive = feature_predictive_stats(panel, features)
     correlation = report["correlation"]
 
-    clusters: List[FeatureCluster] = []
-    redundant: List[str] = []
-    for members in report["clusters"]:
-        members = list(members)
-        representative = _pick_representative(members, predictive)
-        pairs = [
-            abs(correlation.get(a, {}).get(b, 0.0))
-            for a in members
-            for b in members
-            if a != b
-        ]
-        clusters.append(
-            FeatureCluster(
-                members=sorted(members),
-                representative=representative,
-                max_abs_correlation=max(pairs) if pairs else 1.0,
-                size=len(members),
-            )
-        )
-        redundant.extend(m for m in members if m != representative)
+    clusters = [
+        FeatureCluster(**record)
+        for record in cluster_records(report["clusters"], correlation, predictive)
+    ]
+    redundant = [
+        member
+        for cluster in clusters
+        for member in cluster.members
+        if member != cluster.representative
+    ]
 
     warnings: List[str] = []
     for cluster in clusters:
@@ -322,24 +319,28 @@ def get_feature_redundancy(
             others = sorted(set(cluster.members) - {cluster.representative})
             warnings.append(
                 f"{cluster.size} features are one signal at "
-                f"|rho| >= {input_data.cluster_threshold:.2f}: keep "
+                f"|r| >= {input_data.cluster_threshold:.2f}: keep "
                 f"{cluster.representative!r}, drop {others}."
             )
-    condition_number = float(report["condition_number"])
-    if condition_number > 30.0:
-        warnings.append(
-            f"condition number {condition_number:.0f} -- the panel is "
-            "collinear enough that a linear model's coefficients are not "
-            "individually interpretable."
+    warnings.extend(
+        collinearity_warnings(
+            report["collinear"],
+            cluster_threshold=input_data.cluster_threshold,
+            pair_list="redundant_features lists",
         )
+    )
+    condition = condition_warning(report["condition_number"])
+    if condition:
+        warnings.append(condition)
 
     return FeatureRedundancyResult(
         dataset_id=input_data.dataset_id,
         n_features=len(features),
-        clusters=sorted(clusters, key=lambda c: (-c.size, c.representative)),
+        clusters=clusters,
         redundant_features=sorted(redundant),
-        condition_number=condition_number,
+        condition_number=float(report["condition_number"]),
         vif=report["vif"],
+        collinear_features=report["collinear"],
         correlation=correlation,
         spearman_correlation=report["spearman_correlation"],
         warnings=warnings,
@@ -360,6 +361,9 @@ def get_feature_ic_decay(input_data: FeatureICDecayInput) -> FeatureICDecayResul
     Positive shifts advance the feature -- letting it see further into the
     target window. That is not something to do in production; it is the
     control that makes the shape readable.
+
+    `analyze_features` returns the same curve for every feature at once,
+    under `report.leakage`.
     """
     from standard_quant_tools.modeling.agent.tools import _load_dataset_panel
 
@@ -382,8 +386,9 @@ def get_feature_ic_decay(input_data: FeatureICDecayInput) -> FeatureICDecayResul
 
 def select_features(input_data: SelectFeaturesInput) -> SelectFeaturesResult:
     """
-    Choose a feature set: drop the duplicates, drop what does not predict,
-    and give a reason for every exclusion.
+    Choose a feature set: drop the duplicates, drop what does not pass a
+    permutation test against the target on the selection window, and give
+    a reason for every exclusion.
 
     Deliberately boring. There is no greedy search here, because a selector
     scored on the same panel it selects from manufactures overfit that looks
@@ -392,9 +397,16 @@ def select_features(input_data: SelectFeaturesInput) -> SelectFeaturesResult:
     no measurable relationship with the target", are the two a human can be
     shown afterwards.
 
-    Redundancy is resolved BEFORE the IC floor. A cluster is one signal, so
-    the question is whether that signal clears the floor, asked once through
-    its representative -- not whether each restatement clears it separately.
+    Redundancy is resolved BEFORE the IC floor and the test. A cluster is
+    one signal, so the question is whether that signal clears them, asked
+    once through its representative -- not whether each restatement clears
+    them separately.
+
+    The test (`significance`, default 'entity_shuffle') is what makes a
+    call with no arguments select: the floor defaults to 0.0, and before
+    the test existed that kept every feature that was not a duplicate. See
+    `analysis.feature_selection.select_features` for the null and what it
+    kept on the live panel. `significance='none'` returns the old answer.
 
     The selection reads the first `1 - holdout_fraction` of the panel's
     dates (or through `selection_end`) and reports each selected
@@ -405,12 +417,13 @@ def select_features(input_data: SelectFeaturesInput) -> SelectFeaturesResult:
 
     The redundancy work comes back with the answer. `clusters` is exactly
     what get_feature_redundancy returns for this panel and threshold, each
-    redundant drop names its keeper in `duplicate_of`, and `vif` /
-    `condition_number` say whether what survived is collinear. All of it
-    was computed to make the decision; running the redundancy tool
-    afterwards would buy the same correlation matrix a second time.
-    `correlation` itself stays behind `include_correlation` because it is
-    the one piece that grows with the square of the candidate count.
+    redundant drop names its keeper in `duplicate_of`, and `vif`,
+    `condition_number` and `collinear_features` say how collinear the
+    candidates are. All of it was computed to make the decision; running
+    the redundancy tool afterwards would buy the same correlation matrix a
+    second time. `correlation` itself stays behind `include_correlation`
+    because it is the one piece that grows with the square of the
+    candidate count.
     """
     from standard_quant_tools.modeling.agent.tools import _load_dataset_panel
 
@@ -427,6 +440,11 @@ def select_features(input_data: SelectFeaturesInput) -> SelectFeaturesResult:
         max_features=input_data.max_features,
         selection_end=input_data.selection_end,
         holdout_fraction=input_data.holdout_fraction,
+        significance=input_data.significance,
+        alpha=input_data.alpha,
+        n_permutations=input_data.n_permutations,
+        random_seed=input_data.random_seed,
+        max_draws=input_data.max_draws,
     )
     return SelectFeaturesResult(
         dataset_id=input_data.dataset_id,
@@ -438,6 +456,7 @@ def select_features(input_data: SelectFeaturesInput) -> SelectFeaturesResult:
         clusters=result["clusters"],
         vif=result["vif"],
         condition_number=result["condition_number"],
+        collinear_features=result["collinear_features"],
         # The matrix is already in hand; the gate is on the PAYLOAD, which
         # grows with the square of the candidate count and is not what an
         # agent reads a selection for.
@@ -445,6 +464,8 @@ def select_features(input_data: SelectFeaturesInput) -> SelectFeaturesResult:
         selection_window=result["selection_window"],
         holdout_window=result["holdout_window"],
         selection_ic=result["selection_ic"],
+        selection_p_value=result["selection_p_value"],
+        significance=result["significance"],
         holdout_ic=result["holdout_ic"],
         warnings=result["warnings"],
     )
@@ -505,6 +526,9 @@ def get_feature_drift(input_data: FeatureDriftInput) -> FeatureDriftResult:
 
     The full-sample IC averages across the break, and an average across a
     break describes neither side of it.
+
+    `screen_feature_stability` answers this for every feature at once, from
+    the same `feature_drift`.
     """
     from standard_quant_tools.modeling.agent.tools import _load_dataset_panel
 
@@ -538,6 +562,9 @@ def get_feature_regime_stability(
     Read `sign_consistency` first, then the block ICs. Consistency alone
     misses decay: a feature going 0.44, 0.44, 0.01, 0.02 keeps a sign
     consistency of 1.0 while its edge disappears.
+
+    `screen_feature_stability` answers this for every feature at once, from
+    the same `feature_stability`.
     """
     from standard_quant_tools.modeling.agent.tools import _load_dataset_panel
 
@@ -572,14 +599,21 @@ def run_feature_permutation_test(
     serial correlation. Shuffling within each date (`null='within_date'`)
     destroys both, and on live features -- per-date IC autocorrelation
     +0.6 -- it rejected a true null 27-35% of the time (findings D10).
+    `null='entity_shuffle'` hands each entity's whole series to another
+    entity: serial correlation kept, and a static cross-sectional tilt --
+    which the circular shift leaves in its null -- broken. It is the null
+    `select_features` tests with by default.
 
     The p-value is TWO-SIDED. A feature with an IC of -0.20 is a strong
     feature with a sign, not a weak one, and a one-sided test would report
-    it as unremarkable.
+    it as unremarkable. It counts draws at least as far from zero as the
+    observed IC, so read `null_mean` beside it: a circular-shift null can
+    be centred well away from zero (beta_60 on the live panel: +0.041),
+    and then `null_p95_abs` is that offset plus the spread, not a noise
+    level around zero.
 
-    `null_p95_abs` is the number to keep: it is the IC this panel yields from
-    noise alone 5% of the time, and it is the honest floor for
-    `select_features(min_abs_rank_ic=...)` on this data.
+    `screen_feature_significance` runs this test over every feature at
+    once.
     """
     from standard_quant_tools.modeling.agent.tools import _load_dataset_panel
 
@@ -654,30 +688,39 @@ def screen_feature_significance(
     input_data: ScreenFeatureSignificanceInput,
 ) -> ScreenFeatureSignificanceResult:
     """
-    The IC floor this panel supports, measured rather than guessed.
+    Every feature's permutation test in one call, and the noise level the
+    widest of their nulls sets.
 
-    `select_features(min_abs_rank_ic=...)` takes a number, and the number
-    an agent picks is usually 0.02 because 0.02 sounds small. Whether it is
-    small is a property of the panel: on a short panel with few names,
-    noise alone produces mean ICs well above it, and a floor under the
-    noise level keeps noise. This screen runs the permutation test over
-    every candidate feature and reports the largest `null_p95_abs` among
-    them as `honest_floor` -- the |IC| this panel yields from noise 5% of
-    the time, for the feature whose null is widest.
+    An IC floor picked by eye is usually 0.02 because 0.02 sounds small.
+    Whether it is small is a property of the panel: on a short panel with
+    few names, noise alone produces mean ICs well above it, and a floor
+    under the noise level keeps noise. This screen runs the permutation
+    test over every candidate feature and reports the largest
+    `null_p95_abs` among them as `honest_floor` -- the |IC| the widest null
+    reaches 5% of the time.
 
     The result usually inverts the naive one. On a twelve-name panel a
     0.02 floor kept four features of ten and the permutation floor, 0.0694,
     kept none: the four were not weak signals, they were the panel's noise
     level.
 
-    Cost is `features x n_permutations` draws, about 1.6 ms each. The
-    product is computed BEFORE the first shuffle and the screen is refused
-    past `max_draws`, so a long run is chosen rather than discovered.
+    `honest_floor` is NOT a `min_abs_rank_ic` for `select_features`, and
+    this screen used to say it was. It applies the widest null to every
+    feature, so it is stricter than each feature's own test -- on the live
+    panel it kept 0 of 8 while the same screen called rvol_20 significant
+    -- and it is measured on every date, the holdout included, which a
+    selection must not read. `select_features` runs its own test on its
+    selection window (`significance='entity_shuffle'` by default).
 
-    Read `p_value` per feature and `honest_floor` for the set, and read
-    the family-wise warning before treating a list of significant features
-    as a list of discoveries -- twenty features tested at alpha 0.05
-    deliver one significant result from noise alone.
+    Cost is `features x n_permutations` draws, which
+    `estimate_draw_seconds` prices per null and panel size. The product is
+    computed BEFORE the first shuffle and the screen is refused past
+    `max_draws`, so a long run is chosen rather than discovered.
+
+    Read `p_value` per feature beside `null_mean`, and read the family-wise
+    warning before treating a list of significant features as a list of
+    discoveries -- twenty features tested at alpha 0.05 deliver one
+    significant result from noise alone.
     """
     from standard_quant_tools.modeling.agent.tools import _load_dataset_panel
 
@@ -709,14 +752,16 @@ def screen_feature_significance(
                 "screen cannot be bought -- it has to be narrowed"
             )
         )
+        seconds = estimate_draw_seconds(input_data.null, len(panel))
         raise ValidationError(
             f"this screen needs {n_draws:,} permutation draws "
             f"({len(features)} features x {input_data.n_permutations} "
             f"permutations), over the max_draws={input_data.max_draws:,} "
-            f"ceiling. At about 1.6 ms a draw that is roughly "
-            f"{max(1, round(n_draws * 0.0016 / 60))} minutes. Either narrow "
-            "`features` to the candidates you actually doubt or lower "
-            f"`n_permutations`, or {remedy}."
+            f"ceiling. At about {seconds * 1e3:.1f} ms a draw under the "
+            f"{input_data.null!r} null on this panel's {len(panel):,} rows "
+            f"that is roughly {max(1, round(n_draws * seconds / 60))} "
+            "minute(s). Either narrow `features` to the candidates you "
+            f"actually doubt or lower `n_permutations`, or {remedy}."
         )
 
     rows: List[FeatureSignificance] = []
@@ -767,6 +812,7 @@ def screen_feature_significance(
                 feature=feature,
                 rank_ic=result["observed_ic"],
                 p_value=result["p_value"],
+                null_mean=result["null_mean"],
                 null_p95_abs=result["null_p95_abs"],
                 ic_autocorrelation_lag1=result["ic_autocorrelation_lag1"],
                 significant_at_05=bool(result["significant_at_05"]),
@@ -790,14 +836,23 @@ def screen_feature_significance(
     n_significant = sum(1 for r in rows if r.significant_at_05)
 
     if honest_floor is not None:
+        # This sentence used to call honest_floor "the floor THIS panel
+        # supports" for select_features(min_abs_rank_ic=...). It is the
+        # widest of the features' nulls applied to all of them, measured on
+        # every date: on the live panel it kept 0 of 8 while this screen
+        # called one feature significant, and as a selection floor it would
+        # have read the holdout.
         warnings.append(
-            f"select_features(min_abs_rank_ic={honest_floor:.4f}) is the floor "
-            f"THIS panel supports: {floor_row.feature!r} produced an |IC| that "
-            f"large from noise alone 5% of the time under the "
-            f"{input_data.null!r} null. A floor of {naive_floor} keeps "
-            f"{n_naive} of {len(rows)} features here; the measured floor keeps "
-            f"{n_kept}. The difference is not weak signal, it is this panel's "
-            "noise level."
+            f"honest_floor={honest_floor:.4f} is the widest null here: the "
+            f"draws of {floor_row.feature!r} reached an |IC| that large 5% of "
+            f"the time under the {input_data.null!r} null. A floor of "
+            f"{naive_floor} keeps {n_naive} of {len(rows)} features; "
+            f"honest_floor keeps {n_kept}, and {n_significant} cleared p < 0.05 "
+            "against its own null. honest_floor applies the widest null to "
+            "every feature and was measured on every date, the holdout "
+            "included, so it is not a min_abs_rank_ic for select_features, "
+            "whose significance test reads only its selection window "
+            "(significance='entity_shuffle' by default)."
         )
 
     autocorrelated = [
@@ -816,7 +871,9 @@ def screen_feature_significance(
             "a true null 27-35% of the time at phi 0.95-0.99 against an "
             "overlapping label. These p-values are too small by about that "
             "much. Re-run with null='circular_shift', which rolls each "
-            "entity's series and keeps the serial correlation."
+            "entity's series and keeps the serial correlation, or "
+            "null='entity_shuffle', which keeps it and also breaks a static "
+            "cross-sectional tilt."
         )
 
     if rows:
@@ -1160,12 +1217,19 @@ FEATURE_TOOL_DEFS: List[tuple] = [
     (
         "get_feature_redundancy",
         "Which features are restatements of one another, and which one to "
-        "keep. RSI, 20-day momentum, MACD and stochastic are one momentum "
-        "cluster, not four independent sources of alpha. Returns each "
-        "cluster with a representative chosen by strongest rank IC, the drop "
-        "list already worked out, and the collinearity diagnostics (VIF, "
-        "condition number) that say whether linear coefficients on this "
-        "panel mean anything.",
+        "keep. RSI, 20-day momentum, MACD and stochastic can form one "
+        "momentum cluster rather than four independent sources of alpha; "
+        "whether they do is a property of the panel. Returns each cluster "
+        "(pairs joined at |r| >= cluster_threshold) with a representative "
+        "chosen by strongest rank IC, the drop list already worked out, the "
+        "VIF per feature and the condition number, and collinear_features: "
+        "every feature with VIF at or above 5 -- which the pairwise clusters "
+        "cannot see when several features explain it together -- with the "
+        "features that explain it. Warns at VIF 5 (note) and 10 (action), "
+        "when a high-VIF feature is in no cluster, and at a condition number "
+        "of 1000. A singular correlation matrix is reported as one: infinite "
+        "condition number and infinite VIF (null) for the features in the "
+        "exact combination.",
         FeatureRedundancyInput,
     ),
     (
@@ -1175,21 +1239,31 @@ FEATURE_TOOL_DEFS: List[tuple] = [
         "0 and collapses on both sides already contains the answer) and "
         "whether it is tradeable (how much IC survives one bar of "
         "staleness). Returns the curve as ordered points with the peak "
-        "named.",
+        "named. analyze_features returns the same curve for every feature "
+        "at once, under report.leakage.",
         FeatureICDecayInput,
     ),
     (
         "select_features",
         "Choose a feature set from a built dataset: keep one feature per "
-        "redundancy cluster, drop what falls below an IC floor, and return a "
-        "reason for every exclusion. Deliberately has no greedy search -- a "
-        "selector scored on the panel it selects from manufactures overfit "
-        "that looks like evidence. Redundancy is resolved before the IC "
-        "floor, because a cluster is one signal and the question is whether "
-        "THAT signal clears the floor. The redundancy work comes back with "
-        "the answer -- the clusters get_feature_redundancy would return, the "
-        "keeper each duplicate was dropped for, VIF and condition number -- "
-        "so the diagnostics need no second call.",
+        "redundancy cluster, apply an optional IC floor, drop what does not "
+        "pass a permutation test against the target, and return a reason "
+        "for every exclusion. The test (significance='entity_shuffle', "
+        "default) runs on the selection window only, before the holdout is "
+        "read: each cluster representative's mean rank IC against the same "
+        "feature series handed to randomly permuted entities, kept at p < "
+        "alpha (0.05); drops are reason 'insignificant' with their p-value, "
+        "and selection_p_value carries every tested p. On the live panel it "
+        "kept 2 of 8. 'circular_shift' is the screen's null; 'none' keeps "
+        "every non-redundant feature above the floor, as before the test "
+        "existed, and warns. Needs at least 4-5 entities. Deliberately has "
+        "no greedy search -- a selector scored on the panel it selects from "
+        "manufactures overfit that looks like evidence. Redundancy is "
+        "resolved before the floor and the test, because a cluster is one "
+        "signal. The redundancy work comes back with the answer -- the "
+        "clusters get_feature_redundancy would return, the keeper each "
+        "duplicate was dropped for, VIF, condition number and "
+        "collinear_features -- so the diagnostics need no second call.",
         SelectFeaturesInput,
     ),
     (
@@ -1212,7 +1286,9 @@ FEATURE_TOOL_DEFS: List[tuple] = [
         "for the distribution, plus the IC computed separately on each half. "
         "The two fail differently and need different fixes: distribution "
         "drift with a stable IC is a preprocessing problem, while a stable "
-        "distribution with a collapsed IC means the edge is gone.",
+        "distribution with a collapsed IC means the edge is gone. "
+        "screen_feature_stability runs this for every feature at once, with "
+        "a per-block drift curve.",
         FeatureDriftInput,
     ),
     (
@@ -1222,40 +1298,51 @@ FEATURE_TOOL_DEFS: List[tuple] = [
         "one regime, and interleaved folds average exactly that away. "
         "Returns per-block IC plus sign consistency against the full-sample "
         "IC. Read both: consistent sign with collapsing magnitude is decay, "
-        "and sign consistency stays at 1.0 through it.",
+        "and sign consistency stays at 1.0 through it. "
+        "screen_feature_stability runs this for every feature at once.",
         FeatureStabilityInput,
     ),
     (
         "run_feature_permutation_test",
-        "How often noise on THIS panel produces an IC as large as the "
-        "observed one, in either direction. Shuffles the feature within each "
-        "date, which states the null exactly -- the feature carries no "
-        "cross-sectional information within a date -- and returns a "
-        "TWO-SIDED empirical p-value, so a strongly negative IC is "
-        "significant rather than ignored. null_p95_abs is the IC this panel "
-        "yields from noise alone 5% of the time, which is the defensible "
-        "floor for select_features(min_abs_rank_ic=...). Cost is linear in "
-        "n_permutations.",
+        "How often a null drawn from THIS panel produces an IC as far from "
+        "zero as the observed one, for one feature. The default null "
+        "(null='circular_shift') rolls each entity's feature series in time "
+        "by a random offset: the link to the target is broken and the "
+        "feature's serial correlation kept, but so is each entity's average "
+        "level, so a feature whose ranking of the entities barely moves can "
+        "have a null centred far from zero -- read null_mean. "
+        "null='entity_shuffle' hands each entity's whole series to another "
+        "entity, which keeps the serial correlation and breaks that tilt "
+        "too (select_features' default test; needs at least 4-5 entities). "
+        "null='within_date' shuffles within each date and over-rejects on "
+        "autocorrelated features. Returns a TWO-SIDED empirical p-value, so "
+        "a strongly negative IC counts, plus the null's mean, spread and "
+        "95th percentile of |IC|. Cost is linear in n_permutations. "
+        "screen_feature_significance runs this test over every feature at "
+        "once.",
         PermutationTestInput,
     ),
     (
         "screen_feature_significance",
-        "The IC floor this panel supports, for EVERY candidate feature at "
-        "once. select_features(min_abs_rank_ic=...) takes a number, and the "
-        "number an agent picks is usually 0.02 because 0.02 sounds small -- "
-        "whether it is small is a property of the panel. This permutes each "
-        "feature and returns honest_floor, the largest null_p95_abs across "
-        "them: the |IC| this panel yields from noise alone 5% of the time. "
-        "On a twelve-name panel a 0.02 floor kept four features of ten and "
-        "the measured floor of 0.0694 kept none. Per feature: IC, two-sided "
-        "p-value, that feature's own null and the per-date IC "
-        "autocorrelation that says which null is calibrated. Cost is "
-        "features x n_permutations draws at about 1.6 ms each, counted "
-        "before the first shuffle and REFUSED past max_draws rather than "
-        "truncated. Warns with the floor sentence and how many features each "
-        "floor keeps, with the within_date caveat on autocorrelated "
-        "features, and with the family-wise sentence -- twenty features at "
-        "alpha 0.05 deliver one significant result from noise.",
+        "run_feature_permutation_test for EVERY candidate feature at once, "
+        "and the noise level the widest null sets. Per feature: IC, "
+        "two-sided p-value, that feature's own null (null_mean and "
+        "null_p95_abs) and the per-date IC autocorrelation that says which "
+        "null is calibrated. honest_floor is the largest null_p95_abs "
+        "across the features: on a twelve-name panel a 0.02 floor kept four "
+        "features of ten and an honest_floor of 0.0694 kept none. It is not "
+        "a min_abs_rank_ic for select_features -- it applies the widest null "
+        "to every feature and reads every date, holdout included; "
+        "select_features runs its own test on its selection window. "
+        "null='circular_shift' (default), 'entity_shuffle' or "
+        "'within_date'. Cost is features x n_permutations draws, about 50 "
+        "ns a panel row each under circular_shift (1.3-1.4 ms on a "
+        "31,680-row panel) and less under the other two, counted before the "
+        "first shuffle and REFUSED past max_draws rather than truncated. "
+        "Warns with the floor sentence and how many features each floor "
+        "keeps, with the within_date caveat on autocorrelated features, and "
+        "with the family-wise sentence -- twenty features at alpha 0.05 "
+        "deliver one significant result from noise.",
         ScreenFeatureSignificanceInput,
     ),
     (

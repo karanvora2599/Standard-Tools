@@ -2,9 +2,9 @@
 Choosing a feature set, and comparing two of them.
 
 Selection here is deliberately BORING: drop what is redundant, drop what
-does not predict, keep the rest, and say why for every drop. There is no
-search, no wrapper method, no greedy forward pass. That is a deliberate
-limit rather than an unfinished one.
+does not pass a permutation test against the target, keep the rest, and
+say why for every drop. There is no search, no wrapper method, no greedy
+forward pass. That is a deliberate limit rather than an unfinished one.
 
 A greedy selector scored on the same panel it selects from is a machine for
 manufacturing overfit, and it is a particularly bad one to hand an agent:
@@ -23,6 +23,7 @@ went up.
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
@@ -30,20 +31,40 @@ import pandas as pd
 
 from standard_quant_tools.error import ValidationError
 
+from ..limits import MAX_PERMUTATION_DRAWS
 from .feature_report import (
+    _abs_rank_ic,
     _boundary_date,
     _named_once,
     _panel_dates,
+    cluster_records,
+    collinearity_warnings,
+    condition_warning,
     feature_predictive_stats,
     redundancy_report,
 )
+from .feature_stability import estimate_draw_seconds, permutation_test_ic
 
 logger = logging.getLogger(__name__)
 
+#: The nulls `select_features` can gate on, and "none" for no gate.
+SELECTION_NULLS = ("entity_shuffle", "circular_shift", "none")
 
-def _abs_rank_ic(stats: Dict[str, Dict[str, float]], feature: str) -> float:
-    value = (stats.get(feature) or {}).get("rank_ic_mean")
-    return abs(float(value)) if value is not None and np.isfinite(value) else 0.0
+#: How each null reads in a sentence.
+_NULL_PROSE = {
+    "entity_shuffle": "the entity-shuffle null",
+    "circular_shift": "the circular-shift null",
+}
+
+#: What "none of them beat it" means, per null.
+_NULL_MEANING = {
+    "entity_shuffle": "the same series assigned to random entities",
+    "circular_shift": "its own series rolled in time by a random offset per entity",
+}
+
+#: The draw budget a selection may spend before it is refused, the same
+#: default the significance screen uses.
+DEFAULT_MAX_DRAWS = 20_000
 
 
 def _signed_rank_ic(
@@ -127,47 +148,98 @@ def _window(dates: pd.DatetimeIndex) -> Dict[str, Any]:
     }
 
 
-def _cluster_records(
-    clusters: Sequence[Sequence[str]],
-    correlation: Dict[str, Dict[str, float]],
+def _check_gate_arguments(
+    significance: str, alpha: float, n_permutations: int, random_seed: int
+) -> None:
+    """The gate's arguments, refused by name for a direct caller the way
+    the tool's schema refuses them."""
+    if significance not in SELECTION_NULLS:
+        raise ValidationError(
+            f"select_features: significance={significance!r}; expected "
+            "'entity_shuffle' (default), 'circular_shift' or 'none'."
+        )
+    if significance == "none":
+        return
+    if not (0.0 < float(alpha) < 1.0):
+        raise ValidationError(
+            f"select_features: alpha={alpha!r} must lie strictly between 0 and 1."
+        )
+    if not (20 <= int(n_permutations) <= 5000):
+        raise ValidationError(
+            f"select_features: n_permutations={n_permutations!r} must be "
+            "between 20 and 5000. 200 resolves a p-value to about 0.005."
+        )
+    if int(random_seed) < 0:
+        raise ValidationError(
+            f"select_features: random_seed={random_seed!r} must be non-negative."
+        )
+
+
+def _significance_gate(
+    selection_panel: pd.DataFrame,
+    candidates: Sequence[str],
     predictive: Dict[str, Dict[str, float]],
-) -> List[Dict[str, Any]]:
+    *,
+    null: str,
+    alpha: float,
+    n_permutations: int,
+    random_seed: int,
+) -> "tuple[List[str], Dict[str, Optional[float]], List[Dict[str, Any]]]":
     """
-    The redundancy clusters in the shape `get_feature_redundancy` publishes:
-    sorted members, a representative, the strongest pairwise correlation
-    inside the group, and the size.
+    Each candidate's two-sided permutation p-value on the selection window;
+    what passes, every p-value, and a drop record for what does not.
 
-    Built here rather than left to the caller so that the two tools cannot
-    drift apart. `select_features` and `get_feature_redundancy` resolve the
-    same clusters on the same panel, and an agent that called both and got
-    two different drop lists would have no way to tell which to believe.
-
-    The representative is the strongest |rank IC|, ties broken by the FIRST
-    name alphabetically. Written as a sort rather than a `max` because `max`
-    on a (value, name) key breaks ties toward the LAST name, and the two
-    tools would then contradict each other on any exact restatement -- which
-    is precisely the case a cluster exists to report.
+    Reads `selection_panel` only. The holdout is not in it, and the caller
+    reads the holdout after this returns, for the features this kept.
     """
-    records: List[Dict[str, Any]] = []
-    for members in clusters:
-        members = sorted(members)
-        keeper = sorted(members, key=lambda f: (-_abs_rank_ic(predictive, f), f))[0]
-        pairs = [
-            abs(correlation.get(a, {}).get(b, 0.0))
-            for a in members
-            for b in members
-            if a != b
-        ]
-        records.append(
+    passed: List[str] = []
+    p_values: Dict[str, Optional[float]] = {}
+    dropped: List[Dict[str, Any]] = []
+    prose = _NULL_PROSE[null]
+    for feature in candidates:
+        try:
+            result = permutation_test_ic(
+                selection_panel,
+                feature,
+                n_permutations=n_permutations,
+                method="spearman",
+                random_seed=random_seed,
+                null=null,
+            )
+        except ValidationError as exc:
+            # One untestable column does not sink the selection: it cannot
+            # pass a test it cannot take, and the reason is the record.
+            p_values[feature] = None
+            dropped.append(
+                {
+                    "feature": feature,
+                    "reason": "insignificant",
+                    "duplicate_of": None,
+                    "p_value": None,
+                    "detail": f"not testable on the selection window: {exc}",
+                }
+            )
+            continue
+        p_value = float(result["p_value"])
+        p_values[feature] = p_value
+        if p_value < alpha:
+            passed.append(feature)
+            continue
+        ic = (predictive.get(feature) or {}).get("rank_ic_mean")
+        shown = f"{ic:+.4f}" if ic is not None and np.isfinite(ic) else "None"
+        dropped.append(
             {
-                "members": members,
-                "representative": keeper,
-                "max_abs_correlation": max(pairs) if pairs else 1.0,
-                "size": len(members),
+                "feature": feature,
+                "reason": "insignificant",
+                "duplicate_of": None,
+                "p_value": p_value,
+                "detail": (
+                    f"rank IC {shown} on the selection window, p={p_value:.3f} "
+                    f"against {prose} at alpha {alpha:g}"
+                ),
             }
         )
-    records.sort(key=lambda record: (-record["size"], record["representative"]))
-    return records
+    return passed, p_values, dropped
 
 
 def select_features(
@@ -179,10 +251,16 @@ def select_features(
     max_features: int = 0,
     selection_end: Any = None,
     holdout_fraction: float = 0.3,
+    significance: str = "entity_shuffle",
+    alpha: float = 0.05,
+    n_permutations: int = 200,
+    random_seed: int = 0,
+    max_draws: int = DEFAULT_MAX_DRAWS,
 ) -> Dict[str, Any]:
     """
-    Keep one feature per redundancy cluster, drop what does not predict, and
-    record a reason for every exclusion.
+    Keep one feature per redundancy cluster, drop what does not pass a
+    permutation test on the selection window, and record a reason for every
+    exclusion.
 
     THE SELECTION DOES NOT SEE THE WHOLE PANEL. Redundancy and the IC floor
     were measured over every date, including the ones a later walk-forward
@@ -197,23 +275,49 @@ def select_features(
     holdout IC is the number to believe; the selection IC is in-sample by
     construction.
 
-    Order matters and is not arbitrary. Redundancy is resolved FIRST, then
-    the IC floor is applied. The other way round, a cluster whose members
-    are all individually below the floor would be dropped entirely -- but a
-    cluster is one signal, and the right question is whether that one signal
-    clears the floor, asked once via its representative.
+    Order matters and is not arbitrary: redundancy, then the IC floor, then
+    the significance test, then the cap. Redundancy is resolved FIRST. The
+    other way round, a cluster whose members are all individually below the
+    floor would be dropped entirely -- but a cluster is one signal, and the
+    right question is whether that one signal clears the floor, asked once
+    via its representative. The test is asked of the representatives that
+    cleared the floor, for the same reason and because it is the expensive
+    step.
 
-    `max_features` truncates by absolute rank IC after both filters. It is
+    THE SIGNIFICANCE TEST. The floor defaults to 0.0, so before the test a
+    call with no arguments kept every feature that was not a duplicate --
+    on the live panel of 2026-10-03, all eight, while one screen called one
+    of them significant. `significance` (default 'entity_shuffle') tests
+    each representative's mean rank IC on the selection window against a
+    permutation null and drops what does not reach p < `alpha`, as reason
+    'insignificant' with its p-value. The entity-shuffle null hands each
+    entity's whole feature series to another entity (see
+    `permutation_test_ic`): it keeps each series' serial correlation and
+    breaks the feature-entity link, including a static tilt, which a
+    circular shift keeps. On that panel it kept beta_60 (p 0.005, holdout
+    IC +0.015) and rvol_20 (p 0.005, +0.027) and dropped the six others
+    (p 0.28-0.89). 'circular_shift' is the screen's null; 'none' applies no
+    test and returns what this function returned before it had one, to the
+    bit, with a warning saying no test was applied. The p-values are not
+    corrected for the number of features tested, and the warning says how
+    many would clear from noise alone.
+
+    The test reads the selection window ONLY, and is fixed before the
+    holdout is read: `holdout_ic` is computed afterwards, for the features
+    the test kept.
+
+    `max_features` truncates by absolute rank IC after every filter. It is
     a cap for a caller who has a hard budget, not a ranking to trust: the
     difference between the 20th and 21st feature by IC on one panel is
     usually noise.
 
     The redundancy diagnostics come back with the selection rather than
     being recomputed: `clusters` in the shape `get_feature_redundancy`
-    publishes, `vif`, `condition_number`, `correlation`, and a
-    `duplicate_of` on every redundant drop. All four were already computed
-    to make the decision, and returning them is what makes the decision
-    auditable without paying for the same correlation matrix twice.
+    publishes, `vif`, `condition_number`, `correlation`,
+    `collinear_features` and a `duplicate_of` on every redundant drop. All
+    of them were already computed to make the decision, and returning them
+    is what makes the decision auditable without paying for the same
+    correlation matrix twice.
     """
     feature_ids = list(feature_ids)
     if not feature_ids:
@@ -222,6 +326,7 @@ def select_features(
     if missing:
         raise ValidationError(f"panel has no features: {sorted(missing)}")
     _named_once(panel, feature_ids, "select_features")
+    _check_gate_arguments(significance, alpha, n_permutations, random_seed)
 
     dates, cutoff = _selection_cutoff(panel, selection_end, holdout_fraction)
     if cutoff is None:
@@ -236,7 +341,7 @@ def select_features(
         selection_panel, feature_ids, cluster_threshold=cluster_threshold
     )
 
-    clusters = _cluster_records(
+    clusters = cluster_records(
         redundancy["clusters"], redundancy["correlation"], predictive
     )
 
@@ -279,6 +384,53 @@ def select_features(
             )
         else:
             kept.append(feature)
+
+    # The test, on the representatives that cleared the floor. Its cost is
+    # counted before the first draw, as the significance screen counts its
+    # own: a long run is chosen rather than discovered.
+    p_values: Dict[str, Optional[float]] = {}
+    gate: Optional[Dict[str, Any]] = None
+    if significance != "none":
+        n_draws = len(kept) * int(n_permutations)
+        if n_draws > max_draws:
+            seconds = estimate_draw_seconds(significance, len(selection_panel))
+            remedy = (
+                f"pass max_draws={n_draws} to accept the cost"
+                if n_draws <= MAX_PERMUTATION_DRAWS
+                else (
+                    f"max_draws stops at {MAX_PERMUTATION_DRAWS:,} draws, so "
+                    "this test cannot be bought -- it has to be narrowed"
+                )
+            )
+            raise ValidationError(
+                f"select_features: the significance test needs {n_draws:,} "
+                f"permutation draws ({len(kept)} features x {n_permutations} "
+                f"permutations), over the max_draws={max_draws:,} ceiling. At "
+                f"about {seconds * 1e3:.1f} ms a draw under "
+                f"{_NULL_PROSE[significance]} on {len(selection_panel):,} rows "
+                f"that is roughly {max(1, round(n_draws * seconds / 60))} "
+                "minute(s). Narrow `features`, lower `n_permutations`, pass "
+                f"significance='none' to skip the test, or {remedy}."
+            )
+        passed, p_values, insignificant = _significance_gate(
+            selection_panel,
+            kept,
+            predictive,
+            null=significance,
+            alpha=alpha,
+            n_permutations=n_permutations,
+            random_seed=random_seed,
+        )
+        gate = {
+            "null": significance,
+            "alpha": float(alpha),
+            "n_permutations": int(n_permutations),
+            "random_seed": int(random_seed),
+            "n_tested": len(kept),
+            "n_passed": len(passed),
+        }
+        dropped.extend(insignificant)
+        kept = passed
 
     kept.sort(key=lambda f: (-_abs_rank_ic(predictive, f), f))
     if max_features and len(kept) > max_features:
@@ -338,6 +490,25 @@ def select_features(
                 "panel."
             )
 
+    warnings.extend(
+        _gate_warnings(
+            gate,
+            selection_panel,
+            n_selection_dates=int(selection_window["n_dates"]),
+            min_abs_rank_ic=min_abs_rank_ic,
+        )
+    )
+    warnings.extend(
+        collinearity_warnings(
+            redundancy["collinear"],
+            cluster_threshold=cluster_threshold,
+            pair_list="The redundancy drops are made for",
+        )
+    )
+    condition = condition_warning(redundancy["condition_number"])
+    if condition:
+        warnings.append(condition)
+
     return {
         "selected": kept,
         "dropped": sorted(dropped, key=lambda d: d["feature"]),
@@ -350,6 +521,8 @@ def select_features(
         "selection_window": selection_window,
         "holdout_window": holdout_window,
         "selection_ic": {f: _signed_rank_ic(predictive, f) for f in feature_ids},
+        "selection_p_value": p_values,
+        "significance": gate,
         "holdout_ic": holdout_ic,
         # Paid for by the `redundancy_report` call above and previously
         # thrown away, which forced an agent that wanted "dropped as a
@@ -358,8 +531,60 @@ def select_features(
         "vif": redundancy["vif"],
         "condition_number": redundancy["condition_number"],
         "correlation": redundancy["correlation"],
+        "collinear_features": redundancy["collinear"],
         "warnings": warnings,
     }
+
+
+def _gate_warnings(
+    gate: Optional[Dict[str, Any]],
+    selection_panel: pd.DataFrame,
+    *,
+    n_selection_dates: int,
+    min_abs_rank_ic: float,
+) -> List[str]:
+    """What the significance test did, in sentences: how many passed and
+    how many noise alone would pass, the empty result said in so many
+    words, a panel too small for the null to reach `alpha`, and the
+    absence of any test when there was none."""
+    if gate is None:
+        return [
+            "No significance test was applied: every feature that was not "
+            f"redundant and cleared min_abs_rank_ic={min_abs_rank_ic:g} was kept."
+        ]
+    alpha, null, n_tested = gate["alpha"], gate["null"], gate["n_tested"]
+    prose = _NULL_PROSE[null]
+    warnings: List[str] = []
+    if null == "entity_shuffle":
+        n_entities = int(selection_panel["entity"].nunique())
+        assignments = math.factorial(n_entities) if n_entities < 20 else math.inf
+        if assignments * alpha < 2.0:
+            warnings.append(
+                f"With {n_entities} entities there are only {assignments} ways "
+                "to assign the feature series to them, so the entity-shuffle "
+                "null cannot produce a p-value much below "
+                f"1/{assignments} = {1.0 / assignments:.3f}, and at alpha "
+                f"{alpha:g} it cannot reliably pass anything. Pass "
+                "significance='circular_shift' or 'none' on a panel this small."
+            )
+    if n_tested == 0:
+        return warnings
+    if gate["n_passed"] == 0:
+        warnings.append(
+            f"No feature cleared p < {alpha:g} against {prose} on the "
+            f"{n_selection_dates} selection dates, so `selected` is empty. None "
+            "of these features ranks these entities better than "
+            f"{_NULL_MEANING[null]}."
+        )
+    else:
+        warnings.append(
+            f"{gate['n_passed']} of {n_tested} features cleared p < {alpha:g} "
+            f"against {prose} on the {n_selection_dates} selection dates; at "
+            f"that alpha about {alpha * n_tested:.1f} of {n_tested} clear from "
+            "noise alone, and these p-values are not corrected for the "
+            f"{n_tested} tests."
+        )
+    return warnings
 
 
 def summarize_feature_set(

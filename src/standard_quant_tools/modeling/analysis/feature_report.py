@@ -442,6 +442,237 @@ def _quantile_shape(
 
 # ── Redundancy ────────────────────────────────────────────────────────────
 
+#: VIF at or above this is named in `collinear`, with what explains it. The
+#: lower of the two conventional lines ("exceeds 5 or 10", James, Witten,
+#: Hastie & Tibshirani, ISLR 2013, s.3.3.3): the other features explain at
+#: least 80% of the feature's variance.
+VIF_NOTE = 5.0
+
+#: VIF at or above this carries an action in the warnings ("in excess of
+#: 10", Kutner, Nachtsheim, Neter & Li, ALSM 5th ed., s.10.5): 90% of the
+#: feature's variance is the others'.
+VIF_ACTION = 10.0
+
+#: Condition number (largest over smallest eigenvalue of the correlation
+#: matrix) at or above which every tool warns. Montgomery, Peck & Vining
+#: (s.9.4) read 100-1000 as moderate-to-strong and past 1000 as severe on
+#: this scale. Belsley's line of 30 is for the condition INDEX, the square
+#: root of this number (30 there is 900 here); the redundancy tool used to
+#: draw it at 30 on this scale and warned at a condition index of 5.5.
+CONDITION_WARN = 1000.0
+
+#: An eigenvalue at or below the largest times this is zero: the matrix is
+#: singular. A correlation matrix with an exact linear dependency comes
+#: out of eigvalsh with a smallest eigenvalue of 1e-16 or so rather than
+#: 0, which read as a finite condition number of ~1e16 and, through pinv,
+#: as VIFs below 1 (an exact copy came out at 0.25).
+_SINGULAR_RTOL = 1e-12
+
+#: A feature loading above this on an eigenvector of a zero eigenvalue is
+#: part of the exact dependency; below it, it is rounding.
+_NULL_LOADING = 1e-8
+
+#: `explained_by` stops at the shortest prefix of the other features
+#: (strongest partial correlation first) whose regression reaches this
+#: share of the full R-squared, and never lists more than `_EXPLAINED_CAP`.
+_EXPLAINED_SHARE = 0.90
+_EXPLAINED_CAP = 5
+
+
+def _abs_rank_ic(stats: Dict[str, Dict[str, float]], feature: str) -> float:
+    """|rank IC| of one feature, 0.0 where it is missing or not finite."""
+    value = (stats.get(feature) or {}).get("rank_ic_mean")
+    return abs(float(value)) if value is not None and np.isfinite(value) else 0.0
+
+
+def cluster_representative(
+    members: Sequence[str], predictive: Dict[str, Dict[str, float]]
+) -> str:
+    """
+    The member of a cluster worth keeping: the strongest |rank IC|, ties
+    broken by the FIRST name alphabetically.
+
+    Written as a sort rather than a `max` because `max` on a (value, name)
+    key breaks ties toward the LAST name, and two tools would then
+    contradict each other on any exact restatement -- which is precisely
+    the case a cluster exists to report. A missing or non-finite IC counts
+    as 0.0, so it cannot win on a NaN comparison.
+    """
+    return sorted(members, key=lambda f: (-_abs_rank_ic(predictive, f), f))[0]
+
+
+def cluster_records(
+    clusters: Sequence[Sequence[str]],
+    correlation: Dict[str, Dict[str, float]],
+    predictive: Dict[str, Dict[str, float]],
+) -> List[Dict[str, Any]]:
+    """
+    The redundancy clusters as `get_feature_redundancy` and
+    `select_features` both publish them: sorted members, a representative,
+    the strongest pairwise correlation inside the group, and the size.
+
+    ONE builder for both tools. It was written twice, once in each, and two
+    tools that resolve the same clusters on the same panel must not be able
+    to drift apart: an agent that called both and got two different drop
+    lists would have no way to tell which to believe.
+
+    `max_abs_correlation` is None for a single-member cluster. It used to
+    be 1.0, which is the value that means "an exact restatement" -- the
+    opposite of a feature that restates nothing.
+    """
+    records: List[Dict[str, Any]] = []
+    for members in clusters:
+        members = sorted(members)
+        pairs = [
+            abs(correlation.get(a, {}).get(b, 0.0))
+            for a in members
+            for b in members
+            if a != b
+        ]
+        records.append(
+            {
+                "members": members,
+                "representative": cluster_representative(members, predictive),
+                "max_abs_correlation": max(pairs) if pairs else None,
+                "size": len(members),
+            }
+        )
+    records.sort(key=lambda record: (-record["size"], record["representative"]))
+    return records
+
+
+def _explained_r2(matrix: np.ndarray, i: int, chosen: List[int], exact: bool) -> float:
+    """R-squared of feature i regressed on the `chosen` features, from the
+    correlation matrix alone. A least-squares solve when the chosen block
+    may itself be singular."""
+    r = matrix[i, chosen]
+    block = matrix[np.ix_(chosen, chosen)]
+    if exact:
+        coef = np.linalg.lstsq(block, r, rcond=None)[0]
+    else:
+        coef = np.linalg.solve(block, r)
+    return float(r @ coef)
+
+
+def _collinear_entry(
+    names: List[str],
+    matrix: np.ndarray,
+    i: int,
+    vif: Optional[float],
+    order: List[int],
+    partial: Dict[int, Optional[float]],
+    in_cluster: bool,
+) -> Dict[str, Any]:
+    """One feature of the `collinear` block. `order` ranks the other
+    features by how much of this one they explain on their own terms;
+    `explained_by` is its shortest prefix that reaches 90% of the full
+    R-squared."""
+    exact = vif is None
+    full = 1.0 if exact else 1.0 - 1.0 / vif
+    chosen: List[int] = []
+    for j in order[:_EXPLAINED_CAP]:
+        chosen.append(j)
+        if _explained_r2(matrix, i, chosen, exact) >= _EXPLAINED_SHARE * full:
+            break
+    others = [j for j in range(len(names)) if j != i]
+    strongest = max(abs(float(matrix[i, j])) for j in others)
+    return {
+        "feature": names[i],
+        "vif": vif,
+        "r_squared": full,
+        "vif_from_strongest_pair": (
+            1.0 / (1.0 - strongest**2) if 1.0 - strongest**2 > _SINGULAR_RTOL else None
+        ),
+        "in_cluster": in_cluster,
+        "explained_by": [
+            {
+                "feature": names[j],
+                "partial_correlation": partial.get(j),
+                "correlation": float(matrix[i, j]),
+            }
+            for j in chosen
+        ],
+    }
+
+
+def _collinear_block(
+    names: List[str],
+    matrix: np.ndarray,
+    inverse: Optional[np.ndarray],
+    vif: Dict[str, Optional[float]],
+    null_vectors: Optional[np.ndarray],
+    clustered: set,
+) -> List[Dict[str, Any]]:
+    """
+    Every feature whose VIF is at or above `VIF_NOTE`, or infinite, highest
+    first, with what explains it.
+
+    Pairwise clustering cannot see a feature that is nearly a combination
+    of several others when no single pair is close: on the live panel
+    rsi_14 has VIF 7.46 and no pair reaches 0.9, so `redundant_features`
+    came back empty beside it. This names the others behind each such VIF:
+    ordered by |partial correlation| (the correlation left between the two
+    once every other feature is held fixed, read off the inverse
+    correlation matrix), the shortest prefix whose regression reaches 90%
+    of the full R-squared, never more than five. `vif_from_strongest_pair`
+    is the VIF that feature's single strongest pair would give alone; the
+    gap between it and `vif` is the part no pairwise view shows.
+
+    For a feature in an exact linear dependency (VIF infinite, reported as
+    None) the partial correlations are undefined; `explained_by` then
+    orders the other members of the dependency by their weight in it.
+    """
+    entries: List[Dict[str, Any]] = []
+    index = {name: k for k, name in enumerate(names)}
+    projector = (
+        null_vectors @ null_vectors.T
+        if null_vectors is not None and null_vectors.size
+        else None
+    )
+    for name in names:
+        i = index[name]
+        value = vif.get(name, float("nan"))
+        if value is None:
+            # Part of an exact dependency: the others in it, heaviest first.
+            weight = np.abs(projector[i]) if projector is not None else None
+            partners = [
+                j for j in range(len(names)) if j != i and vif.get(names[j]) is None
+            ]
+            partners.sort(
+                key=lambda j: (-float(weight[j]), -abs(float(matrix[i, j])), names[j])
+            )
+            entries.append(
+                _collinear_entry(
+                    names, matrix, i, None, partners, {}, name in clustered
+                )
+            )
+            continue
+        if not np.isfinite(value) or value < VIF_NOTE or inverse is None:
+            continue
+        others = [j for j in range(len(names)) if j != i]
+        partial: Dict[int, Optional[float]] = {}
+        for j in others:
+            scale = float(inverse[i, i] * inverse[j, j])
+            partial[j] = (
+                float(-inverse[i, j] / np.sqrt(scale))
+                if scale > 0 and np.isfinite(scale)
+                else None
+            )
+        others.sort(key=lambda j: (-abs(partial[j] or 0.0), names[j]))
+        entries.append(
+            _collinear_entry(
+                names, matrix, i, float(value), others, partial, name in clustered
+            )
+        )
+    entries.sort(
+        key=lambda e: (
+            e["vif"] is not None,
+            -(e["vif"] if e["vif"] is not None else 0.0),
+            e["feature"],
+        )
+    )
+    return entries
+
 
 def redundancy_report(
     panel: pd.DataFrame,
@@ -453,10 +684,13 @@ def redundancy_report(
     Which features are restatements of one another.
 
     An agent that puts RSI, the stochastic oscillator, 20-day momentum and
-    MACD into one model has not supplied four pieces of evidence; it has
-    supplied roughly one, four times. Every importance-style diagnostic then
-    splits that one signal across four columns and reports each as modest,
-    which is the opposite of the truth.
+    MACD into one model may not have supplied four pieces of evidence; on
+    some panels it has supplied roughly one, four times. Every
+    importance-style diagnostic then splits that one signal across four
+    columns and reports each as modest, which is the opposite of the truth.
+    Whether they do form one group is a property of the panel: on the live
+    panel of 2026-10-03, rsi_14 and pctb_20 correlated at 0.87 and no pair
+    of its eight features reached 0.9.
 
     Three views, because they fail differently:
 
@@ -472,7 +706,22 @@ def redundancy_report(
     threshold, which is deliberately the crude choice: it needs no linkage
     or distance model, it is easy to explain, and at a threshold this high
     the "chaining" that would make single-linkage clustering misleading is
-    not a practical concern.
+    not a practical concern. It is also why the clusters and the VIFs can
+    disagree: a feature nearly explained by three others, none of them
+    close on its own, is in no cluster. `collinear` lists every such
+    feature -- VIF at or above `VIF_NOTE`, or infinite -- with the others
+    that explain it (see `_collinear_block`).
+
+    A SINGULAR MATRIX IS SAID TO BE ONE. When the smallest eigenvalue is at
+    most 1e-12 of the largest, some feature is an exact linear combination
+    of others: the condition number is infinite, and each feature loading
+    on the zero eigenvalue's eigenvector has an infinite VIF, reported as
+    None. Before this, eigvalsh's 1e-16 for that eigenvalue read as a
+    condition number of ~1e16 and pinv returned VIFs below 1 -- 0.25 for
+    an exact copy, 0.62 for an exact sum -- which no feature can have. The
+    other features keep the VIF the pseudo-inverse gives them, which is
+    their regression on the rest. A matrix that is not singular takes the
+    path it always took, to the bit.
     """
     _named_once(panel, feature_ids, "redundancy_report")
     if len(feature_ids) < 2:
@@ -482,6 +731,7 @@ def redundancy_report(
             "vif": {},
             "condition_number": float("nan"),
             "clusters": [[f] for f in feature_ids],
+            "collinear": [],
         }
 
     frame = panel[list(feature_ids)].dropna()
@@ -492,31 +742,55 @@ def redundancy_report(
             "vif": {},
             "condition_number": float("nan"),
             "clusters": [[f] for f in feature_ids],
+            "collinear": [],
         }
 
     pearson = frame.corr(method="pearson")
     spearman = frame.corr(method="spearman")
+    clusters = _correlation_clusters(pearson, cluster_threshold)
 
     # VIF from the inverse correlation matrix: its diagonal IS 1/(1-R2_i),
     # which is the definition, and it costs one inversion instead of one
     # regression per feature.
-    vif: Dict[str, float] = {}
+    vif: Dict[str, Optional[float]] = {}
     condition_number = float("nan")
+    collinear: List[Dict[str, Any]] = []
     matrix = pearson.to_numpy(dtype=float)
+    names = [str(f) for f in feature_ids]
     if np.all(np.isfinite(matrix)):
         try:
             eigenvalues = np.linalg.eigvalsh(matrix)
             smallest = float(np.min(eigenvalues))
             largest = float(np.max(eigenvalues))
-            if smallest > 0:
+            inverse: Optional[np.ndarray] = None
+            null_vectors: Optional[np.ndarray] = None
+            if smallest > largest * _SINGULAR_RTOL:
                 condition_number = largest / smallest
+                inverse = np.linalg.pinv(matrix)
+                for i, feature in enumerate(feature_ids):
+                    vif[feature] = _safe(inverse[i, i])
             else:
-                # Exactly singular: at least one feature is a linear
-                # combination of the others. Infinity is the honest answer.
+                # Singular: at least one feature is an exact linear
+                # combination of the others. Infinity is the honest answer
+                # for the matrix, and for every feature in the dependency.
                 condition_number = float("inf")
-            inverse = np.linalg.pinv(matrix)
-            for i, feature in enumerate(feature_ids):
-                vif[feature] = _safe(inverse[i, i])
+                values, vectors = np.linalg.eigh(matrix)
+                zero = values <= largest * _SINGULAR_RTOL
+                # eigh and eigvalsh can disagree in the last bit; the branch
+                # was taken on eigvalsh's smallest, so its vector is null.
+                zero[int(np.argmin(values))] = True
+                null_vectors = vectors[:, zero]
+                kept = vectors[:, ~zero]
+                inverse = (kept / values[~zero]) @ kept.T
+                loading = np.sqrt(np.sum(null_vectors**2, axis=1))
+                for i, feature in enumerate(feature_ids):
+                    vif[feature] = (
+                        None if loading[i] > _NULL_LOADING else _safe(inverse[i, i])
+                    )
+            clustered = {m for c in clusters if len(c) > 1 for m in c}
+            collinear = _collinear_block(
+                names, matrix, inverse, vif, null_vectors, clustered
+            )
         except np.linalg.LinAlgError:  # pragma: no cover - pinv rarely fails
             logger.debug("[modeling] VIF unavailable: correlation matrix is degenerate")
 
@@ -525,8 +799,117 @@ def redundancy_report(
         "spearman_correlation": _frame_to_nested(spearman),
         "vif": vif,
         "condition_number": condition_number,
-        "clusters": _correlation_clusters(pearson, cluster_threshold),
+        "clusters": clusters,
+        "collinear": collinear,
     }
+
+
+def condition_warning(condition_number: Any) -> Optional[str]:
+    """
+    The one sentence every feature tool says about the condition number,
+    or None below `CONDITION_WARN`.
+
+    `analyze_features` drew this line at 1000 and `get_feature_redundancy`
+    at 30 -- Belsley's line, which is for the condition INDEX, the square
+    root of this number -- so the redundancy tool warned at an index of 5.5
+    that its sibling read as healthy, and `select_features` said nothing.
+    One function, one line, one sentence.
+    """
+    try:
+        value = float(condition_number)
+    except (TypeError, ValueError):
+        return None
+    if np.isnan(value) or value < CONDITION_WARN:
+        return None
+    if np.isinf(value):
+        return (
+            "NOTE: the feature correlation matrix is singular, so its condition "
+            "number is infinite (reported as null): at least one feature is an "
+            "exact linear combination of others. Above ~1000 a linear model's "
+            "coefficients are not individually interpretable — they trade off "
+            "against each other almost freely."
+        )
+    return (
+        f"NOTE: the feature correlation matrix has condition number {value:,.0f}. "
+        "Above ~1000 a linear model's coefficients are not individually "
+        "interpretable — they trade off against each other almost freely."
+    )
+
+
+def collinearity_warnings(
+    collinear: Sequence[Dict[str, Any]],
+    *,
+    cluster_threshold: float,
+    pair_list: str,
+) -> List[str]:
+    """
+    The sentences that say what VIF says, from `redundancy_report`'s
+    `collinear` block. Shared by `analyze_features`, `get_feature_redundancy`
+    and `select_features`, so one panel reads the same in each.
+
+    `pair_list` names, in the caller's own terms, the list that only holds
+    pairs above `cluster_threshold` -- the reconciling sentence is about
+    why that list and the VIFs disagree, and it has to name the field the
+    reader is looking at.
+    """
+    warnings: List[str] = []
+    exact = [e for e in collinear if e.get("vif") is None]
+    high = [e for e in collinear if e.get("vif") is not None and e["vif"] >= VIF_ACTION]
+    note = [
+        e
+        for e in collinear
+        if e.get("vif") is not None and VIF_NOTE <= e["vif"] < VIF_ACTION
+    ]
+
+    def _behind(entry: Dict[str, Any]) -> str:
+        named = " and ".join(
+            f"{part['feature']} (|r| {abs(part['correlation']):.2f})"
+            for part in entry["explained_by"][:2]
+        )
+        pair = entry.get("vif_from_strongest_pair")
+        alone = (
+            f"its strongest pair alone would give a VIF of {pair:.1f}"
+            if pair is not None
+            else "its strongest pair alone is an exact restatement"
+        )
+        return (
+            f"the other features explain {entry['r_squared']:.0%} of "
+            f"{entry['feature']}'s variance, mostly {named}, and {alone}"
+        )
+
+    if exact:
+        names = ", ".join(e["feature"] for e in exact)
+        warnings.append(
+            f"The feature correlation matrix is singular: {names} are exact "
+            "linear combinations of one another, so their VIF is infinite "
+            "(reported as null) and no linear model can separate their "
+            "coefficients. Drop one feature from each combination; "
+            "collinear_features names the others in it."
+        )
+    if high:
+        named = ", ".join(f"{e['feature']} ({e['vif']:.1f})" for e in high)
+        warnings.append(
+            f"VIF is at or above {VIF_ACTION:.0f} for {named}: "
+            f"{_behind(high[0])}. A linear model's coefficients on these are not "
+            "individually interpretable; drop or combine one of the features in "
+            "collinear_features before reading them."
+        )
+    if note:
+        named = ", ".join(f"{e['feature']} ({e['vif']:.1f})" for e in note)
+        warnings.append(
+            f"NOTE: VIF is at or above {VIF_NOTE:.0f} for {named}: "
+            f"{_behind(note[0])}."
+        )
+    loose = [e["feature"] for e in collinear if not e.get("in_cluster")]
+    if loose:
+        warnings.append(
+            f"{pair_list} pairs at |r| >= {cluster_threshold:.2f} only, and "
+            f"{', '.join(loose)} (VIF at or above {VIF_NOTE:.0f}) "
+            f"{'is' if len(loose) == 1 else 'are'} in no such pair. VIF measures "
+            "each feature against all the others at once, so dropping one of "
+            "them is a modelling choice, not a deduplication."
+        )
+    return warnings
 
 
 def _frame_to_nested(frame: pd.DataFrame) -> Dict[str, Dict[str, float]]:
@@ -811,11 +1194,13 @@ def build_feature_report(
             f for f, v in leakage.items() if v["flagged"]
         )
 
-    report["warnings"] = _report_warnings(report)
+    report["warnings"] = _report_warnings(report, cluster_threshold=cluster_threshold)
     return report
 
 
-def _report_warnings(report: Dict[str, Any]) -> List[str]:
+def _report_warnings(
+    report: Dict[str, Any], *, cluster_threshold: float = 0.9
+) -> List[str]:
     """
     The findings worth surfacing without being asked.
 
@@ -846,13 +1231,18 @@ def _report_warnings(report: Dict[str, Any]) -> List[str]:
             "which reads as several weak findings rather than one strong one."
         )
 
-    condition = report.get("redundancy", {}).get("condition_number", float("nan"))
-    if np.isfinite(condition) and condition > 1000:
-        warnings.append(
-            f"NOTE: the feature correlation matrix has condition number {condition:,.0f}. "
-            "Above ~1000 a linear model's coefficients are not individually "
-            "interpretable — they trade off against each other almost freely."
+    warnings.extend(
+        collinearity_warnings(
+            report.get("redundancy", {}).get("collinear", []),
+            cluster_threshold=cluster_threshold,
+            pair_list="report.redundancy.clusters groups",
         )
+    )
+    condition = condition_warning(
+        report.get("redundancy", {}).get("condition_number", float("nan"))
+    )
+    if condition:
+        warnings.append(condition)
 
     flagged = report.get("leakage_flagged", [])
     if flagged:

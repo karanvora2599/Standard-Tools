@@ -500,7 +500,7 @@ class TestSelectFeatures:
         )
         assert result.dropped
         for dropped in result.dropped:
-            assert dropped.reason in {"redundant", "weak", "capped"}
+            assert dropped.reason in {"redundant", "weak", "insignificant", "capped"}
             assert dropped.detail.strip()
 
     def test_an_impossible_floor_drops_everything(self, dataset):
@@ -511,8 +511,10 @@ class TestSelectFeatures:
         assert all(d.reason == "weak" for d in result.dropped)
 
     def test_max_features_caps_and_says_so(self, dataset):
+        # The cap's mechanics, so no significance test: on three entities
+        # the default entity-shuffle null cannot pass anything to cap.
         result = select_features(
-            SelectFeaturesInput(dataset_id=dataset, max_features=1)
+            SelectFeaturesInput(dataset_id=dataset, max_features=1, significance="none")
         )
         assert len(result.selected) <= 1
         if result.n_clusters > 1:
@@ -524,9 +526,14 @@ class TestSelectFeatures:
         would get contradictory drop lists."""
         # On the same window: the redundancy tool reads the whole panel, so
         # the selection must too for the representatives to agree.
+        # And no significance test, which would drop representatives the
+        # redundancy tool still names.
         selected = select_features(
             SelectFeaturesInput(
-                dataset_id=dataset, cluster_threshold=0.0, holdout_fraction=0.0
+                dataset_id=dataset,
+                cluster_threshold=0.0,
+                holdout_fraction=0.0,
+                significance="none",
             )
         )
         redundancy = get_feature_redundancy(

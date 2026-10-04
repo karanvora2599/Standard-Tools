@@ -755,7 +755,9 @@ profile_feature: one feature's coverage, turnover, autocorrelation, IC and
 ICIR, quantile spread and monotonicity.
 get_feature_redundancy: which features are the same signal, with a
 representative named. Say which one you would KEEP and why. Do not report
-that a cluster exists and leave the decision open.
+that a cluster exists and leave the decision open. An empty drop list is not
+an absence of collinearity: read collinear_features, the features several
+others explain together.
 get_feature_ic_decay: how the IC behaves as the feature is shifted in time.
 Answers both "does this leak" and "does it survive a bar of staleness".
 get_feature_drift: whether the feature is still the same measurement, and
@@ -766,9 +768,12 @@ get_feature_regime_stability: the IC inside each of several contiguous time
 blocks. Read the block ICs, not just sign consistency — a feature decaying
 from 0.44 to 0.01 keeps perfect sign consistency the whole way down.
 run_feature_permutation_test: how often noise on THIS panel produces an IC
-this large.
-select_features: drop the duplicates and the unmeasurable, with a reason
-recorded per exclusion.
+this large; read null_mean, since a null need not be centred on zero.
+screen_feature_significance runs the same test for every feature at once.
+select_features: drop the duplicates, then test each representative against
+an entity-shuffle permutation null on the selection window; every exclusion
+carries a reason, and an insignificant one its p-value. significance="none"
+skips the test.
 compare_feature_sets: two sets on the same panel, with the collinearity cost
 of the larger one attached.
 run_feature_ablation: refit without each feature and report what each was
@@ -778,8 +783,9 @@ tell the user the fit count before starting a large one.
 
 THREE THINGS YOU MUST NOT DO.
 
-Never call an IC "small but real" without running
-run_feature_permutation_test first. On a few hundred dates and a couple of
+Never call an IC "small but real" without a permutation test first
+(screen_feature_significance for every feature, run_feature_permutation_test
+for one). On a few hundred dates and a couple of
 dozen entities, an IC of 0.03 is inside the range noise produces routinely.
 Reporting a number that has not cleared its own null is the easiest way for
 you to mislead somebody.
