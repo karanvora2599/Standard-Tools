@@ -1,5 +1,53 @@
 # Changelog
 
+## A dataset built under one pandas loads under the other
+
+- **The refusal.** A modeling dataset's integrity hash was
+  `audit.hash_dataframe`, which covers each column's `str(dtype)`. pandas 3
+  prints a text column as `str` where pandas 2 prints `object`, and parses a
+  date string to `datetime64[s]` where pandas 2 gives `[ns]`. A dataset
+  built under one pandas was refused under the other as "no longer matches
+  the hash recorded when it was built" by every tool that loads a dataset
+  (21 entry points, including `run_model_experiment`, `analyze_features`,
+  `check_leakage` and the `sqt://dataset/{id}` resource), with no byte of
+  the panel changed.
+- **`audit.canonical_frame_hash`.** A content hash over the row count, the
+  index, each column's name and logical kind (`float64`, `int`, `bool`,
+  `timestamp[ns, UTC]`, `string`, `category<…>`) and every value, through
+  bytes that are the same under every pandas: floats little-endian with one
+  NaN pattern, datetimes as UTC nanoseconds, text as its distinct values
+  plus a code per row. Text stored as `object`, `str` or `string`, and
+  datetimes at `[ns]`, `[us]`, `[ms]` or `[s]` holding the same instants,
+  hash alike; a one-ulp change, a dropped row, a relabelled entity, a date
+  moved a day, a reordered or renamed column, float32, a NaN, a dropped time
+  zone and a row swap each change it. `hash_dataframe` is unchanged.
+- **New datasets record version 2.** `build_model_dataset` and
+  `register_external_panel` write the canonical hash as `data_hash`, with
+  `data_hash_version: 2` and `built_with` (python, pandas, numpy, pyarrow)
+  in `dataset_meta.json`. Manifests record `dataset_hash_version`, and
+  `inspect_model`'s lineage view shows it.
+- **Existing datasets keep their hash.** Nothing is migrated: `data_hash` is
+  copied into every manifest and fold node hash, so rewriting it would
+  change the identity of runs that exist. A version-1 hash is checked as
+  read and, on a miss, under the other pandas's dtype names and datetime
+  resolutions (lossless conversions only). Re-running a live ridge model on
+  a dataset built under pandas 3.0.5 under pandas 2.3.3 records the same
+  dataset hash and the same eight fold node hashes, r² −0.008855 and rank IC
+  0.0090; its predictions differ from the pandas-3 run by at most 7.2e-16
+  (numpy 2.0.2 against 2.4.6, scikit-learn 1.9.1 against 1.9.0). Under
+  pandas 3.0.5 the re-run is bit-identical, predictions file included.
+- **Refusals say what is known.** A version-2 mismatch says the hash does
+  not depend on the pandas or pyarrow version, so the data changed. A
+  version-1 miss under the pandas that wrote the panel says the data
+  changed; under another or unrecorded pandas it says the check cannot tell
+  an edit from a pandas difference and names both versions. Each names its
+  file: an external panel's own path, where it said `panel.parquet`.
+- **Cost.** At one million rows the canonical hash takes 0.24–0.31 s at 24
+  columns and 0.95–0.97 s at 84, against 0.45–0.47 s and 1.46–1.55 s for
+  `hash_dataframe`, about twice a Parquet read. On the 31,680-row live panel
+  it takes 3.0–4.8 ms, and a version-1 dataset verified under the other
+  pandas's dtype names loads in 13–14 ms.
+
 ## The ADF report pass solves its design column-major like the sweep above it
 
 - **`engle_granger`'s cost tracked the winning lag, not n.** At n=32,000,

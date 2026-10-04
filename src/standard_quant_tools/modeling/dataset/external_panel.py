@@ -16,9 +16,13 @@ SQT_RUNS_DIR, and the matrices this path exists for are partitioned
 directories of them -- copying one is a materialization, which is the thing
 the external-dataset contract was built to avoid. The engine loads the panel
 whole either way, so the copy buys nothing except the integrity check, and
-that survives without it: `hash_dataframe` runs on the frame AFTER it is
+that survives without it: the content hash runs on the frame AFTER it is
 loaded, so an externally-referenced panel is verified exactly as strictly as
-a built one.
+a built one. The frame is re-parsed on every load, and the parse depends on
+the pandas version -- a CSV's dates come back `datetime64[ns]` under pandas
+2 and `datetime64[s]` under pandas 3, its text `object` under one and `str`
+under the other -- so the hash recorded is the one that does not see those
+differences (`dataset.integrity`, version 2).
 
 WHAT THE CALLER MUST STILL DECLARE. The horizon. A panel arrives with a
 `target` column and no statement of what that column MEANS, and the engine

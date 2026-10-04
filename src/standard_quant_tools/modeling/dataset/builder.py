@@ -28,7 +28,6 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 
-from standard_quant_tools.audit.hashing import hash_dataframe
 from standard_quant_tools.data.bundle import DataBundle, validate_bundle
 from standard_quant_tools.data.factory import DataFactory
 from standard_quant_tools.error import ValidationError
@@ -52,6 +51,7 @@ from .coverage import (
     provider_guarantee_warnings,
 )
 from .fetch import fetch_universe_ohlcv
+from .integrity import DATA_HASH_VERSION, build_environment, panel_data_hash
 from .lags import expand_lags, expanded_feature_ids, lags_by_output_name
 from .leakage import check_point_in_time_safety
 from .missing import forward_fill_bounded
@@ -695,13 +695,14 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
             continue
         require_finite_array(values, col, "build_model_dataset")
 
-    # audit.hash_dataframe, not a local pd.util.hash_pandas_object call.
-    # hash_pandas_object is a per-ROW digest that never sees column labels,
-    # so two panels with identical numbers under entirely different feature
-    # columns hash the same. The audit package was explicitly fixed for
-    # exactly this collision; duplicating the pre-fix version here
-    # reintroduced it in the modeling lineage.
-    data_hash = hash_dataframe(long_panel)
+    # A hash that covers the column labels: hash_pandas_object alone is a
+    # per-ROW digest that never sees them, so two panels with identical
+    # numbers under different feature columns hashed the same. And one that
+    # does not depend on the pandas version: `hash_dataframe` covers
+    # `str(dtype)`, which pandas 3 spells differently for every text
+    # column, so a dataset built under one pandas was refused under the
+    # other. See dataset.integrity.
+    data_hash = panel_data_hash(long_panel)
 
     result: Dict[str, Any] = {
         "panel": long_panel,
@@ -721,6 +722,10 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
         # record, not the underlying registry ids.
         "feature_ids": expanded_names,
         "data_hash": data_hash,
+        # Which form `data_hash` is, and the libraries that produced the
+        # panel it covers -- see dataset.integrity.
+        "data_hash_version": DATA_HASH_VERSION,
+        "built_with": build_environment(),
         "data_sources": data_sources,
         "spec_hash": dataset_spec_hash(spec),
         # What the frames in this dataset can and cannot support, as one

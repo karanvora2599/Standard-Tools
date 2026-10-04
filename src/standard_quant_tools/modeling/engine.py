@@ -1964,6 +1964,7 @@ def run_experiment(
         target_id=dataset["target_id"],
         dataset_id=dataset_id,
         dataset_hash=dataset["data_hash"],
+        dataset_hash_version=dataset.get("data_hash_version"),
         oos_metrics=oos_metrics,
         feature_importance_summary=importance_summary,
         n_folds=len(fold_metrics),

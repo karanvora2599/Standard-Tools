@@ -66,6 +66,12 @@ class ModelManifest(BaseModel):
     target_id: str
     dataset_id: str
     dataset_hash: str
+    # Which form `dataset_hash` is: 1 is `audit.hash_dataframe`, which
+    # depends on how the building pandas spelled its dtypes; 2 is
+    # `audit.canonical_frame_hash`, which does not. Copied from the
+    # dataset, never recomputed. None for a model registered before it was
+    # recorded, or from a dataset carrying no hash.
+    dataset_hash_version: Optional[int] = None
     validation_method: str
     oos_metrics: Dict[str, float]
     feature_importance_summary: Dict[str, Dict[str, float]]

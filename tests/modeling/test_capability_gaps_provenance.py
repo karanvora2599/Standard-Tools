@@ -299,6 +299,7 @@ class TestTheOtherViewsAreUnchanged:
         assert set(lineage) == {
             "dataset_id",
             "dataset_hash",
+            "dataset_hash_version",
             "data_sources",
             "oos_predictions_uri",
             "random_seed",

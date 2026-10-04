@@ -40,7 +40,6 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from standard_quant_tools.audit.hashing import hash_dataframe
 from standard_quant_tools.error import ValidationError
 
 from .. import artifacts as _artifacts
@@ -50,6 +49,12 @@ from ..capabilities import modeling_capabilities
 from ..dataset.builder import SPEC_HASH_VERSION
 from ..dataset.builder import build_dataset as _build_dataset
 from ..dataset.builder import dataset_spec_hash
+from ..dataset.integrity import (
+    DATA_HASH_VERSION,
+    build_environment,
+    panel_data_hash,
+    verify_panel_hash,
+)
 from ..dataset.lags import parse_lag_column
 from ..engine import refuse_duplicate_entity_dates
 from ..engine import run_experiment as _run_experiment
@@ -295,6 +300,10 @@ def build_model_dataset(input_data: BuildModelDatasetInput) -> BuildModelDataset
             "target_id": built["target_id"],
             "targets": built.get("targets", []),
             "data_hash": built["data_hash"],
+            # The form of data_hash (2: independent of the pandas version)
+            # and the libraries that built the panel -- dataset.integrity.
+            "data_hash_version": built["data_hash_version"],
+            "built_with": built["built_with"],
             # spec_hash was computed by build_dataset and then discarded.
             # Persisted so a model can be tied to the exact feature/target
             # DEFINITION, not just to the resulting data. The version says
@@ -505,7 +514,12 @@ def register_external_panel(
             "feature_ids": loaded["feature_ids"],
             "target_id": f"{primary['target_type']}:{primary['horizon']}",
             "targets": declared,
-            "data_hash": hash_dataframe(panel),
+            # Of the panel as loaded, not of the file: a reload re-runs the
+            # same parsing, and version 2 is the same whichever pandas does
+            # it (a CSV's dates parse to [ns] under pandas 2, [s] under 3).
+            "data_hash": panel_data_hash(panel),
+            "data_hash_version": DATA_HASH_VERSION,
+            "built_with": build_environment(),
             "spec_hash": dataset_spec_hash(spec),
             "spec_hash_version": SPEC_HASH_VERSION,
             "entities": loaded["entities"],
@@ -692,10 +706,13 @@ def _load_dataset_meta(dataset_id: str):
     A dataset's recorded metadata, WITHOUT reading or hashing its panel.
 
     `_load_dataset_panel` verifies the panel against the hash recorded at
-    build time, which costs 0.5 s per million rows at 24 columns and 1.7 s
-    at 84 -- three to six times what reading the Parquet costs. That is the
-    right price for anything that USES the data. It is the wrong price for
-    a caller that wants four keys out of a JSON file, which is what
+    build time. For a version-2 hash that costs 0.24-0.31 s per million
+    rows at 24 columns and 0.95-0.97 s at 84, about twice what reading the
+    Parquet costs (pandas 2.3.3 and 3.0.5). A version-1 hash costs 0.45-0.47
+    s and 1.46-1.55 s, and about twice that when it is verified under the
+    other pandas's dtype names. That is the right price for anything that
+    USES the data. It is the wrong price for a caller that wants four keys
+    out of a JSON file, which is what
     `validate_model_spec` was paying: it read and hashed the whole panel,
     bound it to `_panel`, and discarded it.
 
@@ -746,24 +763,30 @@ def _load_dataset_panel(dataset_id: str):
     # over data already in memory.
     if meta.get("storage") == "external":
         panel = _load_external_panel_for(meta, dataset_id)
+        panel_path = meta.get("panel_path")
+        written_parquet = None
     else:
-        panel = _artifacts.load_artifact(str(directory / "panel.parquet"))
+        panel_path = directory / "panel.parquet"
+        panel = _artifacts.load_artifact(str(panel_path))
+        written_parquet = panel_path
 
     # The panel is reloaded from disk and its hash was recorded at build
     # time, but nothing previously re-derived it -- so an edited
     # panel.parquet trained a model whose manifest recorded the ORIGINAL
     # panel's hash, making the lineage actively misleading rather than
-    # merely incomplete.
-    stored_hash = meta.get("data_hash")
-    if stored_hash is not None:
-        actual_hash = hash_dataframe(panel)
-        if actual_hash != stored_hash:
-            raise ValidationError(
-                f"dataset {dataset_id!r}: panel.parquet no longer matches the "
-                f"hash recorded when it was built (expected {stored_hash}, found "
-                f"{actual_hash}). Using it would record a lineage hash that does "
-                "not describe the data actually used — rebuild the dataset instead."
-            )
+    # merely incomplete. The hash is checked in the form the dataset
+    # recorded it: version 2 does not depend on the pandas version, and a
+    # version-1 hash is also tried under the other pandas's dtype names and
+    # datetime resolutions, so a dataset built under pandas 3 loads under
+    # pandas 2 and the reverse. The recorded value is never rewritten:
+    # manifests and fold node hashes already carry it.
+    verify_panel_hash(
+        panel,
+        meta,
+        dataset_id=dataset_id,
+        panel_path=panel_path,
+        written_parquet=written_parquet,
+    )
     return panel, meta, directory
 
 
@@ -828,6 +851,14 @@ def run_model_experiment(
         "feature_ids": meta["feature_ids"],
         "target_id": selected_target_id,
         "data_hash": meta["data_hash"],
+        # The form of the stored data_hash, for the manifest: 1 for a
+        # dataset that records none (`hash_dataframe`), 2 for the
+        # pandas-independent hash.
+        "data_hash_version": (
+            int(meta.get("data_hash_version") or 1)
+            if meta.get("data_hash") is not None
+            else None
+        ),
         "spec_hash": stored_spec_hash,
         "spec_hash_version": (
             spec_hash_version if stored_spec_hash is not None else None
@@ -1001,6 +1032,10 @@ def inspect_model(input_data: InspectModelInput) -> InspectModelResult:
         data = {
             "dataset_id": manifest.dataset_id,
             "dataset_hash": manifest.dataset_hash,
+            # The form of dataset_hash: 1 depends on the pandas version that
+            # built the dataset, 2 does not. None for a model registered
+            # before the form was recorded, whose hash is version 1.
+            "dataset_hash_version": manifest.dataset_hash_version,
             # Which feed each entity's bars came from; the field that
             # tells two builds of one spec apart (findings D16).
             "data_sources": manifest.data_sources,

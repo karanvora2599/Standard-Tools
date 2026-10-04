@@ -21,7 +21,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from standard_quant_tools.audit.hashing import hash_dataframe
+from standard_quant_tools.audit.hashing import canonical_frame_hash, hash_dataframe
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.modeling import artifacts as _artifacts
 from standard_quant_tools.modeling.dataset.builder import build_dataset
@@ -222,8 +222,15 @@ class TestDatasetHashing:
         assert legacy_a == legacy_b, "demonstrates the collision being fixed"
 
     def test_builder_uses_the_column_aware_hash(self, patched_multi_factory):
+        """The builder records the column-aware hash in its pandas-independent
+        form (see the CHANGELOG entry of 2026-10-04), which still tells the
+        two frames above apart."""
         built = build_dataset(_spec())
-        assert built["data_hash"] == hash_dataframe(built["panel"])
+        assert built["data_hash"] == canonical_frame_hash(built["panel"])
+        assert built["data_hash_version"] == 2
+        a = pd.DataFrame({"feat_a": [1.0, 2.0], "feat_b": [3.0, 4.0]})
+        b = pd.DataFrame({"other_x": [1.0, 2.0], "other_y": [3.0, 4.0]})
+        assert canonical_frame_hash(a) != canonical_frame_hash(b)
 
 
 class TestTransactionalCommit:
@@ -277,6 +284,7 @@ class TestDatasetSpecIntegrity:
                 "feature_ids": built["feature_ids"],
                 "target_id": built["target_id"],
                 "data_hash": built["data_hash"],
+                "data_hash_version": built["data_hash_version"],
                 "spec_hash": built["spec_hash"],
                 "warnings": built.get("warnings", []),
             },
