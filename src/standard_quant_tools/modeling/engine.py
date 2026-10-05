@@ -40,6 +40,12 @@ from .estimators.registry import (
     quantile_support,
     validate_params,
 )
+from .estimators.trees import (
+    EarlyStoppingFit,
+    early_stopping_warnings,
+    prepare_early_stopping,
+    refuse_early_stopping_without_validation_set,
+)
 from .monitoring import feature_profile, reference_sample
 from .plan import plan_experiment
 from .preprocessing import (
@@ -592,22 +598,31 @@ def _gradient_boosting_advice(model_spec: ModelSpec, n_rows: int) -> List[str]:
     every tree, on one core; HistGradientBoosting bins each feature once,
     splits on the bins, uses every core, and from 10,000 rows stops early
     by default. Measured on a 71,070-row, 12-feature synthetic panel on 16
-    logical cores (see the CHANGELOG entry of 2026-10-01): the walk-forward
-    experiment took 124 s under gradient_boosting (n_estimators=150,
-    max_depth=3) and 2.5 s under hist_gradient_boosting at its defaults,
-    about 50x; a single like-for-like fit, 150 trees of depth 3 with early
-    stopping off, was 128x. On live data of the same shape it measured
-    16x; the gap depends on the cores and on how soon early stopping ends
-    the fit, which is why the sentence says where its number came from.
+    logical cores (see the CHANGELOG entry of 2026-10-01), and measured
+    again on 2026-10-04 under hist_gradient_boosting's time-ordered early
+    stopping, on a rebuilt panel of 60 names x 1,185 dates with Gaussian
+    features (Python 3.11, Windows, warm, median of 3, the machine shared
+    with other work): at the default budget, 'auto', the walk-forward
+    experiment took 48 s under gradient_boosting (n_estimators=150,
+    max_depth=3) and 1.33 s under hist_gradient_boosting at its defaults,
+    about 36x (at a budget of 1, 116 s and 1.33 s, 87x); a single
+    like-for-like fit, 150 trees of depth 3 with early stopping off, was
+    128x. On live data of the same shape it measured 33x at 'auto' (31 s
+    and 0.94 s); the gap depends on the cores and on how soon early
+    stopping ends the fit, which is why the sentence says where its number
+    came from.
 
     WHY 10,000 ROWS. One gradient_boosting(150, depth 3) fit, against
     hist_gradient_boosting at its defaults, by rows: 1,000 rows 0.34 s vs
     0.21 s (1.6x); 3,000 rows 1.1 s vs 0.23 s (4.8x); 10,000 rows 4.1 s vs
-    0.26 s (15x); 20,000 rows 8.5 s vs 0.07 s, early stopping now on
-    (118x). Below 10,000 rows both fit in about a second and the gap is a
-    few times, so the sentence would be noise; from 10,000 rows a fit costs
-    seconds, an experiment makes one per fold plus the refit, and the gap
-    is an order of magnitude and widening.
+    0.26 s (15x); 20,000 rows 8.1 s vs 0.058 s, early stopping now on
+    (140x; measured again on 2026-10-04 under the time-ordered early
+    stopping, which stopped after 19 iterations, with OpenMP's workers
+    spinning as they did when the other sizes were measured). Below 10,000
+    rows both fit in about a second and the gap is a few times, so the
+    sentence would be noise; from 10,000 rows a fit costs seconds, an
+    experiment makes one per fold plus the refit, and the gap is an order
+    of magnitude and widening.
 
     Guidance, never a substitution: the two are different models -- binned
     splits, a different default depth and stopping rule -- so which one to
@@ -623,7 +638,7 @@ def _gradient_boosting_advice(model_spec: ModelSpec, n_rows: int) -> List[str]:
         "and at this size it is where the run's time goes. "
         "hist_gradient_boosting is its histogram-binned equivalent: on a "
         "71,070-row synthetic panel the same walk-forward experiment ran "
-        "about 50x faster with it at its defaults than with gradient_boosting "
+        "about 36x faster with it at its defaults than with gradient_boosting "
         "(n_estimators=150, max_depth=3), on 16 logical cores. It is a "
         "different model, so it was not substituted: this run fitted "
         "gradient_boosting as specified."
@@ -651,8 +666,12 @@ def _random_forest_advice(model_spec: ModelSpec, n_rows: int, budget: int) -> Li
     rows, 8 features, 16 logical cores shared with other work; 200 trees
     of depth 6, 8 folds and the refit): 71 to 124 s at budget 1, 18.1 to
     18.9 s at 'auto' with every content hash of the budget-1 run, and
-    hist_gradient_boosting at its defaults 3.9 to 7.9 s at 'auto'. The
-    same 10,000-row threshold as `_gradient_boosting_advice`.
+    hist_gradient_boosting at its defaults 0.57 to 0.72 s at 'auto'
+    (measured again on 2026-10-04 under its time-ordered early stopping,
+    which ends each fold after 10 to 16 iterations: warm, five runs each on
+    Python 3.12 / pandas 2.3 and Python 3.11 / pandas 3.0, medians 0.59 and
+    0.68 s, Windows, the machine shared with other work). The same 10,000-row
+    threshold as `_gradient_boosting_advice`.
 
     Guidance, never a substitution, as for gradient boosting.
     """
@@ -674,7 +693,7 @@ def _random_forest_advice(model_spec: ModelSpec, n_rows: int, budget: int) -> Li
         "trees of depth 6 took 71 to 124 s for 8 walk-forward folds and the "
         "refit, 97% of it building trees; at budget.max_parallelism='auto' "
         "the same experiment took 18 to 19 s with the same predictions, and "
-        "hist_gradient_boosting at its defaults took 4 to 8 s. It is a "
+        "hist_gradient_boosting at its defaults took 0.6 to 0.7 s. It is a "
         "different model, so it was not substituted: this run fitted "
         "random_forest as specified."
     ]
@@ -1242,7 +1261,11 @@ def _fit(
     y: Any,
     weights: "np.ndarray | None",
     group: "np.ndarray | None" = None,
-):
+    *,
+    index: "SampleIndex | None" = None,
+    horizon: "int | None" = None,
+    notes: "List[EarlyStoppingFit] | None" = None,
+) -> "EarlyStoppingFit | None":
     """
     Fit, passing sample weights and query groups only when they apply.
 
@@ -1259,9 +1282,21 @@ def _fit(
     Every fit in a run comes through here -- each fold's, each search
     candidate's, each quantile and conformal fit's, and the refit's -- so
     this is where a forest fitted on several threads is put back on one
-    before anything predicts with it (see `_predict_on_one_thread`).
+    before anything predicts with it (see `_predict_on_one_thread`), and
+    where histogram boosting's early stopping is given the last dates of
+    the rows it is handed as its validation set, with an embargo of the
+    label `horizon` before them, instead of a shuffled share of those rows
+    (see `prepare_early_stopping`). `index` is the sample index of the rows
+    of `X`. Returns what was done to that stopping rule, None when nothing
+    was, and adds a fit whose early stopping was turned off to `notes`.
     """
-    kwargs: Dict[str, Any] = {}
+    stopping = prepare_early_stopping(estimator, y, index, horizon)
+    validation: Dict[str, Any] = {}
+    if stopping is not None:
+        X, y, weights, validation = stopping.apply(X, y, weights)
+        if stopping.block is None and notes is not None:
+            notes.append(stopping)
+    kwargs: Dict[str, Any] = dict(validation)
     if weights is not None:
         kwargs["sample_weight"] = weights
     if group is not None:
@@ -1269,7 +1304,7 @@ def _fit(
     if not kwargs:
         estimator.fit(X, y)
         _predict_on_one_thread(estimator)
-        return
+        return stopping
     try:
         estimator.fit(X, y, **kwargs)
     except TypeError as exc:
@@ -1281,6 +1316,7 @@ def _fit(
             "task='ranking' estimator."
         ) from exc
     _predict_on_one_thread(estimator)
+    return stopping
 
 
 def _fit_quantile_models(
@@ -1291,6 +1327,8 @@ def _fit_quantile_models(
     arrays: Any,
     n_jobs: Optional[int] = None,
     exact_n_jobs: bool = False,
+    horizon: "int | None" = None,
+    notes: "List[EarlyStoppingFit] | None" = None,
 ) -> Dict[float, Any]:
     """
     One estimator per requested quantile, fitted on the same rows and
@@ -1299,7 +1337,7 @@ def _fit_quantile_models(
     exactly as it was: `prediction` is the base fit, and the quantiles
     stand beside it. `n_jobs` defaults to the budget's parallelism; a fold
     fitted beside others passes its own share, and `exact_n_jobs` is
-    `_instantiate`'s.
+    `_instantiate`'s; `horizon` and `notes` are `_fit`'s.
     """
     if n_jobs is None:
         n_jobs = model_spec.budget.resolved_max_parallelism()
@@ -1313,7 +1351,15 @@ def _fit_quantile_models(
             n_jobs=n_jobs,
             exact_n_jobs=exact_n_jobs,
         )
-        _fit(model, arrays.X, arrays.y, arrays.sample_weight)
+        _fit(
+            model,
+            arrays.X,
+            arrays.y,
+            arrays.sample_weight,
+            index=arrays.index,
+            horizon=horizon,
+            notes=notes,
+        )
         models[float(q)] = model
     return models
 
@@ -1325,6 +1371,8 @@ def _conformal_radius(
     arrays: Any,
     n_jobs: Optional[int] = None,
     exact_n_jobs: bool = False,
+    horizon: "int | None" = None,
+    notes: "List[EarlyStoppingFit] | None" = None,
 ) -> "tuple[float, int]":
     """
     The split-conformal radius for one training window: absolute
@@ -1332,8 +1380,8 @@ def _conformal_radius(
     under the embargo and the label purge, and their (1 - alpha) quantile.
     Returns (radius, number of residuals it was read from). The blocks are
     cut on the sample index the arrays carry, so they are the rows of `X`
-    whatever order the adapter put them in. `n_jobs` as for
-    `_fit_quantile_models`.
+    whatever order the adapter put them in. `n_jobs`, `horizon` and
+    `notes` as for `_fit_quantile_models`.
     """
     intervals = model_spec.intervals
     assert intervals is not None
@@ -1359,6 +1407,9 @@ def _conformal_radius(
             arrays.X[train_mask],
             arrays.y[train_mask],
             weights[train_mask] if weights is not None else None,
+            index=arrays.index.take(train_mask),
+            horizon=horizon,
+            notes=notes,
         )
         return arrays.y[test_mask], np.asarray(model.predict(arrays.X[test_mask]))
 
@@ -1447,6 +1498,12 @@ def run_experiment(
     validate_params(
         model_spec.task, model_spec.estimator.type, model_spec.estimator.params
     )
+    # Histogram boosting asked to stop early under a scikit-learn that
+    # cannot be handed a time-ordered validation set, refused before any
+    # data is read.
+    refuse_early_stopping_without_validation_set(
+        estimator_cls, model_spec.estimator.params, model_spec.search
+    )
 
     # The budget as the spec asked for it -- a whole number, or 'auto' --
     # and the thread count that means in this process, read once so every
@@ -1521,6 +1578,13 @@ def run_experiment(
 
     has_label_end = LABEL_END_COL in panel.columns
     is_cpcv = model_spec.validation.method == "cpcv"
+    # The label's length in bars, read off target_id: the embargo before a
+    # histogram booster's validation dates in every fit, and the overlap
+    # discount on the effective sample size below.
+    horizon = _target_horizon(dataset.get("target_id"))
+    # Histogram-boosting fits whose early stopping was turned off, from
+    # every fit of the run, for one warning per reason after the refit.
+    early_stopping_notes: List[EarlyStoppingFit] = []
     fold_metrics = []
     fold_importance = []
     # The columns the ESTIMATOR sees: the pipeline's output, which is the
@@ -1684,6 +1748,9 @@ def run_experiment(
                     inner_arrays.y,
                     inner_arrays.sample_weight,
                     group=inner_arrays.group,
+                    index=inner_arrays.index,
+                    horizon=horizon,
+                    notes=early_stopping_notes,
                 )
                 # The adapter's score, so a search on a ranker selects using
                 # the ordering score the real fit will produce rather than
@@ -1954,8 +2021,15 @@ def run_experiment(
         # and never sees a test row at all.
         estimator = _calibrated(estimator, model_spec, len(arrays.y))
         with openmp_thread_limit(openmp_threads):
-            _fit(
-                estimator, arrays.X, arrays.y, arrays.sample_weight, group=arrays.group
+            stopping = _fit(
+                estimator,
+                arrays.X,
+                arrays.y,
+                arrays.sample_weight,
+                group=arrays.group,
+                index=arrays.index,
+                horizon=horizon,
+                notes=early_stopping_notes,
             )
 
             metrics, prediction_values, fold_ic = _predict_fold(
@@ -1984,6 +2058,8 @@ def run_experiment(
                     arrays,
                     n_jobs=fit_jobs,
                     exact_n_jobs=exact,
+                    horizon=horizon,
+                    notes=early_stopping_notes,
                 ).items():
                     quantile_values[q] = np.asarray(model.predict(test_X.to_numpy()))
                     distribution_columns[quantile_column(q)] = quantile_values[q]
@@ -1996,6 +2072,8 @@ def run_experiment(
                     arrays,
                     n_jobs=fit_jobs,
                     exact_n_jobs=exact,
+                    horizon=horizon,
+                    notes=early_stopping_notes,
                 )
                 lower = np.asarray(prediction_values, dtype=float) - radius
                 upper = np.asarray(prediction_values, dtype=float) + radius
@@ -2021,6 +2099,9 @@ def run_experiment(
             "prediction_values": prediction_values,
             "fold_ic": fold_ic,
             "distribution_columns": distribution_columns,
+            "early_stopping": (
+                None if stopping is None else stopping.report(estimator)
+            ),
             "importance": fold_feature_importance(estimator, prepared["fold_columns"]),
         }
 
@@ -2081,6 +2162,12 @@ def run_experiment(
                 "node_hash": fold.node_hash,
             }
         )
+        if outcome["early_stopping"] is not None:
+            # Histogram boosting's stopping rule as this fold ran it: the
+            # validation dates, the rows the embargo left out, and the
+            # iterations boosting ran; or why it was off. Absent for every
+            # fit the library left as scikit-learn runs it.
+            fold_records[-1]["early_stopping"] = outcome["early_stopping"]
         # Weight by out-of-sample prediction count -- see
         # average_fold_metrics for why equal weighting distorts the
         # headline number when coverage varies across folds.
@@ -2194,7 +2281,6 @@ def run_experiment(
             .drop_duplicates()
             .shape[0]
         )
-    horizon = _target_horizon(dataset.get("target_id"))
     oos_metrics["n_oos_rows"] = float(n_oos_rows)
     # And discounted again across entities: rows on one date are one
     # cluster, and a panel of names that move together holds fewer
@@ -2500,12 +2586,15 @@ def run_experiment(
     full_weights = _fold_sample_weights(model_spec, full_index)
     full_arrays = adapter.prepare(model_spec, full_index, full_X, full_y, full_weights)
     with openmp_thread_limit(refit_openmp_threads):
-        _fit(
+        refit_stopping = _fit(
             final_estimator,
             full_arrays.X,
             full_arrays.y,
             full_arrays.sample_weight,
             group=full_arrays.group,
+            index=full_arrays.index,
+            horizon=horizon,
+            notes=early_stopping_notes,
         )
         # The deployed distribution, fitted the way the folds' were: one
         # quantile model per level on the full panel, and a conformal
@@ -2528,6 +2617,8 @@ def run_experiment(
                     full_arrays,
                     n_jobs=refit_jobs,
                     exact_n_jobs=refit_exact,
+                    horizon=horizon,
+                    notes=early_stopping_notes,
                 )
                 quantile_models = {quantile_column(q): m for q, m in fitted.items()}
             if model_spec.intervals is not None:
@@ -2538,6 +2629,8 @@ def run_experiment(
                     full_arrays,
                     n_jobs=refit_jobs,
                     exact_n_jobs=refit_exact,
+                    horizon=horizon,
+                    notes=early_stopping_notes,
                 )
                 distribution_state["conformal"] = {
                     "method": model_spec.intervals.method,
@@ -2546,6 +2639,14 @@ def run_experiment(
                     "radius": float(radius),
                     "n_calibration": int(n_calibration),
                 }
+    if refit_stopping is not None:
+        # The deployed estimator's stopping rule, as each fold's is
+        # recorded beside its metrics.
+        validation_report["refit_early_stopping"] = refit_stopping.report(
+            final_estimator
+        )
+    # Said once per reason, counted over every fit of the run.
+    run_warnings.extend(early_stopping_warnings(early_stopping_notes))
 
     # model_id generated here (not left to save_model's own default)
     # so the OOS predictions artifact lands in the same

@@ -1,5 +1,77 @@
 # Changelog
 
+## hist_gradient_boosting stops early on the last dates of each training window, and a spec can set or turn off its early stopping
+
+- **The validation rows are the window's last dates.** scikit-learn's
+  default early stopping held out a shuffled 10% of a fit's rows above
+  10,000 of them: rows dated among the rows fitted, whose h-day labels share
+  up to h - 1 days of outcome with theirs. Each hist_gradient_boosting fit
+  above 10,000 rows now validates on the rows of its training window's last
+  10% of distinct dates, handed to scikit-learn as `X_val`, `y_val` and
+  `sample_weight_val`. Rows whose label ends on or after the first of those
+  dates are left out of the fit, and so is every row on the label horizon's
+  h dates before it. The counting and the embargo are `select_features`'
+  holdout's (`_selection_cutoff`, `_split_at_holdout`); a test holds the two
+  to the same rows on a ragged panel. Every fit applies the rule to its own
+  rows: each fold, each search candidate on its inner window, each conformal
+  fit, the refit, and under calibration each calibration fit.
+- **`early_stopping`, `validation_fraction` and `n_iter_no_change` are spec
+  parameters.** `early_stopping` is "auto" (the default: the window has more
+  than 10,000 rows, scikit-learn's threshold), True or False; a number is
+  refused rather than read as a flag. `validation_fraction` is a share of
+  the window's dates, 0.01 to 0.5, written with a decimal point;
+  `n_iter_no_change` is 1 to 100,000. Either is refused beside
+  `early_stopping=False`, where no rule runs.
+- **The deployed model is fitted on the rows before the panel's last
+  dates.** The refit stops early like every other fit, so the panel's last
+  10% of dates and the embargo before them decide when it stops and are not
+  fitted: on the live panel 28,350 of 31,680 rows fitted and 106 dates
+  validated. `early_stopping=False` fits every row, to the last date.
+- **What each fit did is recorded.**
+  `validation_report.folds[i].early_stopping` and
+  `validation_report.refit_early_stopping` give the validation dates, the
+  rows fitted, validated and embargoed, and `n_iter`, the iterations
+  boosting ran (one per calibration fit under calibration). Neither appears
+  where a fit runs as scikit-learn runs it: every other estimator,
+  `early_stopping=False`, and "auto" on 10,000 rows or fewer.
+- **Under scikit-learn older than 1.7**, whose fit takes no `X_val`,
+  `early_stopping=True` is refused by name before any data is read, in
+  params or on a search axis, and "auto" fits every row without early
+  stopping and says so once in `warnings` with the number of fits. Neither
+  falls back to the shuffled split.
+- **A window too short for the block** -- too few dates for the validation
+  block and the embargo with a row left to fit, or, for a classifier, one
+  class left to fit on -- is refused by name under True; under "auto" it is
+  fitted on every row without early stopping, and one warning counts such
+  fits. scikit-learn's own minimum is one row on each side.
+- **The shuffled split stopped late on the live panel.** On the 30-name
+  daily panel (5-day rank label, eight walk-forward folds of 14,880 to
+  14,970 rows, `random_seed` 7, `max_iter=1000`), boosting stopped after 198
+  to 529 iterations on a shuffled 10% of the rows, 277 to 426 on a random
+  10% of the dates, 10 to 13 on those dates with the label horizon embargoed
+  around them, and 10 to 16 on the window's last 10% of dates. The late
+  stops came from the overlapping labels, not from where in the window the
+  validation rows sat.
+- **Which results change.** Every hist_gradient_boosting run with a training
+  window or refit above 10,000 rows, or with `early_stopping=True`. The live
+  spec at its defaults: each fold ran out its 100 iterations before and now
+  stops after 10 to 16, the refit after 10; `cs_rank_ic_mean` 0.0240 (t
+  1.81, p 0.083) becomes 0.0035 (t 0.22, p 0.83), r2 -0.0698 becomes
+  -0.0180, and the `oos_predictions`, `prediction_reference` and
+  `model.joblib` hashes change. The shuffled split moved with the seed
+  (0.0085, p 0.57 at `random_seed` 42); the result is now the same at seeds
+  7 and 42 and at `max_iter` 100 and 1000. With `early_stopping=False` it is
+  0.0137 (t 1.00, p 0.32). The metrics and iteration counts are the same on
+  Python 3.11 / pandas 3.0.5 / scikit-learn 1.9.0 and Python 3.12 / pandas
+  2.3.3 / scikit-learn 1.9.1. Boosting at most 16 iterations instead of 100,
+  the run took 2.5 to 5.5 s against 4.9 to 13.6 s before (Python 3.11, warm,
+  budget 1 and 'auto', a shared 16-thread machine under other load).
+- **What does not change.** Ridge under walk-forward, purged k-fold and
+  CPCV, and the random forest, on the same panel: every content hash,
+  out-of-sample metric, fold metric, headline test and warning is the same
+  as before. hist_gradient_boosting with `early_stopping=False`, or "auto"
+  at 10,000 rows or fewer, fits as before, bit for bit.
+
 ## The guides say what the code does now, with their figures measured again
 
 - **The guides describe these changes**: the cosine-frequency test and

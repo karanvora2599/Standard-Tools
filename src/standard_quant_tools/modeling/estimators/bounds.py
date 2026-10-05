@@ -136,6 +136,29 @@ class FractionBound(ParamBound):
         super().validate(estimator, name, value)
 
 
+@dataclass(frozen=True)
+class FlagBound(ParamBound):
+    """
+    A bool, or one of `choices` given as a string -- scikit-learn's
+    `early_stopping`, which is True, False or 'auto'.
+
+    A number is refused rather than read as a truth value. `1 == True` in
+    Python, so a membership test alone would let `early_stopping=1`
+    through as True, and `0` as False.
+    """
+
+    def validate(self, estimator: str, name: str, value: Any) -> None:
+        if isinstance(value, str):
+            if self.choices is not None and value in self.choices:
+                return
+            raise ValidationError(
+                f"estimator {estimator!r}: parameter {name!r}={value!r} is not one "
+                f"of {sorted(c for c in (self.choices or ()) if c is not None)} "
+                "and not a bool."
+            )
+        super().validate(estimator, name, value)
+
+
 # ── Shared bounds ───────────────────────────────────────────────────────
 # Ceilings sized so any realistic research request passes, while a runaway
 # one is rejected before sklearn allocates anything.
