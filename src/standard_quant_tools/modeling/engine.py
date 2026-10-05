@@ -1283,12 +1283,13 @@ def _fit(
     candidate's, each quantile and conformal fit's, and the refit's -- so
     this is where a forest fitted on several threads is put back on one
     before anything predicts with it (see `_predict_on_one_thread`), and
-    where histogram boosting's early stopping is given the last dates of
-    the rows it is handed as its validation set, with an embargo of the
-    label `horizon` before them, instead of a shuffled share of those rows
-    (see `prepare_early_stopping`). `index` is the sample index of the rows
-    of `X`. Returns what was done to that stopping rule, None when nothing
-    was, and adds a fit whose early stopping was turned off to `notes`.
+    where the early stopping of histogram boosting and of the MLPs is
+    given the last dates of the rows it is handed as its validation set,
+    with an embargo of the label `horizon` before them, instead of a
+    shuffled share of those rows (see `prepare_early_stopping`). `index` is
+    the sample index of the rows of `X`. Returns what was done to that
+    stopping rule, None when nothing was, and adds a fit whose early
+    stopping was turned off to `notes`.
     """
     stopping = prepare_early_stopping(estimator, y, index, horizon)
     validation: Dict[str, Any] = {}
@@ -2163,10 +2164,10 @@ def run_experiment(
             }
         )
         if outcome["early_stopping"] is not None:
-            # Histogram boosting's stopping rule as this fold ran it: the
-            # validation dates, the rows the embargo left out, and the
-            # iterations boosting ran; or why it was off. Absent for every
-            # fit the library left as scikit-learn runs it.
+            # The stopping rule of histogram boosting or an MLP as this fold
+            # ran it: the validation dates, the rows the embargo left out,
+            # and the iterations (epochs) it ran; or why it was off. Absent
+            # for every fit the library left as scikit-learn runs it.
             fold_records[-1]["early_stopping"] = outcome["early_stopping"]
         # Weight by out-of-sample prediction count -- see
         # average_fold_metrics for why equal weighting distorts the

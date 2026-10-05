@@ -534,10 +534,11 @@ class RunModelExperimentResult(BaseModel):
         "shared cache also reports `projections`, the folds read off a "
         "wider run's matrices, and `projectable`, whether this pipeline "
         "allows that. run_model_experiment keeps its cache private, so "
-        "neither applies to it. A hist_gradient_boosting fit that stopped "
-        "early on its window's last dates reports it per fold "
+        "neither applies to it. A hist_gradient_boosting or mlp fit that "
+        "stopped early on its window's last dates reports it per fold "
         "(`folds[i].early_stopping`: the validation block, the rows "
-        "embargoed, the iterations used) and for the deployed refit "
+        "embargoed, the iterations used, and for an mlp `best_iter`, the "
+        "epoch whose weights it kept) and for the deployed refit "
         "(`refit_early_stopping`).",
     )
     n_train_rows_purged_overlap: Optional[int] = Field(

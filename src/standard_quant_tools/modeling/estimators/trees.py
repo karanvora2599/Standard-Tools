@@ -16,7 +16,8 @@ among rows whose overlapping labels share their outcomes, so the stopping
 point was chosen on rows that are not out of sample in time. Here the
 validation rows are the training window's LAST dates instead, with the
 rows whose labels reach into them dropped from the fit, and scikit-learn
-is handed them as `X_val` (see `prepare_early_stopping`).
+is handed them as `X_val` (see `prepare_early_stopping`). The MLPs of
+`neural.py` stop on the same block: their fit takes `X_val` too.
 """
 
 import inspect
@@ -25,6 +26,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+from sklearn.base import is_classifier
 from sklearn.ensemble import (
     GradientBoostingClassifier,
     GradientBoostingRegressor,
@@ -186,14 +188,42 @@ def is_hist_gradient_boosting(estimator_cls: Any) -> bool:
     )
 
 
-def _boosters(estimator: Any) -> "Tuple[Any, bool]":
-    """The histogram booster a fit trains -- the estimator itself, or the
-    one a probability calibration wraps -- and whether it is wrapped; None
-    for any other estimator."""
-    if isinstance(estimator, _HIST_GB_CLASSES):
+def stops_on_validation_set(estimator_cls: Any) -> bool:
+    """
+    Whether a registered class early-stops on a validation set its fit is
+    handed as `X_val`, `y_val` and `sample_weight_val`: scikit-learn's
+    histogram boosting, or a class that says so by carrying the protocol
+    `neural._TimeOrderedEarlyStopping` gives the MLPs -- `estimator_name`
+    (its registry name), `min_validation_rows`, and a static
+    `takes_validation_set()` answering for this scikit-learn.
+    """
+    return is_hist_gradient_boosting(estimator_cls) or (
+        isinstance(estimator_cls, type)
+        and callable(getattr(estimator_cls, "takes_validation_set", None))
+    )
+
+
+def _profile(estimator_cls: type) -> "Tuple[str, bool, int]":
+    """A validation-set fitter's registry name, whether this scikit-learn
+    lets its fit take a validation set, and the fewest validation rows its
+    rule scores (scikit-learn's histogram boosting takes one)."""
+    if issubclass(estimator_cls, _HIST_GB_CLASSES):
+        return "hist_gradient_boosting", fit_takes_validation_set(), 1
+    return (
+        str(estimator_cls.estimator_name),
+        bool(estimator_cls.takes_validation_set()),
+        int(estimator_cls.min_validation_rows),
+    )
+
+
+def _validation_fitter(estimator: Any) -> "Tuple[Any, bool]":
+    """The estimator a fit trains that stops on a validation set -- the
+    estimator itself, or the one a probability calibration wraps -- and
+    whether it is wrapped; None for any other estimator."""
+    if stops_on_validation_set(type(estimator)):
         return estimator, False
     inner = getattr(estimator, "estimator", None)
-    if isinstance(inner, _HIST_GB_CLASSES):
+    if inner is not None and stops_on_validation_set(type(inner)):
         from sklearn.calibration import CalibratedClassifierCV
 
         if isinstance(estimator, CalibratedClassifierCV):
@@ -220,25 +250,42 @@ def _old_sklearn_refusal(where: str) -> str:
     )
 
 
+def _no_validation_set_refusal(estimator_cls: type, where: str) -> str:
+    """Why early_stopping=True cannot run under this scikit-learn."""
+    if issubclass(estimator_cls, _HIST_GB_CLASSES):
+        return _old_sklearn_refusal(where)
+    return (
+        f"{where}: early_stopping=True needs a time-ordered validation set, "
+        f"and this scikit-learn's ({_sklearn_version()}) "
+        f"{estimator_cls.__name__} cannot be handed one. Without one, "
+        "scikit-learn stops on a shuffled share of the training rows, dated "
+        "among the rows it fits and sharing their overlapping labels' "
+        "outcomes, and the library does not fit it that way. Set "
+        "early_stopping=False."
+    )
+
+
 def refuse_early_stopping_without_validation_set(
     estimator_cls: Any, params: Dict[str, Any], search: Any = None
 ) -> None:
     """
-    Refuse, before any data is read, a spec that asks histogram boosting
-    for early stopping -- in its params or on a search axis -- under a
-    scikit-learn that cannot take a time-ordered validation set.
+    Refuse, before any data is read, a spec that asks for early stopping
+    -- in its params or on a search axis -- from an estimator that stops on
+    a validation set, under a scikit-learn that cannot hand it one.
 
     'auto' is not refused: it was never chosen, and it fits without early
     stopping under such a scikit-learn, with a warning (see
     `prepare_early_stopping`).
     """
-    if not is_hist_gradient_boosting(estimator_cls) or fit_takes_validation_set():
+    if not stops_on_validation_set(estimator_cls) or _profile(estimator_cls)[1]:
         return
     asked = params.get("early_stopping") is True
     grid = getattr(search, "param_grid", None) or {}
     asked = asked or any(v is True for v in grid.get("early_stopping", ()))
     if asked:
-        raise ValidationError(_old_sklearn_refusal("run_model_experiment"))
+        raise ValidationError(
+            _no_validation_set_refusal(estimator_cls, "run_model_experiment")
+        )
 
 
 def _date_label(value: Any) -> str:
@@ -322,7 +369,8 @@ def time_ordered_validation(
 @dataclass
 class EarlyStoppingFit:
     """
-    What the library did to one histogram-boosting fit's stopping rule.
+    What the library did to one fit's stopping rule (histogram boosting or
+    an MLP).
 
     `block` is the split from `time_ordered_validation` when the fit early-
     stops on it; None when early stopping was turned off for this fit, and
@@ -349,19 +397,25 @@ class EarlyStoppingFit:
 
     def report(self, estimator: Any) -> Dict[str, Any]:
         """The record a fold or the refit carries: the validation block and
-        the iterations boosting ran, or why early stopping was off."""
-        booster, wrapped = _boosters(estimator)
+        the iterations boosting ran (an MLP's epochs), or why early stopping
+        was off. An MLP also reports `best_iter`, the epoch whose weights
+        it kept, which scikit-learn restores at the end of its epochs."""
+        fitter, wrapped = _validation_fitter(estimator)
         if wrapped:
-            n_iter: Any = [
-                int(c.estimator.n_iter_)
-                for c in getattr(estimator, "calibrated_classifiers_", [])
+            fitted = [
+                c.estimator for c in getattr(estimator, "calibrated_classifiers_", [])
             ]
         else:
-            n_iter = int(booster.n_iter_) if booster is not None else None
+            fitted = [] if fitter is None else [fitter]
+        n_iter: Any = [int(f.n_iter_) for f in fitted]
+        best: Any = [f.best_iteration() for f in fitted if hasattr(f, "best_iteration")]
+        if not wrapped:
+            n_iter = n_iter[0] if n_iter else None
+            best = best[0] if best else None
         if self.block is None:
             return {"applied": False, "reason": self.reason, "n_iter": n_iter}
         block = self.block
-        return {
+        record = {
             "applied": True,
             "validation_start": block["validation_start"],
             "validation_end": block["validation_end"],
@@ -372,6 +426,9 @@ class EarlyStoppingFit:
             "n_fit_rows": int(block["fit_rows"].sum()),
             "n_iter": n_iter,
         }
+        if fitter is not None and hasattr(fitter, "best_iteration"):
+            record["best_iter"] = best
+        return record
 
 
 def prepare_early_stopping(
@@ -381,43 +438,47 @@ def prepare_early_stopping(
     horizon: "int | None",
 ) -> Optional[EarlyStoppingFit]:
     """
-    Decide one histogram-boosting fit's stopping rule, and set the
-    estimator's `early_stopping` to match. None -- the fit left exactly as
-    scikit-learn would run it -- for any other estimator, for
+    Decide one fit's stopping rule, for histogram boosting or an MLP, and
+    set the estimator's `early_stopping` to match. None -- the fit left
+    exactly as scikit-learn would run it -- for any other estimator, for
     `early_stopping=False`, and for 'auto' on 10,000 rows or fewer.
 
     Otherwise the fit early-stops on `time_ordered_validation`'s block,
     with `early_stopping` set to True: scikit-learn's 'auto' decides on
     the rows `fit` is handed, which are now fewer than the window's, and
     would turn the rule off for a window just above the threshold. The
-    window, not the fitted rows, is what 'auto' is decided on.
+    window, not the fitted rows, is what 'auto' is decided on. An MLP's
+    `early_stopping` is True or False; it has no 'auto'.
 
     When the rule cannot run on a time-ordered block -- a scikit-learn
-    older than 1.7, or a window whose dates cannot hold a validation block
-    and the embargo before it with a row left to fit (scikit-learn's own
-    minimum is one row each side, and for a classifier both classes among
-    the fitted rows and no class in the validation rows that the fitted
-    rows lack) -- 'auto' turns early stopping off for this fit and says
-    why, and True is refused by name. A window under calibration is split
-    the same way and every calibration fit stops on its block.
+    whose fit cannot take a validation set (histogram boosting before
+    1.7), or a window whose dates cannot hold a validation block and the
+    embargo before it with a row left to fit (scikit-learn's own minimum
+    is one row each side, two validation rows for an MLP, and for a
+    classifier both classes among the fitted rows and no class in the
+    validation rows that the fitted rows lack) -- 'auto' turns early
+    stopping off for this fit and says why, and True is refused by name.
+    A window under calibration is split the same way and every
+    calibration fit stops on its block.
     """
-    booster, wrapped = _boosters(estimator)
-    if booster is None:
+    fitter, wrapped = _validation_fitter(estimator)
+    if fitter is None:
         return None
-    setting = booster.early_stopping
+    setting = fitter.early_stopping
     n_rows = int(len(y))
     if setting is False or (setting == "auto" and n_rows <= AUTO_EARLY_STOPPING_ROWS):
         return None
     explicit = setting is True
-    where = "estimator 'hist_gradient_boosting'"
+    name, takes_validation_set, min_validation_rows = _profile(type(fitter))
+    where = f"estimator '{name}'"
 
     def off(kind: str, reason: str, n_dates: Optional[int]) -> EarlyStoppingFit:
-        booster.set_params(early_stopping=False)
+        fitter.set_params(early_stopping=False)
         return EarlyStoppingFit(off_kind=kind, reason=reason, n_window_dates=n_dates)
 
-    if not fit_takes_validation_set():
+    if not takes_validation_set:
         if explicit:
-            raise ValidationError(_old_sklearn_refusal(where))
+            raise ValidationError(_no_validation_set_refusal(type(fitter), where))
         return off(
             "scikit-learn",
             f"scikit-learn {_sklearn_version()} takes no validation set "
@@ -434,7 +495,7 @@ def prepare_early_stopping(
             )
         return off("window", reason, None)
 
-    fraction = booster.validation_fraction
+    fraction = fitter.validation_fraction
     if isinstance(fraction, bool) or not isinstance(fraction, float):
         raise ValidationError(
             f"{where}: validation_fraction={fraction!r} must be a share of the "
@@ -445,7 +506,7 @@ def prepare_early_stopping(
     block, reason = time_ordered_validation(
         dates, getattr(index, "label_end", None), horizon, fraction
     )
-    if block is not None and isinstance(booster, HistGradientBoostingClassifier):
+    if block is not None and is_classifier(fitter):
         fitted = np.unique(np.asarray(y)[block["fit_rows"]])
         validated = np.unique(np.asarray(y)[block["validation_rows"]])
         if fitted.size < 2:
@@ -454,6 +515,12 @@ def prepare_early_stopping(
             block, reason = None, (
                 "the validation rows hold a class the rows left to fit on do not"
             )
+    if block is not None and int(block["validation_rows"].sum()) < min_validation_rows:
+        block, reason = None, (
+            f"its last {block['n_validation_dates']} date(s) hold "
+            f"{int(block['validation_rows'].sum())} row(s), and {name}'s "
+            f"validation score needs at least {min_validation_rows}"
+        )
     if block is not None and wrapped:
         if int(block["fit_rows"].sum()) == int(block["validation_rows"].sum()):
             # The calibration hands each of its fits the arguments whose
@@ -466,14 +533,19 @@ def prepare_early_stopping(
             )
     if block is None:
         if explicit:
+            advice = (
+                "Set early_stopping='auto' or False, lower validation_fraction, "
+                "or widen the training window."
+                if is_hist_gradient_boosting(type(fitter))
+                else "Set early_stopping=False, or widen the training window."
+            )
             raise ValidationError(
                 f"{where}: early_stopping=True needs a time-ordered validation "
                 f"block, and this training window cannot give one: {reason}. "
-                "Set early_stopping='auto' or False, lower validation_fraction, "
-                "or widen the training window."
+                f"{advice}"
             )
         return off("window", str(reason), n_dates)
-    booster.set_params(early_stopping=True)
+    fitter.set_params(early_stopping=True)
     return EarlyStoppingFit(block=block, n_window_dates=n_dates)
 
 

@@ -1,5 +1,85 @@
 # Changelog
 
+## The MLPs stop early on the last dates of each training window
+
+- **The validation rows are the window's last dates.** An `mlp` spec with
+  `early_stopping=True` (off by default) stopped on scikit-learn's own
+  split: a shuffled 10% of each fit's rows, stratified for the classifier,
+  dated among the rows fitted, whose h-day labels share up to h - 1 days of
+  outcome with theirs. Each such fit now validates on the rows of its
+  training window's last 10% of distinct dates, and leaves out of the fit
+  the rows whose label ends on or after the first of them and every row on
+  the label horizon's h dates before it: the block hist_gradient_boosting
+  stops on, cut by the same code. `prepare_early_stopping` and the fold
+  record now serve any estimator whose fit takes a validation set, not only
+  histogram boosting. Every fit applies the rule to its own rows: each fold,
+  each search candidate on its inner window, the refit, and under
+  calibration each calibration fit.
+- **scikit-learn's rule, on the rows handed in.** scikit-learn's MLP takes
+  no validation set, so `PanelMLPRegressor` and `PanelMLPClassifier` take
+  `X_val`, `y_val` and `sample_weight_val` in `fit`. The fit runs
+  scikit-learn's own epochs with its split turned off, sends each epoch's
+  scoring to scikit-learn's early-stopping branch
+  (`_update_no_improvement_count`) with those rows, and sets the starting
+  state and restores the best epoch's weights as scikit-learn does. The
+  score (R2 or accuracy, weighted from scikit-learn 1.7), `tol` (1e-4), the
+  patience (more than 10 epochs without beating the best by `tol`), the
+  restored weights, `validation_scores_`, `best_validation_score_` and
+  `n_iter_` are those of scikit-learn's own early stopping handed the same
+  split, bit for bit: a test records the split scikit-learn draws and hands
+  it to the subclass, for both tasks, weighted and not, with the epochs
+  unshuffled (the split's random draws are the only ones the two runs do not
+  share). The three methods take the same arguments from scikit-learn 1.3 to
+  1.9 (the scoring takes sample weights from 1.7), and the tests pass under
+  1.3.2, 1.6.1, 1.9.0 and 1.9.1; a scikit-learn without them has
+  `early_stopping=True` refused by name before any data is read. Driving the
+  epochs through `partial_fit` was not used: it re-seeds an integer
+  `random_state` on every call, so each epoch would reshuffle from a fresh
+  stream, and it refuses `early_stopping=True`.
+- **What each fit did is recorded**, as for hist_gradient_boosting:
+  `validation_report.folds[i].early_stopping` and
+  `validation_report.refit_early_stopping` give the validation dates, the
+  rows fitted, validated and embargoed, `n_iter` (the epochs run) and
+  `best_iter`, the epoch whose weights the model kept; under calibration,
+  one of each per calibration fit.
+- **Refused by name.** The MLP has no 'auto', so a window that cannot hold
+  the block -- too few dates for it and the embargo with a row left to fit,
+  a block of fewer than two rows (scikit-learn's minimum), or, for the
+  classifier, one class left to fit on -- is refused, as
+  hist_gradient_boosting refuses it under True.
+- **The shuffled split stopped late.** On a synthetic panel of 30 names and
+  750 days with 20-day labels and the date and the entity among the features
+  (walk-forward, 250-date windows, 10 folds, 64 units, `max_iter=500`, seeds
+  7, 42, 1, 2 and 3), the shuffled split stopped a fold after 13 to 193
+  epochs (median 78), its best epoch scoring an R2 of 0.001 to 0.089 on rows
+  beside the ones it fitted; the window's last dates stopped it after 12 to
+  69 (median 13), at a best R2 of -0.154 to 0.046. On two more draws of the
+  panel (three seeds each) the medians were 70 and 98 epochs against 14 and
+  12. The out-of-sample `cs_rank_ic_mean` did not move one way: 0.079
+  against 0.104 on the first panel, 0.055 against 0.032 and 0.017 against
+  0.050 on the other two, and 0.031 with early stopping off (401 to 500
+  epochs). On a panel whose labels have no signal at all, the folds ran 12
+  to 199 epochs (median 88) against 12 to 62 (median 12). On the live
+  30-name panel (5-day rank label, eight folds of 14,880 to 14,970 rows, the
+  live spec's validation, seeds 7 and 42) the shuffled split ran 31 to 96
+  epochs at a best R2 of 0.019 to 0.060 and the block 13 to 50 at -0.089 to
+  0.004; the MLP has no skill there either way: `cs_rank_ic_mean` -0.0140
+  and -0.0106 before, -0.0246 and -0.0096 now, -0.016 with early stopping
+  off.
+- **Fit time follows the epochs.** An epoch costs the same either way (7.6
+  against 8.2 ms on a 6,900-row fold, medians), so on the first synthetic
+  panel a fold fits in 0.11 s against 0.65 s (medians), the refit on 22,500
+  rows in 0.36 s against 2.7 s, and a run in 1.6 to 2.3 s against 8.9 to
+  11.4 s (Python 3.12, scikit-learn 1.9.1, a shared 16-thread laptop).
+- **What does not change.** `early_stopping=False`, the default, fits as
+  before: on the live dataset with `mlp` at its defaults and with
+  label-uniqueness weights, and on a synthetic panel for regression,
+  classification, and classification under sigmoid calibration with weights,
+  every content hash is the same as before, `model.joblib`, `model.skops`
+  and `oos_predictions` included, and no early-stopping record appears. A
+  test holds the fitted state to the previous class's pickled bytes.
+  hist_gradient_boosting's tests pass unchanged.
+
 ## The guides carry hist_gradient_boosting's new live results and the cointegration figures measured again
 
 - **The guides describe these changes**: time-ordered early stopping and
