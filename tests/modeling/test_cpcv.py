@@ -131,10 +131,24 @@ class TestTheSplitter:
 
 
 def _expected_purge(panel: pd.DataFrame, dates: pd.Index, folds) -> int:
-    """Row-wise, independently of the engine: a training row is purged
-    when its label reaches into ANY test block it precedes."""
+    """Row-wise, independently of the engine: a training row is purged when
+    its label bars intersect ANY test block's label bars.
+
+    The block's labels reach `horizon` bars past its last date -- a forward
+    return on the block's final bar resolves then -- so the interval to
+    intersect against is [first, latest label end among the block's rows],
+    not [first, last]. This oracle used the latter and so expected every
+    training row in the reach after a block to survive, which under cpcv
+    (training on both sides of every block) is the leak
+    `test_two_sided_purge.py` now asserts to zero.
+
+    Still PER BLOCK: each contiguous run gets its own reach, which is why
+    the span rule below purges strictly more.
+    """
     purged = 0
     date_pos = {d: i for i, d in enumerate(dates)}
+    row_dates = panel["date"].to_numpy()
+    label_ends = panel["label_end_date"].to_numpy()
     for train_pos, test_pos in folds:
         train_set = set(train_pos.tolist())
         # Contiguous runs of test positions.
@@ -144,11 +158,24 @@ def _expected_purge(panel: pd.DataFrame, dates: pd.Index, folds) -> int:
                 runs.append((start, prev))
                 start = cur
         runs.append((start, test_pos[-1]))
-        blocks = [(dates[a], dates[b]) for a, b in runs]
+        blocks = []
+        for a, b in runs:
+            first, last = dates[a], dates[b]
+            in_block = (row_dates >= first) & (row_dates <= last)
+            span_end = last
+            if in_block.any():
+                ends = label_ends[in_block]
+                ends = ends[~pd.isna(ends)]
+                if ends.size and ends.max() > span_end:
+                    span_end = ends.max()
+            blocks.append((first, span_end))
         for row_date, label_end in zip(panel["date"], panel["label_end_date"]):
             if date_pos[row_date] not in train_set:
                 continue
-            if any(label_end >= first and row_date <= last for first, last in blocks):
+            if any(
+                label_end >= first and row_date <= span_end
+                for first, span_end in blocks
+            ):
                 purged += 1
     return purged
 

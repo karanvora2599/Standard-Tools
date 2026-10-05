@@ -272,8 +272,22 @@ class TestARepeatedGridValueIsOneCandidate:
 
 
 def _oracle_purge(panel: pd.DataFrame, dates: pd.Index, train_pos, test_pos) -> int:
-    """Row-wise and independent of the engine: a training row is purged
-    when its label reaches into a test block it does not follow."""
+    """Row-wise and independent of the engine: a training row is purged when
+    its label bars intersect the test block's label bars.
+
+    TWO INTERVALS. The row's label spans [row_date, label_end]. The block's
+    labels span [first, the latest label end among the block's own rows],
+    which reaches past the block's last BAR by the horizon -- a forward
+    return on the block's final date is not resolved until then. The
+    intersection test is `label_end >= first and row_date <= span_end`.
+
+    This oracle used [first, last] as the second interval, i.e. the block's
+    bars, which drops its forward reach and keeps every training row in the
+    `horizon` bars after a block. Under purged_kfold, where training sits on
+    both sides, that is a leak; see `test_two_sided_purge.py`. The span end
+    is derived here from the panel rather than from `block_label_end`, so
+    this stays a reimplementation and not an echo.
+    """
     in_train = panel["date"].isin(dates[train_pos]).to_numpy()
     runs, start = [], test_pos[0]
     for prev, cur in zip(test_pos[:-1], test_pos[1:]):
@@ -286,7 +300,14 @@ def _oracle_purge(panel: pd.DataFrame, dates: pd.Index, train_pos, test_pos) -> 
     purged = np.zeros(len(panel), dtype=bool)
     for a, b in runs:
         first, last = dates[a], dates[b]
-        purged |= in_train & (label_end >= first) & (row_date <= last)
+        in_block = (row_date >= first) & (row_date <= last)
+        span_end = last
+        if in_block.any():
+            ends = label_end[in_block]
+            ends = ends[~pd.isna(ends)]
+            if ends.size and ends.max() > span_end:
+                span_end = ends.max()
+        purged |= in_train & (label_end >= first) & (row_date <= span_end)
     return int(purged.sum())
 
 

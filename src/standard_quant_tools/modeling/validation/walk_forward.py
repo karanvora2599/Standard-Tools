@@ -248,6 +248,34 @@ def contiguous_runs(positions: np.ndarray) -> "list[tuple[int, int]]":
     return [(int(positions[s]), int(positions[e])) for s, e in zip(starts, ends)]
 
 
+def block_label_end(
+    row_dates: np.ndarray,
+    row_label_end: np.ndarray,
+    first_test_date: Any,
+    last_test_date: Any,
+) -> Any:
+    """The last bar the TEST BLOCK's own labels span.
+
+    A block is not finished when its last bar prints: a forward return on its
+    final date resolves `horizon` bars later, and those bars belong to the
+    block's labels. Read off the test rows' own recorded label ends rather
+    than from a horizon, so entities on different calendars each contribute
+    their real end.
+
+    Falls back to the block's last date when no test row records one, which
+    purges exactly what it purged before.
+    """
+    in_block = (row_dates >= first_test_date) & (row_dates <= last_test_date)
+    if not in_block.any():
+        return last_test_date
+    ends = np.asarray(row_label_end)[in_block]
+    ends = ends[~pd.isna(ends)]
+    if not ends.size:
+        return last_test_date
+    latest = ends.max()
+    return latest if latest > last_test_date else last_test_date
+
+
 def label_overlap_mask(
     train_mask: np.ndarray,
     row_dates: np.ndarray,
@@ -258,13 +286,32 @@ def label_overlap_mask(
     """
     Which training rows share label bars with a test block.
 
-    A training row is purged when the bars its label spans OVERLAP the
-    block: the label ends on or after the block starts, and the row itself
-    begins on or before the block ends. Under walk-forward the second
-    condition is always true, since training precedes testing; it is
-    written in full because purged k-fold puts training rows on BOTH sides
-    of the block, and there the rows after it must not be purged for the
-    wrong reason.
+    An overlap is between two intervals: the bars a training row's label
+    spans, and the bars the TEST BLOCK's labels span. A row is purged when
+    they intersect -- its label ends on or after the block starts, and the
+    row itself begins on or before the block's labels END.
+
+    THE SECOND INTERVAL USED TO BE THE BLOCK'S BARS, which is one side of
+    the comparison only. A block's labels reach `horizon` bars past its last
+    date, and a training row inside that reach has features built from bars
+    the test labels are still resolving over. Under walk-forward it never
+    arose -- training is entirely before the block, so the condition held
+    either way -- but purged k-fold and cpcv put training rows on BOTH sides,
+    and the rows just after a block were kept.
+
+    MEASURED, 100 dates and a 5-bar label at embargo=0: purged_kfold kept 20
+    such rows across its five folds -- `horizon` rows for every fold with
+    training data after its block, which is all but the last -- and cpcv kept
+    100 across fifteen folds. They are the rows nearest the block, so the
+    most informative ones. walk_forward kept none, and its purge count did
+    not move when `block_label_end` was introduced (35 either way), which is
+    the check that this fix is a no-op there.
+
+    This is why `ValidationSpec.embargo` does not have to cover the horizon:
+    the purge covers it on both sides, from each row's own label end, which
+    a fixed date count cannot do when entities sit on different calendars.
+    The embargo is the extra gap for feature LOOKBACK, which is a different
+    leak.
 
     ONE IMPLEMENTATION, for the outer fold loop and the inner
     hyperparameter search alike. The engine had this rule inline and the
@@ -282,7 +329,12 @@ def label_overlap_mask(
     return (
         np.asarray(train_mask, dtype=bool)
         & (row_label_end >= first_test_date)
-        & (row_dates <= last_test_date)
+        & (
+            row_dates
+            <= block_label_end(
+                row_dates, row_label_end, first_test_date, last_test_date
+            )
+        )
     )
 
 

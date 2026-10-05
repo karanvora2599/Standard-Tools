@@ -939,10 +939,13 @@ class ValidationSpec(BaseModel):
         0,
         ge=0,
         description="Bars excluded between train and test folds to prevent "
-        "lookback leakage across the boundary. Note this does NOT need to "
-        "cover the target horizon: training rows whose forward-return label "
-        "would resolve inside the test window are purged separately, using "
-        "each row's own label end date.",
+        "lookback leakage across the boundary -- a feature whose window "
+        "reaches back over the test block. This does NOT need to cover the "
+        "target horizon: the label-overlap purge covers it on BOTH sides of "
+        "the block, from each row's own label end date, which a fixed count "
+        "of dates cannot do when entities sit on different calendars. Under "
+        "purged_kfold and cpcv the forward side is the one that matters, "
+        "since those put training rows after the block as well as before.",
     )
     min_folds: int = Field(
         2,
