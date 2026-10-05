@@ -37,6 +37,7 @@ from typing import Any, Dict, List, Optional, Sequence
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools._blas import single_threaded_blas
 from standard_quant_tools._special import norm_cdf
 from standard_quant_tools.analysis._series import clean_series
 from standard_quant_tools.error import ValidationError
@@ -90,11 +91,15 @@ def adf_statistic(values: np.ndarray, lags: int = 1) -> float:
     design = np.column_stack(columns)
     target = dy[lags:]
 
-    beta, *_ = np.linalg.lstsq(design, target, rcond=None)
-    residual = target - design @ beta
-    dof = len(target) - design.shape[1]
-    sigma2 = float((residual**2).sum() / dof)
-    covariance = sigma2 * np.linalg.pinv(design.T @ design)
+    # One BLAS thread for the fit, the residual and the Gram matrix with
+    # its pseudo-inverse, so the statistic is the same bits whatever thread
+    # count the caller's BLAS has.
+    with single_threaded_blas():
+        beta, *_ = np.linalg.lstsq(design, target, rcond=None)
+        residual = target - design @ beta
+        dof = len(target) - design.shape[1]
+        sigma2 = float((residual**2).sum() / dof)
+        covariance = sigma2 * np.linalg.pinv(design.T @ design)
     return float(beta[1] / math.sqrt(covariance[1, 1]))
 
 

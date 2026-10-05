@@ -29,8 +29,14 @@ names 1.8-3.4x, which made those whole calls 1.05-1.22x and 1.17-1.50x as
 long. That is the price of a whole output, not only its factorizations,
 being the same bits on any machine with the same BLAS. Matrix-vector
 products outside these blocks (a portfolio's variance, an optimizer's
-gradient) keep the caller's setting: they gave the same bits at every
-thread count measured.
+gradient) keep the caller's setting: they reduce over the assets, and gave
+the same bits at every thread count measured. Longer reductions do not:
+OpenBLAS splits a dot product of more than 10,000 terms across threads,
+and under 0.3.27 a matrix-vector product reducing 100,000 rows at four
+threads and more. So the half-life statistics' sums of squares and the
+depth slope's run under the limit too, with the rest of the linear algebra
+on the library's own paths: `pca_whiten`'s decomposition and projection,
+the feature VIFs, and the factor, ADF and Engle-Granger regressions.
 
 A BLAS library has one thread setting for the whole process, so the limit is
 reference-counted: every concurrent user runs on one thread, and the setting

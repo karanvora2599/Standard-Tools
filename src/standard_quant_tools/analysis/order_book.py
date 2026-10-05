@@ -41,6 +41,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools._blas import single_threaded_blas
 from standard_quant_tools.error import ValidationError
 
 __all__ = ["book_dynamics", "book_metrics", "depth_profile", "microprice"]
@@ -607,10 +608,15 @@ def _depth_slope(
     if ok.sum() < 2:
         return None
     x, y = distance[ok], size[ok]
-    denominator = float(x @ x)
+    # Both sums are dot products, which OpenBLAS splits across threads above
+    # 10,000 terms -- a thousand snapshots of five levels a side -- so on one
+    # thread the slope is the same bits whatever the caller's BLAS has.
+    with single_threaded_blas():
+        denominator = float(x @ x)
+        numerator = x @ y
     if denominator <= 0:
         return None
-    return float(x @ y / denominator)
+    return float(numerator / denominator)
 
 
 def _mean(values: np.ndarray) -> Optional[float]:

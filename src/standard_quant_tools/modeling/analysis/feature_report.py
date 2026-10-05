@@ -45,6 +45,7 @@ import pandas as pd
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components
 
+from standard_quant_tools._blas import single_threaded_blas
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.modeling.validation.metrics import (
     check_ic_method,
@@ -758,39 +759,46 @@ def redundancy_report(
     matrix = pearson.to_numpy(dtype=float)
     names = [str(f) for f in feature_ids]
     if np.all(np.isfinite(matrix)):
+        # One BLAS thread for the eigenvalues, the inverse and the regressions
+        # behind `collinear`, so the VIFs and the condition number are the
+        # same bits whatever thread count the caller's BLAS has: at 50
+        # features and more their last bits followed it.
         try:
-            eigenvalues = np.linalg.eigvalsh(matrix)
-            smallest = float(np.min(eigenvalues))
-            largest = float(np.max(eigenvalues))
-            inverse: Optional[np.ndarray] = None
-            null_vectors: Optional[np.ndarray] = None
-            if smallest > largest * _SINGULAR_RTOL:
-                condition_number = largest / smallest
-                inverse = np.linalg.pinv(matrix)
-                for i, feature in enumerate(feature_ids):
-                    vif[feature] = _safe(inverse[i, i])
-            else:
-                # Singular: at least one feature is an exact linear
-                # combination of the others. Infinity is the honest answer
-                # for the matrix, and for every feature in the dependency.
-                condition_number = float("inf")
-                values, vectors = np.linalg.eigh(matrix)
-                zero = values <= largest * _SINGULAR_RTOL
-                # eigh and eigvalsh can disagree in the last bit; the branch
-                # was taken on eigvalsh's smallest, so its vector is null.
-                zero[int(np.argmin(values))] = True
-                null_vectors = vectors[:, zero]
-                kept = vectors[:, ~zero]
-                inverse = (kept / values[~zero]) @ kept.T
-                loading = np.sqrt(np.sum(null_vectors**2, axis=1))
-                for i, feature in enumerate(feature_ids):
-                    vif[feature] = (
-                        None if loading[i] > _NULL_LOADING else _safe(inverse[i, i])
-                    )
-            clustered = {m for c in clusters if len(c) > 1 for m in c}
-            collinear = _collinear_block(
-                names, matrix, inverse, vif, null_vectors, clustered
-            )
+            with single_threaded_blas():
+                eigenvalues = np.linalg.eigvalsh(matrix)
+                smallest = float(np.min(eigenvalues))
+                largest = float(np.max(eigenvalues))
+                inverse: Optional[np.ndarray] = None
+                null_vectors: Optional[np.ndarray] = None
+                if smallest > largest * _SINGULAR_RTOL:
+                    condition_number = largest / smallest
+                    inverse = np.linalg.pinv(matrix)
+                    for i, feature in enumerate(feature_ids):
+                        vif[feature] = _safe(inverse[i, i])
+                else:
+                    # Singular: at least one feature is an exact linear
+                    # combination of the others. Infinity is the honest
+                    # answer for the matrix, and for every feature in the
+                    # dependency.
+                    condition_number = float("inf")
+                    values, vectors = np.linalg.eigh(matrix)
+                    zero = values <= largest * _SINGULAR_RTOL
+                    # eigh and eigvalsh can disagree in the last bit; the
+                    # branch was taken on eigvalsh's smallest, so its vector
+                    # is null.
+                    zero[int(np.argmin(values))] = True
+                    null_vectors = vectors[:, zero]
+                    kept = vectors[:, ~zero]
+                    inverse = (kept / values[~zero]) @ kept.T
+                    loading = np.sqrt(np.sum(null_vectors**2, axis=1))
+                    for i, feature in enumerate(feature_ids):
+                        vif[feature] = (
+                            None if loading[i] > _NULL_LOADING else _safe(inverse[i, i])
+                        )
+                clustered = {m for c in clusters if len(c) > 1 for m in c}
+                collinear = _collinear_block(
+                    names, matrix, inverse, vif, null_vectors, clustered
+                )
         except np.linalg.LinAlgError:  # pragma: no cover - pinv rarely fails
             logger.debug("[modeling] VIF unavailable: correlation matrix is degenerate")
 

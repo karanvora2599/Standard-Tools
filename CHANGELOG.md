@@ -1,5 +1,90 @@
 # Changelog
 
+## The rest of the library's own BLAS work runs on one thread, and a cointegration test spends a seventh as long in Python
+
+- **`pca_whiten`, the feature VIFs, the half-life t-statistic and the
+  depth slope are the same bits at any BLAS thread count.** The limits of
+  2026-10-02 and 2026-10-04 left them on the caller's threads, and under
+  OpenBLAS 0.3.27 and 0.3.31 on a 16-thread machine their last bits
+  followed the count: `pca_whiten`'s SVD from 20,000 rows of 30 features
+  (between one thread and two or four) and its projection (between one
+  and sixteen), which the full-panel refit runs off the pools;
+  `redundancy_report`'s eigenvalues, pseudo-inverse and `collinear`
+  regressions at 50 features and more, behind the VIFs that
+  `get_feature_redundancy` and `select_features` report; the two sums of
+  squares behind the half-life t-statistic of `half_life_statistics` and
+  `cointegration_test` above 10,000 bars, since OpenBLAS splits a dot
+  product of more than 10,000 terms across threads; and the two dot
+  products of `book_metrics`' depth slope. All run under
+  `single_threaded_blas()` now, and so do the least squares and Gram
+  products of `multi_factor_regression`, the ADF statistic and the
+  Engle-Granger guard, which gave the same bits at every count measured
+  here but are products of the kind np.cov's was, whose bits followed the
+  thread count on the CI runners.
+- **What moves, once.** At 16 threads, against the code before: the
+  output of `pca_whiten` at 50,000 × 30 by at most 2.5e-14 relative under
+  0.3.27 and 4.6e-14 under 0.3.31 (97 of 500,000 values; the fitted state
+  is unchanged), `redundancy_report`'s VIFs by at most 6.4e-16 and the
+  partial correlations in `collinear` by 4.2e-15 at 50 and 150 features
+  (the condition number is unchanged), the half-life t-statistic of
+  `half_life_statistics` and `cointegration_test` above 10,000 bars by at
+  most 5.2e-16, and the depth slope by 8.8e-16. These are the one-thread
+  bits, which the code before gave at a caller limit of one. Every other
+  output of these calls is unchanged, and so is every output below those
+  sizes.
+- **What it costs.** Run with and without the limit call by call in
+  lockstep on a shared 16-thread machine, as the ratio of the minimums and
+  the median ratio after/before on Python 3.12 and 3.11: `pca_whiten` fit
+  and projection 0.77–0.85× at 5,000 × 8, 1.23–1.43× at 50,000 × 30 and
+  1.12–1.16× at 200,000 × 20 (its SVD of 50,000 × 30 takes 58–62 ms on
+  one thread against 41–45 ms on sixteen); `redundancy_report`
+  0.91–1.01× at 8, 50 and 150 features, where pandas' correlations
+  dominate; `multi_factor_regression` 0.85–1.02×; `run_stationarity_tests`
+  0.90–1.06×; `half_life_statistics` at 12,000 bars 0.78–0.81×;
+  `book_metrics` 0.90–1.05×. `SQT_BLAS_THREADS=0` gives all of them the
+  caller's threads back.
+- **`cointegration_test` spends a seventh as long in Python, with every
+  output bit-identical.** Around a native test of 0.08–0.13 ms at 500
+  bars the Python layer took 1.0–1.3 ms: two label lookups aligning the
+  pair, and a half-life gate that put the spread back into a Series,
+  dropped its missing values twice and aligned it with its own lag
+  through pandas. Two series on one unique index are now read as they
+  stand, which is what the intersection and the lookups returned for
+  them; the gate reads the spread's values; MacKinnon's 5% critical value
+  is cached by sample size; and the gate's flatness test skips the
+  standard deviation for finite values between 1e-100 and 1e100 in
+  magnitude, where it cannot change `has_no_dispersion`'s answer. The
+  Python layer is 0.14–0.19 ms at 500 bars. Per pair, medians of 1,000
+  calls in five interleaved runs on Python 3.12 (pandas 2.3), with the
+  native call alone in brackets: 500 bars 1.09–1.45 ms to 0.23–0.30 ms
+  (0.08–0.13), 1,000 bars 1.27–1.73 to 0.38–0.72 (0.23–0.32), 2,000 bars
+  1.92–2.62 to 0.97–1.27 (0.73–1.03). On Python 3.11 (pandas 3.0), three
+  runs: 1.46–1.81 to 0.30–0.37 ms, 1.83–2.06 to 0.49–0.54, and 2.42–2.78
+  to 1.15–1.37.
+- **The pair screen.** `scan_cointegrated_pairs` works out each series'
+  half of the degenerate-pair guard once rather than once per pair, under
+  one BLAS limit, and `scan_pairs` reads the batch result by column
+  rather than a Series per row. Through `scan_pairs` on 50 names of 500
+  bars (1,225 pairs, both orders each), on one shared index (the batch
+  path): 128–146 to 82–93 µs a pair on Python 3.12, 219–263 to 93–95 µs
+  on 3.11. With one series a bar short (the per-pair loop): 2.95–3.43 to
+  0.73–0.81 ms a pair, and 3.78–3.79 to 0.79–0.86 ms.
+- **Tested.** `cointegration_test`'s whole result, or its error, is held
+  bit for bit to the pandas path as it ran before, written out in the
+  test, on 34 pairs of series under `aic`, `bic`, `AIC` and a refused
+  criterion: one index, equal indexes, renamed, ragged, reversed or
+  shuffled indexes, UTC against New York, integer against float labels,
+  repeated dates, integer, object, float32 and nullable prices, gaps,
+  infinities, too short, constant and affine pairs, and magnitudes near
+  1e150, 1e306 and 1e-160. So are `half_life_statistics` and the gate on
+  29 spreads, the alignment, the half-life from values, the cached
+  critical value, the flatness test on about 4,800 arrays across the
+  double range, the screen's per-series guard, and `scan_pairs`' batch
+  path against its per-pair loop. Seven calls join the tests that require
+  the same bits at caller limits of one, two and four and at the default;
+  on the code before, five of them fail, under OpenBLAS 0.3.27 and 0.3.31
+  alike.
+
 ## A model writes one skops bundle whether it was fitted or loaded, a bundle the loader refuses is not written, and a LightGBM model's joblib records no thread count
 
 - **A fitted model and that model loaded write one `model.skops`.** skops

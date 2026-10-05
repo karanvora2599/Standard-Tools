@@ -5,6 +5,7 @@ from typing import Any, Dict, List
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools._blas import single_threaded_blas
 from standard_quant_tools._special import norm_cdf_array
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.validation import require_finite_array
@@ -129,6 +130,18 @@ def multi_factor_regression(
 
     X = np.column_stack([np.ones(n), X_f])
 
+    # One BLAS thread for the fit, the fitted values and the Gram matrix
+    # with its inverse, so every number returned is the same bits whatever
+    # thread count the caller's BLAS has.
+    with single_threaded_blas():
+        return _regress(X, y, n, k, factor_names)
+
+
+def _regress(
+    X: np.ndarray, y: np.ndarray, n: int, k: int, factor_names: List[str]
+) -> Dict[str, Any]:
+    """`multi_factor_regression` on its design and target."""
+    _nan = float("nan")
     beta, _residuals, rank, _sv = np.linalg.lstsq(X, y, rcond=None)
     # The rank-deficiency policy rolling_factor_loadings already applies,
     # made a refusal here because there is one regression, not a series of
@@ -285,13 +298,14 @@ def rolling_factor_loadings(
     # this costs nothing extra.
     n_coef = 1 + k
     out = np.full((n, len(col_names)), np.nan)
-    for i in range(window - 1, n):
-        y_w = y_arr[i - window + 1 : i + 1]
-        X_w = X_arr[i - window + 1 : i + 1]
-        X_des = np.column_stack([np.ones(window), X_w])
-        beta, _residuals, rank, _sv = np.linalg.lstsq(X_des, y_w, rcond=None)
-        if rank < n_coef:
-            continue  # leave the row NaN
-        out[i] = beta
+    with single_threaded_blas():
+        for i in range(window - 1, n):
+            y_w = y_arr[i - window + 1 : i + 1]
+            X_w = X_arr[i - window + 1 : i + 1]
+            X_des = np.column_stack([np.ones(window), X_w])
+            beta, _residuals, rank, _sv = np.linalg.lstsq(X_des, y_w, rcond=None)
+            if rank < n_coef:
+                continue  # leave the row NaN
+            out[i] = beta
 
     return pd.DataFrame(out, index=common_idx, columns=col_names)

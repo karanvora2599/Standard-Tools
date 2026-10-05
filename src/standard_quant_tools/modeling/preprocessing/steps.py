@@ -24,6 +24,7 @@ from typing import Any, Dict
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools._blas import single_threaded_blas
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.modeling.estimators.bounds import (
     EstimatorParamSchema,
@@ -440,7 +441,12 @@ class PCAWhiten(Preprocessor):
             raise ValidationError("pca_whiten needs at least two training rows.")
         mean = matrix.mean(axis=0)
         centered = matrix - mean
-        _u, singular, vt = np.linalg.svd(centered, full_matrices=False)
+        # One BLAS thread, as the walk-forward pools give every fit: the
+        # full-panel refit runs off the pools on the caller's threads, and
+        # from 20,000 rows of 30 features the decomposition's last bits
+        # differed there between one thread and two or four.
+        with single_threaded_blas():
+            _u, singular, vt = np.linalg.svd(centered, full_matrices=False)
         components = vt[:k].copy()
         # A reproducible sign: the largest-magnitude loading of each
         # component is positive.
@@ -469,7 +475,11 @@ class PCAWhiten(Preprocessor):
         mean = np.asarray(state["mean"], dtype=np.float64)
         components = np.asarray(state["components"], dtype=np.float64)
         scale = np.asarray(state["scale"], dtype=np.float64)
-        projected = (X.to_numpy(dtype=np.float64) - mean) @ components.T * scale
+        centred = X.to_numpy(dtype=np.float64) - mean
+        # The projection on one BLAS thread too: at 20,000 rows its last
+        # bits differed between one thread and sixteen.
+        with single_threaded_blas():
+            projected = centred @ components.T * scale
         columns = [f"pc{i + 1}" for i in range(components.shape[0])]
         return pd.DataFrame(projected, index=X.index, columns=columns)
 

@@ -1,12 +1,14 @@
 import logging
 import math
+from functools import lru_cache
 from itertools import combinations
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pandas as pd
 from statsmodels.tsa.stattools import coint
 
+from standard_quant_tools._blas import single_threaded_blas
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.validation import require_finite_array
 
@@ -40,10 +42,25 @@ def _degenerate_pair_reason(a_vals: np.ndarray, b_vals: np.ndarray):
     to its own magnitude, and a residual of 1e-14 varies hugely relative to
     itself while being zero relative to a price near 100. The comparison
     that matters is against the SERIES scale.
+
+    The regression runs on one BLAS thread when the caller holds
+    `single_threaded_blas()`, as both callers do.
     """
-    n = a_vals.size
-    if n == 0:
+    if a_vals.size == 0:
         return None
+    reason = _constant_reason(b_vals)
+    if reason is not None:
+        return reason
+    return _affine_reason(
+        a_vals,
+        float(np.nanmax(np.abs(a_vals))),
+        np.column_stack([np.ones(a_vals.size), b_vals]),
+    )
+
+
+def _constant_reason(b_vals: np.ndarray) -> Optional[str]:
+    """The first half of `_degenerate_pair_reason`: series_b does not move.
+    A property of series_b alone, so a screen asks it once per series."""
     b_scale = float(np.nanmax(np.abs(b_vals)))
     if b_scale <= 0 or float(np.ptp(b_vals)) <= b_scale * _DEGENERATE_RTOL:
         return (
@@ -52,10 +69,18 @@ def _degenerate_pair_reason(a_vals: np.ndarray, b_vals: np.ndarray):
             "spread would just be series_a. Cointegration is a statement "
             "about two series that both move."
         )
-    design = np.column_stack([np.ones(n), b_vals])
+    return None
+
+
+def _affine_reason(
+    a_vals: np.ndarray, a_scale: float, design: np.ndarray
+) -> Optional[str]:
+    """The second half of `_degenerate_pair_reason`: series_a is an exact
+    linear function of series_b. `a_scale` is the largest |series_a| and
+    `design` is [1, series_b], both of which a screen computes once per
+    series rather than once per pair."""
     beta, *_ = np.linalg.lstsq(design, a_vals, rcond=None)
     residual = a_vals - design @ beta
-    a_scale = float(np.nanmax(np.abs(a_vals)))
     if a_scale > 0 and float(np.ptp(residual)) <= a_scale * _DEGENERATE_RTOL:
         return (
             "the two series are an exact linear function of one another, so "
@@ -97,14 +122,60 @@ except ImportError:
         return func
 
 
-def _half_life_gate(spread: pd.Series) -> Dict[str, Any]:
-    """The Dickey-Fuller check on a fitted spread's half-life, as result keys."""
-    stats = half_life_statistics(spread, fitted_residual=True)
+def _half_life_gate(spread: np.ndarray) -> Dict[str, Any]:
+    """
+    The Dickey-Fuller check on a fitted spread's half-life, as result keys.
+
+    `half_life_statistics(pd.Series(spread), fitted_residual=True)`, read
+    off the array. The spread of two aligned series has one value per date
+    and no gap, so the label alignment inside `half_life` keeps every row
+    where it is, and the arithmetic below is that function's to the bit.
+    Through the Series it was 0.7 ms of a 1.1 ms test at 500 bars, most of
+    it pandas aligning the spread with its own lag.
+    """
+    values = spread[~np.isnan(spread)]
+    require_finite_array(values, "spread", "half_life_statistics")
+    stats = _half_life_statistics(
+        values, fitted_residual=True, half_life_of=lambda: _half_life_of(values)
+    )
     return {
         "half_life_mean_reverting": stats["mean_reverting"],
         "half_life_t_statistic": stats["t_statistic"],
         "half_life_critical_value": stats["critical_value"],
     }
+
+
+def _aligned_pair(
+    series_a: pd.Series, series_b: pd.Series
+) -> Tuple[pd.Index, np.ndarray, np.ndarray]:
+    """
+    The two series on the dates they share: (index, a values, b values).
+
+    Two series on one unique index -- one date range from one provider,
+    the usual case -- are read as they stand. That is what the
+    intersection and the two label lookups below return for them: the
+    intersection of two equal unique indexes is that index, and looking up
+    every label of a unique index in its own order returns the series. The
+    lookups were 0.15 ms of a 1.1 ms test at 500 bars. Each array is a
+    fresh copy, as a lookup's is.
+    """
+    index_a, index_b = series_a.index, series_b.index
+    if (
+        (index_a is index_b or index_a.equals(index_b))
+        and index_a.is_unique
+        and index_b.is_unique
+    ):
+        return (
+            index_a,
+            series_a.to_numpy(dtype=float, copy=True),
+            series_b.to_numpy(dtype=float, copy=True),
+        )
+    common_idx = index_a.intersection(index_b)
+    return (
+        common_idx,
+        series_a.loc[common_idx].to_numpy(dtype=float),
+        series_b.loc[common_idx].to_numpy(dtype=float),
+    )
 
 
 def cointegration_test(
@@ -154,11 +225,7 @@ def cointegration_test(
     if autolag.lower() not in ("aic", "bic"):
         raise ValidationError(f"autolag must be 'aic' or 'bic', got {autolag!r}")
 
-    common_idx = series_a.index.intersection(series_b.index)
-    a = series_a.loc[common_idx]
-    b = series_b.loc[common_idx]
-    a_vals = a.to_numpy(dtype=float)
-    b_vals = b.to_numpy(dtype=float)
+    common_idx, a_vals, b_vals = _aligned_pair(series_a, series_b)
     require_finite_array(a_vals, "series_a", "cointegration_test")
     require_finite_array(b_vals, "series_b", "cointegration_test")
     n = len(a_vals)
@@ -173,6 +240,19 @@ def cointegration_test(
     path = "C++" if (HAS_CPP and _cpp_core is not None) else "statsmodels"
     logger.debug("[cointegration] n_obs=%d  autolag=%s  path=%s", n, autolag, path)
 
+    # The guard's regression and the half-life gate's run on one BLAS
+    # thread, so every number returned is the same bits whatever thread
+    # count the caller's BLAS has. The gate's two sums of squares are dot
+    # products, which OpenBLAS splits across threads above 10,000 terms.
+    with single_threaded_blas():
+        return _engle_granger(a_vals, b_vals, common_idx, autolag)
+
+
+def _engle_granger(
+    a_vals: np.ndarray, b_vals: np.ndarray, common_idx: pd.Index, autolag: str
+) -> Dict[str, Any]:
+    """`cointegration_test` on the aligned, checked values."""
+    n = len(a_vals)
     # ── one guard, ahead of both backends ─────────────────────────────────────
     #
     # THE TWO PATHS RETURNED OPPOSITE VERDICTS HERE. On an exactly affine
@@ -196,10 +276,12 @@ def cointegration_test(
     if HAS_CPP and _cpp_core is not None:
         use_aic = autolag.lower() != "bic"
         raw = _cpp_core.engle_granger(a_vals, b_vals, -1, use_aic)
-        spread = pd.Series(
-            a_vals - float(raw["intercept"]) - float(raw["hedge_ratio"]) * b_vals,
-            index=common_idx,
-        )
+        spread = a_vals - float(raw["intercept"]) - float(raw["hedge_ratio"]) * b_vals
+        if len(common_idx) != n:
+            # Dates that repeat in both series: each lookup returned every
+            # row of each date, more rows than dates, and labelling the
+            # spread with the dates refuses that, as it always has.
+            pd.Series(spread, index=common_idx)
         return {
             "cointegrated": bool(raw["cointegrated"]),
             "hedge_ratio": float(raw["hedge_ratio"]),
@@ -228,8 +310,8 @@ def cointegration_test(
         "10%": float(crit_arr[2]),
     }
 
-    spread = pd.Series(a_vals - beta[0] - hedge * b_vals, index=common_idx)
-    hl = half_life(spread)
+    spread_values = a_vals - beta[0] - hedge * b_vals
+    hl = half_life(pd.Series(spread_values, index=common_idx))
 
     result = {
         "cointegrated": bool(p_val < 0.05),
@@ -238,7 +320,7 @@ def cointegration_test(
         "p_value": float(p_val),
         "critical_values": crit,
         "half_life_days": hl,
-        **_half_life_gate(spread),
+        **_half_life_gate(spread_values),
         "n_obs": n,
     }
     logger.debug(
@@ -286,7 +368,8 @@ def compute_spread(
             spread_vals = a - r["intercept"] - r["slope"] * b
         else:
             X = np.column_stack([np.ones(len(a)), b])
-            beta, *_ = np.linalg.lstsq(X, a, rcond=None)
+            with single_threaded_blas():
+                beta, *_ = np.linalg.lstsq(X, a, rcond=None)
             spread_vals = a - beta[0] - beta[1] * b
     else:
         spread_vals = a - hedge_ratio * b
@@ -309,7 +392,25 @@ def half_life(spread: pd.Series) -> float:
 
     y = delta.loc[common].to_numpy(dtype=float)
     x = lag.loc[common].to_numpy(dtype=float)
+    return _ar1_half_life(y, x)
 
+
+def _half_life_of(values: np.ndarray) -> float:
+    """
+    `half_life` of a spread with no missing value and one row per label,
+    from its values alone.
+
+    For such a spread the first difference and the lag are both labelled
+    by every date but the first, so their intersection is that index and
+    the two lookups keep every row in order: `y` is the first difference
+    (pandas' `diff` is the same subtraction as numpy's) and `x` the values
+    before the last.
+    """
+    return _ar1_half_life(np.diff(values), values[:-1])
+
+
+def _ar1_half_life(y: np.ndarray, x: np.ndarray) -> float:
+    """The half-life from a spread's first difference `y` and its lag `x`."""
     if len(y) < 3:
         return float("inf")
 
@@ -321,7 +422,8 @@ def half_life(spread: pd.Series) -> float:
         ar_coeff = r["slope"]
     else:
         X = np.column_stack([np.ones(len(y)), x])
-        beta, *_ = np.linalg.lstsq(X, y, rcond=None)
+        with single_threaded_blas():
+            beta, *_ = np.linalg.lstsq(X, y, rcond=None)
         ar_coeff = float(beta[1])
 
     if ar_coeff >= 0:
@@ -384,15 +486,68 @@ def half_life_statistics(
     negative, as `half_life`), `ar_coefficient`, `t_statistic`,
     `critical_value`, `mean_reverting` (the t-statistic clears the 5%
     critical value and the half-life is finite) and `n_obs`.
+
+    The regression's products run on one BLAS thread, so the t-statistic
+    is the same bits at any thread count: its two sums of squares are dot
+    products, which OpenBLAS splits across threads above 10,000 terms.
     """
+    clean = spread.dropna()
+    values = clean.to_numpy(dtype=float)
+    require_finite_array(values, "spread", "half_life_statistics")
+    return _half_life_statistics(
+        values, fitted_residual=fitted_residual, half_life_of=lambda: half_life(clean)
+    )
+
+
+@lru_cache(maxsize=1024)
+def _mackinnon_5pct(n_series: int, nobs: int) -> float:
+    """MacKinnon's (2010) 5% critical value with a constant, for `n_series`
+    series and `nobs` observations. A polynomial in 1/nobs that cost 7 us a
+    call; a pair screen asks for the same few sample sizes again and
+    again."""
     from statsmodels.tsa.adfvalues import mackinnoncrit
 
+    return float(mackinnoncrit(N=n_series, regression="c", nobs=nobs)[1])
+
+
+def _no_dispersion(values: np.ndarray) -> bool:
+    """
+    `has_no_dispersion(values)` for finite values, without the standard
+    deviation where it cannot change the answer.
+
+    That test reads the standard deviation only to call a series flat when
+    it is zero or not finite, and then compares the range with the largest
+    magnitude. For finite values whose largest magnitude lies between
+    1e-100 and 1e100 the standard deviation is finite (no sum or square of
+    them overflows), and it is zero only when every value is the same:
+    two different values of that size are at least 1e-117 apart, so some
+    deviation from their mean squares to a normal number, not to zero. A
+    range of zero is flat by the comparison too, so there the comparison
+    alone is the test's answer. Outside that band, the test itself. The
+    standard deviation was 38 us of the half-life gate at 500 bars.
+    """
     # Imported here: `metrics` imports `analysis` at package level, so a
     # module-level import would close a cycle.
-    from standard_quant_tools.metrics.risk_metrics import has_no_dispersion
+    from standard_quant_tools.metrics.risk_metrics import (
+        DISPERSION_RTOL,
+        has_no_dispersion,
+    )
 
-    values = spread.dropna().to_numpy(dtype=float)
-    require_finite_array(values, "spread", "half_life_statistics")
+    if values.ndim == 1 and values.size >= 2:
+        scale = float(np.max(np.abs(values)))
+        if 1e-100 <= scale <= 1e100:
+            return float(np.ptp(values)) <= scale * DISPERSION_RTOL
+    return has_no_dispersion(values)
+
+
+def _half_life_statistics(
+    values: np.ndarray,
+    *,
+    fitted_residual: bool,
+    half_life_of: Callable[[], float],
+) -> Dict[str, Any]:
+    """`half_life_statistics` on the spread's finite values, with
+    `half_life_of()` giving its half-life."""
     n = int(values.size) - 1
     nan = float("nan")
     result: Dict[str, Any] = {
@@ -403,26 +558,25 @@ def half_life_statistics(
         "mean_reverting": False,
         "n_obs": max(n, 0),
     }
-    if n < 3 or has_no_dispersion(values):
+    if n < 3 or _no_dispersion(values):
         # Too short to fit, or a constant: no reversion to measure.
         return result
 
     y = np.diff(values)
     x = values[:-1]
     design = np.column_stack([np.ones(n), x])
-    beta, *_ = np.linalg.lstsq(design, y, rcond=None)
-    residual = y - design @ beta
     dof = n - 2
-    s2 = float(residual @ residual) / dof if dof > 0 else nan
     x_centred = x - x.mean()
-    sxx = float(x_centred @ x_centred)
+    with single_threaded_blas():
+        beta, *_ = np.linalg.lstsq(design, y, rcond=None)
+        residual = y - design @ beta
+        s2 = float(residual @ residual) / dof if dof > 0 else nan
+        sxx = float(x_centred @ x_centred)
     se = math.sqrt(s2 / sxx) if sxx > 0 and s2 == s2 else nan
     ar_coeff = float(beta[1])
     t_stat = ar_coeff / se if se == se and se > 0 else nan
-    critical = float(
-        mackinnoncrit(N=2 if fitted_residual else 1, regression="c", nobs=n)[1]
-    )
-    hl = half_life(spread.dropna())
+    critical = _mackinnon_5pct(2 if fitted_residual else 1, n)
+    hl = half_life_of()
     result.update(
         {
             "half_life": float(hl),
@@ -648,6 +802,53 @@ def benjamini_hochberg(p_values: Sequence[float]) -> np.ndarray:
     return out
 
 
+def _degenerate_pairs(
+    frame: pd.DataFrame, pair_list: Sequence[Tuple[str, str]]
+) -> List[bool]:
+    """
+    Whether `_degenerate_pair_reason` refuses each pair of a screen.
+
+    The same predicate, with what depends on one series alone -- its
+    values, whether it is constant, its largest magnitude and the design
+    [1, series_b] -- worked out once per series rather than once per pair,
+    and every regression on one BLAS thread. A pair's own work is one
+    least-squares fit and the range of its residual.
+    """
+    columns: Dict[str, np.ndarray] = {}
+
+    def column(name: str) -> np.ndarray:
+        if name not in columns:
+            columns[name] = frame[name].to_numpy(dtype=float)
+        return columns[name]
+
+    constant: Dict[str, bool] = {}
+    scales: Dict[str, float] = {}
+    designs: Dict[str, np.ndarray] = {}
+    flags: List[bool] = []
+    with single_threaded_blas():
+        for a, b in pair_list:
+            a_vals, b_vals = column(a), column(b)
+            if a_vals.ndim != 1 or b_vals.shape != a_vals.shape:
+                # Not two plain columns (a duplicated name selects a frame):
+                # the predicate as it stands, whatever it makes of them.
+                flags.append(_degenerate_pair_reason(a_vals, b_vals) is not None)
+                continue
+            if a_vals.size == 0:
+                flags.append(False)
+                continue
+            if b not in constant:
+                constant[b] = _constant_reason(b_vals) is not None
+            if constant[b]:
+                flags.append(True)
+                continue
+            if a not in scales:
+                scales[a] = float(np.nanmax(np.abs(a_vals)))
+            if b not in designs:
+                designs[b] = np.column_stack([np.ones(b_vals.size), b_vals])
+            flags.append(_affine_reason(a_vals, scales[a], designs[b]) is not None)
+    return flags
+
+
 def scan_cointegrated_pairs(
     prices: Union[pd.DataFrame, Dict[str, pd.Series]],
     pairs: Optional[Sequence[Tuple[str, str]]] = None,
@@ -661,8 +862,9 @@ def scan_cointegrated_pairs(
     A pair screen is O(N^2) in the universe: 2,000 tickers is 1,999,000 pairs.
     Driving that from Python -- ``for a, b in combinations(tickers, 2)``
     calling :func:`cointegration_test` per pair -- pays the pandas round trip
-    two million times and uses one core. Measured at 2,000 bars that is 9.8
-    hours; this path does the same work in about 5 minutes.
+    two million times and uses one core. Measured at 2,000 bars that was 9.8
+    hours for one order of each pair; this path tests both orders of every
+    pair in 1.7 minutes at 500 bars and 19 at 2,000 on a 16-thread laptop.
 
     Every series is aligned onto ONE common index before the panel is built,
     which is the one semantic difference from looping :func:`cointegration_test`
@@ -758,13 +960,7 @@ def scan_cointegrated_pairs(
     # 4,949 pairs. Same predicate either way, so the scan and the single test
     # never disagree about which pairs are answerable -- and it runs on BOTH
     # backends, because the kernel does not see the guard above.
-    degenerate = [
-        _degenerate_pair_reason(
-            frame[a].to_numpy(dtype=float), frame[b].to_numpy(dtype=float)
-        )
-        is not None
-        for a, b in pair_list
-    ]
+    degenerate = _degenerate_pairs(frame, pair_list)
 
     def _blank_row(n_obs: int):
         nan = float("nan")

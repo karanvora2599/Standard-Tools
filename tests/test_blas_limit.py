@@ -1,7 +1,7 @@
 """
 `single_threaded_blas()`: the library's own covariance-sized linear algebra
 on one BLAS thread, and the answers that then stop depending on the machine
-(see the CHANGELOG entries of 2026-10-02 and 2026-10-04).
+(see the CHANGELOG entries of 2026-10-02, 2026-10-04 and 2026-10-04).
 
 Two halves. The limit itself: applied inside, the caller's setting back
 after, nested and concurrent users all on one thread with the setting in
@@ -19,6 +19,17 @@ thread count on the CI runners' OpenBLAS (the sample and Ledoit-Wolf
 covariances, where these tests failed) or on OpenBLAS 0.3.27 and 0.3.31 on
 a 16-thread Windows machine (the rest), and every output built from them
 did too.
+
+Until the CHANGELOG entry of 2026-10-04 some of the library's own linear
+algebra still ran on the caller's threads, and these outputs followed the
+thread count under OpenBLAS 0.3.27 on that machine: `pca_whiten`'s fit and
+projection (20,000 rows of 30 features), the VIFs and `collinear` block of
+`redundancy_report` (60 features), the half-life t-statistic of
+`half_life_statistics` and `cointegration_test` (dot products of more than
+10,000 terms) and `book_metrics`' depth slope. The factor regression's and
+the ADF statistic's least squares and Gram products gave the same bits there
+at every limit; they run under it too, since a product of the same kind,
+np.cov's, followed the thread count on the CI runners.
 """
 
 from __future__ import annotations
@@ -34,11 +45,21 @@ import pytest
 
 from standard_quant_tools import _blas
 from standard_quant_tools._blas import single_threaded_blas
+from standard_quant_tools.analysis.cointegration import (
+    cointegration_test,
+    half_life_statistics,
+)
 from standard_quant_tools.analysis.correlation import diversification_ratio
 from standard_quant_tools.analysis.diagnostics import lead_lag_matrix
+from standard_quant_tools.analysis.multi_factor import multi_factor_regression
+from standard_quant_tools.analysis.order_book import book_metrics
 from standard_quant_tools.analysis.pca import factor_contributions, pca_returns
+from standard_quant_tools.analysis.stationarity import run_stationarity_tests
 from standard_quant_tools.error import ValidationError
+from standard_quant_tools.modeling.analysis.feature_report import redundancy_report
 from standard_quant_tools.modeling.features import network
+from standard_quant_tools.modeling.preprocessing.base import FoldContext
+from standard_quant_tools.modeling.preprocessing.steps import PCAWhiten
 from standard_quant_tools.portfolio import construction
 from standard_quant_tools.portfolio.covariance import estimate_covariance
 from standard_quant_tools.portfolio.optimize import (
@@ -322,6 +343,73 @@ NETWORK = _factor_returns(126, 1000, seed=71)
 VIEWS = np.zeros((2, N))
 VIEWS[0, 0], VIEWS[0, 1], VIEWS[1, 2] = 1.0, -1.0, 1.0
 
+
+def _latent_features(n_rows, n_features, seed, latent):
+    """A feature matrix driven by a few latent factors, built without a
+    matrix product so its own bits do not depend on the BLAS."""
+    rng = np.random.default_rng(seed)
+    factors = rng.normal(size=(n_rows, latent))
+    loadings = rng.normal(size=(latent, n_features))
+    values = rng.normal(scale=0.7, size=(n_rows, n_features))
+    for j in range(latent):
+        values += factors[:, [j]] * loadings[[j], :]
+    return values
+
+
+def _pca_whiten():
+    """A fit and its projection, as a walk-forward fold or the full-panel
+    refit runs them."""
+    frame = pd.DataFrame(
+        _latent_features(20_000, 30, 73, 4), columns=[f"f{i}" for i in range(30)]
+    )
+    context = FoldContext(dates=np.zeros(len(frame), dtype="datetime64[ns]"))
+    step = PCAWhiten(n_components=5, whiten=True)
+    state = step.fit(frame, context)
+    return [state, step.transform(frame, state, context)]
+
+
+FEATURES = pd.DataFrame(
+    _latent_features(600, 60, 79, 10), columns=[f"x{i:02d}" for i in range(60)]
+)
+
+
+def _walks(n, seed):
+    rng = np.random.default_rng(seed)
+    index = pd.bdate_range("1990-01-01", periods=n)
+    a = pd.Series(100.0 + np.cumsum(rng.normal(size=n)), index=index)
+    b = pd.Series(100.0 + np.cumsum(rng.normal(size=n)), index=index)
+    return a, b
+
+
+#: Longer than 10,000 bars, where OpenBLAS splits a dot product across
+#: threads: an intraday history.
+LONG_A, LONG_B = _walks(12_000, 83)
+SPREAD = pd.Series(
+    np.cumsum(np.random.default_rng(89).normal(size=20_000)) * 0.05
+    + np.random.default_rng(97).normal(size=20_000)
+)
+
+
+def _book(snapshots, levels, seed):
+    """Snapshots of a depth book: 600 of ten levels a side give the depth
+    slope 12,000 points."""
+    rng = np.random.default_rng(seed)
+    mid = 100.0 + np.cumsum(rng.normal(0, 0.01, snapshots))
+    columns = {}
+    for i in range(levels):
+        columns[f"bid_price_{i}"] = (
+            mid - 0.01 * (i + 0.5) - rng.uniform(0, 2e-3, snapshots)
+        )
+        columns[f"bid_size_{i}"] = rng.uniform(100, 1000, snapshots) * (1 + i)
+        columns[f"ask_price_{i}"] = (
+            mid + 0.01 * (i + 0.5) + rng.uniform(0, 2e-3, snapshots)
+        )
+        columns[f"ask_size_{i}"] = rng.uniform(100, 1000, snapshots) * (1 + i)
+    return pd.DataFrame(columns)
+
+
+BOOK = _book(600, 10, 101)
+
 CALLS = {
     "_repair_psd": lambda: construction._repair_psd(RAGGED, "test"),
     "risk_parity": lambda: construction.risk_parity(RAGGED, max_iterations=200),
@@ -359,6 +447,21 @@ CALLS = {
     "lead_lag_matrix": lambda: lead_lag_matrix(
         RETURNS.iloc[:, :120], min_correlation=0.05
     ),
+    # The CHANGELOG entry of 2026-10-04: the last of the library's own BLAS
+    # work, each whole output.
+    "pca_whiten": _pca_whiten,
+    "redundancy_report": lambda: redundancy_report(FEATURES, list(FEATURES.columns)),
+    "multi_factor_regression": lambda: multi_factor_regression(
+        RETURNS["A000"], RETURNS[["A001", "A002", "A003", "A004", "A005"]]
+    ),
+    "run_stationarity_tests": lambda: run_stationarity_tests(
+        LONG_A.iloc[:5_000], lags=10
+    ),
+    "cointegration_test_long": lambda: cointegration_test(LONG_A, LONG_B),
+    "half_life_statistics_long": lambda: half_life_statistics(
+        SPREAD, fitted_residual=True
+    ),
+    "book_metrics": lambda: book_metrics(BOOK),
 }
 
 

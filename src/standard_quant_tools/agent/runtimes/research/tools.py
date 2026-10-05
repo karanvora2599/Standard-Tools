@@ -1316,8 +1316,9 @@ def scan_pairs(input_data: PairScannerInput) -> PairScannerResult:
     # ── Batch fast path ──────────────────────────────────────────────────
     # The loop below is O(N^2) in the universe -- 2,000 tickers is 1,999,000
     # iterations, each paying a full pandas round trip into the extension and
-    # none of them parallel. Measured at 2,000 bars that is 9.8 hours;
-    # scan_cointegrated_pairs does the same work in about 5 minutes.
+    # none of them parallel. Measured at 2,000 bars that was 9.8 hours for
+    # one order of each pair; scan_cointegrated_pairs tests both orders in
+    # about 19 minutes (1.7 at 500 bars).
     #
     # Engaged only when every series shares an IDENTICAL index. The batch
     # path aligns the whole universe onto one common sample, while this loop
@@ -1332,7 +1333,20 @@ def scan_pairs(input_data: PairScannerInput) -> PairScannerResult:
             try:
                 frame = pd.DataFrame({t: prices[t] for t in valid_tickers})
                 scanned = _scan_pairs_batch(frame, all_pairs)
-                batch = {(a, b): row for (a, b), row in scanned.iterrows()}
+                # By column, not `iterrows`: a Series per row was 25 us a
+                # pair, as long as the native test of both orders.
+                fields = [
+                    "p_value",
+                    "p_value_reverse",
+                    "hedge_ratio",
+                    "adf_statistic",
+                    "half_life_days",
+                ]
+                values = [scanned[f].to_numpy(dtype=float) for f in fields]
+                batch = {
+                    key: dict(zip(fields, row))
+                    for key, row in zip(scanned.index, zip(*values))
+                }
                 logger.debug(
                     "[scan_pairs] batch path: %d pairs in one native call",
                     len(batch),
@@ -1353,18 +1367,12 @@ def scan_pairs(input_data: PairScannerInput) -> PairScannerResult:
         try:
             if batch:
                 row = batch[(a, b)]
-                if not math.isfinite(float(row["adf_statistic"])):
+                if not math.isfinite(row["adf_statistic"]):
                     raise ValueError(
                         "Engle-Granger produced no statistic for this pair "
                         "(degenerate or perfectly collinear series)"
                     )
-                result = {
-                    "p_value": float(row["p_value"]),
-                    "p_value_reverse": float(row["p_value_reverse"]),
-                    "hedge_ratio": float(row["hedge_ratio"]),
-                    "adf_statistic": float(row["adf_statistic"]),
-                    "half_life_days": float(row["half_life_days"]),
-                }
+                result = {k: float(v) for k, v in row.items()}
             else:
                 result = dict(_coint(prices[a], prices[b]))  # type: ignore[arg-type]
                 result["p_value_reverse"] = float(
