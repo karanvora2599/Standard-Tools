@@ -810,8 +810,9 @@ class AttestModelPackageResult(BaseModel):
     model_id: str
     ok: bool = Field(
         ...,
-        description="Nothing mismatched, nothing hashed is missing, and the "
-        "signature check -- when one was run or required -- passed.",
+        description="Nothing mismatched, nothing hashed is missing, no "
+        "artifact the manifest should hash is uncovered, and the signature "
+        "check -- when one was run or required -- passed.",
     )
     verified: List[str] = Field(
         default_factory=list,
@@ -829,7 +830,25 @@ class AttestModelPackageResult(BaseModel):
         default_factory=list,
         description="Files present that the manifest does not cover: the "
         "signature, the promotion log, scoring outputs. Named so a reader "
-        "knows what the hashes do NOT vouch for.",
+        "knows what the hashes do NOT vouch for. Legitimate, and not a "
+        "finding -- see `uncovered` for the kind that is.",
+    )
+    uncovered: List[str] = Field(
+        default_factory=list,
+        description="Artifacts the manifest SHOULD hash and does not. "
+        "Registration hashes these itself, so an entry absent from a "
+        "non-empty content_hashes was removed afterwards -- and a missing "
+        "expected digest makes the loader skip that one file while every "
+        "other still verifies, which is how a hash becomes removable rather "
+        "than only forgeable. Fails `ok`.",
+    )
+    predates_hashing: bool = Field(
+        False,
+        description="True when the manifest records no content hashes at all: "
+        "a package registered before hashing existed. Nothing is claimed "
+        "about its files, so nothing about them can fail; reported rather "
+        "than silently treated as verified. A package with SOME hashes and a "
+        "gap is `uncovered`, not this.",
     )
     signature: Optional[Dict[str, Any]] = Field(
         None,

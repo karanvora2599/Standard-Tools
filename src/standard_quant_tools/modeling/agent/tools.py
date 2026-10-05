@@ -1491,6 +1491,22 @@ def attest_model_package(
     signature = report.signature
     key_pinned = bool((signature or {}).get("key_pinned"))
     warnings: List[str] = []
+    if report.uncovered:
+        warnings.append(
+            f"The manifest does not hash {report.uncovered}, and registration "
+            "always hashes those when it writes them — so the entry was "
+            "removed after the fact. A missing expected digest makes the "
+            "loader skip that one artifact while every other still verifies, "
+            "which for model.joblib means a pickle deserialized unchecked. "
+            "Re-register the model from its source, or pull the package again "
+            "from where it is intact."
+        )
+    if report.predates_hashing:
+        warnings.append(
+            "This manifest records no content hashes at all, so it predates "
+            "content hashing and nothing here vouches for any of its files. "
+            "Not a tampered package — but not a verified one either."
+        )
     if report.mismatched or report.missing:
         warnings.append(
             "This package is not the one that was registered: "
@@ -1524,6 +1540,8 @@ def attest_model_package(
         mismatched=report.mismatched,
         missing=report.missing,
         unhashed=report.unhashed,
+        uncovered=report.uncovered,
+        predates_hashing=report.predates_hashing,
         signature=signature,
         signature_error=report.signature_error,
         key_pinned=key_pinned,
@@ -1584,6 +1602,17 @@ def promote_model(input_data: PromoteModelInput) -> PromoteModelResult:
             findings.append(f"no longer hash to the manifest: {report.mismatched}")
         if report.missing:
             findings.append(f"hashed by the manifest and gone: {report.missing}")
+        # Found by driving the live service: the gate refused a package
+        # whose only fault was a removed hash and the detail came out as
+        # "()", because this list knew the two older faults and not the
+        # new one. A refusal nobody can act on is barely a refusal.
+        if report.uncovered:
+            findings.append(
+                "present and no longer hashed by the manifest, though "
+                f"registration always hashes them: {report.uncovered} — the "
+                "entry was removed after the fact, which makes the loader "
+                "skip that artifact while every other still verifies"
+            )
         if report.signature_error:
             findings.append(f"signature: {report.signature_error}")
         detail = "; ".join(findings)
