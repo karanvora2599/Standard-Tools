@@ -568,6 +568,15 @@ is the normal one — `fetch_order_events` pulls it once and publishes an
 `sqt://order_event_panel` the metrics read, rather than re-fetching a metered
 feed.
 
+The two passes over the events — queue ahead and order lifetimes — run in
+the native extension when it is built, with the same numbers as the Python
+loops they replace: a 2,000,000-event session, the default cap, reports in
+0.5 s rather than 8.5 s (0.15 s more to read its Parquet file). A window
+whose order ids or sides have missing values on the rows that read them
+runs the loops. Lifetimes are whole microseconds, as pandas'
+`Timedelta.total_seconds()` counts them, so an order cancelled within a
+microsecond of its add lived 0.0 seconds.
+
 
 ## Related
 

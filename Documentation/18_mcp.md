@@ -469,7 +469,8 @@ measured; it is not, so it became a flag rather than a default.
 
 ### Why long-running tools are hidden
 
-`scan_pairs` is measured at **5.31 minutes** over a 2,000-ticker universe
+`scan_pairs` is measured at **19 minutes** over a 2,000-ticker universe of
+2,000 bars (both orders of every pair)
 and `run_backtest_optimization` grows with the grid. Both can outlast a
 default client timeout, and a timeout that fires after most of the work is
 done is worse than not offering the tool. `run_screener` is *not* hidden —

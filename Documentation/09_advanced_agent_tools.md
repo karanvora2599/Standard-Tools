@@ -287,12 +287,16 @@ else:
 > **Performance:** When every ticker shares an index — the usual case for one date range
 > from one provider — `scan_pairs` sends the whole pair set to the native
 > `scan_cointegrated_pairs` in a single call, parallel across pairs, instead of looping
-> `cointegration_test` per pair. Measured per pair at 500 bars: 23.4 µs, against 1.85 ms
-> for the Python loop.
+> `cointegration_test` per pair. Measured per pair on 200 names (19 900 pairs; Python 3.12,
+> pandas 2.3, a shared 16-thread machine): 49–51 µs at 500 bars and 231–249 µs at 2 000,
+> both orders of each pair, against 0.23–0.25 ms and 0.82–0.84 ms for one
+> `cointegration_test` call per pair in a Python loop, 3.3–5.1× as long.
 >
 > That matters because the work is `O(n²)` in the universe. A 2 000-ticker screen is
-> 1 999 000 pairs: **~5.3 min at 2 000 bars, where the per-pair loop took ~9.8 h.** For a
-> universe of 10 tickers (45 pairs) it is well under a second either way.
+> 1 999 000 pairs: **~5.3 min at 2 000 bars, where the per-pair loop took ~9.8 h**, measured
+> with one order per pair, before the screen added the reverse test and before
+> `cointegration_test`'s Python layer shrank to a seventh on 2026-10-04. For a universe of
+> 10 tickers (45 pairs) it is well under a second either way.
 >
 > A universe whose tickers have *different* index lengths falls back to the per-pair loop.
 > The batch path aligns the whole universe onto one common sample while the loop aligns

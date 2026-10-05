@@ -1,5 +1,43 @@
 # Changelog
 
+## The guides carry hist_gradient_boosting's new live results and the cointegration figures measured again
+
+- **The guides describe these changes**: time-ordered early stopping and
+  its spec parameters (15_modeling), the skops bundle as one file for a
+  fit and its loads and the boosters' bundles (15_modeling), the rest of
+  the library's BLAS work on one thread and `cointegration_test`'s cost
+  (16_performance, 08_analysis, 04_backtesting, 15_modeling), and the
+  native order-event passes, binomial lattice and regime step, with the
+  futures loop measured and left in Python (16_performance, 15_modeling,
+  22_microstructure, 21_derivatives).
+- **hist_gradient_boosting on the live panel**, re-run with Python 3.11
+  and pandas 3: headline rank IC 0.0035 (t 0.22, p 0.83), where the guides
+  quoted 0.0240 (t 1.81, p 0.083); against ridge, Diebold-Mariano t -1.93
+  (p 0.065), where they quoted -4.21 (p 2.9e-4), and the IC difference
+  -0.0055 (p 0.74). A run takes 0.65–0.74 s warm. The two engine advice
+  texts that quote it say so: a run that "took 4 to 8 s" takes 0.6 to
+  0.7 s, and hist_gradient_boosting is about 36 times as fast as
+  gradient_boosting on a rebuilt 71,070-row synthetic panel, where the
+  text said about 50.
+- **`cointegration_test` against statsmodels**, measured again through
+  the library with and without the extension on the same pairs: 25–30×
+  at 500 bars (6.4–6.9 ms against 0.23–0.26 ms) and 37–41× at 2,000
+  (30.7–31.4 ms against 0.76–0.83 ms), where the guides and the README
+  said 23× and 86×; the statsmodels path takes a third of the time it
+  did when 86× was measured.
+- **The pair screen at full size.** The guides, the README and two code
+  comments quoted 5.31 min for 2,000 names at 2,000 bars, measured when
+  the screen tested one order per pair. Both orders of all 1,999,000
+  pairs take 1.68 min at 500 bars (50 µs a pair) and 19.4 min at 2,000
+  (581 µs a pair) on a 16-thread laptop; a 400-name scan of the same bars
+  runs at 255–258 µs a pair, against 274–280 µs for the code before these
+  changes, so the full-size run spends 2.3 times as long on each pair.
+  `scan_pairs` is long-running for that reason, and 18_mcp says 19
+  minutes.
+- **README**: 15,796 tests; with the extension required, `-m "not
+  integration"` gives 15,634 passing and 84 skipped (14:49); 16 C++ test
+  executables and 95,816 checks, where it said 14 and 92,160.
+
 ## The order-event passes, the binomial lattice and the regime EM step run natively with the same numbers, and the uniqueness weights order a repeated date as their fallback does
 
 - **`label_uniqueness_weights` orders rows of one entity on one date by

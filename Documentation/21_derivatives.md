@@ -51,6 +51,13 @@ other model is refused by name rather than pricing a European option and
 letting the early-exercise premium go missing — which is largest exactly where
 it matters, deep in the money on a dividend payer.
 
+The lattice's backward induction runs in the native extension when it is
+built, with the same price, delta and gamma as the numpy loop on x86: an
+American option at the default 200 steps prices in 0.04 ms rather than
+1.1 ms, and at 2,000 steps in 2.5 ms rather than 18 ms. At 5,000 steps the
+far out-of-the-money nodes reach subnormal values (below 2.2e-308) and both
+paths slow to 45–67 ms.
+
 Bachelier also has **no dividend term** — it prices a forward-like normal
 underlying — so `price_option(model="bachelier", dividend_yield=...)` is
 refused by name rather than pricing as if the dividend were zero. It used

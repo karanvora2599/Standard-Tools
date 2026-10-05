@@ -33,9 +33,9 @@ the size named:
 | `wilder_atr` (n = 2 115, raw kernel) | **0.92–1.00×** (tied) | | Was **0.24–0.29×** before the same rewrite. |
 | `bollinger_bands` (n = 2 000) | **1.6×** | | |
 | `stochastic_oscillator` (n = 2 000) | **2.6×** | | |
-| `cointegration_test` (n = 500, vs. statsmodels) | **23×** (8.3ms → 0.37ms) | — | Compares against statsmodels, not numba — statsmodels has no JIT path at all. |
-| `cointegration_test` (n = 2 000, vs. statsmodels) | **86×** (86.9ms → 1.01ms) | — | The ratio grows with n because the kernel is no longer quadratic: the ADF lag sweep used to run one column-pivoted QR per candidate lag, `O(T·L³)` in total, and now reads every candidate's residual off one nested factorization, `O(T·L²)`. |
-| `scan_cointegrated_pairs` (2 000 tickers, 2 000 bars) | **111×** (9.81 h → 5.31 min) | — | One native call over the whole pair set instead of ~2 M Python round trips, parallel across pairs. |
+| `cointegration_test` (n = 500, vs. statsmodels) | **25–30×** (6.4–6.9 ms → 0.23–0.26 ms) | — | Compares against statsmodels, not numba — statsmodels has no JIT path at all. The library's call with the extension and without it (the statsmodels 0.14.3 path), on the same pairs, measured on 2026-10-04 on a shared 16-thread machine; first measured at 23× (8.3 ms → 0.37 ms), before the Python layer around both paths shrank. |
+| `cointegration_test` (n = 2 000, vs. statsmodels) | **37–41×** (30.7–31.4 ms → 0.76–0.83 ms) | — | Measured as the n = 500 row; first measured at 86× (86.9 ms → 1.01 ms) against a statsmodels path that took nearly three times as long as it does now. The ratio grows with n because the kernel is no longer quadratic: the ADF lag sweep used to run one column-pivoted QR per candidate lag, `O(T·L³)` in total, and now reads every candidate's residual off one nested factorization, `O(T·L²)`. |
+| `scan_cointegrated_pairs` (2 000 tickers, 2 000 bars) | **111×** (9.81 h → 5.31 min) | — | One native call over the whole pair set instead of ~2 M Python round trips, parallel across pairs. Measured with one order per pair, against a loop of `cointegration_test` as it ran then. Both orders of all 1,999,000 pairs, measured on 2026-10-04 on a 16-thread laptop: 1.68 min at 500 bars (50 µs a pair) and 19.4 min at 2 000 (581 µs a pair, where a 400-ticker scan of the same bars runs at 255–258 µs a pair, and the code before 2026-10-04 at 274–280 µs). Since the screen tests both orders and that call's Python layer shrank to a seventh (2026-10-04), on 200 tickers it takes 49–51 µs a pair at 500 bars and 231–249 µs at 2 000, against 0.23–0.25 ms and 0.82–0.84 ms for one `cointegration_test` call per pair: 3.3–5.1×. |
 | `calculate_beta` (n = 500, vs. `lstsq`) | **1.4×** | — | |
 | `half_life` (n = 500, vs. `lstsq`) | **1.1×** | — | |
 | `run_strategy` (n = 2 000, `include_trade_log=False`) | **~58×** (26.8ms → 0.46ms) | — | A wrapper-redundancy bug, not a kernel problem — see note below. Was ~1.0× before the fix. |
@@ -49,13 +49,16 @@ the size named:
 | `standardize_by_date` (cross-sectional z-score) | **8.6–11.6×** | — | Per-date centre, scale and clip over a counting-sorted panel. |
 | `cross_sectional_correlation` (per-date IC) | **3.0–6.2×** | — | spearman 4.9–6.2×, pearson 3.0–4.2×. Counting-sorts rows by date in O(n), replacing an argsort and two gathers. |
 | `cross_sectional_correlation` (pooled rank IC) | **1.6–3.0×** | — | Same kernel, one segment. The pooled case has no per-date parallelism to draw on, so the ranking sort splits into per-thread runs and merges above 50 000 rows. |
-| `label_uniqueness` (label-overlap weights) | **8–23×** | — | Concurrency by difference array, O(n) where sweeping each label's span is O(n·horizon). Gated below 50 000 rows, where the argument conversion costs more than the Python loop saves. |
+| `label_uniqueness` (label-overlap weights) | **8–23×** | — | Concurrency by difference array, O(n) where sweeping each label's span is O(n·horizon). Not gated: since the argument conversion stopped going through pandas it wins at every size. Each entity's rows are sorted as (date, row) pairs, so rows of one entity on one date keep their row order, as the fallback's stable sort keeps them, and an entity already in date order is not sorted (0.89–0.94× the previous kernel's time on one thread at 31,680 and 500,000 rows). |
 | `rank_by_date` (per-date average rank) | **4.4–22×** | — | The one modelling operation where VECTORISING LOST: a numpy rewrite measured 395 ms against pandas' `groupby.rank` at 407 ms, and slower at five columns. 4.4× at 50 entities, 16.6–22× at 500. Ranks every column in one call, and an extraction rather than new arithmetic — `average_ranks` already implemented the tie semantics. |
 | `permutation_null_ic` (whole permutation loop) | **68–88×** | — | The loop crosses the boundary entire, not the correlation alone: a third of the cost was constructing per-draw pandas Series nobody reads. Ranks once, since shuffling values inside a date permutes their ranks. Two numpy attempts at the same idea measured 0.14× and 0.6×. Seeded reproducibly WITHIN a backend only, the contract `simulate_forward_paths` states. |
 | `hierarchical_risk_parity` (2 106 days × 235 assets) | **4.5×** (341ms → 77ms; `frame.corr()` 260ms → 8–11ms) | — | Against pandas' `frame.corr()`, not numba: the correlation matrix was 78–86% of the call. The `pearson_correlation` kernel is pandas' `nancorr` arithmetic per pair, bit for bit, with each complete column's Welford recursion computed once and reused in every pair it is in; a pair with a gap runs pandas' loop as written. Weights, cluster order and risk contributions are identical to the `frame.corr()` path on pandas 2.3.3 (4.46×) and 3.0.5 (4.68×, 295ms → 63ms). |
 | `rolling_hurst` (n = 2 000, window = 200) | **274×** vs. Python, plus a further ~10.5× from OpenMP + a one-pass DFA reformulation on top of the *original* C++ implementation (measured independently, at the same n/window) | — | Combining the two independently-measured ratios gives roughly ~2 900× vs. the pure-Python fallback at this size — not itself a single direct measurement, but both factors are real. |
 | `simulate_forward_paths` (n_simulations = 5 000, horizon = 60) | **2.0×** (74.8ms → 37.7ms) | — | No numba path ever existed for this one — was pure uncompiled Python. See OpenMP note below for the parallel path's own measured speedup. |
 | `cusum_peaks` (200 AR(1) null paths × 2 105 steps) | **20×** (14.4ms → 0.71ms) | — | Against the numpy loop it replaces; there is no numba path. `cusum` gains 2.5× and `detect_basis_dislocation` 1.7× end to end. Bit-identical. The recursion clips at zero, so it has no filter or scan form, and every vectorized closed form measured slower than the loop. Serial on purpose: on 16 threads the kernel ran in a sixth of the time and its callers got 1.7× slower, because OpenMP's idle workers keep spinning beside the Python that runs next. |
+| `order_queue_ahead` + `order_lifetimes` (`order_event_metrics`, 2,000,000 events) | **17×** (8,516ms → 498ms) | — | Against the Python loops they replace: the queue pass 18.6× (4,327 → 232 ms), the lifetime pass 22.4× (3,936 → 176 ms); 15.5× (770 → 50 ms) at 200,000 events. Same state machines over `pd.factorize` codes, every number the loops' to the bit. Serial: a state machine. The two passes called on their own run the loops below 64 events. |
+| `binomial_lattice` (American put) | **28×** at 200 steps (1.13ms → 0.04ms), **7.2×** at 2,000 (17.8ms → 2.5ms) | — | Against the numpy loop of one expression per level; 26.5× (726 → 27 ms) on 476 contracts at 256 steps priced one call each. Bit for bit on x86. At 5,000 steps 1.5× only: 2.6% of the nodes are subnormal (below 2.2e-308, far out of the money) and both paths spend most of their time on them. |
+| `regime_em_step` (`detect_regimes`, 100 EM iterations) | **3.6–4.6×** (2,000–5,000 returns, 2–4 regimes: 21.5–57.6ms → 4.8–16.1ms) | — | numpy's `exp` stays numpy's (its own SIMD routine on some x86 machines, the C library's elsewhere) and is now the larger part of a step; the kernel does the rest of the step and the convergence test in numpy's summation order, bit for bit. The regime tool with prices from the disk cache: 2.7–3.7×. |
 | `garch11_variance_recursion` (n = 2 000, warm steady-state) | **0.8×** (10.8ms → 12.9ms, i.e. slightly *slower*) | 219ms → 4.8ms first call | The whole point of this port is the cold-start column, not this one — see below. |
 | `kalman_filter_*`, `donchian_state_machine`, `vwap_reversion_state_machine` | not separately re-measured | same cold-start pattern as GARCH/ADX above | |
 
@@ -66,6 +69,22 @@ the size named:
 **Two honest findings from actually measuring this**, worth calling out rather than hiding:
 - **`run_strategy` originally showed only ~1.0× end-to-end**, not the then-documented 3–8×, even though the raw C++ kernel genuinely was faster in isolation (confirmed by `tests/cpp/bench_backtest.cpp`'s native-only numbers below). The gap was never the kernel — it was the Python wrapper: `pct_change`/`shift` computed unconditionally before the C++ dispatch check even though the C++ path never used them, and an unconditional Python trade-log rebuild that overwrote already-correct native stats every call. **Since fixed** (removing both, and only building the Python trade log when a caller actually asks for it via `include_trade_log=True`) — the real, current number is **~58×** (26.8ms → 0.46ms), reflected in the table above. `batch_run_strategy` never had this specific bug (its consumer already read native stats directly), but has since gained its own further ~6–11× from an allocation-free summary kernel plus OpenMP across the parameter grid.
 - **OpenMP's measured speedup for `simulate_forward_paths` is ~2.0–2.4×** on this 16-core machine (min-of-7-runs across separate process invocations, `n_simulations=200 000`) — not the near-linear-with-cores scaling the per-path independence would suggest in theory. MSVC's OpenMP support here is version 2.0 (an older spec) — some of that gap was expected going in, though the spec was not the cause: linking LLVM's newer runtime instead left this kernel where it was on 16 threads (0.99×, [Build variants](#build-variants-openmp-runtime-profile-guided-optimization-and-clang-cl) below). A later pass eliminating each path's small per-path RNG/buffer allocations moved this scaling ratio only within noise (~2.4×→~2.1×, both real measurements) — the allocation being eliminated turned out not to be the dominant cost at this problem size, a legitimate change worth keeping regardless (fewer allocations is never worse) but not the win that framing initially suggested.
+
+**Four loops measured for porting (2026-10-04).** Each was measured at the
+size it is called with, through its public function and its agent tool,
+and ported only where the loop was most of the call and a kernel would be
+more than marginally faster:
+
+| Loop | Python time | Share of the call | Decision |
+|---|---|---|---|
+| `order_events`' queue and lifetime passes | 8.0–8.5 s at 2,000,000 events | 94% of `order_event_metrics`; the Parquet read is 0.15 s | Ported: 17× on the report |
+| `pricing._binomial`'s backward induction | 0.95 ms (200 steps) to 63 ms (5,000) | 95–98% of `get_option_pricing` | Ported: 7–28× below 5,000 steps |
+| `detect_regimes`' EM loop | 23–60 ms (2,000–5,000 returns, 2–4 regimes) | 87–95% of the regime tool from the disk cache | Ported, after numpy's `exp`: 3.6–4.6× |
+| `run_futures_simulation`'s bar loop | 2.0–2.2 µs a bar | 20–49% of the engine, 10–21% of `run_futures_backtest` (4.6–50.6 ms at 252–5,040 bars) | Not ported: removing the loop entirely bounds the tool at 1.11–1.27×, and the pandas conversions before the loop (1.6–10.3 ms) cost as much |
+
+None of the three new kernels is parallel: the order passes are state
+machines, a lattice level is a few microseconds, and one EM step on 5,000
+returns with 4 regimes is about 55 µs, under the 150 µs floor.
 
 **A third honest finding, from the modeling kernels.** That work opened by
 stating a *ceiling* rather than a target: feature preprocessing was 47–56%
@@ -396,8 +415,10 @@ processes inherit it.
 **scikit-learn's OpenMP pays for PASSIVE where nothing holds it back.**
 hist_gradient_boosting starts a team on every logical CPU for each fit and
 prediction, and its work per region is small on a modeling fold: on a
-15,000-row, 8-feature fold 16 sleeping-then-waking threads took 1.5–1.7 s
-against 0.28–0.36 s on one thread (ACTIVE: about 0.3 s either way). The
+14,880-row, 8-feature fold of the live panel (14 iterations under its early
+stopping) 16 sleeping-then-waking threads took 0.21–0.24 s against
+0.039–0.045 s on one thread (ACTIVE: 0.05–0.10 s on sixteen, 0.04–0.05 s
+on one). The
 modeling engine therefore holds OpenMP estimators to their share of the
 budget, one thread under `"auto"` below 2,000,000 training cells, through
 `_blas.openmp_thread_limit`, reference-counted across threads where the
@@ -450,8 +471,11 @@ output built from them. Under the same limit, `estimate_covariance`, the
 optimizers, `pca_returns`, `lead_lag_matrix` and the network features
 return the same bits on any machine with the same BLAS. Matrix-vector
 products outside these blocks (a portfolio's variance, an optimizer's
-gradient) keep the caller's setting; they gave the same bits at 1, 2, 4 and
-16 threads on every build measured. The cost, run before and after call by
+gradient) keep the caller's setting: they reduce over the assets, and gave
+the same bits at 1, 2, 4 and 16 threads on every build measured. Longer
+reductions do not: OpenBLAS splits a dot product of more than 10,000 terms
+across threads, and under 0.3.27 a matrix-vector product reducing 100,000
+rows at four threads and more. The cost, run before and after call by
 call in lockstep on a shared 16-thread machine, as the range of the minimum
 and median ratios after/before on both interpreters:
 
@@ -477,6 +501,43 @@ other threads of the process also runs on one thread. `SQT_BLAS_THREADS`
 sets another count; 0 disables the limit. `threadpoolctl`, a declared
 dependency, applies it; where it finds no BLAS it can control, the limit
 does nothing.
+
+**The rest of the library's own linear algebra runs on one thread too.**
+Until 2026-10-04 these kept the caller's threads, and under OpenBLAS 0.3.27
+and 0.3.31 at 16 threads their last bits followed the count: `pca_whiten`'s
+SVD from 20,000 rows of 30 features and its projection, which the full-panel
+refit runs off the pools; `redundancy_report`'s eigenvalues, pseudo-inverse
+and `collinear` regressions at 50 features and more, behind the VIFs
+`get_feature_redundancy` and `select_features` report; the sums of squares
+behind the half-life t-statistic of `half_life_statistics` and
+`cointegration_test` above 10,000 bars; and `book_metrics`' depth slope. The
+least squares and Gram products of `multi_factor_regression`, the ADF
+statistic and the Engle-Granger guard run under the limit as well; they gave
+the same bits at every count measured here. Each whole output is now the
+same bits at caller limits of 1, 2, 4 and 16. What moved, once, at 16
+threads: `pca_whiten`'s output at 50,000 × 30 by at most 2.5e-14 relative
+(4.6e-14 under 0.3.31; 97 of 500,000 values, the fitted state unchanged),
+the VIFs by 6.4e-16 and the `collinear` partial correlations by 4.2e-15, the
+half-life t-statistic above 10,000 bars by at most 5.2e-16 and the depth
+slope by 8.8e-16. The cost, run with and without the limit call by call in
+lockstep on a shared 16-thread machine, as the ratio of the minimums and the
+median ratio after/before on Python 3.12 and 3.11:
+
+| Call | Size | After/before |
+|---|---|---|
+| `pca_whiten` fit and projection | 5,000 × 8 | 0.77–0.85× |
+| `pca_whiten` fit and projection | 50,000 × 30 | 1.23–1.43× |
+| `pca_whiten` fit and projection | 200,000 × 20 | 1.12–1.16× |
+| `redundancy_report` | 8, 50 and 150 features | 0.91–1.01× |
+| `multi_factor_regression` | 1,260 × 5, 5,000 × 10 | 0.85–1.02× |
+| `run_stationarity_tests` | 1,000 to 20,000 bars | 0.90–1.06× |
+| `half_life_statistics` | 12,000 bars | 0.78–0.81× |
+| `book_metrics` | 2,000 and 20,000 snapshots of 10 levels | 0.90–1.05× |
+
+The one that loses is the tall SVD: 50,000 × 30 takes 58–62 ms on one thread
+against 41–45 ms on sixteen. Estimator fits are unchanged: a budget of 1, a
+search that does not pool and the full-panel refit keep the process's BLAS
+setting for the estimator itself.
 
 ---
 ## When a kernel goes parallel
@@ -608,6 +669,8 @@ Confirmed benchmarks on a 2 000-bar series (Python 3.12, NumPy 2.4):
 | Monte Carlo equity bands (`simulate_forward_paths`, 200 000 paths × 60 days) | 796 ms (three `np.percentile` calls along the strided axis) | 272 ms (one call on a transposed copy) | **2.9–3.2×** | 1.9–2.4× at 20 000 × 252, 1.7–1.9× at the default 1 000 paths; the terminal-only variant 1.1–1.4×. The terminal-return 5th percentile is computed once for both VaR and the CVaR threshold. Bit-identical: a band that comes out zero or NaN is recomputed as its own call (note below). |
 | Lead-lag p-values (126 names, `max_lag=10`, `min_correlation=0.02`; 99 818 pairs) | 1.3 s (`f_sf` per pair) | 0.10–0.13 s (`f_sf_array`) | **10–13×** | The whole `lead_lag_matrix` call 4.4–5.8×, 1.3–1.6× at the default 0.1 floor. `f_sf`'s double for every input on NumPy 2.0 and 2.4: `math.log`/`math.exp` per element rather than numpy's SIMD versions, and batches under 128 stay on the scalar. |
 | Winsorize step fit (2 000 × 200) | 99 ms (two `Series.quantile` per column) | 6.6 ms (one `DataFrame.quantile`) | **15–19×** | 3.3× at 20 000 × 50, 41–56× at 500 × 500. Bit-identical on pandas 2.3 and 3.0. Frames with repeated labels or a non-float64 column keep the per-column calls; the default winsorize + zscore pair runs the fused native path and is unaffected. |
+| `cointegration_test`, per pair (500 / 1,000 / 2,000 bars) | 1.09–1.45 / 1.27–1.73 / 1.92–2.62 ms | 0.23–0.30 / 0.38–0.72 / 0.97–1.27 ms | **4.4–5.2× / 2.4–3.8× / 1.7–2.2×** | The native test alone is 0.08–0.13 / 0.23–0.32 / 0.73–1.03 ms; the Python around it went from 1.0–1.3 ms to 0.14–0.19 ms at 500 bars. Two series on one unique index are read without the intersection and label lookups, the half-life gate reads the spread's values rather than a Series aligned with its own lag, the 5% critical value is cached by sample size, and the gate's flatness test skips the standard deviation where it cannot change the answer. Every output is the same bits, on pandas 2.3 and 3.0. Python 3.11 / pandas 3.0: 1.46–1.81 / 1.83–2.06 / 2.42–2.78 → 0.30–0.37 / 0.49–0.54 / 1.15–1.37 ms. |
+| `scan_pairs`, 50 names × 500 bars (1,225 pairs, both orders) | 128–146 µs a pair (one index, batch); 2.95–3.43 ms (per-pair loop) | 82–93 µs; 0.73–0.81 ms | **1.5–1.8×; 4.0–4.3×** | The batch path's degenerate-pair guard works out each series' half once, and the tool reads the batch by column instead of `iterrows`. The loop path is the per-pair `cointegration_test` above. Python 3.11 / pandas 3.0: 219–263 → 93–95 µs; 3.78–3.79 → 0.79–0.86 ms. |
 
 > **Portfolio simulator note:** `run_portfolio_simulation` holds prices, target weights and liquidity baselines as dense `(n_bars × n_tickers)` matrices and executes the default cost configuration as array arithmetic. The vectorized rebalance is deliberately narrow — `per_share` commission, the impact model and the ADV constraint each need a per-element decision (a per-order minimum, a per-ticker volatility lookup, an error naming one ticker) and keep the explicit loop, selected automatically by cost model. Both routes are held to the same numbers by tests: agreement with the pre-vectorization implementation is within 1.7e-15 relative across every configuration, with `rebalance_log` identical, the residual being pairwise-vs-sequential summation rather than a different formula. The speedup grows with universe size because the removed cost scaled with tickers × bars. See [Documentation/04_backtesting.md](04_backtesting.md).
 

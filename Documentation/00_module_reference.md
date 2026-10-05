@@ -113,8 +113,8 @@ Computed entirely from data a backtest already produces (`equity_curve`, `trade_
 - `calculate_beta` — 2-variable OLS via closed-form normal equations (1.4× vs. `np.linalg.lstsq` — a real but modest win, not the 10–20× originally projected before this was actually benchmarked)
 - `rolling_beta` — incremental O(1)-per-bar sum updates (4.7× vs. two pandas rolling passes), plus a further ~1.1–1.5× from an optional runtime AVX2+FMA dispatch path
 - `half_life` / `compute_spread` — same OLS kernel, same modest (~1.1×) speedup
-- `cointegration_test` — full Engle-Granger pipeline (23× vs. statsmodels at n=500; **86×** at n=2 000, because the ADF lag sweep now reads every candidate lag off a single nested factorization instead of factorizing once per lag)
-- `scan_cointegrated_pairs` — every pair of a universe in one native call, parallel across pairs. A 2 000-ticker screen is ~5 min at 2 000 bars rather than ~9.8 h looping `cointegration_test`
+- `cointegration_test` — full Engle-Granger pipeline (25–30× vs. statsmodels at n=500; **37–41×** at n=2 000, because the ADF lag sweep now reads every candidate lag off a single nested factorization instead of factorizing once per lag)
+- `scan_cointegrated_pairs` — every pair of a universe, in both orders, in one native call, parallel across pairs: 49–51 µs a pair at 500 bars and 231–249 µs at 2 000 on 200 names, against 0.23–0.25 ms and 0.82–0.84 ms for one `cointegration_test` call per pair in a Python loop
 - `hurst_exponent` / `rolling_hurst` — DFA + R/S + sliding window (83–131× / 274×)
 - `rolling_factor_loadings` — per-window rank-revealing QR with column pivoting (2.3–10× vs. per-window `lstsq`, larger at shorter windows). This deliberately replaced a much faster incremental-Cholesky path that was **wrong**: its pivot test compared every factor column against the intercept column's diagonal, so factor values around 1e-6 made the whole window read as singular and it returned all-NaN where NumPy returned correct coefficients. Recovering the speed via a QR update/downdate is not attempted; see [16_performance.md](16_performance.md)
 

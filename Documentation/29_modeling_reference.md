@@ -55,14 +55,14 @@ Parameter values are bounded as well as named; see [15_modeling.md](15_modeling.
 | task | name | class | allowed params | capabilities |
 |---|---|---|---|---|
 | classification | `gradient_boosting` | `sklearn.ensemble._gb.GradientBoostingClassifier` | `learning_rate`, `max_depth`, `n_estimators` | sample weights, probabilities, importances |
-| classification | `hist_gradient_boosting` | `sklearn.ensemble._hist_gradient_boosting.gradient_boosting.HistGradientBoostingClassifier` | `learning_rate`, `max_depth`, `max_iter` | sample weights, probabilities |
+| classification | `hist_gradient_boosting` | `sklearn.ensemble._hist_gradient_boosting.gradient_boosting.HistGradientBoostingClassifier` | `early_stopping`, `learning_rate`, `max_depth`, `max_iter`, `n_iter_no_change`, `validation_fraction` | sample weights, probabilities |
 | classification | `logistic` | `sklearn.linear_model._logistic.LogisticRegression` | `C`, `fit_intercept`, `l1_ratio`, `max_iter`, `penalty`, `solver` | sample weights, probabilities, coefficients |
 | classification | `mlp` | `standard_quant_tools.modeling.estimators.neural.PanelMLPClassifier` | `alpha`, `early_stopping`, `learning_rate_init`, `max_iter`, `n_hidden_layers`, `n_hidden_units`, `random_state` | probabilities |
 | classification | `random_forest` | `sklearn.ensemble._forest.RandomForestClassifier` | `max_depth`, `max_features`, `max_samples`, `min_samples_leaf`, `n_estimators` | sample weights, probabilities, importances |
 | classification | `sgd` | `standard_quant_tools.modeling.estimators.online.ProbabilisticSGDClassifier` | `alpha`, `eta0`, `fit_intercept`, `l1_ratio`, `learning_rate`, `loss`, `max_iter`, `penalty`, `random_state`, `tol` | sample weights, probabilities, coefficients |
 | regression | `elastic_net` | `sklearn.linear_model._coordinate_descent.ElasticNet` | `alpha`, `fit_intercept`, `l1_ratio`, `max_iter` | sample weights, coefficients |
 | regression | `gradient_boosting` | `sklearn.ensemble._gb.GradientBoostingRegressor` | `learning_rate`, `max_depth`, `n_estimators` | sample weights, importances |
-| regression | `hist_gradient_boosting` | `sklearn.ensemble._hist_gradient_boosting.gradient_boosting.HistGradientBoostingRegressor` | `learning_rate`, `max_depth`, `max_iter` | sample weights |
+| regression | `hist_gradient_boosting` | `sklearn.ensemble._hist_gradient_boosting.gradient_boosting.HistGradientBoostingRegressor` | `early_stopping`, `learning_rate`, `max_depth`, `max_iter`, `n_iter_no_change`, `validation_fraction` | sample weights |
 | regression | `huber` | `sklearn.linear_model._huber.HuberRegressor` | `alpha`, `epsilon`, `fit_intercept`, `max_iter` | sample weights, coefficients |
 | regression | `lasso` | `sklearn.linear_model._coordinate_descent.Lasso` | `alpha`, `fit_intercept`, `max_iter` | sample weights, coefficients |
 | regression | `linear` | `sklearn.linear_model._base.LinearRegression` | `fit_intercept` | sample weights, coefficients |

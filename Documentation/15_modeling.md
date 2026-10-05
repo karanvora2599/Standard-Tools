@@ -1573,30 +1573,63 @@ Neither is a declared dependency. Registration is guarded, so a missing
 library leaves the registry reporting what *is* installed rather than
 breaking an import of `standard_quant_tools.modeling`. Install with
 `pip install lightgbm xgboost` if you want them; `hist_gradient_boosting`
-closes most of the gap with no extra install.
+closes most of the gap with no extra install. Its 10.9 s predates its
+time-ordered early stopping (below): on a 60-name live panel of 71,070
+rows and 8 features, 14 walk-forward folds and the refit at budget
+`"auto"`, a run now takes 0.91–0.95 s, warm, on a shared 16-thread machine.
 
-**`hist_gradient_boosting` holds out part of its training window.** It is
-scikit-learn's `HistGradientBoostingRegressor` and
-`HistGradientBoostingClassifier` with only `max_iter`, `max_depth` and
-`learning_rate` exposed, so scikit-learn's default `early_stopping="auto"`
-applies: above 10,000 training rows a fit sets aside a random 10% of them
-(`validation_fraction=0.1`, stratified by class for the classifier) and
-stops when the loss on those rows has not improved for 10 iterations
-(`n_iter_no_change`). The split is drawn from the estimator's
-`random_state`, which the engine sets to the spec's `random_seed`, so it is
-the same on every run of a spec and moves when the seed does. The rows set
-aside are dated inside the training window, and a held-out row's h-day
-label shares up to h − 1 days of outcome with the same entity's training
-rows beside it, so the stopping point is chosen on rows that are not out of
-sample in time, and the model is fitted on the other 90% of the window. The
-test fold is outside both, as for every estimator. `early_stopping` is not
-in the allowlist, so a spec cannot turn this off. On a 14,940-row window of
-the live 30-name panel (its 5-day rank label, `random_seed` 42) the default
-100 iterations ran out before the held-out loss stopped improving (at
-`max_iter=1000` it stopped at 246), so there the rule chose nothing, but the
-fit still left out a tenth of the rows: its predictions on the window
-correlated 0.91 with those of the same estimator fitted on every row with
-`early_stopping=False`.
+**`hist_gradient_boosting` stops early on the last dates of its training
+window.** It is scikit-learn's `HistGradientBoostingRegressor` and
+`HistGradientBoostingClassifier` with `max_iter`, `max_depth`,
+`learning_rate`, `early_stopping`, `validation_fraction` and
+`n_iter_no_change` exposed. Under `early_stopping="auto"`, the default, a
+fit whose training window has more than 10,000 rows (scikit-learn's own
+threshold) stops early; `True` always does and `False` never does. The
+validation rows are those on the window's last `validation_fraction`
+(default 0.1) of its distinct dates: a share of dates, not of rows, and not
+drawn at random. Rows whose label ends on or after the first validation
+date are left out of the fit, and so is every row dated on the label
+horizon's h dates before it, so no fitted label shares an outcome with a
+validation row. This is the rule `select_features` holds out by. Boosting
+stops when the loss on the validation rows has not improved for
+`n_iter_no_change` (default 10) iterations, and the model keeps the trees
+fitted to that point. Every fit applies the rule to its own rows: each
+walk-forward fold, each search candidate on its inner window, each
+conformal-interval fit, the refit on the whole panel, and under probability
+calibration each calibration fit. `validation_report.folds[i].early_stopping`
+and `validation_report.refit_early_stopping` give the validation dates, the
+rows fitted, validated and embargoed, and `n_iter`, the iterations boosting
+ran. The refit is no exception: the deployed model is fitted on the rows
+before the panel's last tenth of dates and the embargo, and those dates
+only decide when it stops (on the live panel, 28,350 of 31,680 rows fitted,
+106 dates validated). `early_stopping=False` fits every row, to the last
+date, for `max_iter` iterations.
+
+scikit-learn's own rule holds out a shuffled 10% of the rows instead. Those
+rows sit among the rows fitted, and a held-out row's h-day label shares up
+to h − 1 days of outcome with the same entity's fitted rows beside it. On
+the live 30-name panel (5-day rank label, eight walk-forward folds of 14,880
+to 14,970 rows, `random_seed` 7, `max_iter=1000`), boosting stopped after
+198 to 529 iterations on a shuffled 10% of the rows, 277 to 426 on a random
+10% of the dates, 10 to 13 on those dates with the label horizon embargoed
+around them, and 10 to 16 on the window's last 10% of dates. The late stops
+came from the overlapping labels, not from where in the window the
+validation rows sat. At the default `max_iter=100` the shuffled split never
+stopped, and the run's out-of-sample `cs_rank_ic_mean` was 0.0240 (t 1.81,
+p 0.083) at `random_seed` 7 and 0.0085 (p 0.57) at 42, because the split
+moved with the seed. It is now 0.0035 (t 0.22, p 0.83) at either seed and
+either `max_iter`, and 0.0137 (t 1.00, p 0.32) with `early_stopping=False`.
+
+The time-ordered rule needs scikit-learn 1.7 or later, whose fit takes the
+validation rows as `X_val`. Under an older one, `early_stopping=True` is
+refused before any data is read, and `"auto"` fits every row without early
+stopping and says so in the run's `warnings`; neither falls back to the
+shuffled split. A window too short for the validation block and the
+embargo with a row left to fit, or a classifier's window that would leave
+one class to fit on, is refused under `True`; under `"auto"` it is fitted
+on every row without early stopping, and one warning counts such fits.
+`validation_fraction` and `n_iter_no_change` are refused beside
+`early_stopping=False`, where no stopping rule runs.
 
 ### Quantile regression
 
@@ -1626,6 +1659,9 @@ choices), and `validate_params` checks values as well as names:
 | `learning_rate` | 1e-6 – 10 |
 | `alpha` / `C` | 0 (or 1e-9) – 1e9 |
 | `l1_ratio` | 0 – 1 |
+| `early_stopping` (hist_gradient_boosting) | `"auto"`, `True` or `False`; a number is refused rather than read as a flag |
+| `validation_fraction` (hist_gradient_boosting) | 0.01 – 0.5 of the training window's dates, written with a decimal point |
+| `n_iter_no_change` (hist_gradient_boosting) | 1 – 100,000 |
 
 The ceilings are deliberately generous — they exist to stop a runaway
 request taking the process down, not to express an opinion about good
@@ -1920,8 +1956,8 @@ a 20-day label over 126; this one rejects 4.6% to 5.9% over horizons 1 to
 20 and 126 to 2,000 dates, and costs power only where the dates are few
 for the horizon. On a 30-name daily equity panel all three models were
 indistinguishable from zero: ridge 0.0090 (t 0.29, p 0.776),
-hist_gradient_boosting 0.0240 (t 1.81, p 0.083; t 2.67 if the daily ICs,
-whose lag-1 autocorrelation is 0.45, are read as independent), random
+hist_gradient_boosting 0.0035 (t 0.22, p 0.826; t 0.34 if the daily ICs,
+whose lag-1 autocorrelation is 0.57, are read as independent), random
 forest 0.0022 (t 0.10). With fewer than 10 tested dates the warning says
 the headline was not tested; significantly below zero, it says the
 predictions order the names in reverse and what the negated ordering
@@ -1970,6 +2006,14 @@ label-overlap purging — and `scheduled_train_end`, the window end the
 splitter planned. Their difference is exactly how much the purge removed.
 Only the scheduled value used to be reported, so a fold whose last two
 weeks were entirely purged still claimed to have trained through them.
+A `hist_gradient_boosting` fold that stopped early also records
+`early_stopping`: the validation dates (`validation_start`,
+`validation_end`, `n_validation_dates`), `n_fit_rows`,
+`n_validation_rows`, `n_embargoed_rows` with `embargo_dates`, and
+`n_iter`; or, where early stopping was turned off, `applied: false` and the
+reason. `n_train_rows` counts all three parts. The refit's is
+`validation_report.refit_early_stopping`. Neither appears for any other
+estimator, nor where a fit ran as scikit-learn runs it.
 
 `ValidationSpec.min_folds` (default **2**) is enforced against *completed*
 folds. One surviving fold is a single train/test split, not walk-forward
@@ -2410,6 +2454,13 @@ end is the same sentinel to both. The fallback used to sort and search the
 objects as given and drifted from the kernel by up to 2.7 (mean 1) on a
 720-row panel with label ends missing; the two now agree to the bit.
 
+Rows of one entity on the same date keep their row order on both backends,
+the order of a stable sort by date. The engine never hands over such a
+panel — it refuses a repeated (entity, date) — but a direct caller can,
+and a tied row's position decides which bars its label spans: the kernel's
+sort once left that order to chance, and its weights differed from the
+fallback's by up to 1.5 (mean 1) on a 3,900-row panel with repeated dates.
+
 `time_decay`'s `half_life_days` is in calendar days rather than bars, so the
 intent survives a change of data frequency.
 
@@ -2723,8 +2774,9 @@ It controls four things:
 - **OpenMP estimators are held to their share.** hist_gradient_boosting,
   LightGBM and XGBoost start an OpenMP team per fit and prediction, on every
   logical CPU at their default. Under the PASSIVE wait policy this package
-  sets on import, 16 threads fitted a 15,000-row, 8-feature fold in 1.5–1.7 s
-  and one thread in 0.28–0.36 s, with the same predictions. Each fit and
+  sets on import, 16 threads fitted a 14,880-row, 8-feature fold of the live
+  panel (14 iterations under its early stopping) in 0.21–0.24 s and one
+  thread in 0.039–0.045 s, with the same predictions. Each fit and
   prediction now runs under `openmp_thread_limit` at the fit's share. Under
   MSVC's vcomp the count set on any thread reaches every thread (a per-call
   limit on a worker thread was measured reaching the main thread), so there
@@ -2733,13 +2785,24 @@ It controls four things:
   restores its own; under `"auto"` that is one thread below 2,000,000 training cells
   (rows × columns), where one thread measured faster, and the share above.
   On a 30-name daily equity panel (31,680 rows, 8 features) a
-  hist_gradient_boosting run went from 15–17 s to about 4 s.
+  hist_gradient_boosting run went from 15–17 s to about 4 s while every fit
+  ran its 100 iterations; under the time-ordered early stopping of
+  2026-10-04 (see [the two optional
+  boosters](#the-two-optional-boosters-and-why-they-are-worth-installing))
+  it takes 0.65–0.74 s.
   `score_model` and `survival_curves` predict under the same limit, at the
   count the run gives one fit of the scored matrix on the budget it
   recorded (`validation_report["fits"]["max_parallelism"]`): one thread
-  under `"auto"` for a one-date score, the budget when it is a number. A
-  30-row, 8-feature hist_gradient_boosting score measured a median
-  5.0–9.2 ms on all 16 threads and 0.75–0.93 ms on one, the same
+  under `"auto"` for a one-date score, the budget when it is a number.
+  A LightGBM model loaded from its file follows that limit too: its `n_jobs`
+  is written as 0 (the OpenMP runtime's count) where it used to carry the
+  share it was fitted with, which LightGBM set itself whatever the limit.
+  A 30-row, 8-feature LightGBM prediction under the one-thread limit took
+  a median 4.6 ms at the 16 threads a fit under `"auto"` above 2,000,000
+  cells records on a 16-thread machine, and 1.2 ms at 0, the same
+  predictions to the bit. A 30-row, 8-feature hist_gradient_boosting score
+  with the live panel's deployed model (10 iterations) measured a median
+  0.64–0.90 ms on all 16 threads and 0.21–0.22 ms on one, the same
   predictions to the bit. An estimator that does not run on OpenMP is left
   alone.
 
@@ -2772,7 +2835,9 @@ LightGBM's fit can differ in the last bits
 with its thread count (4e-19 on a 160,000-row fit, none on 25,000 rows),
 and it ignores the OpenMP runtime's count when its `n_jobs` is unset, so it
 is handed its share explicitly, one included; under `"auto"` it fits on one
-thread below the threshold on every machine. The TPE search stays
+thread below the threshold on every machine. Its `model.joblib` records that
+share as 0, LightGBM's "the OpenMP runtime's count", so the file is one at
+any budget (see [The skops bundle](#the-skops-bundle)). The TPE search stays
 sequential on purpose — a parallel optuna study changes which trials the
 sampler has seen when it proposes the next one, and a search whose winner
 depends on thread timing is not a search anyone can reproduce.
@@ -2785,9 +2850,13 @@ eigendecomposition on four to eight workers, and those fits no longer depend
 on the machine's core count. End to end at a budget of 8 with 235 features,
 ridge is 1.0–1.2× faster and linear regression 1.15–1.25×. A budget of 1, a
 search that does not pool (TPE, or a single candidate), and the full-panel
-refit keep the process's BLAS setting. The numbers are identical at 1 and at
-4, checked bit for bit on a 150-feature ridge search. `SQT_BLAS_THREADS`
-sets another count, or 0 to leave BLAS alone (see
+refit keep the process's BLAS setting. That setting is the estimator's: a
+`pca_whiten` step's decomposition and projection run on one BLAS thread
+wherever they run, since 2026-10-04, because from 20,000 rows of 30
+features their last bits followed the thread count in the refit. The
+numbers are identical at 1 and at 4, checked bit for bit on a 150-feature
+ridge search. `SQT_BLAS_THREADS` sets another count, or 0 to leave BLAS
+alone (see
 [16_performance.md](16_performance.md#runtime-defaults-openmp-wait-policy-and-blas-threads)).
 
 A `random_forest` run that will build every tree on one core — an explicit
@@ -3524,11 +3593,11 @@ required by default.
 `model.joblib` is verified before it is deserialized and the manifest can
 be signed, which is a guard *around* pickle, not a replacement for it:
 joblib is pickle, and pickle executes code from the file by design. When
-the `skops` package is installed (`pip install standard_quant_tools[skops]`),
-registration also writes **`model.skops`** beside the joblib — the same
-estimator as declared state — hashed into the manifest like every other
-artifact, and `formats` on the manifest says which of the two the model
-carries. `load_model(model_id, format="skops")`, or
+the `skops` package is installed (`pip install standard_quant_tools[skops]`,
+skops 0.15 or later), registration also writes **`model.skops`** beside the
+joblib — the same estimator as declared state — hashed into the manifest
+like every other artifact, and `formats` on the manifest says which of the
+two the model carries. `load_model(model_id, format="skops")`, or
 `SQT_MODEL_FORMAT=skops` for every load, constructs only the types the
 loader trusts: skops' defaults, this package's own estimators by module
 prefix, and five scikit-learn types the registered estimators hold that
@@ -3536,11 +3605,13 @@ skops does not trust by default — a forest's or gradient-boosting model's
 trees (`sklearn.tree._tree.Tree`), a histogram-boosting model's
 (`TreePredictor`), a calibrated classifier's per-fold calibrators
 (`_CalibratedClassifier`, `_SigmoidCalibration`) and an MLP's
-`AdamOptimizer` (`serialization.TRUSTED_TYPES`). Until 2026-10-04 those
-five were not trusted, and every forest, gradient-boosting,
-histogram-boosting, calibrated and MLP bundle was refused at load. A
-bundle naming any other type is refused **by that type's name** before
-anything is built.
+`AdamOptimizer` (`serialization.TRUSTED_TYPES`, read off skops 0.15 and
+scikit-learn 1.9). Until 2026-10-04 those five were not trusted, and every
+forest, gradient-boosting, histogram-boosting, calibrated and MLP bundle
+was refused at load. A bundle naming any other type is refused **by that
+type's name** before anything is built; under a skops older than 0.15,
+whose defaults can name other types, the refusal says which release the
+trusted types were derived on and which one is installed.
 
 The planted cases: a corrupted joblib is refused while the bundle still
 answers; a corrupted bundle is refused before it is read; a bundle
@@ -3548,12 +3619,19 @@ carrying a type from outside the package is refused by name, and so is
 one carrying a scikit-learn type no registered estimator holds (an MLP
 fitted with `solver="sgd"` holds an `SGDOptimizer`). Every registered
 scikit-learn and package estimator, and every classifier calibrated both
-ways, loads from its bundle with the same predictions. LightGBM and
-XGBoost models are written as bundles but refused at load, naming their
-booster type: loading one would mean trusting that library's own state.
-When skops cannot serialize an estimator at all, registration keeps
-joblib alone, `formats` says `["joblib"]`, and asking for the bundle is
-refused rather than answered with the joblib.
+ways, loads from its bundle with the same predictions. Registration does
+not write a bundle the loader would refuse: the bundle's types are checked
+against what the loader trusts before it is written, and when any is
+refused registration keeps joblib alone, logs the types and `formats` says
+`["joblib"]`. That is every LightGBM and XGBoost model, whose booster
+(`lightgbm.basic.Booster`, `xgboost.core.Booster`) the loader refuses
+because loading it would mean trusting that library's own state; until
+2026-10-04 their bundles were written and listed in `formats`, and could
+never be loaded. A manifest that lists one still loads its joblib and
+verifies, and its bundle is refused by the booster type. When skops
+cannot serialize an estimator at all, registration likewise keeps joblib
+alone, and asking for the bundle of a model without one is refused rather
+than answered with the joblib.
 
 The same model writes the same bundle. As `skops.io.dump` writes it, an
 archive dates every member with the wall clock, stores each array under its
@@ -3563,27 +3641,80 @@ left; two identical runs therefore wrote different `model.skops` files and
 the manifest's hash for it never reproduced. Registration rewrites the
 archive before saving it: ids numbered in the order `schema.json` first
 names them, members renamed to match, padding zeroed, every member dated
-1980-01-01. What loads from it is unchanged, and a bundle written before
-loads as it always did.
+1980-01-01. A bundle written before loads as it always did.
+
+The bundle is the model's state, wherever the model came from. skops gives
+one `__id__` to every reference to one object, so the ids also recorded
+which objects the model in memory shared, and a fit, a joblib load and a
+skops load share different ones: a fit passes one float or string between
+attributes that a load holds as copies, joblib loads each reference to an
+array as its own array, and a model loaded from its bundle shares every
+`inf`. Of the 31 registered estimator cases that have a bundle, 24 wrote
+another bundle once loaded from their joblib, and the gradient-boosting,
+histogram-boosting and quantile gradient-boosting regressors another once
+loaded from their bundle; no array's bytes, dtype or memory order
+differed, only the ids. Registration now numbers ids by what a node holds:
+a node that loads as an immutable value (a number, string, None, type,
+function, bytes, a numpy scalar, or a tuple of these) has one id per
+distinct value, and any other node (an array, list, dict, estimator or
+random state) one id per place it appears, its arrays written once per
+place. A fitted model, that model loaded from its joblib and that model
+loaded from its bundle write one bundle, for all 31. What loads is the
+same estimator — its types, parameters, values and predictions; what
+differs is which objects are one object: a mutable object two attributes
+shared in the fit, such as a calibrated classifier's `classes_` and each
+fold's `classes`, loads as equal copies, as it does from the joblib, and
+equal immutable values load as one. `serialization.state_hash(estimator)`
+is the content hash registration records for `model.skops`, computed in
+memory, and None for a model registered without a bundle.
+
+The bundles of the linear models (linear, ridge, lasso, elastic net,
+Huber, quantile, logistic, both SGD learners) and of the Cox model kept
+their bytes; every tree ensemble's, MLP's and calibrated classifier's
+changed once on 2026-10-04. On the live fixture under Python 3.12 and
+pandas 2.3, ridge's stays `841665d38b1dc1d6`, the random forest's went
+from `0f6341deb345afc5` to `5b0e12b8ce4e6569` and hist_gradient_boosting's
+from `1dc56bd162cb0e3c` to `931f7ab0d05a946f` for the same trees; its
+time-ordered early stopping, the same day, fits other trees, whose bundle
+is `219ff6c33b22adaf` at a budget of 1 and under `"auto"`. The hash
+follows the values: the fixture forest's joblib, written under Python 3.11
+and numpy 2.4, gives `5b0e12b8ce4e6569` loaded under Python 3.12 and numpy
+2.0, while the ridge and hist_gradient_boosting fits differ between the two
+environments in the last bits (a coefficient by 1.2e-16, a baseline
+prediction by 7.4e-20) and give their own.
 
 The same model writes the same `model.joblib` too. A fresh fit already
-did, but two things in the file did not follow the model: a forest loaded
-from a file carries whatever its loader left in the seven padding bytes of
-each node record, so loads of one file re-dumped to different files, and a
-histogram-boosting model pickled its bin mapper's `n_threads`, the OpenMP
-thread count it was fitted under. Both formats, and
-`quantile_models.joblib`, are now written with the padding zeroed and
-`n_threads` recorded as None; the model in memory keeps its count.
-scikit-learn reads it only while binning data inside `fit`, and `predict`
-picks its thread count when called, so a loaded model predicts as the
-registered one did. A histogram-boosting model's files changed once on
+did, but three things in the file did not follow the model: a forest
+loaded from a file carries whatever its loader left in the seven padding
+bytes of each node record, so loads of one file re-dumped to different
+files; a histogram-boosting model pickled its bin mapper's `n_threads`, the
+OpenMP thread count it was fitted under; and a LightGBM model recorded the
+`n_jobs` the engine handed it — its share of the budget — as its own
+parameter, in its booster's parameters and in the booster's model text
+(`[num_threads: 4]`). Both formats, and `quantile_models.joblib`, are now
+written with the padding zeroed, `n_threads` recorded as None and a
+LightGBM model's count recorded as 0, LightGBM's documented "the OpenMP
+runtime's count"; the model in memory keeps its own. scikit-learn reads
+`n_threads` only while binning data inside `fit`, and both libraries'
+`predict` reads its thread count when called, so a loaded model predicts
+as the registered one did, with the same predictions — a LightGBM model on
+the OpenMP limit `score_model` holds rather than on the share it was
+fitted with. A histogram-boosting model's files changed once on
 2026-10-04 — the live fixture's 10-thread `16413ffd8e1f73fb` and a
 1-thread rerun's `cf2f7f06ec960dbc` are both `6cd6d579ad02cdbc`, the same
-trees — while ridge and random-forest files kept their hashes. A loaded
-model re-dumped is still not byte for byte the fitted model's file, for
-any estimator: pickle writes an object referenced twice once, and a fit
-shares objects (numpy's float64 dtype, the strings of its parameter
-names) that a load holds as separate copies.
+trees, until the time-ordered early stopping fitted other trees
+(`2d7e95bc288e6277` under Python 3.11) — while ridge and random-forest
+files kept their hashes. A LightGBM
+model's changed once on 2026-10-04: on the live panel (50 trees, Python
+3.12) its budget-1 and budget-4 files, `392f98bc92307ff6` and
+`9560171b87632007`, are both `233f50e446018779`. An XGBoost model's file
+was one at any budget already (`71e487be7db930c8` at 1 and 4): the engine
+hands it no `n_jobs`, and its booster records `nthread` 0. A loaded model
+re-dumped is still not byte for byte the fitted model's joblib, for any
+estimator: pickle writes an object referenced twice once, and a fit shares
+objects (numpy's float64 dtype, the strings of its parameter names) that a
+load holds as separate copies. The bundle, and `state_hash`, are the form
+that does not depend on it.
 
 ### A registry that reaches another machine
 
@@ -3938,7 +4069,7 @@ On 20,000 simulated loss differentials of a 5-bar overlap over 504 dates it
 rejects a true zero 5.2% of the time at a nominal 5% (20-bar: 5.6%), where
 the previous Newey-West lag of max(2h, ⌊4(n/100)^(2/9)⌋) rejected 7.6%
 (9.9%) and the original h − 1 more. On the live panel against ridge,
-hist_gradient_boosting moved from t −4.82 (p 1.4e−6) to t −4.21 (p 2.9e−4)
+hist_gradient_boosting moved from t −1.76 (p 0.079) to t −1.93 (p 0.065)
 and random forest from t −1.74 (p 0.082) to t −1.61 (p 0.120). A lag named
 to `diebold_mariano` is used as named, with the small-sample factor, as
 before. A ranker's score has no scale, so it has no loss and the IC
@@ -4489,15 +4620,16 @@ pooled, **1.59×/1.82×** cross-sectional, **2.23×/2.55×** weighted, at
 
 The dates were the next half of a run. `to_numpy()` on a timezone-aware
 date column builds a `pd.Timestamp` per row, and a ridge walk-forward run
-on a 31,680-row, 30-name daily panel made 58 such calls — the sample
-index, the preprocessing context, the plan, the fold loop — for 0.85 s of
-its 1.52 s under the profiler, before the sorts and searches the object
-arrays slowed down. Those columns are now read as their UTC instants
+on a 31,680-row, 30-name daily panel made 58 such calls — the sample index,
+the preprocessing context, the plan, the fold loop — for 0.85 s of its
+1.52 s under the profiler, before the sorts and searches the object arrays
+slowed down. Those columns are now read as their UTC instants
 (`datetime_values`). Warm, median of five runs on a 16-thread machine, on
-pandas 3.0 the ridge run went from 2.2–2.8 s to 0.36–0.49 s (1.55–1.74 s
-to 0.32–0.38 s on pandas 2.3), a ridge cpcv run from 5.7–6.9 s to
-1.1–1.3 s, and a hist_gradient_boosting run from 4.5–6.1 s to 2.7–3.4 s,
-with every recorded output and content hash unchanged. The
+pandas 3.0 the ridge run went from 2.2–2.8 s to 0.36–0.49 s (1.55–1.74 s to
+0.32–0.38 s on pandas 2.3), a ridge cpcv run from 5.7–6.9 s to 1.1–1.3 s,
+and a hist_gradient_boosting run from 4.5–6.1 s to 2.7–3.4 s at the 100
+iterations every fit then ran (0.65–0.74 s under its time-ordered early
+stopping), with every recorded output and content hash unchanged. The
 hyperparameter search reads them the same way now. A ridge grid search on
 that panel (4 values of `alpha`, 2 inner folds, 8 outer folds and the
 refit) went from 7.0–7.2 s to 1.5 s on pandas 3.0 and from 5.1 s to
@@ -4548,11 +4680,11 @@ Everything works. `_sqt_core` is optional throughout, each module carries its
 own `HAS_CPP` flag, and the tests compare the two paths directly by toggling
 it — so they are meaningful whether or not a compiler was available.
 
-Two of the kernels are additionally gated by size, because below the
-crossover the argument conversion costs more than the kernel saves: pooled
-correlation above 5,000 rows, label uniqueness above 50,000. Both thresholds
-exist because the first versions were measurably *slower* than the Python
-they replaced on small panels.
+One kernel is additionally gated by size, because below the crossover the
+argument conversion costs more than the kernel saves: pooled correlation
+above 5,000 rows. Label uniqueness was gated at 50,000 rows for the same
+reason until its conversion stopped going through pandas; it now wins at
+every size and is not gated.
 
 ---
 

@@ -3,8 +3,8 @@
 The analysis module provides statistical tools for understanding return series, factor exposures, and market structure. Most functions are pure NumPy / Pandas with no external dependencies. The error bars, multiple-testing corrections and structure tests built around this surface — bootstrap intervals, normality, stationarity, regimes, seasonality, lead-lag — are a separate family and live in [23_inference.md](23_inference.md); nothing here duplicates them. Several functions have optional **C++ fast paths** via the `_sqt_core` extension:
 
 - **Hurst exponent** — measured 83–131× faster (DFA, n=500/n=2 000); measured 274× for rolling Hurst (n=2 000, window=200). Pure-Python fallback is automatic when the extension is not built. Those are the numbers this document quotes everywhere; earlier, unmeasured 20–80×/30–100× projections appeared here before `_sqt_core` was benchmarked.
-- **Cointegration** — measured 23× faster at n=500 and **86× at n=2 000** (Engle-Granger OLS + ADF + MacKinnon 2010, vs. statsmodels). The ratio grows with sample size rather than shrinking, because the ADF lag sweep is no longer quadratic: it used to run one column-pivoted QR per candidate lag, `O(T·L³)` in total, and now reads every candidate's residual off a single nested factorization, `O(T·L²)`. Bypasses statsmodels for the actual computation when built, but `statsmodels` remains a required install either way (it's imported unconditionally at module load, not lazily behind the C++ check).
-- **`scan_cointegrated_pairs`** — every pair of a universe in one native call, parallel across pairs. A 2 000-ticker screen at 2 000 bars takes ~5 min instead of ~9.8 h looping `cointegration_test`.
+- **Cointegration** — measured 25–30× faster at n=500 and **37–41× at n=2 000** (Engle-Granger OLS + ADF + MacKinnon 2010, vs. statsmodels). The ratio grows with sample size rather than shrinking, because the ADF lag sweep is no longer quadratic: it used to run one column-pivoted QR per candidate lag, `O(T·L³)` in total, and now reads every candidate's residual off a single nested factorization, `O(T·L²)`. Bypasses statsmodels for the actual computation when built, but `statsmodels` remains a required install either way (it's imported unconditionally at module load, not lazily behind the C++ check).
+- **`scan_cointegrated_pairs`** — every pair of a universe, in both orders, in one native call, parallel across pairs: 49–51 µs a pair at 500 bars and 231–249 µs at 2 000 on 200 names, against 0.23–0.25 ms and 0.82–0.84 ms for one `cointegration_test` call per pair in a Python loop.
 - **`calculate_beta`, `half_life`, `compute_spread`** — measured 1.1–1.4× faster (2-variable OLS via closed-form normal equations, avoids LAPACK `lstsq` overhead) — a real but modest win; `lstsq` on a 2-variable system turned out not to carry as much LAPACK-call overhead as originally estimated. (An earlier, unmeasured 10–20× projection appeared in this doc before `_sqt_core` was actually built and benchmarked for the full before/after story.)
 - **`rolling_beta`** — measured 4.7× faster (incremental O(1)-per-bar sum updates replace two sequential pandas `.rolling.cov/.var` passes, n=2 000, window=60), plus a further ~1.1–1.5× from an optional runtime AVX2+FMA dispatch path on capable CPUs (falls back to the same scalar kernel elsewhere). (An earlier, unmeasured 10–40× projection appeared in this doc before real measurement.)
 - **`rolling_factor_loadings`** — measured 2.3–10× faster than a per-window `np.linalg.lstsq` loop (10.0× at n=2 000/window=60, 5.5× at n=500/window=60, 2.3× at window=252 — the gap narrows as the window grows, since cost is `O(n·window·p²)`). This is **slower than the 26× this document used to claim, on purpose**: that figure belonged to an incremental rank-1 Cholesky path that returned all-NaN for small-magnitude factors. See "C++ acceleration" below.
@@ -259,6 +259,8 @@ functions directly when you already hold the series.
 Two price series are **cointegrated** when a linear combination of them is stationary, even though each series individually follows a random walk. This is the statistical foundation of pairs trading.
 
 `cointegration_test` uses the **C++ extension** (`_sqt_core`) when available — a self-contained Engle-Granger implementation (OLS + ADF + MacKinnon 2010 response surface) with no dependency on `statsmodels` for the computation. Measured **23× at n = 500 and 86× at n = 2 000**, the ratio growing with sample size because the ADF lag sweep is no longer quadratic. The statsmodels fallback is used automatically when the extension is not built; the API and return format are identical either way.
+
+The Python around the native test is small next to it. At 500 bars a call takes 0.23–0.30 ms, of which the native test is 0.08–0.13 ms; at 2,000 bars 0.97–1.27 ms against 0.73–1.03 ms (Python 3.12, pandas 2.3, medians of 1,000 calls on a shared machine). Until 2026-10-04 the Python took 1.0–1.3 ms, most of it pandas: two label lookups aligning the pair, and a half-life gate that aligned the spread with its own lag. Two series on one unique index are now read as they stand, which is what those lookups returned for them, and the gate reads the spread's values; every output is the same bits. Two series on different indexes still go through the intersection and the lookups. The guard's regression and the gate's sums of squares run on one BLAS thread, so the half-life t-statistic is the same bits at any thread count, including above 10,000 bars, where OpenBLAS splits a dot product across threads.
 
 `autolag` must be exactly `"aic"` or `"bic"`; anything else raises `ValidationError`. This is enforced because the two backends previously disagreed on a typo: the C++ path mapped any string that wasn't exactly `"bic"` onto AIC, while the statsmodels fallback passed it straight through to `coint`. A misspelled criterion therefore ran a *different* lag selection depending on the build, and echoed the typo back in the result either way.
 
@@ -541,8 +543,15 @@ counted as a test. At least 20 aligned bars are required.
 | `max_lag` | ADF max lag; `-1` for the automatic Schwert rule. |
 | `fdr` | False discovery rate for `cointegrated_fdr` (default 0.05). |
 
-**Measured**, 2 000 tickers × 2 000 bars: **5.31 min**, against 9.81 h for the per-pair
-loop. At 500 bars: 46.7 s against 61.7 min.
+**Measured**, 2 000 tickers, both orders of all 1,999,000 pairs (2026-10-04, Python
+3.12, a 16-thread laptop): **1.68 min** at 500 bars, 50 µs a pair, and **19.4 min** at
+2 000 bars, 581 µs a pair; a 400-ticker scan of the same bars runs at 255–258 µs a pair,
+so the full-size run spends 2.3 times as long on each pair. When the screen tested one
+order per pair, it took 5.31 min at 2 000 bars and 46.7 s at 500, against 9.81 h and
+61.7 min for a per-pair loop through statsmodels. Measured again per pair on 200 names (19 900 pairs; Python
+3.12, pandas 2.3, a shared 16-thread machine): this call 49–51 µs at 500 bars and
+231–249 µs at 2 000, both orders, against 0.23–0.25 ms and 0.82–0.84 ms for one
+`cointegration_test` call per pair in a loop, 3.3–5.1× as long.
 
 ### The one semantic difference
 
@@ -559,7 +568,10 @@ falls back to the per-pair loop otherwise, so it never silently re-tests a pair 
 shorter sample. Either way it gates each pair on `p_value_both` after the
 Benjamini-Hochberg adjustment across every pair that produced one (or unadjusted with
 `multiple_testing="none"`), and reports the number tested and how many would clear the
-threshold by chance.
+threshold by chance. On 50 names of 500 bars (1,225 pairs, both orders each) the tool
+spends 82–93 µs a pair on the batch path and 0.73–0.81 ms a pair on the per-pair loop
+(Python 3.12, pandas 2.3), against 128–146 µs and 2.95–3.43 ms before 2026-10-04, with the
+same answer.
 
 ---
 
