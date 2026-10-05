@@ -260,7 +260,7 @@ class TestADeterministicRefusalIsNotRetried:
         empty["Close"] = np.nan
         market = _install(monkeypatch, {"AAPL": empty})
 
-        with pytest.raises(NonRetryableAPIError, match="none of them has a Close"):
+        with pytest.raises(NonRetryableAPIError, match="none of them is fully priced"):
             YFinanceProvider().get_ohlcv("AAPL", "2026-06-01", LAST)
         assert market.calls == ["AAPL"]
 
@@ -541,7 +541,7 @@ class TestDatabentoFollowsTheSameRule:
         raw["close"] = np.nan
         client = _DatabentoClient(raw, summary)
 
-        with pytest.raises(NonRetryableAPIError, match="none of them has a Close"):
+        with pytest.raises(NonRetryableAPIError, match="none of them is fully priced"):
             self._provider(client).get_ohlcv("NVDA", "2026-06-01", LAST)
         assert len([c for c in client.calls if c["dataset"] == summary]) == 1
 
@@ -646,3 +646,124 @@ class TestPolygonAndBloombergFollowTheSameRule:
         kept = drop_unusable_closes(parsed, "AAPL", provider="bloomberg")
         assert list(kept["Close"]) == [1.5, 1.6]
         assert kept.attrs[MISSING_KEY] == ["2023-01-04"]
+def _window(n: int, *, missing=(), placeholder_tail: int = 0, column: str = "Close"):
+    """A daily frame of `n` bars with chosen holes, for the hygiene rule.
+
+    `missing` are positions inside the window; `placeholder_tail` is a run of
+    unpriced bars at the end, which is what a vendor listing a session before
+    it trades produces.
+    """
+    index = pd.bdate_range("2026-01-05", periods=n)
+    frame = pd.DataFrame(
+        {
+            "Open": [100.0] * n,
+            "High": [101.0] * n,
+            "Low": [99.0] * n,
+            "Close": [100.5] * n,
+            "Volume": [1_000] * n,
+        },
+        index=index,
+    )
+    for i in missing:
+        frame.iloc[i, frame.columns.get_loc(column)] = np.nan
+    for i in range(n - placeholder_tail, n):
+        frame.iloc[i, frame.columns.get_loc("Close")] = np.nan
+    return frame
+
+
+class TestTheDensityCeiling:
+    """Dropping is right for a hole and wrong for a series that is holes.
+
+    The rule before this one refused a whole symbol on a single NaN close, and
+    the cost was measured: in a 200-symbol study seven names lost ~17,000 bars
+    each, every one failing on the SAME single degraded pre-market hour. The
+    ceiling has to catch the opposite failure without recreating that one.
+    """
+
+    def test_a_handful_of_holes_is_still_dropped_and_disclosed(self):
+        kept = drop_unusable_closes(
+            _window(40, missing=(5, 9, 20)), "AAA", provider="test"
+        )
+        assert len(kept) == 37
+        assert len(kept.attrs[MISSING_KEY]) == 3
+
+    def test_a_window_that_is_mostly_holes_is_refused(self):
+        with pytest.raises(NonRetryableAPIError) as caught:
+            drop_unusable_closes(
+                _window(40, missing=tuple(range(0, 30))), "AAA", provider="test"
+            )
+        assert "75.0% unpriced" in str(caught.value)
+        assert "the gaps are the data" in str(caught.value)
+
+    def test_one_hole_in_a_short_window_is_not_a_dense_window(self):
+        """The case that corrected the first attempt at this.
+
+        A pure fraction made window LENGTH the threshold: one hole is 1.1% of
+        an 87-session window and 20% of a five-bar one, so the first hole was
+        fatal in both -- the refusal-on-a-single-NaN the measured note says
+        was wrong, arriving by another route. The absolute floor is what stops
+        it.
+        """
+        for n in (5, 20, 87):
+            kept = drop_unusable_closes(_window(n, missing=(1,)), "AAA", provider="t")
+            assert len(kept) == n - 1, f"one hole in {n} bars is repairable"
+
+    def test_the_floor_and_the_fraction_both_have_to_be_passed(self):
+        # 10 holes in 40 bars is 25%, over the fraction and not over the floor.
+        kept = drop_unusable_closes(
+            _window(40, missing=tuple(range(10))), "AAA", provider="t"
+        )
+        assert len(kept) == 30
+        # 20 holes in 4,000 bars is 0.5%: over the floor, under the fraction.
+        kept = drop_unusable_closes(
+            _window(4000, missing=tuple(range(20))), "AAA", provider="t"
+        )
+        assert len(kept) == 3980
+
+    def test_a_trailing_placeholder_run_is_never_counted(self):
+        """A session listed before it traded is not a hole in the series.
+
+        A window fetched right at the publication edge can be ENTIRELY
+        placeholder, which is the healthiest answer there is; counting those
+        toward the density would refuse it.
+        """
+        kept = drop_unusable_closes(
+            _window(20, placeholder_tail=15), "AAA", provider="t"
+        )
+        assert len(kept) == 5
+        assert len(kept.attrs[PLACEHOLDER_KEY]) == 15
+        assert MISSING_KEY not in kept.attrs
+
+
+class TestAllFourPricesAreChecked:
+    """Not Close alone.
+
+    `fill_price="next_open"` prices an entry against Open, so a bar with a
+    Close and no Open passed a Close-only check and then filled at NaN.
+    """
+
+    @pytest.mark.parametrize("column", ["Open", "High", "Low", "Close"])
+    def test_a_hole_in_any_price_drops_the_bar(self, column):
+        kept = drop_unusable_closes(
+            _window(30, missing=(7,), column=column), "AAA", provider="t"
+        )
+        assert len(kept) == 29, f"a missing {column} makes the bar unusable"
+        assert kept.attrs[MISSING_KEY] == ["2026-01-14"]
+
+    def test_a_missing_volume_does_not_drop_the_bar(self):
+        """Volume is deliberately not in the check.
+
+        A session with no volume reported is still a priced session, and the
+        Volume dtype already records whether the window's was complete.
+        """
+        frame = _window(30)
+        frame.iloc[7, frame.columns.get_loc("Volume")] = np.nan
+        kept = drop_unusable_closes(frame, "AAA", provider="t")
+        assert len(kept) == 30
+
+    def test_the_all_unpriced_refusal_names_what_a_bar_needs(self):
+        frame = _window(10, missing=tuple(range(10)), column="Open")
+        with pytest.raises(NonRetryableAPIError) as caught:
+            drop_unusable_closes(frame, "AAA", provider="t")
+        assert "none of them is fully priced" in str(caught.value)
+        assert "a fill is priced against Open" in str(caught.value)

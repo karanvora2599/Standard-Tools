@@ -702,6 +702,201 @@ def resolve(ref: str, expect: Optional[str] = None) -> Any:
     return frame
 
 
+#: How many rows of an externally registered dataset a consumer that needs a
+#: whole frame will bring into memory.
+#:
+#: `ExternalDataset` exists so that nothing materialises a registered file by
+#: accident -- "something shaped like a DataFrame would let a consumer written
+#: for a fetched panel silently pull forty gigabytes through an `.iloc`". That
+#: contract is about SILENCE, not about refusing ever to read: a consumer may
+#: decide in code to load one, and `resolve_frame` is that decision written
+#: once with a ceiling on it, rather than seven times without.
+#:
+#: Five million rows is roughly a single name's full trading day of US equity
+#: prints, which is the window these consumers are built for. A tape wider
+#: than that is a research question that wants a narrower window or a
+#: streaming consumer, and saying so is more use than loading it.
+EXTERNAL_FRAME_MAX_ROWS = 5_000_000
+
+#: Kinds whose consumers read a time index rather than a position.
+#:
+#: Not every kind does, and the difference is not cosmetic: a book update and
+#: an order event are not unique in time, so `order_book_panel` and
+#: `order_event_panel` carry `timestamp` as a column and index by position on
+#: purpose. These two are the other case -- `KINDS` calls both
+#: "timestamp-indexed", and `analysis/microstructure.py` refuses a positional
+#: one outright because every estimator there matches a trade to the quote
+#: that preceded it.
+#:
+#: Parquet does not distinguish them. A file written from an indexed frame and
+#: one written from a stamped column read back the same way through a dataset
+#: scanner, so a registration cannot preserve which it was and the kind has to
+#: say.
+TIME_INDEXED_KINDS = frozenset({"tick_tape", "quote_panel"})
+
+
+def resolve_frame(
+    ref: str,
+    *,
+    expect: str,
+    who: str,
+    produced_by: str = "",
+    max_rows: int = EXTERNAL_FRAME_MAX_ROWS,
+) -> pd.DataFrame:
+    """Resolve a reference to a DataFrame, whichever storage holds it.
+
+    A kind in `EXTERNAL_KINDS` resolves to a frame when it was published and
+    to an `ExternalDataset` handle when it was registered. A consumer built
+    around whole-frame pandas needs the frame either way, and the comment on
+    `EXTERNAL_KINDS` is explicit that the two storages must not be an accept
+    and a refuse -- that is the reason there is one kind and not two.
+
+    So a handle is read here, bounded and out loud:
+
+    - a dataset whose recorded row count exceeds `max_rows` is refused by
+      NAMING the count and the ceiling, because that is a caller's decision to
+      make and they can only make it if they are told the size;
+    - a dataset with no recorded count is streamed with a hard stop at the
+      ceiling, and hitting the stop is a refusal rather than a truncation --
+      a microstructure estimate over a silently clipped tape is wrong in a way
+      no warning string makes safe.
+
+    Every other failure becomes ONE refusal, and `produced_by` is what the
+    caller appends to it: the tool a reader would run to get a good reference.
+    A malformed string, the wrong kind and a cleared runs directory all say
+    what is wrong with the reference and none of them says where a good one
+    comes from, so this wraps them all rather than re-raising the subset that
+    already happen to be `ValidationError` -- that distinction is invisible to
+    a caller and was the difference between the two helpers this replaces.
+    """
+    from standard_quant_tools.data.external import ExternalDataset
+
+    tail = f" {produced_by.strip()}" if produced_by else ""
+    try:
+        data = resolve(ref, expect=expect)
+    except Exception as exc:  # noqa: BLE001 -- one refusal, not a traceback
+        raise ValidationError(
+            f"{who}: {ref!r} could not be resolved as a {expect!r} "
+            f"reference -- {exc}{tail}"
+        ) from exc
+
+    if isinstance(data, ExternalDataset):
+        data = _external_frame(data, ref=ref, who=who, max_rows=max_rows)
+    elif not isinstance(data, pd.DataFrame):
+        # Not "nothing usable": the reference resolved, to something this
+        # consumer cannot use. Naming the type is the difference between a
+        # caller fixing the call and a caller doubting the registration.
+        raise ValidationError(
+            f"{who}: {ref!r} resolved to a {type(data).__name__}, and this "
+            f"tool needs a table. A {expect!r} reference should hold one; if "
+            "this one was published by hand, publish the frame itself."
+        )
+
+    if expect in TIME_INDEXED_KINDS:
+        data = _time_indexed(data, ref=ref, who=who, kind=expect, tail=tail)
+
+    if data.empty:
+        # Not reachable through any producer in this library today: `publish`
+        # refuses an empty frame outright, and an empty registration is caught
+        # in `_external_frame` with the path in the message. Kept because the
+        # cost is one branch and the alternative, should a kind ever allow it,
+        # is an empty frame travelling into a spread calculation.
+        raise ValidationError(
+            f"{who}: {ref!r} resolved to an EMPTY table -- the reference is "
+            "good and there is nothing in it. A fetch window outside market "
+            f"hours, or one the venue has no prints for, ends here.{tail}"
+        )
+    return data
+
+
+def _external_frame(
+    handle: Any, *, ref: str, who: str, max_rows: int
+) -> pd.DataFrame:
+    """Read a registered dataset into memory, bounded, or refuse by size."""
+    rows = handle.rows
+    if rows is not None and int(rows) > max_rows:
+        raise ValidationError(
+            f"{who}: {ref!r} is registered external and holds {int(rows):,} "
+            f"rows, over the {max_rows:,} this tool will load. Nothing was "
+            "truncated and nothing was computed. Fetch or register a narrower "
+            "window -- an hour of one name is the scale these estimates are "
+            "read at -- or consume it in batches through the order-book tools, "
+            "which never load a whole panel."
+        )
+
+    chunks: list = []
+    held = 0
+    for batch in handle.batches():
+        held += len(batch)
+        if held > max_rows:
+            raise ValidationError(
+                f"{who}: {ref!r} is registered external, its row count was "
+                f"not recorded, and reading it passed {max_rows:,} rows. It "
+                "was NOT truncated to fit: an estimate over a clipped tape is "
+                "wrong rather than approximate. Register a narrower window, or "
+                f"re-register this one so its size is known ({handle.path})."
+            )
+        chunks.append(batch)
+    if not chunks:
+        raise ValidationError(
+            f"{who}: {ref!r} points at {handle.path}, which has no rows. The "
+            "registration is good and the file is empty."
+        )
+    frame = pd.concat(chunks, ignore_index=len(chunks) > 1)
+    # The time index is restored in `resolve_frame`, for both storages at
+    # once: a published tape can carry its stamp in a column too.
+    # A registration records the vendor on the sidecar, not on the bytes, so a
+    # frame rebuilt from them carries no `attrs` and every consumer that
+    # reports provenance would report none. Stamp what the handle knows.
+    frame.attrs.setdefault("source", f"external:{handle.fmt}")
+    frame.attrs.setdefault("external_path", str(handle.path))
+    return frame
+
+
+def _time_indexed(
+    frame: pd.DataFrame, *, ref: str, who: str, kind: str, tail: str = ""
+) -> pd.DataFrame:
+    """Put the stamp on the index, for either storage of a time-indexed kind.
+
+    The gap this closes is narrow and was invisible to a column check: the
+    frame had `price` and `size` and the right row count, and failed three
+    frames inside the estimator on its index type. A caller reading that
+    refusal has no way to know it came from how their tape was stored.
+
+    Both storages can arrive either way. `fetch_tick_tape` publishes the
+    indexed frame a provider returns, and a tape published by hand need not
+    be indexed at all; on the registered side `__index_level_0__` is what
+    pandas names an unnamed index in Parquet, and a dataset scanner does not
+    apply the metadata that would turn it back into one -- so a file written
+    from an indexed tape and one written from a stamped column arrive
+    identically, and neither is indexed.
+    """
+    if isinstance(frame.index, pd.DatetimeIndex):
+        return frame
+    for column in ("timestamp", "__index_level_0__"):
+        if column not in frame.columns:
+            continue
+        stamps = pd.to_datetime(frame[column], errors="coerce", utc=True)
+        if stamps.isna().all():
+            continue
+        out = frame.drop(columns=[column]).set_index(
+            pd.DatetimeIndex(stamps, name="timestamp")
+        )
+        # Not sorted here. Order within a timestamp is information -- of two
+        # quote updates in one nanosecond the later is the book that stood --
+        # and `analysis/microstructure.py` does its own stable ordering for
+        # exactly that reason. Sorting here would be a second, unstable one.
+        return out
+    raise ValidationError(
+        f"{who}: {ref!r} is a {kind!r} with no usable timestamp, on its index "
+        f"or in a column. Columns: {list(frame.columns)[:12]}. This kind is "
+        "timestamp-indexed, because every estimator that reads one matches a "
+        "trade to the quote that PRECEDED it and a row position cannot say "
+        "which that was. Publish the frame with a DatetimeIndex, or with the "
+        f"stamp in a column named `timestamp`.{tail}"
+    )
+
+
 def _vendor_provenance(frame: Any) -> Dict[str, Any]:
     """
     Which vendor dataset a frame came from, off the frame itself.
@@ -796,13 +991,16 @@ def kinds() -> Dict[str, str]:
 
 
 __all__ = [
+    "EXTERNAL_FRAME_MAX_ROWS",
     "EXTERNAL_KINDS",
     "KINDS",
     "Reference",
+    "TIME_INDEXED_KINDS",
     "describe",
     "kinds",
     "parse",
     "publish",
     "publish_external",
     "resolve",
+    "resolve_frame",
 ]

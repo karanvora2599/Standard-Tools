@@ -186,9 +186,13 @@ class TestADamagedSidecarIsRefused:
         directory = runs / "run1"
         directory.mkdir(parents=True)
         tape = directory / "tape.parquet"
-        pd.DataFrame({"price": [10.0, 10.5], "size": [100.0, 200.0]}).to_parquet(
-            tape, index=False
-        )
+        pd.DataFrame({
+            # A `tick_tape` requires a stamp. This test is about a damaged
+            # sidecar, so the tape only has to be registrable.
+            "timestamp": ["2024-03-05T14:30:00Z", "2024-03-05T14:30:01Z"],
+            "price": [10.0, 10.5],
+            "size": [100.0, 200.0],
+        }).to_parquet(tape, index=False)
         ref, _handle = handoff.publish_external(str(tape), "tick_tape", "run1", "tape")
         sidecar = directory / "tape._handoff.json"
         sidecar.write_bytes(damage)

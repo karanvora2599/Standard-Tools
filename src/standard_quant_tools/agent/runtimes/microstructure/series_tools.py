@@ -39,27 +39,27 @@ from standard_quant_tools.analysis import microstructure as lib
 from standard_quant_tools.data.databento import cross_venue_warning
 from standard_quant_tools.error import ValidationError
 
-from ..handoff import publish, resolve
+from ..handoff import publish, resolve_frame
 
 logger = logging.getLogger(__name__)
 Stat = Annotated[Optional[float], BeforeValidator(_finite_or_none)]
 
 
 def _frame(ref: str, expect: str, what: str) -> pd.DataFrame:
-    """Resolve a reference, refusing by name rather than from inside a loader."""
-    try:
-        data = resolve(ref, expect=expect)
-    except (ValidationError, ValueError):
-        raise
-    except Exception as exc:  # noqa: BLE001 -- one refusal, not a traceback
-        raise ValidationError(
-            f"{what}: {ref!r} could not be resolved as a {expect!r} "
-            f"reference -- {exc}. fetch_tick_tape and fetch_quote_panel in "
-            "the `data` runtime are what produce these."
-        ) from exc
-    if not isinstance(data, pd.DataFrame) or data.empty:
-        raise ValidationError(f"{what}: {ref!r} resolved to nothing usable.")
-    return data
+    """Resolve a reference, refusing by name rather than from inside a loader.
+
+    Delegates, because this used to refuse an externally registered tape --
+    the storage `EXTERNAL_KINDS` exists to make interchangeable with a fetched
+    one -- and reported it as "resolved to nothing usable", which named
+    neither the cause nor the cure.
+    """
+    return resolve_frame(
+        ref,
+        expect=expect,
+        who=what,
+        produced_by="fetch_tick_tape and fetch_quote_panel in the `data` runtime are "
+    "what produce these.",
+    )
 
 
 class ClassifyTradesInput(BaseModel):

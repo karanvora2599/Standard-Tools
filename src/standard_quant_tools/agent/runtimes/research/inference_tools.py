@@ -37,18 +37,83 @@ class _Result(BaseModel):
     warnings: List[str] = Field(default_factory=list)
 
 
-StatisticName = Literal[
-    "mean",
-    "median",
-    "std",
-    "sharpe",
-    "sortino",
-    "skew",
-    "kurtosis",
-    "max_drawdown",
-    "win_rate",
-    "var_95",
-    "cvar_95",
+#: The same statistic under the name the rest of the library uses.
+#:
+#: `calculate_series_metrics` answers with `sharpe_ratio` -- the name of the
+#: function in `metrics/risk_metrics.py` and the field in every result model
+#: that carries one -- and putting an interval on that number is the next
+#: thing a caller does. It used to fail on the spelling, and pydantic's reply
+#: is a list of permitted values with nothing saying that one of them is the
+#: number already in hand.
+_STATISTIC_ALIASES: Dict[str, str] = {
+    "sharpe_ratio": "sharpe",
+    "sortino_ratio": "sortino",
+}
+
+#: Names that belong to a DIFFERENT statistic, and what to say about each.
+#:
+#: Aliasing these would be the worse failure. `var_95` fixes the level at 95%;
+#: `var_historical` takes one. A caller who asked for the second and silently
+#: got the first would have an interval on a quantity they did not ask for,
+#: and nothing in the result would say so.
+_STATISTIC_NEAR_MISSES: Dict[str, str] = {
+    "var_historical": (
+        "var_95 is the one here, and it fixes the level at 95% rather than "
+        "taking one -- so it is var_historical AT 95% and not the general "
+        "form. Bootstrap it at another level by passing the returns you want "
+        "and reading the interval, not by renaming this."
+    ),
+    "var_parametric": (
+        "var_95 here is HISTORICAL -- the empirical quantile, not a fitted "
+        "one. A parametric VaR has an analytic standard error and does not "
+        "need this."
+    ),
+    "cvar": "cvar_95 is the one here, at a fixed 95% level.",
+    "annualized_volatility": (
+        "std is the one here, and it is PERIODIC -- the interval scales with "
+        "the same sqrt(periods_per_year) the point estimate does."
+    ),
+    "cumulative_return": (
+        "mean is the one here. A cumulative return is one number for the "
+        "whole path, so resampling it blocks has nothing to vary."
+    ),
+    "cagr": (
+        "mean is the one here, per period. A CAGR over one path is a single "
+        "number; bootstrap the periodic returns and compound the bounds."
+    ),
+}
+
+
+def _canonical_statistic(value: object) -> object:
+    """Accept the library's spelling, and name the near misses."""
+    if not isinstance(value, str):
+        return value
+    name = value.strip()
+    if name in _STATISTIC_ALIASES:
+        return _STATISTIC_ALIASES[name]
+    if name in _STATISTIC_NEAR_MISSES:
+        raise ValueError(
+            f"statistic={name!r} is not one of these, and the closest one is "
+            f"not the same quantity. {_STATISTIC_NEAR_MISSES[name]}"
+        )
+    return name
+
+
+StatisticName = Annotated[
+    Literal[
+        "mean",
+        "median",
+        "std",
+        "sharpe",
+        "sortino",
+        "skew",
+        "kurtosis",
+        "max_drawdown",
+        "win_rate",
+        "var_95",
+        "cvar_95",
+    ],
+    BeforeValidator(_canonical_statistic),
 ]
 
 
@@ -56,7 +121,13 @@ class BootstrapInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     values: List[float] = Field(..., min_length=30, description="Periodic returns.")
-    statistic: StatisticName = Field("sharpe")
+    statistic: StatisticName = Field(
+        "sharpe",
+        description=(
+            "`sharpe_ratio` and `sortino_ratio` are accepted for these two, "
+            "because that is what `calculate_series_metrics` answers with."
+        ),
+    )
     n_bootstrap: int = Field(2000, ge=100, le=50000)
     block_size: Optional[int] = Field(
         None,

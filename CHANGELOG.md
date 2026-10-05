@@ -1,5 +1,88 @@
 # Changelog
 
+## A registered tape reaches the microstructure tools, one name spells a Sharpe, and an unpriced window is refused by density rather than by its first hole
+
+- **The four microstructure series tools accept either storage of a tape.**
+  `EXTERNAL_KINDS` states the invariant in its own comment -- `tick_tape` and
+  `quote_panel` exist fetched and registered on purpose, "one kind, two
+  storages, rather than an `external_tick_tape` that would double the taxonomy
+  and let a consumer accept one and refuse the other" -- and
+  `classify_trade_direction`, `get_quoted_spread_series`,
+  `get_effective_spread_series` and `estimate_kyle_lambda` did exactly that,
+  through two copies of one helper, reporting a valid registration as
+  "resolved to nothing usable". Both now call `handoff.resolve_frame`, which
+  reads a registered dataset into memory bounded and out loud:
+  `EXTERNAL_FRAME_MAX_ROWS` rows, a dataset over that refused by NAMING its
+  size, and one whose size was never recorded streamed to a hard stop that is
+  a refusal rather than a truncation -- an estimate over a clipped tape is
+  wrong, not approximate. `ExternalDataset` stays a distinct type and
+  `resolve` still hands one back: the contract it exists for is that nothing
+  materialises a registered file BY ACCIDENT, and the decision is now written
+  once with a ceiling on it instead of seven times without.
+- **A time index is restored for the two kinds whose consumers read one.**
+  Found by running the tools rather than the helper: the frame had `price`,
+  `size` and the right row count, and `analysis/microstructure.py` refused it
+  three frames in on its index type, because every estimator there matches a
+  trade to the quote that PRECEDED it. Parquet carries an index as a column
+  and a dataset scanner does not apply the metadata that would restore it, so
+  a file written from an indexed tape and one written from a stamped column
+  arrive identically and neither is indexed; a tape published by hand need not
+  have been indexed either. `TIME_INDEXED_KINDS` names the two kinds this
+  applies to, and `order_book_panel` and `order_event_panel` are deliberately
+  not among them -- a book update and an order event are not unique in time
+  and index by position on purpose. All four tools now return bit-identical
+  results for the same content addressed either way (classify `lee_ready`,
+  n=3600, buys=1896, and the same Kyle lambda).
+- **`KIND_COLUMNS` requires a `timestamp` of a tape and a quote panel.** The
+  same hole the table's own comment records having closed once for
+  `order_event_panel`, whose `price` was missing "so a panel could satisfy
+  REGISTRATION and then fail inside `order_event_metrics`". A stampless tape
+  registered cleanly and could never be read. `COLUMN_ALIASES` accepts
+  `__index_level_0__` for it, which is what pandas names an unnamed index in
+  Parquet -- refusing a file over the spelling of something that is in it
+  would be the wrong refusal -- and an index that is not an instant is
+  refused on resolve, by a message listing the columns it did find.
+- **`sharpe_ratio` and `sortino_ratio` are accepted where a statistic is
+  named.** `calculate_series_metrics` answers with `sharpe_ratio`, which is
+  what `metrics/risk_metrics.py` calls the function and what every result
+  model spells it; `get_bootstrap_interval` took `sharpe`. Putting an interval
+  on a Sharpe is the next thing a caller does -- that module's docstring says
+  the interval is the number a decision should be made on -- and it failed on
+  the spelling, answered by pydantic's list of permitted values with nothing
+  saying one of them was the number already in hand. Four names that LOOK like
+  they should alias are refused instead, each saying why: `var_95` fixes the
+  level at 95% where `var_historical` takes one, and silently answering the
+  second with the first would put an interval on a quantity nobody asked for.
+  An unknown name still gets the plain enumeration.
+- **A handoff reference handed where a path was wanted says so.**
+  `describe_artifact` and `get_drawdown_table` resolved an `sqt://` string as
+  a path -- relative, so against the process working directory -- and the
+  answer was a CONTAINMENT refusal: "resolved path ...\sqt:\equity_curve\r1\
+  curve escapes SQT_RUNS_DIR". It reads as a traversal attempt, prints a
+  directory the caller never named, and says neither "reference" nor the name
+  of a tool that reads one. `load_artifact` now refuses it by name and points
+  at `describe_reference`, `read_reference` and `list_artifacts`; one door, so
+  the next tool to take a path does not rediscover it.
+- **An unpriced window is judged by density, and all four prices are
+  checked.** Two rules ported from Carbon's modeling bridge, which is retired
+  now that the library's own provider serves bars. `drop_unusable_closes`
+  dropped any number of holes and refused only a window with no Close at all,
+  so a feed that half-failed came back as a short clean series with a warning
+  in a log; and it tested Close alone, while `fill_price="next_open"` prices
+  an entry against Open, so a bar with a Close and no Open passed and then
+  filled at NaN. Density is measured over MISSING rows only -- a trailing
+  placeholder is a session listed before it traded, and a window fetched at
+  the publication edge can be all placeholder, the healthiest answer there is.
+  The ported fraction alone was not enough and the suite said so at once: one
+  per cent of an 87-session window is under one bar, so the FIRST hole tripped
+  it, which is the refusal-on-a-single-NaN the measured note in that constant
+  records having been wrong, arriving by another route. It was measured on
+  ~17,000-bar hourly windows where one per cent is 170 bars, so
+  `MAX_MISSING_BARS_ALWAYS_DROPPED` is the floor under it: refusing needs both
+  to be passed.
+- **README**: 16,545 tests; with the extension required, `-m "not
+  integration"` gives 16,380 passing and 87 skipped.
+
 ## The guides describe the MLPs' early stopping, the booster bundles, the last BLAS work and the futures reads
 
 - **15_modeling**: the MLPs' early stopping on the window's last dates,

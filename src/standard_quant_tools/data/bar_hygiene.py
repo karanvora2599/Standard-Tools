@@ -79,6 +79,50 @@ DISCLOSURE_KEYS = (PLACEHOLDER_KEY, MISSING_KEY) + _PARTIAL_KEYS
 #: How many dates a warning names before it summarises the rest.
 _DATES_NAMED = 5
 
+#: Above this share of a window, MISSING bars are refused rather than dropped.
+#:
+#: Dropping is the right answer for a hole and the wrong one for a series that
+#: is mostly holes: past some density the gaps are the data, and a short clean
+#: series handed back with a warning in a log is worse than a refusal.
+#:
+#: One per cent, because the cost of the alternative was measured rather than
+#: argued. The rule before this one refused a whole symbol on a single NaN
+#: close, and in a 200-symbol study seven names -- SOXX, SMH, CSCO, XLF, PM,
+#: DLR, ROKU -- were discarded entirely, roughly 17,000 bars each. Every one
+#: failed on THE SAME SINGLE BAR, a pre-market hour on a morning the vendor
+#: itself flags as degraded, which a caller trading the regular session
+#: filters out before looking at it. Losing 99.994% of a series to protect
+#: against 0.006% of it is the wrong trade, and it is worse than it sounds:
+#: the survivors of such a rule are not a random sample, so a study built on
+#: them is conditioned on which names happened to have a clean pre-market
+#: print on one bad morning.
+#:
+#: The fraction alone is not enough, and a fraction is all Carbon's rule was:
+#: one per cent of an 87-session daily window is under one bar, so the FIRST
+#: hole tripped it -- the same refusal-on-a-single-NaN the paragraph above
+#: records having been wrong, arriving by another route. It was measured on
+#: ~17,000-bar hourly windows, where one per cent is 170 bars.
+MAX_MISSING_FRACTION = 0.01
+
+#: Missing bars always dropped rather than refused, whatever the fraction.
+#:
+#: The floor under the ceiling: refusing needs BOTH to be exceeded. Ten
+#: sessions is two trading weeks, past which a daily series is not a series
+#: with holes but one that is partly absent; at an intraday interval ten bars
+#: is noise and the fraction is what decides. Without this, window LENGTH set
+#: the threshold -- one hole was fatal in a five-bar window and fine in a
+#: five-hundred-bar one, for no reason a caller could see.
+MAX_MISSING_BARS_ALWAYS_DROPPED = 10
+
+#: The columns a bar needs before it can be used, not Close alone.
+#:
+#: A NaN Open is the more dangerous of the two: `fill_price="next_open"`
+#: prices an entry against it, so a bar with a Close and no Open passes a
+#: Close-only check and then fills at NaN. Volume is NOT here -- a session
+#: with no volume reported is still a priced session, and the Volume dtype
+#: already records whether the window's was complete.
+USABLE_COLUMNS = ("Open", "High", "Low", "Close")
+
 
 def _utc_now() -> pd.Timestamp:
     """The current instant, tz-aware UTC. A seam, so a test can stand in a
@@ -108,22 +152,30 @@ def drop_unusable_closes(
     frame: pd.DataFrame, symbol: str, *, provider: str
 ) -> pd.DataFrame:
     """
-    `frame` without its rows whose Close is missing, each disclosed.
+    `frame` without its unusable rows, each disclosed.
 
-    A row after the last bar that has a Close is a PLACEHOLDER -- a session
-    listed before it traded -- and one before it is a MISSING bar. Both are
-    dropped, named in `attrs` (`dropped_placeholder_bars`,
-    `dropped_missing_bars`) and logged as a warning. A frame with no such
-    row is returned untouched, attrs included.
+    A row is unusable when any of `USABLE_COLUMNS` is missing -- not Close
+    alone, because `fill_price="next_open"` prices an entry against Open and
+    a bar with a Close and no Open would otherwise fill at NaN.
+
+    A row after the last usable bar is a PLACEHOLDER -- a session listed
+    before it traded -- and one before it is a MISSING bar. Both are dropped,
+    named in `attrs` (`dropped_placeholder_bars`, `dropped_missing_bars`) and
+    logged as a warning. A frame with no such row is returned untouched,
+    attrs included.
 
     Raises:
-        NonRetryableAPIError: no row has a Close. The vendor's answer for
-            this window has nothing in it to compute with, and a re-fetch
-            returns the same rows.
+        NonRetryableAPIError: no row is usable, or MISSING rows are denser
+            than `MAX_MISSING_FRACTION` of the window. The vendor's answer
+            for this window is what it is, and a re-fetch returns the same
+            rows. Placeholders are not counted toward the density: a one-bar
+            window fetched at the publication edge is 100% placeholder and is
+            the healthiest answer there is.
     """
     if frame is None or len(frame) == 0 or "Close" not in frame.columns:
         return frame
-    null = frame["Close"].isna().to_numpy()
+    checked = [c for c in USABLE_COLUMNS if c in frame.columns]
+    null = frame[checked].isna().any(axis=1).to_numpy()
     if not null.any():
         return frame
     labels = pd.DatetimeIndex(frame.index)
@@ -131,8 +183,10 @@ def drop_unusable_closes(
         raise NonRetryableAPIError(
             f"{provider} returned {len(frame)} bar(s) for {symbol} from "
             f"{_label(labels.min())} to {_label(labels.max())}, and none of them "
-            "has a Close: every row is a session listed before it traded, or a "
-            "bar the vendor has no price for. This is the vendor's answer for "
+            f"is fully priced -- {', '.join(checked)} are all needed, because "
+            "a fill is priced against Open: every row is a session listed "
+            "before it traded, or a bar the vendor has no price for. This is "
+            "the vendor's answer for "
             "the window, so asking again returns the same rows. Widen the "
             "window to include a session that has traded, check that the "
             "symbol still trades, or ask another provider (source=...)."
@@ -140,6 +194,26 @@ def drop_unusable_closes(
     last_priced = labels[~null].max()
     placeholder = null & np.asarray(labels > last_priced)
     missing = null & ~placeholder
+    # The density ceiling, over MISSING rows only. A trailing placeholder is
+    # not a hole in the series, and a window fetched right at the publication
+    # edge can be all placeholder.
+    n_missing = int(missing.sum())
+    fraction = n_missing / len(frame)
+    if (
+        n_missing > MAX_MISSING_BARS_ALWAYS_DROPPED
+        and fraction > MAX_MISSING_FRACTION
+    ):
+        raise NonRetryableAPIError(
+            f"{provider} bars for {symbol} are {fraction:.1%} unpriced inside "
+            f"the window ({n_missing} of {len(frame)}), past both the "
+            f"{MAX_MISSING_BARS_ALWAYS_DROPPED} bars this always repairs and "
+            f"the {MAX_MISSING_FRACTION:.0%} it treats as repairable: "
+            f"{_listed([_label(x) for x in labels[missing]])}. At that density "
+            "the gaps are the data, so the series is refused rather than "
+            "returned short -- dropping them would hand back a clean-looking "
+            "frame that is mostly not there. Asking again returns the same "
+            "rows; narrow the window, or ask another provider (source=...)."
+        )
     kept = frame.loc[~null].copy()
     # Set explicitly: `.copy()` keeps attrs in recent pandas only.
     kept.attrs = dict(frame.attrs)
@@ -159,7 +233,7 @@ def drop_unusable_closes(
         dates = [_label(x) for x in labels[missing]]
         kept.attrs[MISSING_KEY] = dates
         logger.warning(
-            "[%s] %s: dropped %d bar(s) with no Close inside the window as "
+            "[%s] %s: dropped %d unpriced bar(s) inside the window as "
             "missing bars (%s)",
             provider,
             symbol,

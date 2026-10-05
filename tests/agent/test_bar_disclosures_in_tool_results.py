@@ -283,7 +283,7 @@ class TestNoCloseAnywhere:
         empty = CLEAN["AAPL"].copy()
         empty["Close"] = np.nan
         market = _market(monkeypatch, AAPL=empty)
-        with pytest.raises(NonRetryableAPIError, match="none of them has a Close"):
+        with pytest.raises(NonRetryableAPIError, match="none of them is fully priced"):
             get_technical_analysis(
                 TechnicalInput(symbol="AAPL", start_date=START, end_date=END)
             )

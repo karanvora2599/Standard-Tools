@@ -338,3 +338,82 @@ class TestDrawdownTable:
     def test_time_underwater_is_a_fraction_of_bars(self, equity_curve_uri):
         result = dispatch("get_drawdown_table", {"equity_curve_uri": equity_curve_uri})
         assert 0.0 < result["time_underwater_pct"] < 1.0
+class TestAReferenceIsNotAPath:
+    r"""Two addressing systems, and the refusal for confusing them.
+
+    A handoff reference named a published value by kind; an artifact URI names
+    a file under the runs directory. Passing the first where the second was
+    wanted used to resolve it AS a path -- and because a reference is relative,
+    that meant against the process working directory, which produced a
+    CONTAINMENT refusal:
+
+        resolved path C:\...\Standard Tools\sqt:\equity_curve\r1\curve
+        escapes SQT_RUNS_DIR (C:\...\runs)
+
+    Every part of that is wrong for the mistake made. It reads as a traversal
+    attempt, it prints a directory the caller never named and cannot act on,
+    and it says neither "reference" nor the name of a tool that reads one.
+    """
+
+    @staticmethod
+    def _published_curve():
+        import pandas as pd
+
+        from standard_quant_tools.agent.runtimes import handoff
+
+        curve = pd.Series(
+            [1.0, 1.1, 1.05, 1.2, 0.9, 1.3],
+            index=pd.date_range("2024-01-01", periods=6),
+        )
+        return handoff.publish(
+            curve, kind="equity_curve", run_id="refpath", name="curve"
+        )
+
+    def test_describe_artifact_names_the_tool_that_reads_a_reference(self, runs_dir):
+        from standard_quant_tools.agent.runtimes.meta import tools as meta
+
+        ref = self._published_curve()
+        with pytest.raises(ValidationError) as caught:
+            meta.describe_artifact(meta.DescribeArtifactInput(uri=ref))
+        message = str(caught.value)
+        assert "REFERENCE" in message
+        assert "describe_reference" in message
+        assert "escapes" not in message, "not a containment refusal"
+
+    def test_get_drawdown_table_gets_the_same_refusal(self, runs_dir):
+        """The fix is in `load_artifact`, not in either tool.
+
+        Both go through that one door with the caller's string, so fixing it
+        per-tool would have left the next tool to rediscover it.
+        """
+        from standard_quant_tools.agent.runtimes.backtest import tools as bt
+
+        ref = self._published_curve()
+        with pytest.raises(ValidationError) as caught:
+            bt.get_drawdown_table(bt.DrawdownTableInput(equity_curve_uri=ref))
+        assert "REFERENCE" in str(caught.value)
+        assert "describe_reference" in str(caught.value)
+
+    def test_a_real_path_still_loads(self, runs_dir):
+        """The positive control.
+
+        A scheme check that refused everything would pass both tests above.
+        """
+        import pandas as pd
+
+        from standard_quant_tools.backtest.artifacts import (
+            load_artifact,
+            save_artifact,
+        )
+
+        frame = pd.DataFrame({"equity": [1.0, 1.1]})
+        uri = save_artifact(frame, "refpath", "plain")
+        assert len(load_artifact(uri)) == 2
+
+    def test_a_path_that_does_escape_is_still_refused_as_such(self, runs_dir):
+        """And the refusal this one is no longer mistaken for still exists."""
+        from standard_quant_tools.backtest.artifacts import load_artifact
+
+        with pytest.raises(ValidationError) as caught:
+            load_artifact("/etc/passwd")
+        assert "REFERENCE" not in str(caught.value)

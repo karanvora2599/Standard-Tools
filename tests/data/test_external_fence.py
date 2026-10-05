@@ -63,6 +63,14 @@ def fence(tmp_path, monkeypatch):
     decoy = outside / "positions.csv"
     pd.DataFrame(
         {
+            # `timestamp` because a `tick_tape` requires one. These tests are
+            # about the fence, not the schema, and a tape that cannot be read
+            # would never reach the fence in the first place.
+            "timestamp": [
+                "2024-03-05T14:30:00Z",
+                "2024-03-05T14:30:01Z",
+                "2024-03-05T14:30:02Z",
+            ],
             "price": [101.5, 101.6, 101.7],
             "size": [100, 200, 300],
             "secret_note": [SECRET_NOTE] * 3,

@@ -107,8 +107,24 @@ def load_artifact(uri: str) -> pd.DataFrame:
     column).
 
     Raises:
-        ValidationError: uri does not exist, or resolves outside SQT_RUNS_DIR.
+        ValidationError: uri is a handoff reference, does not exist, or
+            resolves outside SQT_RUNS_DIR.
     """
+    text = str(uri).strip()
+    if text.startswith("sqt://"):
+        # A reference is not a path, and resolving one as a path produced a
+        # CONTAINMENT refusal -- "resolved path ...\sqt:\equity_curve\r1\
+        # curve escapes SQT_RUNS_DIR" -- which reads as a traversal attempt,
+        # prints the process working directory the caller never named, and
+        # does not contain the word "reference" or the tool that reads one.
+        raise ValidationError(
+            f"{text!r} is a handoff REFERENCE, not an artifact path. The two "
+            "address different things: a path names a file under the runs "
+            "directory, and a reference names a published value by kind. "
+            "`describe_reference` reports what one holds without loading it "
+            "and `read_reference` reads it; `list_artifacts` gives the paths "
+            "this function takes."
+        )
     path = _resolved_within_runs_dir(Path(uri))
     if not path.exists():
         raise ValidationError(f"artifact not found: {uri}")

@@ -53,7 +53,7 @@ from standard_quant_tools.data.databento import cross_venue_warning
 from standard_quant_tools.error import ValidationError
 
 from .._optional_ref import publish_if_requested as _publish_if_requested
-from ..handoff import resolve as _resolve
+from ..handoff import resolve_frame as _resolve_frame
 
 logger = logging.getLogger(__name__)
 Stat = Annotated[Optional[float], BeforeValidator(_finite_or_none)]
@@ -73,27 +73,23 @@ def _referenced(ref: str, expect: str, who: str) -> pd.DataFrame:
     """
     Resolve a tape or a book, refusing by name and naming what produces one.
 
-    Every failure here -- a malformed reference, the wrong kind, a run
-    directory that was cleared -- becomes ONE refusal that ends with the
-    tool a caller would run to get a good reference. The underlying
-    messages say what is wrong with the string; none of them says where a
-    tick tape comes from, and a caller holding a bad ref needs both.
+    Every failure becomes ONE refusal that ends with the tool a caller would
+    run to get a good reference. The underlying messages say what is wrong
+    with the string; none of them says where a tick tape comes from, and a
+    caller holding a bad ref needs both.
+
+    The body moved to `handoff.resolve_frame`: this copy and the one in
+    `series_tools` had drifted to the same bug, refusing an externally
+    registered tape that `EXTERNAL_KINDS` guarantees is interchangeable with
+    a fetched one.
     """
-    try:
-        data = _resolve(ref, expect=expect)
-    except Exception as exc:  # noqa: BLE001 -- one refusal, not a traceback
-        raise ValidationError(
-            f"{who}: {ref!r} could not be resolved as a {expect!r} "
-            f"reference -- {exc} fetch_tick_tape and fetch_quote_panel in "
-            "the `data` runtime are what produce these."
-        ) from exc
-    if not isinstance(data, pd.DataFrame) or data.empty:
-        raise ValidationError(
-            f"{who}: {ref!r} resolved to nothing usable. fetch_tick_tape "
-            "and fetch_quote_panel in the `data` runtime are what produce "
-            "these."
-        )
-    return data
+    return _resolve_frame(
+        ref,
+        expect=expect,
+        who=who,
+        produced_by="fetch_tick_tape and fetch_quote_panel in the `data` runtime are "
+    "what produce these.",
+    )
 
 
 def _ohlcv(

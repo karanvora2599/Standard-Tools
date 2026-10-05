@@ -120,8 +120,14 @@ KIND_COLUMNS: Dict[str, Tuple[str, ...]] = {
         "size",
     ),
     "event_panel": ("event_time", "available_time"),
-    "tick_tape": ("price", "size"),
-    "quote_panel": ("bid_price", "ask_price"),
+    # `timestamp` for the same reason `price` was added to the panel above:
+    # without it a file satisfies REGISTRATION and then fails inside the
+    # estimator. `handoff.KINDS` calls both of these "timestamp-indexed", and
+    # a Parquet file carries an index as a column -- so the stamp has to be
+    # there under a name, and `timestamp` is the name the normalizers write
+    # and `_column_span` reads.
+    "tick_tape": ("timestamp", "price", "size"),
+    "quote_panel": ("timestamp", "bid_price", "ask_price"),
 }
 
 KIND_DESCRIPTIONS: Dict[str, str] = {
@@ -140,8 +146,15 @@ KIND_DESCRIPTIONS: Dict[str, str] = {
         "`event_time` (when it describes the world) and `available_time` "
         "(when it could first be acted on, and what a join must use)."
     ),
-    "tick_tape": "Individual trades with `price` and `size` columns.",
-    "quote_panel": "Top-of-book quotes with `bid_price` and `ask_price`.",
+    "tick_tape": (
+        "Individual trades: `timestamp`, `price`, `size`. The stamp is a "
+        "COLUMN here and an index on the published form of the same kind; "
+        "resolving one restores the index the estimators need."
+    ),
+    "quote_panel": (
+        "Top-of-book quotes: `timestamp`, `bid_price`, `ask_price`. The "
+        "stamp is a column here, as it is for a tick tape."
+    ),
 }
 
 #: Read this many rows at a time. Large enough that per-batch overhead is
@@ -801,6 +814,30 @@ def book_levels(columns: Sequence[str]) -> int:
     return level
 
 
+#: Spellings that satisfy a required column.
+#:
+#: `__index_level_0__` is what pandas names an unnamed index when it writes
+#: Parquet, so a tape written from a timestamp-indexed frame carries its stamp
+#: under that name and no `timestamp` column at all. Refusing it would be
+#: refusing a readable file over the spelling of something that is in it --
+#: and `handoff._time_indexed` reads exactly these two names, in this order.
+#:
+#: This is a NAME check. An unnamed index can hold a string or a counter just
+#: as easily as an instant, and `check_schema` is handed column names without
+#: their types; one that is not an instant is refused on resolve instead, by a
+#: message that lists the columns it did find.
+COLUMN_ALIASES: Dict[str, Tuple[str, ...]] = {
+    "timestamp": ("__index_level_0__",),
+}
+
+
+def _satisfied(column: str, present: set) -> bool:
+    """Is a required column present under its own name or an accepted one?"""
+    if column in present:
+        return True
+    return any(alias in present for alias in COLUMN_ALIASES.get(column, ()))
+
+
 def required_columns(kind: str) -> Tuple[str, ...]:
     if kind not in KIND_COLUMNS:
         raise ValidationError(
@@ -842,7 +879,7 @@ def check_schema(kind: str, columns: Sequence[str]) -> List[str]:
     """
     required = required_columns(kind)
     present = set(str(c) for c in columns)
-    missing = [c for c in required if c not in present]
+    missing = [c for c in required if not _satisfied(c, present)]
     problems: List[str] = []
     if missing:
         hint = ""
