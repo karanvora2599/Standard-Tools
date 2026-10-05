@@ -1355,6 +1355,24 @@ def run_portfolio_simulation(
         warnings.append(
             "cash went negative at one or more bars — implied margin borrowing"
         )
+    # A SHORT IS BORROWED STOCK AND THE BORROW IS A REAL COST. The
+    # financing accrual above is gated on `borrow_fee_bps > 0.0`, which is
+    # correct, and the default is 0.0 -- so a market-neutral book shorts
+    # for nothing unless the caller happened to set a rate. The number that
+    # comes back is then an upper bound rather than a simulation, and only
+    # this warning says which.
+    short_weights = np.where(weights_mat < 0.0, weights_mat, 0.0)
+    if borrow_fee_bps <= 0.0 and short_weights.any():
+        mean_short = float(np.abs(short_weights).sum(axis=1).mean())
+        warnings.append(
+            f"borrow_fee_bps=0 with a short book: the target weights are short "
+            f"an average of {mean_short:.2f}x capital across rebalances, and the "
+            "simulation financed that for nothing. A short is borrowed stock — "
+            "at 50 bps a year, 1.0x short costs about 0.5% of capital annually, "
+            "which is the whole edge of many market-neutral books. Set "
+            "borrow_fee_bps to what the broker charges, or read the return as an "
+            "upper bound."
+        )
     if n_capped_total:
         warnings.append(
             f"ADV cap: {n_capped_total} trade(s) were sized down to "

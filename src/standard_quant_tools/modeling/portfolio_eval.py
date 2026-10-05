@@ -883,9 +883,47 @@ def _simulate_predictions_portfolio(
     # a registered model's artifact URI, or a published reference.
     predictions_uri = source
     if transform.method == "uncertainty_scaled":
+        # FROM THE TASK, not from the absent columns. A classification
+        # model can never carry an interval -- ModelSpec refuses it,
+        # "intervals are calibrated for task='regression' only;
+        # task='classification' has no residual to place an interval
+        # around" -- so the column-level refusal below told the caller to
+        # "train the model with ModelSpec.intervals", which is the one
+        # thing the spec forbids. A closed loop is worse than a refusal.
+        if task == "classification":
+            raise ValidationError(
+                "transform.method='uncertainty_scaled' sizes on the width of a "
+                "conformal interval, and a classification model has none: "
+                "ModelSpec refuses `intervals` for task='classification' "
+                "because there is no residual to place an interval around. A "
+                "class probability is already a statement of confidence, so "
+                "size on it directly — method='sign' recentres it on "
+                "`proba_threshold`, and 'cross_sectional_zscore' or "
+                "'cross_sectional_rank' size on how far above the threshold "
+                "each name sits."
+            )
         # Before the pivot, where the interval columns still stand beside
         # the prediction: the score the sizer sees is prediction / width.
         predictions_df = scale_by_uncertainty(predictions_df, predictions_uri)
+    # A SURVIVAL SCORE IS A RISK, NOT A RETURN FORECAST. `survival.py` sets
+    # the convention -- "higher means sooner" -- and the score panel passes
+    # it through unchanged, like a regressor's, so the largest LONG goes to
+    # the name whose event is expected soonest. Classification is
+    # recentred precisely so that "positive score = the model is bullish"
+    # holds for every task; survival was left out of that, and the sign it
+    # needs depends on whether the event is good or bad, which only the
+    # caller knows.
+    if task == "survival":
+        warnings.append(
+            "task='survival': the predictions are RISK scores — higher means "
+            "the event comes sooner — and they are sized as given, so this "
+            "book is LONG the names whose event is expected soonest. If the "
+            "event is adverse (a default, a delisting, a halt), that is the "
+            "portfolio inverted: negate the predictions before evaluating, or "
+            "read every sign in this result backwards. Nothing here can tell "
+            "which, because the polarity of the event is not recorded in the "
+            "model."
+        )
     score_panel = predictions_to_score_panel(predictions_df, task, predictions_uri)
 
     # The same continuity contract the bridge enforces, and for a related
