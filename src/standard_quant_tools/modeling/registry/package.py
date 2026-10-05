@@ -35,7 +35,7 @@ from standard_quant_tools.artifact_store import (
 from standard_quant_tools.error import ValidationError
 
 from .lifecycle import PROMOTIONS_FILE, promotions_lock
-from .manifests import ModelManifest
+from .manifests import ALWAYS_HASHED, HASHED_WHEN_WRITTEN, ModelManifest
 from .model_registry import load_manifest
 from .signing import (
     SIGNATURE_FILE,
@@ -61,6 +61,19 @@ class PackageVerification:
     #: promotion log, scoring outputs. Named so a reader knows what the
     #: hashes do NOT vouch for.
     unhashed: List[str] = field(default_factory=list)
+    #: Artifacts the manifest SHOULD hash and does not. A subset of the
+    #: above in spirit but not in kind: these are files registration hashes
+    #: itself, so an entry absent from a non-empty `content_hashes` was
+    #: removed after the fact. `ok` consults this; it did not consult
+    #: `unhashed`, and that is what made a hash removable rather than only
+    #: forgeable.
+    uncovered: List[str] = field(default_factory=list)
+    #: True when the manifest records no content hashes at all -- a package
+    #: registered before hashing existed. Reported rather than treated as a
+    #: gap, because there is nothing to compare and saying so is honest;
+    #: it is also the state a tampered package must not be able to imitate,
+    #: which is why one removed key is `uncovered` instead.
+    predates_hashing: bool = False
     #: The verified signature record, or None when the package is unsigned
     #: and a signature was not required.
     signature: Optional[Dict[str, Any]] = None
@@ -69,7 +82,12 @@ class PackageVerification:
 
     @property
     def ok(self) -> bool:
-        return not self.mismatched and not self.missing and self.signature_error is None
+        return (
+            not self.mismatched
+            and not self.missing
+            and not self.uncovered
+            and self.signature_error is None
+        )
 
     def to_dict(self) -> Dict[str, Any]:
         out = asdict(self)
@@ -109,6 +127,18 @@ def verify_model_package(
         else:
             report.verified.append(filename)
     report.unhashed = sorted(present - covered - {MANIFEST_FILE})
+    # A HASH THAT IS NOT THERE IS NOT A HASH THAT PASSED. `ok` consulted
+    # mismatched, missing and the signature, so a file the manifest simply
+    # does not cover landed in `unhashed` and the package still reported
+    # ok -- and `verify_file` treats a missing expected digest as nothing
+    # to check, so that artifact was then read unverified. Deleting one
+    # line of JSON was cheaper than forging a digest inside it.
+    if not manifest.content_hashes:
+        report.predates_hashing = True
+    else:
+        gaps = {name for name in ALWAYS_HASHED if name not in covered}
+        gaps |= {name for name in report.unhashed if name in HASHED_WHEN_WRITTEN}
+        report.uncovered = sorted(gaps)
     signed = SIGNATURE_FILE in present
     if signed or require_signature:
         try:
@@ -139,10 +169,11 @@ def mirror_model_package(model_id: str, store: ArtifactStore) -> Dict[str, str]:
     in a bucket with no way back. See the CHANGELOG entry of 2026-09-21.
     """
     local = verify_model_package(model_id)
-    if local.missing or local.mismatched:
+    if local.missing or local.mismatched or local.uncovered:
         raise ValidationError(
             f"refusing to mirror model {model_id!r}: the local package does "
-            f"not verify (missing {local.missing}, mismatched {local.mismatched})."
+            f"not verify (missing {local.missing}, mismatched "
+            f"{local.mismatched}, hashes removed for {local.uncovered})."
         )
     manifest = load_manifest(model_id)
     expected_by_filename = {

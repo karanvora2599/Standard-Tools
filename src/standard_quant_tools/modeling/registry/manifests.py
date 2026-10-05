@@ -10,6 +10,38 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
+#: The artifacts `register_model` writes UNCONDITIONALLY, hashed together
+#: in one dict literal. A manifest that hashes anything at all must hash
+#: all three; one of them absent from a non-empty `content_hashes` is a key
+#: that was removed, not a package that predates hashing.
+ALWAYS_HASHED = (
+    "model.joblib",
+    "model_spec.json",
+    "preprocessing_stats.json",
+)
+
+#: Everything registration hashes WHEN it writes it, by the filename the
+#: package carries. Present in the package but absent from a non-empty
+#: `content_hashes` means the same thing as above: the file was written, so
+#: registration hashed it, so the entry was removed afterwards.
+#:
+#: Why a list and not "every file present": the signature, the promotion
+#: log and scoring outputs are legitimately uncovered, and `unhashed`
+#: exists to name them. Only the artifacts registration itself hashes can
+#: be judged this way.
+HASHED_WHEN_WRITTEN = ALWAYS_HASHED + (
+    "model.skops",
+    "preprocessing_state.json",
+    "distribution.json",
+    "feature_profile.json",
+    "quantile_models.joblib",
+    "dataset_spec.json",
+    "feature_reference.parquet",
+    "prediction_reference.parquet",
+    "oos_predictions.parquet",
+)
+
+
 def _nulls_to_nan(mapping: Any) -> Any:
     """
     JSON has no NaN, so a NaN metric is written as `null` and comes back as

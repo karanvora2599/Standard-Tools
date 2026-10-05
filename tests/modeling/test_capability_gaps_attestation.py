@@ -435,3 +435,114 @@ class TestLineageTakesAKey:
                 view="summary",
                 public_key_path=str(key_path),
             )
+
+
+class TestAHashCannotBeDisarmedByDeletingIt:
+    """A hash that is not there is not a hash that passed.
+
+    The sibling bypass -- deleting manifest.json so `_expected_hash`
+    returned None for every artifact -- was closed by letting
+    load_manifest's error propagate, and `_expected_hash`'s docstring
+    records the measurement: "manifest deleted -> DESERIALIZED the tampered
+    file". This is the same bypass one step narrower and one step cheaper:
+    delete a single KEY from `content_hashes`, and `verify_file`, which
+    treats a missing expected digest as nothing to check, skips that one
+    artifact while every other still verifies.
+
+    `PackageVerification.ok` consulted mismatched, missing and the
+    signature. It did not consult `unhashed`, so the file landed there and
+    the package reported ok, `attest_model_package` reported ok, and
+    `promote_model` -- whose only refusal is `report.ok` -- would walk it to
+    production.
+
+    The rule that closes it: a manifest that hashes ANYTHING must hash
+    everything registration would have hashed. An empty `content_hashes` is
+    the genuine pre-hashing package and stays loadable, which
+    `test_a_model_registered_before_content_hashing_still_promotes` pins.
+    """
+
+    @staticmethod
+    def _drop_a_hash(model_id: str, entry: str = "model.joblib") -> None:
+        """Remove one entry, leaving the manifest a valid manifest and
+        every other artifact's digest intact and correct."""
+        path = _manifest_path(model_id)
+        data = json.loads(path.read_text(encoding="utf-8"))
+        hashes = dict(data["content_hashes"])
+        assert entry in hashes, f"{entry} was not hashed to begin with"
+        del hashes[entry]
+        data["content_hashes"] = hashes
+        path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+
+    def test_the_package_no_longer_verifies_and_names_the_gap(
+        self, patched_multi_factory
+    ):
+        model_id = _train_a_model_with_spec(
+            _dataset_spec(), dataset_id="ds_hash_removed"
+        )
+        assert verify_model_package(model_id).ok is True
+        self._drop_a_hash(model_id)
+        report = verify_model_package(model_id)
+        assert report.ok is False
+        assert report.uncovered == ["model.joblib"]
+        # Not a mismatch and not a missing file: the bytes are the
+        # registered ones and the file is there. What is gone is the claim.
+        assert report.mismatched == []
+        assert report.missing == []
+        assert report.predates_hashing is False
+
+    def test_the_pickle_is_not_deserialized_unverified(
+        self, patched_multi_factory
+    ):
+        """The consequence that matters. `joblib.load` executes code from
+        the file, so a skipped digest here is an arbitrary-code-execution
+        path and not merely a wrong-answer one."""
+        from standard_quant_tools.modeling.registry.model_registry import load_model
+
+        model_id = _train_a_model_with_spec(
+            _dataset_spec(), dataset_id="ds_hash_removed_load"
+        )
+        assert load_model(model_id) is not None
+        self._drop_a_hash(model_id)
+        with pytest.raises(ValidationError, match="not the same as an unhashed"):
+            load_model(model_id)
+
+    def test_the_promotion_is_refused(self, patched_multi_factory):
+        model_id = _train_a_model_with_spec(
+            _dataset_spec(), dataset_id="ds_hash_removed_promote"
+        )
+        self._drop_a_hash(model_id)
+        with pytest.raises(ValidationError, match="does not verify"):
+            promote_model(
+                PromoteModelInput(
+                    model_id=model_id,
+                    to_stage="validated",
+                    reason="the folds agreed on the sign",
+                )
+            )
+        assert promotions(model_id) == []
+        assert current_stage(model_id) == "candidate"
+
+    def test_the_attestation_reports_it(self, patched_multi_factory):
+        model_id = _train_a_model_with_spec(
+            _dataset_spec(), dataset_id="ds_hash_removed_attest"
+        )
+        self._drop_a_hash(model_id)
+        result = attest_model_package(
+            AttestModelPackageInput(model_id=model_id, require_signature=False)
+        )
+        assert result.ok is False
+
+    def test_a_legitimately_uncovered_file_is_still_not_a_gap(
+        self, patched_multi_factory
+    ):
+        """The signature, the promotion log and scoring outputs are
+        uncovered by design. `unhashed` names them and `ok` must stay
+        True -- otherwise the fix would refuse every signed package."""
+        model_id = _train_a_model_with_spec(
+            _dataset_spec(), dataset_id="ds_uncovered_is_fine"
+        )
+        (_artifacts.run_dir(model_id) / "notes.txt").write_text("hello")
+        report = verify_model_package(model_id)
+        assert "notes.txt" in report.unhashed
+        assert report.uncovered == []
+        assert report.ok is True

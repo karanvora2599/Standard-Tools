@@ -31,7 +31,7 @@ from .feature_provenance import (
     feature_implementation_hashes,
     feature_provenance_from_spec,
 )
-from .manifests import ModelManifest
+from .manifests import HASHED_WHEN_WRITTEN, ModelManifest
 
 logger = logging.getLogger(__name__)
 
@@ -360,8 +360,34 @@ def _expected_hash(model_id: str, filename: str) -> Optional[str]:
     load_manifest's error now propagates. A registered model always has a
     manifest; if it is absent or unreadable, the package is not intact and
     no loader should proceed on the assumption that it is.
+
+    THE SAME BYPASS ONE STEP NARROWER: deleting a single KEY from
+    `content_hashes` instead of the whole manifest also returned None, and
+    `verify_file` skipped the comparison on it alone while every other
+    artifact still verified. Removing one line of JSON is cheaper still
+    than removing the file.
+
+    A manifest that hashes anything must hash everything registration would
+    have hashed, so a gap in a NON-EMPTY `content_hashes` is refused rather
+    than read as "no reference". An empty one is the genuine pre-hashing
+    package the back-compat was written for, and still returns None.
     """
-    return load_manifest(model_id).content_hashes.get(filename)
+    hashes = load_manifest(model_id).content_hashes
+    digest = hashes.get(filename)
+    if digest is not None:
+        return digest
+    if hashes and filename in HASHED_WHEN_WRITTEN:
+        raise ValidationError(
+            f"model {model_id!r}: the manifest records {len(hashes)} content "
+            f"hash(es) but none for {filename!r}, which registration always "
+            "hashes when it writes it. A missing entry is not the same as an "
+            "unhashed package -- it is the one way to make an integrity check "
+            "skip a single artifact while the rest still verify, and "
+            f"{filename!r} would then be read unverified. Re-register the "
+            "model from its source, or pull the package again from where it "
+            "is intact."
+        )
+    return None
 
 
 def load_preprocessing_stats(model_id: str) -> Dict[str, Dict[str, float]]:
