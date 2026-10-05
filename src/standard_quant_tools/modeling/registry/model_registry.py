@@ -121,12 +121,14 @@ def save_model(
     )
 
     # Written in the state that makes the same model the same bytes: tree
-    # node padding zeroed, a histogram-boosting model's fit-time thread
+    # node padding zeroed, a histogram-boosting or LightGBM model's thread
     # count left out (see `serialization.reproducible_state`).
     model_path = _serialization.save_joblib(directory, "model", estimator)
-    # The same estimator as a skops bundle when the package can write
-    # one: loadable without pickle. None -- and joblib alone -- when
-    # it cannot, which the manifest's `formats` records.
+    # The same estimator as a skops bundle when the package can write one
+    # the loader accepts: loadable without pickle. None -- and joblib
+    # alone -- when it cannot, or when the bundle would hold a type the
+    # loader refuses (a LightGBM or XGBoost booster), which the manifest's
+    # `formats` records.
     skops_path = _serialization.dump_estimator(directory, "model", estimator)
     model_spec_path = _artifacts.save_json(
         directory, "model_spec", model_spec.model_dump()

@@ -124,8 +124,11 @@ remote = [
 ]
 # The skops bundle beside model.joblib: the estimator loadable without
 # executing pickle. Registration writes it when the package is present.
+# 0.15 is the release the loader's trusted types were read off and the
+# oldest verified; another release's defaults can name types the loader
+# then refuses by name.
 skops = [
-    "skops>=0.10"
+    "skops>=0.15"
 ]
 # Not used by the runtime: the oracle the survival Brier-score tests
 # compare the native implementation against.

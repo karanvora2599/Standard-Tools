@@ -1,5 +1,95 @@
 # Changelog
 
+## A model writes one skops bundle whether it was fitted or loaded, a bundle the loader refuses is not written, and a LightGBM model's joblib records no thread count
+
+- **A fitted model and that model loaded write one `model.skops`.** skops
+  gives one `__id__` to every reference to one object, so the bundle
+  recorded which objects the model in memory shared, and a fit, a joblib
+  load and a skops load share different ones: a fit passes one float or
+  string between attributes that a load holds as copies, joblib loads
+  each reference to an array as its own array, and a model loaded from
+  its bundle shares every `inf`. Of the 31 registered estimator cases
+  that have a bundle (every scikit-learn and package estimator, each
+  classifier calibrated both ways), 24 wrote another bundle once loaded
+  from their joblib, and the gradient-boosting, histogram-boosting and
+  quantile gradient-boosting regressors another once loaded from their
+  bundle; no array's bytes, dtype or memory order differed, only the
+  ids. All 31 now write one: the rewrite numbers ids by what a node
+  holds. A node that loads as an immutable value (a number, string,
+  None, type, function, bytes, a numpy scalar, a tuple of these) has one
+  id per distinct value; any other node (an array, list, dict, estimator,
+  random state) one id per place it appears, its arrays written once per
+  place.
+- **What loads is the same estimator.** The same types, parameters,
+  values and predictions; what differs is which objects are one object.
+  A mutable object two attributes shared in the fit (a calibrated
+  classifier's `classes_` and each fold's `classes`) loads as equal
+  copies, as it does from the joblib, and equal immutable values load as
+  one object. A bundle written before loads as it always did.
+- **`serialization.state_hash(estimator)`** is the content hash
+  registration records for `model.skops`, computed in memory: the same
+  for a fitted model and for that model loaded from either file, None
+  when no bundle would be written.
+- **Which `model.skops` hashes change.** The linear models (linear,
+  ridge, lasso, elastic net, Huber, quantile, logistic, both SGD
+  learners) and the Cox model keep theirs; every tree ensemble, MLP and
+  calibrated classifier changes once. On the live fixture under Python
+  3.12 and pandas 2.3, ridge stays `841665d38b1dc1d6`, the random forest
+  goes from `0f6341deb345afc5` to `5b0e12b8ce4e6569` and
+  hist_gradient_boosting from `1dc56bd162cb0e3c` to `931f7ab0d05a946f`.
+  `model.joblib` and the out-of-sample predictions keep their hashes on
+  both interpreters (under pandas 3: `a9b5ce72d5feab97`,
+  `628b5ae08bcc3894`, `6cd6d579ad02cdbc`). The fixture forest's joblib,
+  written under Python 3.11 and numpy 2.4, gives `5b0e12b8ce4e6569`
+  loaded under Python 3.12 and numpy 2.0; the ridge and
+  hist_gradient_boosting files do not, because their values differ
+  between the two environments (a coefficient by 1.2e-16, the baseline
+  prediction by 6.2e-19).
+- **A LightGBM or XGBoost model is registered with joblib alone.**
+  Registration wrote a bundle that `load_estimator` refuses by its
+  booster type and listed `formats: ["joblib", "skops"]`, a format the
+  model could never be loaded in. The bundle's types are now read before
+  it is written; when the loader would refuse any, the warning names them
+  (`['collections.OrderedDict', 'lightgbm.basic.Booster',
+  'lightgbm.sklearn.LGBMRegressor']`), `formats` is `["joblib"]`, and
+  asking for skops is refused as for any model without a bundle. A
+  manifest written before that lists such a bundle still loads its
+  joblib and verifies; its bundle is refused by the booster type as it
+  was. A bundle skops cannot read back is not written either.
+- **A LightGBM model's `model.joblib` is one file at any budget.** The
+  engine hands it its share of the budget as `n_jobs`, which it recorded
+  three times: as its own parameter, in its booster's parameters and in
+  the booster's model text (`[num_threads: 4]`). The three are written
+  as 0, LightGBM's documented "the OpenMP runtime's count", for the
+  length of the dump; the model in memory keeps its count and its
+  booster. On the live panel (50 trees), budgets 1 and 4 wrote
+  `392f98bc92307ff6` and `9560171b87632007` and now both write
+  `233f50e446018779`, with the same out-of-sample predictions. XGBoost's
+  file was one already (`71e487be7db930c8` at both budgets, unchanged):
+  the engine hands it no `n_jobs` and its booster records `nthread` 0.
+- **A loaded LightGBM model predicts under the OpenMP limit.** Its
+  `predict` reads `n_jobs` when called: it ran on the share it was fitted
+  with whatever limit `score_model` held, and now runs on that limit. A
+  400,000-row prediction used 3.9-4.0 cores at `n_jobs=4` with and
+  without a one-thread limit, and at 0 1.0 core under the limit (11.7
+  without), with the same predictions; `None` would have been LightGBM's
+  physical-core count under any limit (12.6 cores under it) on this
+  16-thread machine. A 30-row, 8-feature prediction under the one-thread
+  limit took a median 4.6 ms at `n_jobs=16` (what a fit under `"auto"`
+  above 2,000,000 cells records here) and 1.2 ms at 0.
+- **The `skops` extra requires 0.15**, the release `TRUSTED_TYPES` was
+  read off and the only one verified (it allowed 0.10). Under an older
+  skops, `load_estimator`'s refusal says which release the trusted types
+  were derived on and which one is installed.
+- **Cost.** `dump_estimator`, which now reads the bundle's types back,
+  medians of nine on a 16-thread machine shared with other jobs: a ridge
+  2.1 to 2.6 ms, a 737 KiB histogram-boosting bundle 80 to 91 ms, a
+  4.5 MiB 200-tree forest of depth 6 367 to 472 ms and a 70 MiB one of
+  depth 12 1.01 to 1.19 s; the rewrite alone 0.7, 47 to 48, 201 to 249
+  and 480 to 542 ms. A LightGBM model's `save_joblib` writes, reads back
+  and writes its model text: 10 to 22 ms for 100 trees, 168 to 378 ms
+  for 1,000.
+
 ## hist_gradient_boosting stops early on the last dates of each training window, and a spec can set or turn off its early stopping
 
 - **The validation rows are the window's last dates.** scikit-learn's

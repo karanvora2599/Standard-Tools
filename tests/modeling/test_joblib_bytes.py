@@ -17,6 +17,8 @@ loads of one file, and a histogram-boosting model fitted under OpenMP limits
 1 and 4 each give one file; a planted padding byte and a planted thread
 count do not reach the file; no field and no prediction moves; the model in
 memory keeps its thread count; and a registration writes the file this way.
+A LightGBM model fitted at budgets 1 and 4 gives one file too (the CHANGELOG
+entry of 2026-10-04); an XGBoost model already did.
 A load re-dumped is not byte for byte the fitted model's file, for any
 estimator, because pickle records which objects a model shares (see
 `test_the_loads_of_one_file_give_one_file`).
@@ -24,6 +26,7 @@ estimator, because pickle records which objects a model shares (see
 
 import copy
 import io
+import re
 
 import joblib
 import numpy as np
@@ -266,6 +269,141 @@ class TestTheFitTimeThreadCount:
         with pytest.raises(OSError, match="planted"):
             serialization.save_joblib(tmp_path, "model", model)
         assert model._bin_mapper.n_threads == 6
+
+
+def _booster_fit(library, jobs):
+    """A registered LightGBM or XGBoost regressor built the way the engine
+    builds one for a fit given `jobs` threads of the budget, and fitted
+    under that OpenMP limit, on rows few enough that every thread count
+    fits the same trees."""
+    from standard_quant_tools.modeling import engine
+    from standard_quant_tools.modeling.estimators.registry import (
+        ESTIMATOR_REGISTRY,
+    )
+
+    pytest.importorskip(library)
+    X, y = _data(n=2000)
+    model = engine._instantiate(
+        ESTIMATOR_REGISTRY[("regression", library)],
+        {"n_estimators": 30},
+        7,
+        n_jobs=jobs,
+        exact_n_jobs=True,
+    )
+    with _blas.openmp_thread_limit(jobs):
+        engine._fit(model, X, y, None)
+    return model, X
+
+
+def _thread_lines(booster):
+    return re.findall(r"\[num_threads: [^\]]*\]", booster.model_to_string())
+
+
+def _tree_text(model):
+    """A LightGBM model's text without its parameters: the trees."""
+    return model._Booster.model_to_string().split("\nparameters:\n", 1)[0]
+
+
+class TestALightGBMModelsThreadCount:
+    """The engine hands a LightGBM model its share of the budget as
+    `n_jobs`, and the model recorded it three times: its own parameter, its
+    booster's parameters and the booster's model text (`[num_threads: 4]`),
+    so the same trees fitted at budgets 1 and 4 gave two files (the
+    CHANGELOG entry of 2026-10-04)."""
+
+    def test_fitted_at_1_and_4_threads_writes_one_file(self, tmp_path):
+        one, X = _booster_fit("lightgbm", 1)
+        four, _X = _booster_fit("lightgbm", 4)
+        if _tree_text(one) != _tree_text(four):
+            # The bytes can only be one file when the trees are one model.
+            pytest.skip("this machine's LightGBM fitted different trees at 1 and 4")
+        plain = []
+        for model in (one, four):
+            buffer = io.BytesIO()
+            joblib.dump(model, buffer)
+            plain.append(buffer.getvalue())
+        assert plain[0] != plain[1]
+        assert _saved(tmp_path, one, "one") == _saved(tmp_path, four, "four")
+
+    def test_the_model_in_memory_is_left_as_it_was(self, tmp_path):
+        model, X = _booster_fit("lightgbm", 4)
+        booster = model._Booster
+        params, text = dict(booster.params), booster.model_to_string()
+        _saved(tmp_path, model, "model")
+        assert model.n_jobs == 4
+        assert model._Booster is booster
+        assert booster.params == params
+        assert booster.model_to_string() == text
+        assert _thread_lines(booster) == ["[num_threads: 4]"]
+
+    def test_the_loaded_model_records_0_and_predicts_alike(self, tmp_path):
+        """0 is LightGBM's "the OpenMP runtime's count", which `predict`
+        reads when it is called: a loaded model predicts on the count the
+        loading process's OpenMP limit gives it, as a histogram-boosting
+        model does, with the same predictions."""
+        model, X = _booster_fit("lightgbm", 4)
+        loaded = joblib.load(serialization.save_joblib(tmp_path, "model", model))
+        assert loaded.n_jobs == 0
+        assert loaded._Booster.params["num_threads"] == 0
+        assert _thread_lines(loaded._Booster) == ["[num_threads: 0]"]
+        assert np.array_equal(loaded.predict(X), model.predict(X))
+
+    def test_nested_models_are_reached(self, tmp_path):
+        """The quantile models' dict, which `quantile_models.joblib` holds,
+        and a calibrated classifier's per-fold models."""
+        pytest.importorskip("lightgbm")
+        from lightgbm import LGBMClassifier, LGBMRegressor
+
+        X, y = _data(n=2000)
+        quantiles = {
+            q: LGBMRegressor(
+                objective="quantile", alpha=q, n_estimators=10, n_jobs=3, verbose=-1
+            ).fit(X, y)
+            for q in (0.1, 0.9)
+        }
+        calibrated = CalibratedClassifierCV(
+            LGBMClassifier(n_estimators=10, n_jobs=3, verbose=-1), cv=2
+        ).fit(X, (y > 0).astype(int))
+        for name, obj, count in (
+            ("quantiles", quantiles, 2),
+            ("calibrated", calibrated, 3),
+        ):
+            assert len(serialization._fitted_parts(obj)[2]) == count, name
+            loaded = joblib.load(serialization.save_joblib(tmp_path, name, obj))
+            models = serialization._fitted_parts(loaded)[2]
+            assert {m.n_jobs for m in models} == {0}, name
+            assert {m.n_jobs for m in serialization._fitted_parts(obj)[2]} == {3}
+
+    def test_restored_when_the_dump_fails(self, tmp_path, monkeypatch):
+        model, _X = _booster_fit("lightgbm", 4)
+        booster = model._Booster
+
+        def fail(*_args, **_kwargs):
+            raise OSError("planted: the disk is full")
+
+        monkeypatch.setattr(_artifacts, "save_joblib", fail)
+        with pytest.raises(OSError, match="planted"):
+            serialization.save_joblib(tmp_path, "model", model)
+        assert model.n_jobs == 4 and model._Booster is booster
+
+
+class TestAnXGBoostModelsThreadCount:
+    def test_fitted_under_openmp_limits_1_and_4_writes_one_file(self, tmp_path):
+        """Null case: the engine hands XGBoost no `n_jobs` (its constructor
+        takes none by name), and its booster records `nthread` 0, so its
+        file was already one at any limit."""
+        one, X = _booster_fit("xgboost", 1)
+        four, _X = _booster_fit("xgboost", 4)
+        assert one.n_jobs is None and four.n_jobs is None
+        if not np.array_equal(one.predict(X), four.predict(X)):
+            pytest.skip("this machine's XGBoost fitted different trees at 1 and 4")
+        plain = []
+        for model in (one, four):
+            buffer = io.BytesIO()
+            joblib.dump(model, buffer)
+            plain.append(buffer.getvalue())
+        assert plain[0] == plain[1]
+        assert _saved(tmp_path, one, "one") == _saved(tmp_path, four, "four")
 
 
 class TestARegistration:

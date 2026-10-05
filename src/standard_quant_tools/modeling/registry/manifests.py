@@ -101,8 +101,9 @@ class ModelManifest(BaseModel):
     content_hashes: Dict[str, str] = Field(default_factory=dict)
     # The serialization formats the estimator was written in. Every
     # registration has joblib; `skops` is added when the package is
-    # installed and can serialize the estimator, and is the format that
-    # loads without executing pickle. A manifest written before this
+    # installed, can serialize the estimator, and the loader would trust
+    # every type the bundle holds, and is the format that loads without
+    # executing pickle. A manifest written before this
     # field existed reads as joblib only, which is what it has.
     formats: List[str] = Field(default_factory=lambda: ["joblib"])
 
