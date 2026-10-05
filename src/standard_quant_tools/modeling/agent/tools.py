@@ -1357,6 +1357,32 @@ def backtest_model_signal(
 _HEADLINE_METRIC = {task: headline_metrics(task) for task in available_tasks()}
 
 
+def headline_test(manifest) -> Dict[str, Any]:
+    """
+    The headline test a run made, read off the manifest.
+
+    `validation_report["headline"]` is written at registration by
+    `_headline_report` and the manifest is immutable, so this is a read and
+    never a recomputation -- which is what lets a caller gate on it without
+    re-scoring anything.
+
+    `beats_null` is the field that matters: True when the headline metric
+    beat what a model with no skill scores, at 5%. None when the test could
+    not be made (no headline value, no null for the task, a run registered
+    before the test existed), which is NOT the same as False and must not
+    be read as either an endorsement or a failure.
+    """
+    report = getattr(manifest, "validation_report", None) or {}
+    block = report.get("headline") or {}
+    return block if isinstance(block, dict) else {}
+
+
+def _beats_null(manifest) -> Optional[bool]:
+    """`beats_null` off the manifest, or None when there was no test."""
+    value = headline_test(manifest).get("beats_null")
+    return None if value is None else bool(value)
+
+
 def _headline(task: str, metrics: dict, preferred=None):
     """(metric name, value) for one model, or (None, None)."""
     candidates = (preferred,) if preferred else _HEADLINE_METRIC.get(task, ())
@@ -1403,6 +1429,10 @@ def list_models(input_data: ListModelsInput) -> ListModelsResult:
                 n_folds=manifest.n_folds,
                 headline_metric=metric,
                 headline_value=value,
+                # The number without this is a ranking of draws. Measured:
+                # none of sixteen recorded runs beat zero at 5%, and every
+                # one reported its headline with nothing to say so.
+                headline_beats_null=_beats_null(manifest),
                 dataset_id=manifest.dataset_id,
                 stage=stage,
             )
@@ -1770,6 +1800,7 @@ def compare_models(input_data: CompareModelsInput) -> CompareModelsResult:
                 task=manifest.task,
                 metric=metric,
                 value=value,
+                beats_null=_beats_null(manifest),
                 n_features=len(manifest.feature_ids),
                 dataset_id=manifest.dataset_id,
             )

@@ -1634,6 +1634,16 @@ class ModelSummary(BaseModel):
         None, description="Which metric `headline_value` reports."
     )
     headline_value: Optional[float] = None
+    headline_beats_null: Optional[bool] = Field(
+        None,
+        description="Whether that headline beat what a model with no skill "
+        "scores, at 5% — read off validation_report.headline, which the run "
+        "wrote and the manifest keeps. Ranking models by `headline_value` "
+        "alone ranks draws: measured on a 30-name daily equity panel, none of "
+        "sixteen recorded runs beat zero. None means the test could not be "
+        "made (no headline, no null for the task, or a run registered before "
+        "the test existed) and is not the same as False.",
+    )
     dataset_id: Optional[str] = None
     stage: Optional[str] = Field(
         None, description="Where the model is in its lifecycle; see promote_model."
@@ -1828,6 +1838,14 @@ class ModelComparison(BaseModel):
     value: Optional[float] = None
     rank: Optional[int] = Field(
         None, description="Within its own task. None when the metric is missing."
+    )
+    beats_null: Optional[bool] = Field(
+        None,
+        description="Whether `value` beat what a model with no skill scores, "
+        "at 5% — read off validation_report.headline. A rank among models "
+        "that none of which beat their null is a ranking of draws, so read "
+        "this before the rank. None means the test could not be made and is "
+        "not the same as False.",
     )
     n_features: Optional[int] = None
     dataset_id: Optional[str] = None
