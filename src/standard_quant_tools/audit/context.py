@@ -172,6 +172,7 @@ def record_data_access(
     content_hash: str,
     fetch_ms: Optional[float] = None,
     content_hash_version: Optional[int] = None,
+    tier: Optional[str] = None,
 ) -> None:
     """
     Report an OHLCV pull into the currently-open decision record, if any.
@@ -204,6 +205,10 @@ def record_data_access(
     }
     if content_hash_version is not None:
         fields["content_hash_version"] = int(content_hash_version)
+    # `source` names the VENDOR and `tier` which of its layers answered. See
+    # `record_frame_access` for why they are two fields and were one.
+    if tier is not None:
+        fields["tier"] = tier
     _append_data_source(sources, fields, fetch_ms)
 
 
@@ -215,6 +220,7 @@ def record_frame_access(
     source: str,
     frame: Any,
     fetch_ms: Optional[float] = None,
+    tier: Optional[str] = None,
 ) -> None:
     """
     Report a fetched frame into the currently-open decision record, if any,
@@ -232,6 +238,15 @@ def record_frame_access(
 
     The digest is taken before the fetch clock's lap, as the callers of
     `record_data_access` took theirs, so `fetch_ms` covers it as before.
+
+    `source` NAMES THE VENDOR, and `tier` says which of its layers answered
+    (`live_fetch`, `session_cache`, `disk_cache`). They were one field, with
+    three of four providers putting the tier in it, and the revision detector
+    keys a window's observations by `source`: one vendor read from two tiers
+    read as two sources, so a real revision came back as `sources_disagree`,
+    and two vendors that both said `live_fetch` read as one source, so a real
+    disagreement came back as a revision. Both directions wrong, from one
+    name.
     """
     sources = _data_sources_var.get()
     if sources is None:
@@ -247,6 +262,8 @@ def record_frame_access(
         "content_hash": canonical_frame_hash(frame),
         "content_hash_version": DATA_SOURCE_HASH_VERSION,
     }
+    if tier is not None:
+        fields["tier"] = tier
     expected = (
         sources.legacy.get((symbol, start, end, interval))
         if isinstance(sources, _ReplaySources)

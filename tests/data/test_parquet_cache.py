@@ -435,8 +435,14 @@ class TestCacheHardening:
             prov.get_ohlcv("AAPL", "2022-01-01", "2022-06-01")  # session-cache hit
 
         assert mock_record.call_count == 2
+        # The vendor in `source` and the layer that answered in `tier`. They
+        # were one field, and the revision detector groups a window's
+        # observations by `source` -- so one vendor read twice read as two
+        # sources disagreeing.
         sources = [c.kwargs.get("source") for c in mock_record.call_args_list]
-        assert sources == ["live_fetch", "session_cache"]
+        tiers = [c.kwargs.get("tier") for c in mock_record.call_args_list]
+        assert sources == ["yfinance", "yfinance"]
+        assert tiers == ["live_fetch", "session_cache"]
 
     def test_session_cache_hit_returns_independent_copy(
         self, minimal_ohlcv: pd.DataFrame
@@ -563,7 +569,9 @@ class TestCacheHardening:
             YFinanceProvider().get_ohlcv("AAPL", "2022-01-01", "2022-06-01")
 
         sources = [c.kwargs.get("source") for c in mock_record.call_args_list]
-        assert sources == ["live_fetch", "disk_cache"], (
+        tiers = [c.kwargs.get("tier") for c in mock_record.call_args_list]
+        assert sources == ["yfinance", "yfinance"]
+        assert tiers == ["live_fetch", "disk_cache"], (
             "a second, distinct provider instance must not transparently "
             "hit the first instance's session-cache entry"
         )

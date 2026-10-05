@@ -234,10 +234,13 @@ class TestTheSeams:
             _data_sources_var.reset(token)
         assert len(client.calls) == 1
         assert first.equals(second) and second.attrs["dataset"] == SUMMARY
-        assert [s["source"] for s in sources] == [
-            f"databento:{SUMMARY}",
-            f"databento:{SUMMARY}:session_cache",
-        ]
+        # One feed answering twice is ONE source, with the layer beside it.
+        # The tier used to be appended to the dataset, which made the second
+        # line a different source from the first to anything grouping by that
+        # field -- including the revision detector, whose whole job is to tell
+        # one source restating a window from two sources disagreeing.
+        assert [s["source"] for s in sources] == [f"databento:{SUMMARY}"] * 2
+        assert [s.get("tier") for s in sources] == [None, "session_cache"]
 
     def test_the_disk_cache_is_keyed_by_the_feed_that_answered(self, tmp_path):
         client = StubClient(ALL)

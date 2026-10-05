@@ -1,5 +1,35 @@
 # Changelog
 
+## A decision record names the vendor it read, not the cache layer that answered
+
+- **`source` is the vendor and `tier` is the layer, and they were one field.**
+  Three of the four providers put the layer in it -- yfinance and polygon
+  wrote `live_fetch` / `session_cache` / `disk_cache`, bloomberg wrote
+  `live_fetch`, and only databento named a vendor at all, with the layer glued
+  onto the dataset (`databento:EQUS.SUMMARY:session_cache`). Polygon wrote four
+  different values of `source` in one session, three of them layers and one of
+  them its own name.
+- **The cost is a verdict inverted in both directions.** The revision detector
+  groups a window's observations BY THIS FIELD, to tell one source restating a
+  window (a REVISION: decisions built on the old hash will not reproduce) from
+  two sources holding different hashes for it right now (a DISAGREEMENT: one
+  of them is wrong). With the layer in the field, one vendor read live and
+  then from disk became two sources, so a real revision came back as a
+  disagreement; and two different vendors that both said `live_fetch`
+  collapsed into one source, so a real cross-vendor disagreement -- the single
+  thing that classification exists to catch -- came back as a revision. It was
+  visible on the wire rather than deduced: the engine's lineage route returned
+  `"detail": "live_fetch: window end 2026-10-05 was still in the future"`,
+  offering a cache layer to a reader as the name of a data source.
+- **The dataset stays inside `source` for databento.** EQUS.SUMMARY and
+  XNAS.ITCH genuinely are different feeds and a hash difference between them
+  is exactly what should be reported; only the layer moved out. `tier` is
+  absent rather than null on a recorder that was given none, so a record
+  written before this split is not read as one whose layer was None.
+- The tests that asserted the old field now assert the split, and each reads
+  better for it -- the vendor and the layer are two questions, and a test
+  asserting one string for both could not say which it meant.
+
 ## A registered tape reaches the microstructure tools, one name spells a Sharpe, and an unpriced window is refused by density rather than by its first hole
 
 - **The four microstructure series tools accept either storage of a tape.**

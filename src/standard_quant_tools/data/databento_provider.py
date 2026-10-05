@@ -892,10 +892,20 @@ def _record(
     what: str,
     dataset: str,
     frame: pd.DataFrame,
+    tier: Optional[str] = None,
 ) -> None:
     """One line per fetch into the open decision record, if there is one:
     which dataset answered and a digest of what it said, so a replay can
     tell a restated feed from a changed tool.
+
+    `tier` says which layer answered and is recorded BESIDE the source, not
+    inside it. It used to be appended to the dataset, which made
+    `databento:EQUS.SUMMARY` and `databento:EQUS.SUMMARY:session_cache` two
+    different sources to anything grouping by that field -- so one feed read
+    live once and from the store once was reported as two feeds disagreeing.
+    The dataset stays in `source`: EQUS.SUMMARY and XNAS.ITCH really are
+    different sources, and a hash difference between them is the thing the
+    revision detector exists to find.
 
     The digest is taken only when a record is open. Outside one the line is
     discarded, and hashing the frame to throw the hash away cost as much as
@@ -909,6 +919,7 @@ def _record(
         what,
         source=f"databento:{dataset}",
         frame=frame,
+        tier=tier,
     )
 
 
@@ -2005,8 +2016,9 @@ class DatabentoProvider(DataProvider):
                 start_date,
                 end_date,
                 interval,
-                f"{cached.attrs.get('dataset', '?')}:session_cache",
+                str(cached.attrs.get("dataset", "?")),
                 cached,
+                tier="session_cache",
             )
             served = _with_attrs(cached.copy(), cached.attrs)
             return disclose_served(served, symbol, interval, _bar_clock(symbol, served))
@@ -2108,7 +2120,8 @@ class DatabentoProvider(DataProvider):
             frame.attrs["dataset"] = dataset
             frame.attrs["provider"] = "databento"
             _record(
-                symbol, start_date, end_date, interval, f"{dataset}:disk_cache", frame
+                symbol, start_date, end_date, interval, dataset, frame,
+                tier="disk_cache",
             )
             served[dataset] = frame
             return frame
@@ -2346,7 +2359,12 @@ class DatabentoProvider(DataProvider):
         out.attrs["dataset"] = first
         out.attrs["provider"] = "databento"
         self._disclose(out, symbol, route, interval, schema, start, end, first)
-        _record(symbol, start_date, end_date, interval, f"{first}:disk_cache+live", out)
+        # A stitched answer: the settled part from the store and the rest
+        # fetched. One tier name, because it is one frame.
+        _record(
+            symbol, start_date, end_date, interval, first, out,
+            tier="disk_cache+live",
+        )
         if part_day < settle_through and self._store_settled_part(
             out,
             route,

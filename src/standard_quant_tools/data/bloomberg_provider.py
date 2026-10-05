@@ -448,7 +448,8 @@ class BloombergProvider(DataProvider):
                 start_str,
                 end_str,
                 interval,
-                source="live_fetch",
+                source="bloomberg",
+                tier="live_fetch",
                 frame=result,
             )
         return result

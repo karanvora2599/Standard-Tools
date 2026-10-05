@@ -634,7 +634,8 @@ class PolygonProvider(DataProvider):
                     start_str,
                     end_str,
                     interval,
-                    source="session_cache",
+                    source="polygon",
+                    tier="session_cache",
                     frame=cached_df,
                 )
             return disclose_served(cached_df.copy(), symbol, interval, clock)
@@ -673,7 +674,8 @@ class PolygonProvider(DataProvider):
                         start_str,
                         end_str,
                         interval,
-                        source="disk_cache",
+                        source="polygon",
+                        tier="disk_cache",
                         frame=cached_df,
                     )
                 return cached_df
@@ -716,7 +718,8 @@ class PolygonProvider(DataProvider):
                 start_str,
                 end_str,
                 interval,
-                source="live_fetch",
+                source="polygon",
+                tier="live_fetch",
                 frame=result,
             )
 

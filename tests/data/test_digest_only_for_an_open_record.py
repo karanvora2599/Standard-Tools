@@ -54,7 +54,7 @@ from .test_databento_provider import (
 from .test_point_in_time_records import EPS, PAGE_ONE, PAGE_TWO
 
 
-def _reference_record(symbol, start_date, end_date, what, dataset, frame) -> None:
+def _reference_record(symbol, start_date, end_date, what, dataset, frame, tier=None) -> None:
     """Databento's `_record` without the question: the digest taken first,
     unconditionally, then handed to a report that may discard it."""
     audit.record_data_access(
@@ -65,6 +65,7 @@ def _reference_record(symbol, start_date, end_date, what, dataset, frame) -> Non
         source=f"databento:{dataset}",
         content_hash=audit.canonical_frame_hash(frame),
         content_hash_version=audit.DATA_SOURCE_HASH_VERSION,
+        tier=tier,
     )
 
 
@@ -223,11 +224,16 @@ class TestInsideARecordTheLineIsUnchanged:
     def test_databento_every_path_is_hashed_once(self, digests, open_record):
         _databento_three_ways(_provider(_databento_client()))
         _provider(_databento_client()).get_ohlcv("NVDA", "2024-01-02", "2024-01-10")
-        sources = [entry["source"] for entry in open_record()]
-        assert sources == [
-            f"databento:{CONSOLIDATED}",
-            f"databento:{CONSOLIDATED}:session_cache",
-            f"databento:{CONSOLIDATED}:disk_cache",
+        entries = open_record()
+        # One feed, three layers. The tier used to be appended to the dataset,
+        # which made these three different SOURCES to anything grouping by
+        # that field -- so one feed read three ways was three feeds
+        # disagreeing with each other.
+        assert [e["source"] for e in entries] == [f"databento:{CONSOLIDATED}"] * 3
+        assert [e.get("tier") for e in entries] == [
+            None,
+            "session_cache",
+            "disk_cache",
         ]
         assert len(digests) == 3
 
@@ -304,7 +310,12 @@ class TestInsideARecordTheLineIsUnchanged:
         provider.get_ohlcv("AAPL", "2024-01-02", "2024-03-28")
         provider.get_ohlcv("AAPL", "2024-01-02", "2024-03-28")
         entries = open_record()
-        assert [e["source"] for e in entries] == [
+        # One vendor, three layers. These were three values of `source`, and
+        # the revision detector groups a window's observations by it -- so one
+        # vendor answering from three layers read as three sources, and a real
+        # revision between any two of them came back as a disagreement.
+        assert [e["source"] for e in entries] == ["yfinance"] * 3
+        assert [e["tier"] for e in entries] == [
             "live_fetch",
             "disk_cache",
             "session_cache",
@@ -323,20 +334,24 @@ class TestInsideARecordTheLineIsUnchanged:
         provider.get_point_in_time_records(
             ["aapl"], "fundamentals", [EPS], "2022-01-01", "2023-12-31"
         )
-        assert [(e["source"], e["interval"]) for e in open_record()] == [
-            ("live_fetch", "1d"),
-            ("session_cache", "1d"),
-            ("disk_cache", "1d"),
-            ("polygon", "trades"),
-            ("polygon", "quotes"),
-            ("polygon", "pit:fundamentals"),
+        # The sharpest statement of what was wrong: ONE provider wrote four
+        # different values of `source` in one session, three of them layers
+        # and one of them its own name.
+        assert [(e["source"], e.get("tier"), e["interval"]) for e in open_record()] == [
+            ("polygon", "live_fetch", "1d"),
+            ("polygon", "session_cache", "1d"),
+            ("polygon", "disk_cache", "1d"),
+            ("polygon", None, "trades"),
+            ("polygon", None, "quotes"),
+            ("polygon", None, "pit:fundamentals"),
         ]
         assert len(digests) == 6
 
     def test_bloomberg_bars_are_hashed_once(self, digests, open_record, monkeypatch):
         _bloomberg(monkeypatch).get_ohlcv("AAPL", "2023-01-03", "2023-01-04")
         (entry,) = open_record()
-        assert entry["source"] == "live_fetch" and len(digests) == 1
+        assert entry["source"] == "bloomberg" and entry["tier"] == "live_fetch"
+        assert len(digests) == 1
 
 
 # ── fakes ────────────────────────────────────────────────────────────────

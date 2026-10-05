@@ -716,7 +716,8 @@ class YFinanceProvider(DataProvider):
                     start_str,
                     end_str,
                     interval,
-                    source="session_cache",
+                    source="yfinance",
+                    tier="session_cache",
                     frame=cached_df,
                 )
             return disclose_served(cached_df.copy(), symbol, interval, clock)
@@ -781,7 +782,8 @@ class YFinanceProvider(DataProvider):
                         start_str,
                         end_str,
                         interval,
-                        source="disk_cache",
+                        source="yfinance",
+                        tier="disk_cache",
                         frame=cached_df,
                     )
                 return cached_df
@@ -903,7 +905,8 @@ class YFinanceProvider(DataProvider):
                 start_str,
                 end_str,
                 interval,
-                source="live_fetch",
+                source="yfinance",
+                tier="live_fetch",
                 frame=result,
             )
 
