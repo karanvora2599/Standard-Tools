@@ -17,6 +17,8 @@ import logging
 import math
 from typing import Annotated, Any, Dict, List, Literal, Optional
 
+import numpy as np
+import pandas as pd
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
 from standard_quant_tools.agent.runtimes._json_safe import (
@@ -306,7 +308,7 @@ def run_futures_backtest(input_data: FuturesBacktestInput) -> FuturesBacktestRes
     overflowed = [
         name for name in _FUTURES_HEADLINE if not _is_finite_number(out[name])
     ]
-    n_bad_bars = int((~out["equity_curve"].apply(_is_finite_number)).sum())
+    n_bad_bars = _non_finite_bars(out["equity_curve"])
     if overflowed or n_bad_bars:
         warnings.append(
             f"Reported as null because the arithmetic left floating point: "
@@ -360,7 +362,7 @@ def run_futures_backtest(input_data: FuturesBacktestInput) -> FuturesBacktestRes
         n_rolls=out["n_rolls"],
         rolls=out["rolls"],
         margin_limited_fills=out["margin_limited_fills"],
-        equity_curve={str(k.date()): v for k, v in out["equity_curve"].items()},
+        equity_curve=_by_day(out["equity_curve"]),
         min_margin_cushion=min_margin_cushion,
         cash_curve_ref=_publish_state(out["cash_curve"], run_id, "cash_curve"),
         margin_curve_ref=_publish_state(out["margin_curve"], run_id, "margin_curve"),
@@ -382,6 +384,29 @@ def _is_finite_number(value: Any) -> bool:
         return math.isfinite(float(value))
     except (TypeError, ValueError):
         return False
+
+
+def _non_finite_bars(curve: Any) -> int:
+    """How many bars of `curve` are NaN or infinite: `_is_finite_number` per
+    bar, which on a float64 curve is `np.isfinite` over its array."""
+    if curve.dtype != np.float64:
+        return int((~curve.apply(_is_finite_number)).sum())
+    return int((~np.isfinite(curve.to_numpy())).sum())
+
+
+def _by_day(curve: Any) -> Dict[str, float]:
+    """
+    `{str(stamp.date()): value for stamp, value in curve.items()}`: each
+    bar's value under its ISO calendar date, the last bar of a day winning.
+
+    The index's `.date` gives the same local `datetime.date` per bar that
+    `Timestamp.date()` does, in one pass rather than a Timestamp per bar,
+    and `tolist()` the same Python floats that `items()` yields (4.3 ms of
+    a 5,040-bar curve went to boxing).
+    """
+    if not isinstance(curve.index, pd.DatetimeIndex):
+        return {str(stamp.date()): value for stamp, value in curve.items()}
+    return dict(zip(map(str, curve.index.date), curve.tolist()))
 
 
 class FuturesHedgeBacktestInput(BaseModel):

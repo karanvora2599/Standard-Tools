@@ -44,6 +44,7 @@ depth accumulated across a boundary where none existed.
 
 from __future__ import annotations
 
+import ctypes
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -615,6 +616,108 @@ def _native_codes(
     return out
 
 
+#: The sort `value_counts` gives its counts, largest first: pandas 2 calls
+#: `sort_values(ascending=False)`, a quicksort, and pandas 3 adds
+#: `kind="stable"`. Equal counts are ordered by that call.
+_VALUE_COUNTS_SORT: Dict[str, Any] = (
+    {} if int(pd.__version__.split(".")[0]) < 3 else {"kind": "stable"}
+)
+
+#: Read by identity, an object column of action codes holds at most this
+#: many distinct objects; with more, it is counted by `value_counts`.
+_FEW_OBJECTS = 64
+
+#: Rows looked at before an object column is read by identity at all.
+_IDENTITY_SAMPLE = 4096
+
+
+def _counted_seconds(stamps: pd.Series, keep: Optional[np.ndarray]) -> Optional[float]:
+    """
+    `_elapsed_seconds(stamps[keep])`, or of every row when `keep` is None.
+
+    A column that already holds datetimes is read as its integers: the
+    span is the latest kept stamp minus the earliest, NaT skipped -- the
+    same two Timestamps that `max()` and `min()` box, subtracted the same
+    way -- without copying the kept rows into a new Series and dropping its
+    NaT first (20 ms and 35 ms of 2,000,000 zoned stamps). Any other column
+    is selected and parsed as before, since `pd.to_datetime` infers its
+    format from the first row it is given.
+    """
+    if not _is_datetime(stamps.dtype):
+        return _elapsed_seconds(stamps if keep is None else stamps[keep])
+    values = stamps.array
+    as_integers = np.asarray(values.asi8)
+    valid = as_integers != np.iinfo(np.int64).min
+    if keep is not None:
+        valid &= keep
+    positions = np.flatnonzero(valid)
+    if len(positions) < 2:
+        return None
+    kept = as_integers[positions]
+    first = values[int(positions[kept.argmin()])]
+    last = values[int(positions[kept.argmax()])]
+    span = (last - first).total_seconds()
+    return float(span) if span > 0 else None
+
+
+def _action_counts(actions: pd.Series, keep: Optional[np.ndarray]) -> Dict[Any, Any]:
+    """`actions[keep].value_counts().to_dict()`, or of every row when `keep`
+    is None, with a column of one-letter codes counted by identity."""
+    selected = actions.array if keep is None else actions.array[keep]
+    if actions.dtype == object:
+        counted = _counts_by_identity(np.asarray(selected))
+        if counted is not None:
+            return counted
+    return pd.Series(selected, dtype=actions.dtype, copy=False).value_counts().to_dict()
+
+
+def _counts_by_identity(values: np.ndarray) -> Optional[Dict[str, int]]:
+    """
+    `pd.Series(values, dtype=object).value_counts().to_dict()` for an
+    object array of `str` holding few distinct objects, or None for any
+    other array.
+
+    A column of action codes is such an array: Python keeps one object per
+    one-letter string, so 2,000,000 rows point at five or six objects.
+    `value_counts` hashes every row as a string (70 ms of 2,000,000); here
+    each row's object pointer is read from the array as an integer, the
+    integers are counted (12 ms), and only the few distinct objects are
+    compared as strings. Each must be exactly `str`, whose equal values
+    are one key in pandas' table and unequal ones two, as in a dict; a
+    missing value or any other type returns None. The values come out in
+    the order each first appears, as the table records them, and are
+    sorted by count with the call `value_counts` makes
+    (`_VALUE_COUNTS_SORT`), so equal counts keep its order too.
+    """
+    n = len(values)
+    if n == 0 or values.dtype != object:
+        return None
+    values = np.ascontiguousarray(values)
+    # The array's own buffer of object pointers, viewed and not copied;
+    # `values` holds every object alive while it is read.
+    address = ctypes.cast(values.ctypes.data, ctypes.POINTER(ctypes.c_size_t))
+    identities = np.ctypeslib.as_array(address, shape=(n,))
+    if len(set(identities[:_IDENTITY_SAMPLE].tolist())) > _FEW_OBJECTS:
+        return None
+    codes, distinct = pd.factorize(identities)
+    if len(distinct) > _FEW_OBJECTS:
+        return None
+    # Codes are numbered in order of first appearance, so the running
+    # maximum reaches each code first at that code's first row.
+    firsts = np.searchsorted(np.maximum.accumulate(codes), np.arange(len(distinct)))
+    objects = values[firsts].tolist()
+    if set(map(type, objects)) != {str}:
+        return None
+    per_object = np.bincount(codes, minlength=len(distinct)).tolist()
+    counts: Dict[str, int] = {}
+    for text, count in zip(objects, per_object):
+        counts[text] = counts.get(text, 0) + count
+    keys = list(counts)
+    totals = pd.Series(np.array([counts[key] for key in keys], dtype=np.int64))
+    order = totals.sort_values(ascending=False, **_VALUE_COUNTS_SORT).index
+    return {keys[i]: counts[keys[i]] for i in order}
+
+
 def event_rates(events: pd.DataFrame) -> Dict[str, Any]:
     """
     Events per second, in total and by action.
@@ -627,14 +730,13 @@ def event_rates(events: pd.DataFrame) -> Dict[str, Any]:
     # tick the clock (a snapshot-bearing window read 16,000x too many
     # events per second before this).
     snapshot = _snapshot_mask(events)
-    # The two columns read, not the whole frame: the same rows in the same
-    # order as `events.loc[~snapshot]`, without copying the other columns.
+    # The two columns read, not the whole frame, and only the rows that are
+    # events: the same rows in the same order as `events.loc[~snapshot]`.
     stamps, actions = events["timestamp"], events["action"]
-    if snapshot.any():
-        stamps, actions = stamps[~snapshot], actions[~snapshot]
-    seconds = _elapsed_seconds(stamps)
-    counts = actions.value_counts().to_dict()
-    total = int(len(actions))
+    keep = ~snapshot if snapshot.any() else None
+    seconds = _counted_seconds(stamps, keep)
+    counts = _action_counts(actions, keep)
+    total = int(len(actions)) if keep is None else int(np.count_nonzero(keep))
     per_action = {str(k): int(v) for k, v in counts.items()}
     rates = (
         {str(k): float(v) / seconds for k, v in per_action.items()} if seconds else {}

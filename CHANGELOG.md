@@ -1,5 +1,104 @@
 # Changelog
 
+## The futures account reads its dates in bulk and event_rates counts actions by object, with the same results
+
+- **The futures engine converts its maps once, not key by key.** Before
+  its bar loop, `run_futures_simulation` let pandas infer the price and
+  target index from the dict's Timestamp keys, which on pandas 2 converts
+  each key on its own before the one `DatetimeIndex(keys)` call it ends
+  in; passed that index through `pd.to_datetime`, which boxes every stamp
+  of an index that already is one to decide on a cache and hands the same
+  index back; built a Timestamp per contract-map key; and every bar then
+  hashed its Timestamp to find its contract. Now keys that are all
+  Timestamps in one zone object go straight to `DatetimeIndex(keys)`; a
+  DatetimeIndex without repeated stamps skips `pd.to_datetime`; a map of
+  Timestamps is used as it is (`pd.Timestamp` returns one as itself); a
+  contract map of 128 keys or more spelled exactly 'YYYY-MM-DD' is parsed
+  by numpy in one call and matched to naive bars by integer instant, which
+  for stamps in years 1 to 9999 is the dict's own answer; with no map no
+  bar looks one up; and the day counts take their maximum over the
+  integer array. Any other key -- another spelling, a zone, a datetime, a
+  mixture, a smaller map -- takes the path it took. At 5,040 daily bars
+  the work before the loop is 8.7 -> 3.9 ms with the Timestamp keys the
+  tool hands over and 9.9 -> 6.2 ms with ISO strings, beside a loop of
+  9.7-11.2 ms, which with ISO strings is now 9.1 ms, a bar no longer
+  hashing its stamp (pandas 2.3; 8.3 -> 4.3 and 10.8 -> 6.6 ms under
+  pandas 3.0).
+- **`parse_date_keys` reads its two refusals from the parsed index.** Every
+  tool taking a date-keyed map parses through it (the futures and hedge
+  backtests, the backtest signals, the data tools). It tested each key with
+  `pd.isna` and a dict of Timestamps and walked the index twice; it now
+  takes the NaT mask and `has_duplicates` from the index (two keys naming
+  one instant share its integer, the index having one unit and zone),
+  walks the dict only to name a repeated date, and boxes the stamps once.
+  The same dict and the same refusals, word for word: 11.0 -> 5.4 ms at
+  5,040 keys, 3.6 -> 1.9 ms at 1,260, 1.2 -> 0.8 ms at 252, within 3 us
+  at 2.
+- **`run_futures_backtest` returns its equity curve without a Timestamp
+  per bar**: the index's `.date` (the local date `Timestamp.date()` gives)
+  beside `tolist()` (the floats `items()` yields), and the count of
+  overflowed bars as `np.isfinite` over the float64 curve.
+- **Measured** against the previous modules in the same process, medians
+  of 41 interleaved pairs (20 at 5,040 bars), quarterly rolls, pandas 2.3:
+  `run_futures_backtest` 6.6 -> 5.0 ms at 252 daily bars, 15.7 -> 11.2 ms
+  at 1,260, 53.0 -> 31.3 ms at 5,040 and 48.9 -> 26.8 ms on 5,040 30-minute
+  bars; `run_futures_simulation` with the tool's keys 4.0 -> 3.3, 6.9 ->
+  5.3 and 18.6 -> 14.3 ms, with ISO-string keys 4.2 -> 4.1, 8.0 -> 7.0 and
+  19.1 -> 14.5 ms, without a contract map 3.2 -> 2.8, 6.6 -> 4.8 and 16.7
+  -> 11.7 ms; `run_futures_hedge_backtest` 18.0 -> 18.3, 51.8 -> 45.6 and
+  177 -> 152 ms. Under pandas 3.0 the tool is 1.36x, 1.50x and 1.69x
+  faster at the same sizes. An intraday map keyed by strings, and any
+  map below 128 keys, takes as long as before (0.98-1.01x).
+- **The same numbers.** A test runs the engine and both futures tools as
+  they stood beside the new ones on 312 shapes of input -- daily, gapped
+  and intraday bars, naive, UTC, zoneinfo, pytz and fixed-offset zones
+  across both 2024 clock changes, keys as Timestamps, ISO strings, dates,
+  datetimes and datetime64, mixed and unsorted, maps covering every bar,
+  some bars or other dates -- and on the refusals: every curve with its
+  index, unit, zone and name, every record, total, warning and error
+  message, and every Python warning, equal to the bit, under pandas 2.3
+  and 3.0.
+- **Kept as it was: a contract map keyed in another zone than the bars
+  misses the repeated hour.** When clocks go back, a bar in the second
+  1 am hashes through the first one, so a dict keyed by the same instants
+  in UTC does not find it, and a roll there lands on the next bar found.
+  The bulk match is used only where the dict answers by instant, and the
+  engine still answers as before; a test pins it.
+- **`event_rates` counts a column of one-letter codes by object.** It
+  spent 0.1 s of its 0.14 s at 2,000,000 events in `value_counts`, which
+  hashes every row as a string, and copied the kept rows of both columns
+  it reads. Python keeps one object per one-letter string, so the rows
+  point at five or six objects: each row's pointer is now read from the
+  object array as an integer and counted, and only the distinct objects
+  are compared as strings. The stamps of a datetime column are read as
+  integers, and rows are selected from the arrays. Missing values, any
+  object that is not exactly `str`, more than 64 distinct objects and any
+  other dtype (pandas 3's string columns among them) are counted by
+  `value_counts` as before.
+- **`counts_by_action` keeps `value_counts`' key order.** `value_counts`
+  sorts the counts, in the order each value first appears, with
+  `sort_values(ascending=False)`: a quicksort under pandas 2, which with
+  numpy 2's x86 sort does not keep equal counts in that order (on 10 of
+  50 random counts of 5 codes, 49 of 50 at 16 codes or more), and a
+  stable sort under pandas 3. The new count rebuilds the first-appearance
+  order and makes the same call, so the keys come out in `value_counts`'
+  order under either version, on any machine. Tested against the previous
+  function on ties among 2 to 65 codes, mixed count levels, the same
+  string as several objects, missing values, other types, other dtypes,
+  snapshot rows that hold the first appearance of a code or the extreme
+  stamps, and clocks in every unit, zoned, parsed from strings and with
+  NaT.
+- **Measured**, medians of 21 interleaved pairs: under pandas 2.3, 13.2 ->
+  6.3 ms at 200,000 events and 138 -> 65 ms at 2,000,000; under pandas
+  3.0, whose Parquet reads give a string column, 9.8 -> 7.3 and 80 -> 53
+  ms, and 11.4 -> 6.5 and 122 -> 61 ms on an object column.
+  `order_event_metrics` at 2,000,000 events, of which `event_rates` is a
+  small part, does not move outside its spread: 630 -> 555 ms in one set
+  of 15 pairs and 577 -> 576 ms in another (pandas 2.3).
+- Measured on an i7-13620H under Windows 11, Python 3.12 with numpy 2.0.2
+  and pandas 2.3.3 and Python 3.11 with numpy 2.4.6 and pandas 3.0.5,
+  `gc.collect()` before each call; every compared result equal.
+
 ## A refused booster bundle is decided before anything is dumped, the skops extra allows 0.14, and the tests of a mean and the Cox fit run on one BLAS thread
 
 - **A LightGBM or XGBoost model's bundle is refused before anything is

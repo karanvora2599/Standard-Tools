@@ -136,40 +136,47 @@ def parse_date_keys(
             "so they cannot share one index. Write every key the same way, "
             "e.g. all as 'YYYY-MM-DD'."
         )
-    bad = [key for key, stamp in zip(keys, parsed) if pd.isna(stamp)]
-    if bad:
+    # The two refusals below are read from the parsed index as arrays, and
+    # its stamps are boxed once: per key, `pd.isna`, a dict of Timestamps
+    # and a second pass over the index cost 11 ms of a 5,040-key map. A key
+    # that failed to parse is NaT in the index; two keys naming one instant
+    # share one integer value in it, since every stamp has its unit and zone.
+    missing = parsed.isna()
+    if missing.any():
+        bad = [key for key, gap in zip(keys, missing) if gap]
         raise ValidationError(
             f"{tool}: {len(bad)} key(s) of {field} are not ISO dates: "
             f"{_named(bad)}. {field} maps an ISO date ('YYYY-MM-DD') to its "
             "value; a map keyed by tickers or labels is a different input."
         )
-    seen: Dict[pd.Timestamp, Any] = {}
-    repeated: List[str] = []
-    for key, stamp in zip(keys, parsed):
-        if stamp in seen:
-            repeated.append(f"{seen[stamp]!r} and {key!r}")
-        else:
-            seen[stamp] = key
-    if repeated:
-        raise ValidationError(
-            f"{tool}: keys of {field} name the same date twice: "
-            f"{_named(repeated)}. Only one value per date can be used; keep "
-            "the one you mean."
-        )
+    stamps = list(parsed)
+    if parsed.has_duplicates:
+        seen: Dict[pd.Timestamp, Any] = {}
+        repeated: List[str] = []
+        for key, stamp in zip(keys, stamps):
+            if stamp in seen:
+                repeated.append(f"{seen[stamp]!r} and {key!r}")
+            else:
+                seen[stamp] = key
+        if repeated:
+            raise ValidationError(
+                f"{tool}: keys of {field} name the same date twice: "
+                f"{_named(repeated)}. Only one value per date can be used; "
+                "keep the one you mean."
+            )
+    if not finite:
+        return dict(zip(stamps, [mapping[key] for key in keys]))
     out: Dict[pd.Timestamp, Any] = {}
     non_finite: List[Any] = []
-    for key, stamp in zip(keys, parsed):
-        value = mapping[key]
-        if finite:
-            try:
-                number = float(value)
-            except (TypeError, ValueError):
-                number = math.nan
-            if not math.isfinite(number):
-                non_finite.append(key)
-                continue
-            value = number
-        out[stamp] = value
+    for key, stamp in zip(keys, stamps):
+        try:
+            number = float(mapping[key])
+        except (TypeError, ValueError):
+            number = math.nan
+        if not math.isfinite(number):
+            non_finite.append(key)
+            continue
+        out[stamp] = number
     if non_finite:
         raise ValidationError(
             f"{tool}: {field} has a missing or non-finite value on "

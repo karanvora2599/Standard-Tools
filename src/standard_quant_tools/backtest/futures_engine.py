@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import logging
 import math
+import operator
 from typing import Any, Dict, List, Mapping, Optional
 
 import numpy as np
@@ -119,7 +120,16 @@ def run_futures_simulation(
     # Timestamp key, and NO ROLL WOULD EVER FIRE. Silently: the simulation
     # runs, the numbers look plausible, and the largest recurring cost of
     # holding a future is simply absent.
+    #
+    # A map of `_ISO_DAYS_FROM` keys or more, all spelled exactly
+    # 'YYYY-MM-DD' as a JSON payload spells them, is parsed in one call and
+    # matched to the bars below (`_iso_days`). Any other key is made a
+    # Timestamp here -- one `pd.Timestamp` per key, or none for a key that
+    # already is one, which that call returns as itself -- so a key that
+    # cannot be a date raises where it always did.
     rolls_by_date: Dict[Any, str] = {}
+    contract_days: Optional[pd.DatetimeIndex] = None
+    contract_codes: List[str] = []
     if contract_map is not None:
         if not contract_map:
             raise ValidationError(
@@ -127,9 +137,20 @@ def run_futures_simulation(
                 "which says so in the warnings, rather than an empty map "
                 "that looks like one and is not."
             )
-        rolls_by_date = {
-            pd.Timestamp(key): str(value) for key, value in contract_map.items()
-        }
+        contract_items = list(contract_map.items())
+        contract_keys = [key for key, _ in contract_items]
+        if len(contract_keys) >= _ISO_DAYS_FROM:
+            contract_days = _iso_days(contract_keys)
+        if contract_days is not None:
+            contract_codes = [str(value) for _, value in contract_items]
+        elif set(map(type, contract_keys)) == {pd.Timestamp}:
+            rolls_by_date = dict(
+                zip(contract_keys, [str(value) for _, value in contract_items])
+            )
+        else:
+            rolls_by_date = {
+                pd.Timestamp(key): str(value) for key, value in contract_items
+            }
 
     dates = price_series.index
     n = len(dates)
@@ -173,10 +194,24 @@ def run_futures_simulation(
     # 2026-10-01.
     price_values = price_series.to_numpy(dtype="float64")
     target_values = targets.to_numpy(dtype="float64")
-    day_counts = [max(days, 0) for days in (dates[1:] - dates[:-1]).days.tolist()]
+    day_counts = _day_counts(dates)
+
+    # Each bar's contract, found once for the whole index rather than by a
+    # hash of its Timestamp on every bar: none without a map, and by integer
+    # instant for a map of ISO days (`_match_days` says when that is the
+    # dict's answer). Otherwise each bar looks itself up in the dict.
+    contract_by_bar: Optional[List[Any]] = None
+    if contract_map is None:
+        contract_by_bar = [None] * n
+    elif contract_days is not None:
+        contract_by_bar = _match_days(contract_days, contract_codes, dates)
+        if contract_by_bar is None:
+            rolls_by_date = dict(zip(list(contract_days), contract_codes))
 
     previous_price = float(price_values[0])
-    previous_contract = rolls_by_date.get(dates[0])
+    previous_contract = (
+        rolls_by_date.get(dates[0]) if contract_by_bar is None else contract_by_bar[0]
+    )
 
     for i, date in enumerate(dates):
         price = float(price_values[i])
@@ -188,7 +223,9 @@ def run_futures_simulation(
         #    -- and booking it as profit invented returns out of nothing.
         #    A dead-flat market rolling 39 times up a contango curve
         #    reported +5.85% with a maximum drawdown of 0.00%.
-        current_contract = rolls_by_date.get(date)
+        current_contract = (
+            rolls_by_date.get(date) if contract_by_bar is None else contract_by_bar[i]
+        )
         rolled = (
             i > 0
             and contract_map is not None
@@ -446,11 +483,151 @@ def _series(mapping: Mapping[Any, float], name: str) -> pd.Series:
     if not mapping:
         raise ValidationError(f"{name} is empty.")
     try:
-        series = pd.Series(dict(mapping), dtype="float64")
+        series = _float_series(dict(mapping))
     except (TypeError, ValueError) as exc:
         raise ValidationError(f"{name} must map dates to numbers; {exc}") from None
-    series.index = pd.to_datetime(series.index)
+    # `pd.to_datetime` returns a DatetimeIndex without repeated stamps as the
+    # same object, after boxing every stamp in it to decide whether a cache
+    # would pay (2 ms at 5,040 bars), so that index is kept as it is. Any
+    # other index -- strings, objects, a repeated stamp -- is converted.
+    index = series.index
+    if not (isinstance(index, pd.DatetimeIndex) and index.is_unique):
+        series.index = pd.to_datetime(index)
     return series.sort_index()
+
+
+#: Every key's time zone object, read in C rather than per key in Python.
+_TZINFO = operator.attrgetter("tzinfo")
+
+#: The digit positions of a date spelled 'YYYY-MM-DD'.
+_ISO_DAY_DIGITS = np.array([0, 1, 2, 3, 5, 6, 8, 9])
+
+#: Datetime units from coarsest to finest.
+_UNITS = ("s", "ms", "us", "ns")
+
+#: The size of contract map from which its ISO-day keys are parsed and
+#: matched in bulk. Below it one `pd.Timestamp` per key and a dict probe
+#: per bar cost less than the bulk path's fixed 0.17 ms (0.05-0.13 ms for
+#: 16 to 63 keys); they cost about the same at 128.
+_ISO_DAYS_FROM = 128
+
+#: The years in which a Timestamp hashes on its fields, as days.
+_FIRST_DAY = np.datetime64("0001-01-01", "D")
+_LAST_DAY = np.datetime64("9999-12-31", "D")
+
+
+def _float_series(data: Dict[Any, Any]) -> pd.Series:
+    """
+    `pd.Series(data, dtype="float64")`, with the index built directly when
+    every key is a Timestamp in one time zone object.
+
+    For such keys pandas infers the index by `DatetimeIndex(keys)` -- the
+    same call made here -- after first converting each key on its own to
+    check it can (3.2 ms for the whole constructor at 5,040 keys on pandas
+    2.3, against 0.7 ms for the call). Any other keys, and any failure
+    here, take pandas' own path, so what it returns or raises is unchanged.
+    """
+    keys = list(data)
+    index = _timestamp_index(keys)
+    if index is not None:
+        try:
+            return pd.Series(list(data.values()), index=index, dtype="float64")
+        except Exception:
+            pass
+    return pd.Series(data, dtype="float64")
+
+
+def _timestamp_index(keys: List[Any]) -> Optional[pd.DatetimeIndex]:
+    """`pd.DatetimeIndex(keys)` when every key is a `pd.Timestamp` and all of
+    them carry the same time zone object, else None.
+
+    Under those conditions pandas' inference over the keys -- for an index
+    or a dict's keys -- reaches exactly this call: naive stamps go to it
+    once each is known to be a datetime, and aware ones once they share one
+    zone. Where pandas would instead keep an object index (a stamp outside
+    the nanosecond range on pandas 2) this call raises, and the caller
+    falls back to pandas' path."""
+    if not keys or set(map(type, keys)) != {pd.Timestamp}:
+        return None
+    if len(set(map(id, map(_TZINFO, keys)))) != 1:
+        return None
+    try:
+        return pd.DatetimeIndex(keys)
+    except Exception:
+        return None
+
+
+def _iso_days(keys: List[Any]) -> Optional[pd.DatetimeIndex]:
+    """
+    The keys as one naive index in seconds when every key is a string
+    spelled exactly 'YYYY-MM-DD' naming a real date in years 1 to 9999,
+    else None.
+
+    Each is midnight of its date with no zone, as `pd.Timestamp(key)`
+    makes it; only the unit can differ, and in those years a Timestamp
+    hashes on its fields and compares on its instant whatever its unit, so
+    a bar finds the same key either way. numpy's parse refuses what
+    pandas' refuses (a 30 February, a 13th month), and the constructor
+    then raises what it always raised.
+    """
+    if set(map(type, keys)) != {str} or set(map(len, keys)) != {10}:
+        return None
+    # UCS-4 code points, one per character, little-endian as written.
+    chars = np.array(keys, dtype="<U10").view("<u4").reshape(len(keys), 10)
+    digits = chars[:, _ISO_DAY_DIGITS]
+    if not (
+        (chars[:, 4] == ord("-")).all()
+        and (chars[:, 7] == ord("-")).all()
+        and ((digits >= ord("0")) & (digits <= ord("9"))).all()
+    ):
+        return None
+    try:
+        days = np.array(keys, dtype="datetime64[D]")
+    except Exception:
+        return None
+    if days.min() < _FIRST_DAY or days.max() > _LAST_DAY:
+        return None
+    return pd.DatetimeIndex(days.astype("datetime64[s]"))
+
+
+def _match_days(
+    days: pd.DatetimeIndex, codes: List[str], dates: pd.Index
+) -> Optional[List[Any]]:
+    """
+    `[lookup.get(date) for date in dates]` for `lookup = dict(zip(days,
+    codes))`, found by matching integer instants across the whole index,
+    or None where the bars are not ones it can match.
+
+    A dict finds a key by its hash and then `==`. For naive Timestamps,
+    `==` is the same instant, and a key in years 1 to 9999 hashes on its
+    fields -- as does any bar equal to it -- so the dict's answer is the
+    key with the bar's instant. Bars with a zone (which never equal a
+    naive key) and an index that is not a DatetimeIndex return None.
+    """
+    if not isinstance(dates, pd.DatetimeIndex) or dates.tz is not None:
+        return None
+    if not days.is_unique:
+        return None
+    # Both in the finer of the two units, which loses nothing (or raises).
+    unit = max(days.unit, dates.unit, key=_UNITS.index)
+    try:
+        key_values = days.as_unit(unit).asi8
+        bar_values = dates.as_unit(unit).asi8
+    except Exception:
+        return None
+    positions = pd.Index(key_values).get_indexer(bar_values)
+    # -1 (no key on that bar) takes the trailing None.
+    return np.array(codes + [None], dtype=object)[positions].tolist()
+
+
+def _day_counts(dates: pd.Index) -> List[Any]:
+    """Whole days from each bar to the next, never negative: the list
+    `[max(days, 0) for days in (dates[1:] - dates[:-1]).days.tolist()]`,
+    with the maximum taken over the integer array when no gap is missing."""
+    days = (dates[1:] - dates[:-1]).days
+    if getattr(days, "dtype", None) == np.int64:
+        return np.maximum(days.to_numpy(), 0).tolist()
+    return [max(day, 0) for day in days.tolist()]
 
 
 def _positive(value: Any, name: str) -> float:
