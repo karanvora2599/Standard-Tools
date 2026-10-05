@@ -106,6 +106,12 @@ class TestLifecycle:
             "actor",
             "timestamp_utc",
             "evidence",
+            # The digest of the line before it, rooted in the manifest
+            # digest, so an edited or removed record shows. "Append-only"
+            # used to be a convention of the writer while the docstring
+            # claimed it as a property of the file; see
+            # test_promotion_chain.py, including the two limits.
+            "prev",
         }
 
     def test_the_manifest_is_untouched_by_a_promotion(self, patched_multi_factory):

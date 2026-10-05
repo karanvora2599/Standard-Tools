@@ -953,6 +953,18 @@ class PromoteModelResult(BaseModel):
         "was False, so a waived check is visible here and in the evidence "
         "rather than only in the absence of a refusal.",
     )
+    promotion_chain_findings: List[str] = Field(
+        default_factory=list,
+        description="One sentence per broken link in promotions.jsonl, oldest "
+        "first: a record edited, removed or reordered, or one written before "
+        "the log was chained and so vouched for by nothing. Empty for a log "
+        "whose links all hold. Each record carries the digest of the line "
+        "before it, rooted in the manifest digest; a log rewritten END TO END "
+        "with every link recomputed is not detected, which needs a witness "
+        "kept outside the package. Written into this promotion's own evidence "
+        "too, so a stage recorded on a damaged history says so where somebody "
+        "will read it.",
+    )
     promotion_log_repairs: List[str] = Field(
         default_factory=list,
         description="One sentence per fragment an interrupted append left at "

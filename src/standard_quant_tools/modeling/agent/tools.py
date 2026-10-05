@@ -64,7 +64,13 @@ from ..features.registry import list_features as _list_features
 from ..monitoring import THRESHOLDS, drift_report, prediction_drift, realized_ic
 from ..portfolio_eval import evaluate_model_portfolio as _evaluate_model_portfolio
 from ..registry import signing as _signing
-from ..registry.lifecycle import current_stage, promote, promotions, torn_fragments
+from ..registry.lifecycle import (
+    current_stage,
+    promote,
+    promotions,
+    torn_fragments,
+    verify_promotion_chain,
+)
 from ..registry.model_registry import load_manifest, load_monitoring_reference
 from ..registry.package import PackageVerification, verify_model_package
 from ..scoring import score_model as _score_model
@@ -1532,6 +1538,16 @@ def promote_model(input_data: PromoteModelInput) -> PromoteModelResult:
         f"package_verified={len(report.verified)} files",
         *input_data.evidence,
     ]
+    # The history this decision sits on top of. A stage is a statement
+    # about evidence, and the log of earlier statements is part of that
+    # evidence -- so a damaged chain belongs in the record being written,
+    # not only in the return value of the call that wrote it.
+    chain_findings = verify_promotion_chain(input_data.model_id)
+    broken = [f for f in chain_findings if "carries no `prev`" not in f]
+    if broken:
+        evidence.insert(
+            2, f"promotion_log_chain_broken: {len(broken)} link(s); {broken[0]}"
+        )
     if not report.ok:
         findings: List[str] = []
         if report.mismatched:
@@ -1574,6 +1590,7 @@ def promote_model(input_data: PromoteModelInput) -> PromoteModelResult:
         manifest_sha256=manifest_sha256,
         package_ok=report.ok,
         promotion_log_repairs=torn_fragments(input_data.model_id),
+        promotion_chain_findings=chain_findings,
     )
 
 

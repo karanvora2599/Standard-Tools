@@ -9,8 +9,34 @@ DECISION made after registration, by someone, for a reason, on evidence,
 and possibly reversed. That is a record with a history, not a value: it
 lives in `promotions.jsonl` beside the manifest, append-only, and the
 current stage is whatever the last line says. Nothing about the model's
-identity changes when it is promoted, and nothing about its promotion
-history can be edited without the edit showing.
+identity changes when it is promoted.
+
+WHAT "APPEND-ONLY" IS WORTH. It was a convention of the writer and this
+docstring claimed it as a property of the file: "nothing about its
+promotion history can be edited without the edit showing". Nothing would
+have shown it -- there was no digest and no chain here, and the
+`torn_fragments` machinery below detects a TRUNCATED WRITE, not an edit.
+The line someone would want gone is the one `promote_model` writes on
+purpose, `package_check_waived`, and it sat in the same unprotected file as
+the history it was protecting.
+
+Each record now carries `prev`, the digest of the previous line's bytes,
+rooted in the manifest digest -- the package's commit point and the one
+file a signature covers. `verify_promotion_chain` recomputes it. An
+edited, deleted or reordered line is detected, because every later link
+would have to be recomputed too.
+
+TWO LIMITS, STATED because the defect this replaces was an overclaim and a
+smaller overclaim would be the same mistake. The chain commits to every
+record EXCEPT THE MOST RECENT ONE: nothing in the file hashes the tip, so
+an edit to the last decision is invisible until another is appended on top
+of it. And a log rewritten END TO END, every link recomputed, is not
+detected either -- the manifest digest is readable, so the root can be
+reproduced. Both need a witness kept outside the package, which this module
+does not have and does not claim; `audit/writer.py` keeps a cross-day
+chain-index witness log for the same reason. A record written before the
+chain existed carries no `prev` and is reported as unchained rather than
+as broken -- it is a log from before the property, not a damaged one.
 
 THE STAGES. `candidate` is what registration produces: a model that has
 been fitted and walk-forward validated, which is a fact about the fit and
@@ -49,11 +75,12 @@ beside the log, and `inspect_model` and `promote_model` carry it.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import logging
 import os
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple
@@ -88,6 +115,11 @@ class Promotion:
     actor: str
     timestamp_utc: str
     evidence: List[str]
+    #: The digest of the previous line's bytes, or the manifest digest for
+    #: the first record. None for a record written before the log was
+    #: chained, which `verify_promotion_chain` reports as unchained rather
+    #: than broken.
+    prev: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -120,6 +152,7 @@ def _parse(raw: bytes) -> Promotion:
         actor=str(record.get("actor", "unknown")),
         timestamp_utc=str(record["timestamp_utc"]),
         evidence=[str(e) for e in record.get("evidence") or []],
+        prev=(None if record.get("prev") is None else str(record["prev"])),
     )
 
 
@@ -197,9 +230,107 @@ def _repair_tail(path: Path) -> None:
         os.fsync(handle.fileno())
 
 
+def _line_bytes(record: Promotion) -> bytes:
+    """The exact bytes one record is written as. The chain hashes THESE, so
+    there is one definition of a line and the verifier cannot disagree with
+    the writer about whitespace or key order."""
+    return json.dumps(record.to_dict(), sort_keys=True).encode("utf-8") + b"\n"
+
+
+def _chain_root(model_id: str) -> str:
+    """The chain's root: the digest of the manifest bytes.
+
+    The manifest is the package's commit point -- written last, carrying
+    every other artifact's digest, and the one file the Ed25519 signature
+    covers -- so a chain rooted there is rooted in the only thing about
+    the package a signature already vouches for.
+    """
+    path = _artifacts.run_dir(model_id) / "manifest.json"
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _committed_lines(path: Path) -> List[bytes]:
+    """Every line the log has committed, by its newline, exactly as
+    written. The torn fragment an interrupted append leaves is not one."""
+    if not path.exists():
+        return []
+    raw = path.read_bytes()
+    if not raw:
+        return []
+    parts = raw.split(b"\n")
+    trailing = parts.pop()
+    lines = [part + b"\n" for part in parts]
+    if trailing:
+        # An unterminated final line. It is a record if it parses -- a
+        # newline lost rather than a write interrupted -- and `_read_log`
+        # makes the same distinction.
+        try:
+            _parse(trailing)
+        except (ValueError, KeyError, TypeError):
+            return lines
+        lines.append(trailing)
+    return lines
+
+
+def _chain_tip(path: Path, model_id: str) -> str:
+    """What the next record's `prev` must be."""
+    lines = _committed_lines(path)
+    if not lines:
+        return _chain_root(model_id)
+    return hashlib.sha256(lines[-1]).hexdigest()
+
+
+def verify_promotion_chain(model_id: str) -> List[str]:
+    """
+    One sentence per broken link, oldest first; empty for a log whose
+    links all hold and for a log that has none.
+
+    Reads the lines as bytes and recomputes each record's `prev` from the
+    line before it, rooted in the manifest digest.
+
+    See this module's docstring for what that does and does not catch. In
+    short: an edit anywhere but the LAST record is detected, because the
+    record after it commits to its bytes and nothing commits to the tip's;
+    and a log rewritten end to end with every link recomputed is not
+    detected at all. Both are structural, so they are documented rather
+    than returned as findings -- this reports damage it can see, not the
+    shape of what it cannot.
+    """
+    path = _log_path(model_id)
+    lines = _committed_lines(path)
+    findings: List[str] = []
+    expected = _chain_root(model_id)
+    for position, line in enumerate(lines):
+        try:
+            record = _parse(line)
+        except (ValueError, KeyError, TypeError):
+            findings.append(
+                f"record {position + 1} of {len(lines)} does not parse, so the "
+                "chain cannot be followed past it; every stage after it is "
+                "unreadable."
+            )
+            return findings
+        if record.prev is None:
+            findings.append(
+                f"record {position + 1} of {len(lines)} ({record.from_stage} -> "
+                f"{record.to_stage}) carries no `prev`: it was written before "
+                "the log was chained, so nothing vouches for it."
+            )
+        elif record.prev != expected:
+            findings.append(
+                f"record {position + 1} of {len(lines)} ({record.from_stage} -> "
+                f"{record.to_stage}, {record.timestamp_utc}) links to "
+                f"{record.prev[:12]}... and the line before it hashes to "
+                f"{expected[:12]}...: a record was edited, removed or "
+                "reordered at or before this point."
+            )
+        expected = hashlib.sha256(line).hexdigest()
+    return findings
+
+
 def _append(path: Path, record: Promotion) -> None:
     """One line, whole, and on disk before the lock is released."""
-    line = json.dumps(record.to_dict(), sort_keys=True).encode("utf-8") + b"\n"
+    line = _line_bytes(record)
     with open(path, "ab") as handle:
         handle.write(line)
         handle.flush()
@@ -314,6 +445,9 @@ def promote(
         history = _read_log(path, model_id)[0] if path.exists() else []
         stage = history[-1].to_stage if history else INITIAL_STAGE
         record = _decide(model_id, stage, to_stage, reason, actor, evidence)
+        # Inside the lock, like the stage: the tip is read and extended
+        # without another writer landing a line between the two.
+        record = replace(record, prev=_chain_tip(path, model_id))
         _repair_tail(path)
         _append(path, record)
         # The log is the stage; a mirror holding a stale log holds a stale
@@ -371,4 +505,5 @@ __all__ = [
     "promotions",
     "promotions_lock",
     "torn_fragments",
+    "verify_promotion_chain",
 ]
