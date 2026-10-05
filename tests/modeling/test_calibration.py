@@ -60,6 +60,21 @@ def _panel(n=6000, seed=1):
     return X, y
 
 
+#: Rows per date. The calibration map is fitted on held-out DATE blocks, so
+#: these rows have to sit on a date axis — 20 is a plausible cross-section
+#: and puts the 4,000 training rows on 200 dates, which three blocks and an
+#: embargo of 5 divide without emptying anything.
+PER_DATE = 20
+
+
+def _axis(n: int) -> np.ndarray:
+    """A date for each of `n` rows, `PER_DATE` rows to a date."""
+    import pandas as pd
+
+    dates = pd.bdate_range("2021-01-04", periods=(n + PER_DATE - 1) // PER_DATE)
+    return np.repeat(dates.to_numpy(), PER_DATE)[:n]
+
+
 class TestTheDefaultChangesNothing:
     def test_no_calibration_returns_the_estimator_untouched(self):
         """Every existing spec has to behave exactly as before."""
@@ -125,6 +140,9 @@ class TestItWidensTheReachableRange:
             RandomForestClassifier(n_estimators=200, max_depth=6, random_state=0),
             _spec(calibration="isotonic"),
             len(ytr),
+            y=ytr,
+            row_dates=_axis(len(ytr)),
+            row_label_end=None,
         ).fit(Xtr, ytr)
         return raw.predict_proba(Xte)[:, 1], calibrated.predict_proba(Xte)[:, 1]
 
@@ -151,6 +169,9 @@ class TestItWidensTheReachableRange:
             RandomForestClassifier(n_estimators=200, max_depth=6, random_state=0),
             _spec(calibration="isotonic"),
             len(ytr),
+            y=ytr,
+            row_dates=_axis(len(ytr)),
+            row_label_end=None,
         ).fit(Xtr, ytr)
         selected = calibrated.predict_proba(Xte)[:, 1] > 0.9
         assert selected.sum() > 20
@@ -170,6 +191,9 @@ class TestItWidensTheReachableRange:
             RandomForestClassifier(n_estimators=200, max_depth=6, random_state=0),
             _spec(calibration="sigmoid"),
             4000,
+            y=y[:4000],
+            row_dates=_axis(4000),
+            row_label_end=None,
         ).fit(X[:4000], y[:4000])
         assert calibrated.predict_proba(X[4000:])[:, 1].max() > 0.9
 

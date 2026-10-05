@@ -93,7 +93,12 @@ from .validation.search import (
     search_pool_workers,
 )
 from .validation.survival import EVENT_COL, survival_labels
-from .validation.walk_forward import build_splitter, contiguous_runs
+from .validation.walk_forward import (
+    DateBlockCV,
+    build_splitter,
+    contiguous_runs,
+    restrict_date_block_cv,
+)
 from .validation.weights import build_sample_weights
 
 
@@ -217,7 +222,15 @@ def _oos_effective_sample_size(
     return effective_sample_size_report(n_oos_rows, horizon, n_oos_dates, rho)
 
 
-def _calibrated(estimator, model_spec, n_rows: int):
+def _calibrated(
+    estimator,
+    model_spec,
+    n_rows: int,
+    *,
+    y=None,
+    row_dates=None,
+    row_label_end=None,
+):
     """
     Wrap a classifier so its probabilities mean what they say.
 
@@ -239,6 +252,20 @@ def _calibrated(estimator, model_spec, n_rows: int):
     there would calibrate against memorized labels and report a confidence
     nobody has, which is the same failure as scoring a model on its training
     set and one layer more obscure.
+
+    THE FOLDS ARE DATE BLOCKS, purged and embargoed. This passed an INTEGER
+    to `CalibratedClassifierCV`, which means StratifiedKFold, which splits
+    by ROW -- so the same date's other entities sat on both sides of the
+    split while the map was fitted, no row was purged for a label reaching
+    into its block, and no embargo band was removed. Every other inner
+    split in this library already had the discipline;
+    `ConformalSpec.calibration_folds` even describes it, and this field
+    shares the name without having kept it.
+
+    Stratification is what it cost, and that is the honest trade: a
+    StratifiedKFold guarantees a class in every fold BY ignoring time, and
+    date blocks cannot. An imbalanced label that used to calibrate on
+    leaked folds now refuses and says so.
     """
     method = getattr(model_spec.estimator, "calibration", "none")
     if method == "none":
@@ -264,7 +291,49 @@ def _calibrated(estimator, model_spec, n_rows: int):
 
     from sklearn.calibration import CalibratedClassifierCV
 
-    return CalibratedClassifierCV(estimator, method=method, cv=folds)
+    if y is None or row_dates is None:
+        raise ValidationError(
+            "estimator.calibration needs the training rows' dates and labels "
+            "to cut its folds on the date axis. This is an internal call "
+            "contract, not a spec problem: _calibrated was asked for "
+            f"{method!r} without y= and row_dates=."
+        )
+    cv = DateBlockCV(
+        row_dates,
+        row_label_end,
+        n_folds=folds,
+        embargo=int(model_spec.validation.embargo),
+    )
+    splits = cv.masks()
+    # A map averaged over one block is that block's map. Two is the least
+    # that can be called held out, the same floor `min_folds` sets outside.
+    if len(splits) < 2:
+        raise ValidationError(
+            f"estimator.calibration asked for {folds} held-out date blocks "
+            f"and only {len(splits)} survived the embargo "
+            f"({model_spec.validation.embargo}) and the label purge. The "
+            "calibration map would be fitted on one block, which is not a "
+            "held-out map. Lower calibration_folds, lower the embargo, or "
+            "widen train_window."
+        )
+    y_arr = np.asarray(y)
+    single = [
+        i
+        for i, (train_mask, _) in enumerate(splits)
+        if np.unique(y_arr[train_mask]).size < 2
+    ]
+    if single:
+        raise ValidationError(
+            f"estimator.calibration cannot fit {len(single)} of {len(splits)} "
+            "calibration folds: the training rows left after holding out a "
+            "date block carry one class only. Date blocks respect the time "
+            "order and so cannot guarantee a class in every fold the way a "
+            "stratified row split did -- that split is what leaked, since it "
+            "put the same date's other entities on both sides of it. Lower "
+            "calibration_folds, widen train_window, or use a label with a "
+            "steadier class balance."
+        )
+    return CalibratedClassifierCV(estimator, method=method, cv=cv)
 
 
 def _calibration_importance_warning(
@@ -1295,6 +1364,12 @@ def _fit(
     validation: Dict[str, Any] = {}
     if stopping is not None:
         X, y, weights, validation = stopping.apply(X, y, weights)
+        if stopping.block is not None:
+            # The window just got shorter: early stopping keeps the last
+            # dates for itself. A calibration map cut on DATE blocks has to
+            # be cut on the rows that remain, and `fit_rows` is an index
+            # array rather than a prefix, so the dates are taken by it.
+            restrict_date_block_cv(estimator, stopping.block["fit_rows"])
         if stopping.block is None and notes is not None:
             notes.append(stopping)
     kwargs: Dict[str, Any] = dict(validation)
@@ -2020,7 +2095,14 @@ def run_experiment(
         # Calibration is fitted INSIDE the training window, on folds held out
         # from it, so the map never sees a label the estimator memorized --
         # and never sees a test row at all.
-        estimator = _calibrated(estimator, model_spec, len(arrays.y))
+        estimator = _calibrated(
+            estimator,
+            model_spec,
+            len(arrays.y),
+            y=arrays.y,
+            row_dates=arrays.index.dates,
+            row_label_end=arrays.index.label_end,
+        )
         with openmp_thread_limit(openmp_threads):
             stopping = _fit(
                 estimator,
@@ -2567,7 +2649,18 @@ def run_experiment(
     # The deployed estimator is calibrated the same way the folds were. A
     # model validated with calibrated probabilities and deployed without
     # would report one threshold's behaviour and exhibit another's.
-    final_estimator = _calibrated(final_estimator, model_spec, len(full_y))
+    final_estimator = _calibrated(
+        final_estimator,
+        model_spec,
+        len(full_y),
+        y=full_y,
+        row_dates=datetime_values(panel["date"]),
+        row_label_end=(
+            datetime_values(panel[LABEL_END_COL])
+            if LABEL_END_COL in panel.columns
+            else None
+        ),
+    )
     # Refit through the SAME adapter the folds used. The deployed model is
     # what actually scores, so fitting it differently from the one that was
     # validated is the quietest way to make a validation number describe

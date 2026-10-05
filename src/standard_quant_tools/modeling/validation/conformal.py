@@ -36,7 +36,7 @@ import numpy as np
 
 from standard_quant_tools.error import ValidationError
 
-from .walk_forward import label_overlap_mask
+from .walk_forward import date_block_splits
 
 #: Fewer held-out residuals than this cannot place a quantile at any
 #: level a caller would ask for.
@@ -63,31 +63,21 @@ def held_out_residuals(
     refit is the engine's own -- same estimator, same parameters, same
     weights.
     """
-    dates = np.array(sorted(set(row_dates)))
-    if len(dates) < n_folds:
+    n_dates = len(set(np.asarray(row_dates).tolist()))
+    if n_dates < n_folds:
         raise ValidationError(
             f"conformal calibration needs at least {n_folds} distinct dates in "
             f"the training window for {n_folds} calibration folds; this window "
-            f"has {len(dates)}."
+            f"has {n_dates}."
         )
-    date_code = np.searchsorted(dates, row_dates)
     residuals = []
-    for block in np.array_split(np.arange(len(dates)), n_folds):
-        if block.size == 0:
-            continue
-        first, last = int(block[0]), int(block[-1])
-        in_test = np.zeros(len(dates), dtype=bool)
-        in_test[block] = True
-        banned = np.zeros(len(dates), dtype=bool)
-        banned[max(0, first - embargo) : min(len(dates), last + embargo + 1)] = True
-        test_mask = in_test[date_code]
-        train_mask = ~banned[date_code]
-        overlaps = label_overlap_mask(
-            train_mask, row_dates, label_end, dates[first], dates[last]
-        )
-        train_mask &= ~overlaps
-        if not train_mask.any() or not test_mask.any():
-            continue
+    # The blocks, the embargo band and the label purge are
+    # `date_block_splits`; this loop used to hold that logic and the
+    # probability calibration held a weaker copy of nothing. See its
+    # docstring.
+    for train_mask, test_mask in date_block_splits(
+        row_dates, label_end, n_folds=n_folds, embargo=embargo
+    ):
         y_true, y_pred = fit_predict(train_mask, test_mask)
         residuals.append(
             np.abs(np.asarray(y_true, dtype=float) - np.asarray(y_pred, dtype=float))

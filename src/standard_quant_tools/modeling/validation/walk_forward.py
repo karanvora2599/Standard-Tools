@@ -338,6 +338,157 @@ def label_overlap_mask(
     )
 
 
+def date_block_splits(
+    row_dates: np.ndarray,
+    row_label_end: "np.ndarray | None",
+    *,
+    n_folds: int,
+    embargo: int = 0,
+) -> "list[tuple[np.ndarray, np.ndarray]]":
+    """
+    `n_folds` contiguous date blocks, each with the rows that may be fitted
+    while it is held out.
+
+    ONE IMPLEMENTATION for every inner split that holds out a block of
+    dates. The conformal calibration had this loop inline and the
+    PROBABILITY calibration had none of it: `_calibrated` passed an integer
+    to `CalibratedClassifierCV`, which means StratifiedKFold, which splits
+    by ROW -- so the same date's other entities sat on both sides of the
+    split, no row was purged for a label reaching into its block, and no
+    embargo band was removed. Two spec fields are called
+    `calibration_folds` and only `ConformalSpec`'s kept the promise.
+
+    A block is held out with its `embargo` band of dates on either side,
+    and every remaining row whose label bars intersect the block's is
+    purged. Blocks left with nothing to fit on, or nothing to score, are
+    dropped rather than returned empty, so the caller may get fewer than
+    `n_folds` pairs and should say so if that matters.
+
+    Masks, not indices: the engine's fold machinery is mask-based while
+    sklearn's `cv` takes indices, so each caller converts at its own door.
+    """
+    row_dates = np.asarray(row_dates)
+    # np.unique, not sorted(set(...).tolist()): .tolist() on a datetime64
+    # array yields datetime.datetime objects, and a panel that recorded no
+    # label ends carries an object array of None whose comparison against
+    # datetime64 degrades to False (purge nothing, which is honest) but
+    # against datetime.datetime raises. Keep the dtype the panel came with.
+    dates = np.unique(row_dates)
+    if len(dates) < n_folds:
+        raise ValidationError(
+            f"holding out {n_folds} date blocks needs at least {n_folds} "
+            f"distinct dates in the window; this one has {len(dates)}."
+        )
+    date_code = np.searchsorted(dates, row_dates)
+    out: "list[tuple[np.ndarray, np.ndarray]]" = []
+    for block in np.array_split(np.arange(len(dates)), n_folds):
+        if block.size == 0:
+            continue
+        first, last = int(block[0]), int(block[-1])
+        in_test = np.zeros(len(dates), dtype=bool)
+        in_test[block] = True
+        banned = np.zeros(len(dates), dtype=bool)
+        banned[max(0, first - embargo) : min(len(dates), last + embargo + 1)] = True
+        test_mask = in_test[date_code]
+        train_mask = ~banned[date_code]
+        train_mask &= ~label_overlap_mask(
+            train_mask, row_dates, row_label_end, dates[first], dates[last]
+        )
+        if not train_mask.any() or not test_mask.any():
+            continue
+        out.append((train_mask, test_mask))
+    return out
+
+
+class DateBlockCV:
+    """
+    A scikit-learn `cv` whose folds are contiguous DATE blocks, purged and
+    embargoed -- `date_block_splits` behind the interface sklearn expects.
+
+    WHY AN OBJECT AND NOT A LIST OF INDEX PAIRS. The estimator is wrapped
+    in `CalibratedClassifierCV` before `_fit` runs, and `_fit` may hand the
+    fit fewer rows than it was given: early stopping holds out the last
+    dates of the window with an embargo before them, and
+    `EarlyStoppingFit.apply` returns `X[fit_rows]`. Indices computed
+    against the full window then point past the end -- an MLP fold of 5,900
+    rows fitted on 5,200 and sklearn raised `index 5200 is out of bounds`.
+
+    `fit_rows` is an index array and not necessarily a prefix, so this
+    carries the DATES and is restricted by the same rows, positionally,
+    rather than trusting an offset. `split` refuses a row count it was not
+    built for instead of indexing into the wrong window, which is the
+    failure that would otherwise be silent.
+    """
+
+    def __init__(
+        self,
+        row_dates: np.ndarray,
+        row_label_end: "np.ndarray | None",
+        *,
+        n_folds: int,
+        embargo: int = 0,
+    ):
+        self.row_dates = np.asarray(row_dates)
+        self.row_label_end = (
+            None if row_label_end is None else np.asarray(row_label_end)
+        )
+        self.n_folds = int(n_folds)
+        self.embargo = int(embargo)
+
+    def restricted_to(self, rows: np.ndarray) -> "DateBlockCV":
+        """The same rule over a subset of the rows, taken positionally."""
+        return DateBlockCV(
+            self.row_dates[rows],
+            None if self.row_label_end is None else self.row_label_end[rows],
+            n_folds=self.n_folds,
+            embargo=self.embargo,
+        )
+
+    def masks(self) -> "list[tuple[np.ndarray, np.ndarray]]":
+        return date_block_splits(
+            self.row_dates,
+            self.row_label_end,
+            n_folds=self.n_folds,
+            embargo=self.embargo,
+        )
+
+    def split(self, X, y=None, groups=None):
+        n = len(X)
+        if n != len(self.row_dates):
+            raise ValidationError(
+                f"the calibration folds were cut on {len(self.row_dates)} rows "
+                f"and the fit was handed {n}. The blocks would be read off the "
+                "wrong window. If early stopping shortened it, the cv has to "
+                "be restricted to the rows that remain (see _fit)."
+            )
+        pairs = self.masks()
+        if len(pairs) < 2:
+            raise ValidationError(
+                f"the calibration map has {len(pairs)} usable date block(s) "
+                f"over {len(self.row_dates)} rows at embargo={self.embargo}; a "
+                "map averaged over one block is that block's map. Lower "
+                "calibration_folds, lower the embargo, or widen train_window "
+                "-- and note early stopping takes the last dates of the "
+                "window before this is cut."
+            )
+        for train_mask, test_mask in pairs:
+            yield np.flatnonzero(train_mask), np.flatnonzero(test_mask)
+
+    def get_n_splits(self, X=None, y=None, groups=None) -> int:
+        return len(self.masks())
+
+
+def restrict_date_block_cv(estimator: Any, rows: np.ndarray) -> None:
+    """Cut a wrapped estimator's date-block folds on `rows` instead.
+
+    A no-op for every estimator that is not calibrated on date blocks, so
+    `_fit` can call it unconditionally.
+    """
+    cv = getattr(estimator, "cv", None)
+    if isinstance(cv, DateBlockCV):
+        estimator.cv = cv.restricted_to(rows)
+
+
 def build_splitter(validation_spec: Any) -> Any:
     """Construct the splitter a ValidationSpec asks for."""
     if validation_spec.method == "cpcv":
