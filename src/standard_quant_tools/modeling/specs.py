@@ -1796,10 +1796,13 @@ class PredictionTransformSpec(BaseModel):
         False,
         description=(
             "Divide each raw prediction by that entity's trailing realized "
-            "volatility before weighting (backtest.sizing.vol_scaled), so an "
-            "equally-ranked high-vol name takes a smaller position. Default "
-            "False keeps the transform a pure function of the predictions; "
-            "True makes it depend on price history too, and therefore on "
+            "volatility (backtest.sizing.vol_adjusted_scores) and then "
+            "weight the result with `method`, so an equally-ranked high-vol "
+            "name takes a smaller position. It composes with the method "
+            "rather than replacing it: a cross_sectional_zscore spec still "
+            "z-scores, a rank spec still ranks. Default False keeps the "
+            "transform a pure function of the predictions; True makes it "
+            "depend on price history too, and therefore on "
             "`volatility_lookback`. Ignored by method='top_bottom_quantile' "
             "and 'sign', whose weights are membership-based — scaling a score "
             "cannot change an equal weight."

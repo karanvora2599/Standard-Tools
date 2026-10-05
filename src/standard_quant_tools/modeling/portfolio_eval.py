@@ -54,7 +54,7 @@ from standard_quant_tools.backtest.portfolio_engine import run_portfolio_simulat
 from standard_quant_tools.backtest.sizing import (
     equal_weight_top_bottom,
     rank_weighted,
-    vol_scaled,
+    vol_adjusted_scores,
     zscore_normalized,
 )
 from standard_quant_tools.data.factory import DataFactory
@@ -376,16 +376,26 @@ def _raw_weights_for_group(
             scores, n_long=n_long, n_short=n_short, gross_leverage=1.0
         )
 
+    # BEFORE WEIGHTING, which is what the field says: the scores are
+    # adjusted and the chosen method then weights them. This returned
+    # `vol_scaled(...)` instead, which does its own gross-leverage
+    # normalization and so never ran the method at all -- a
+    # cross_sectional_zscore spec lost its z-scoring, a rank spec its
+    # ranking, and nothing reported the substitution.
+    #
+    # The two membership methods above return before this on purpose and
+    # the field documents it: scaling a score cannot change an equal
+    # weight. Adjusting earlier would reorder names and so change quantile
+    # MEMBERSHIP, which is not what the flag claims to do.
     if spec.volatility_scale:
         if returns_df is None:
             raise ValidationError(
                 "volatility_scale=True requires returns; none were supplied."
             )
-        return vol_scaled(
+        scores = vol_adjusted_scores(
             scores,
             returns_df=returns_df,
             lookback=spec.volatility_lookback,
-            gross_leverage=1.0,
         )
     if spec.method == "uncertainty_scaled":
         # The scores reaching here are already prediction / interval width
@@ -552,12 +562,16 @@ def transform_predictions_to_weights(
     # to notice a number nothing pointed at.
     #
     # It happens whenever the sizer does not centre its scores and the
-    # scores are one-sided: `vol_scaled` divides by volatility and
-    # normalizes gross without recentring, so all-positive predictions
-    # produce no short book at all, and `apply_exposure_targets` can only
-    # fill the long half. Measured on 40 names x 60 dates of positive
-    # predictions: 60 of 60 dates short of target, mean net +0.34 against
-    # a requested 0.0, and `warnings` was None.
+    # scores are one-sided. `method='sign'` is the plain case: all-positive
+    # predictions are all +1, so there is no short book at all and
+    # `apply_exposure_targets` can only fill the long half. Measured on 40
+    # names x 60 dates of positive predictions, through the uncentred
+    # divide-by-volatility sizer this transform used to call: 60 of 60
+    # dates short of target, mean net +0.34 against a requested 0.0, and
+    # `warnings` was None. That route is gone -- volatility_scale now
+    # composes with the method, and both cross-sectional methods recentre
+    # -- but the shortfall is a property of any uncentred one-sided book,
+    # which is why it is counted here and not at one sizer.
     notes: List[str] = []
     if int(shortfall.sum()):
         mean_net = float(np.mean([d["realized_net"] for d in per_date]))

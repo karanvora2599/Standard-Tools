@@ -200,22 +200,46 @@ def vol_scaled(
     """
     _check_scores(scores)
     _check_gross_leverage(gross_leverage)
-    missing = [c for c in scores.columns if c not in returns_df.columns]
-    if missing:
-        raise ValidationError(f"returns_df is missing columns for: {missing}")
-
-    # Rolling window FIRST, on returns_df's own (daily) frequency, THEN
-    # reindex onto scores.index -- reindexing before rolling would silently
-    # turn a `lookback`-bar volatility window into `lookback` SCORE-DATE
-    # observations, e.g. a "20-bar" window becomes ~20 months of history
-    # when scores are submitted monthly against daily returns.
-    vol = returns_df[scores.columns].rolling(lookback).std()
-    vol = vol.reindex(scores.index)
-    vol_safe = vol.where(vol > 1e-12, other=np.nan)
-    adjusted = (scores / vol_safe).fillna(0.0)
+    adjusted = vol_adjusted_scores(scores, returns_df, lookback=lookback)
     gross = adjusted.abs().sum(axis=1)
     gross_safe = gross.where(gross > 1e-12, other=1.0)
     return adjusted.div(gross_safe, axis=0) * gross_leverage
+
+
+def vol_adjusted_scores(
+    scores: pd.DataFrame,
+    returns_df: pd.DataFrame,
+    lookback: int = 20,
+) -> pd.DataFrame:
+    """
+    Each score divided by that name's trailing realized volatility, and
+    nothing else.
+
+    THE DIVISION WITHOUT THE NORMALIZATION, so it composes: a caller can
+    adjust the scores and then size them with whichever function it meant
+    to use. `vol_scaled` is this followed by the same cross-sectional
+    gross-leverage normalization `zscore_normalized` applies, and
+    `PredictionTransformSpec.volatility_scale` is this followed by the
+    method the spec asked for -- it used to be `vol_scaled` instead of the
+    method, which silently dropped the z-scoring or the ranking.
+
+    Rolling window FIRST, on returns_df's own (daily) frequency, THEN
+    reindex onto scores.index -- reindexing before rolling would silently
+    turn a `lookback`-bar volatility window into `lookback` SCORE-DATE
+    observations, e.g. a "20-bar" window becomes ~20 months of history
+    when scores are submitted monthly against daily returns.
+
+    A name with no volatility yet (fewer than `lookback` observations, so a
+    NaN rolling std) gets a zero score for that date rather than a division
+    blowup.
+    """
+    missing = [c for c in scores.columns if c not in returns_df.columns]
+    if missing:
+        raise ValidationError(f"returns_df is missing columns for: {missing}")
+    vol = returns_df[scores.columns].rolling(lookback).std()
+    vol = vol.reindex(scores.index)
+    vol_safe = vol.where(vol > 1e-12, other=np.nan)
+    return (scores / vol_safe).fillna(0.0)
 
 
 def dollar_neutral(weights: pd.DataFrame) -> pd.DataFrame:

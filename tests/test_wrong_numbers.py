@@ -1758,12 +1758,22 @@ class TestModelScoringMeansWhatItSays:
         """`n_dates_below_target_gross` was counted and left sitting in the
         diagnostics dict with `warnings: None`. A caller asking for gross
         1.0 / net 0.0 got a 100%-LONG book at gross 0.5 -- 60 of 60 dates
-        short, mean net +0.34 -- and nothing pointed at it.
+        short -- and nothing pointed at it.
 
-        The cause is that `vol_scaled` divides by volatility and normalizes
-        gross WITHOUT recentring, so one-sided scores produce no short book
-        for `apply_exposure_targets` to fill. That is a property of the
-        method, not a bug in it; the silence was the bug.
+        The cause is an uncentred sizer on one-sided scores: there is no
+        short book for `apply_exposure_targets` to fill, so it can only
+        shrink the long half. `method='sign'` is the plain case -- every
+        positive prediction is +1 -- and measured here it is 60 of 60 dates
+        at gross 0.500, net +0.500. That is a property of the method, not a
+        bug in it; the silence was the bug.
+
+        This was written against `volatility_scale=True`, which used to
+        REPLACE the sizing method with an uncentred divide-by-volatility.
+        It now composes with the method instead, and both cross-sectional
+        methods recentre, so that route no longer produces a one-sided
+        book. The shortfall is a property of any uncentred one-sided book,
+        which is why it is reported from the diagnostics and not from one
+        sizer.
         """
         from standard_quant_tools.modeling.portfolio_eval import (
             transform_predictions_to_weights,
@@ -1775,11 +1785,9 @@ class TestModelScoringMeansWhatItSays:
         names = [f"N{i}" for i in range(40)]
         returns = pd.DataFrame(rng.normal(0, 0.01, (60, 40)), dates, names)
         spec = PredictionTransformSpec(
-            method="cross_sectional_zscore",
-            volatility_scale=True,
+            method="sign",
             gross_exposure=1.0,
             net_exposure=0.0,
-            volatility_lookback=20,
         )
 
         one_sided = pd.DataFrame(np.abs(rng.normal(1, 0.2, (60, 40))), dates, names)
