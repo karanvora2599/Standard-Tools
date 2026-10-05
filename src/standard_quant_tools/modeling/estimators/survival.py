@@ -34,6 +34,7 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 
+from standard_quant_tools._blas import single_threaded_blas
 from standard_quant_tools.error import ValidationError
 
 from .bounds import (
@@ -231,27 +232,37 @@ class CoxPHRegressor:
 
         beta = np.zeros(p)
         eye = np.eye(p)
-        for _iteration in range(self.max_iter):
-            eta = np.clip(Zs @ beta, -30.0, 30.0)
-            wr = w * np.exp(eta)
-            s0 = np.cumsum(wr)[group_end]
-            s1 = np.cumsum(wr[:, None] * Zs, axis=0)[group_end]
-            s2 = np.cumsum(
-                wr[:, None, None] * (Zs[:, :, None] * Zs[:, None, :]), axis=0
-            )[group_end]
-            mean = s1 / s0[:, None]
-            gradient = ((w * e)[:, None] * (Zs - mean)).sum(axis=0) - self.alpha * beta
-            curvature = s2 / s0[:, None, None] - mean[:, :, None] * mean[:, None, :]
-            hessian = (
-                -((w * e)[:, None, None] * curvature).sum(axis=0) - self.alpha * eye
-            )
-            try:
-                step = np.linalg.solve(-hessian + 1e-10 * eye, gradient)
-            except np.linalg.LinAlgError:
-                step = np.linalg.lstsq(-hessian + 1e-6 * eye, gradient, rcond=None)[0]
-            beta = beta + step
-            if np.max(np.abs(step)) < self.tol:
-                break
+        # The Newton steps' products and solves, and the risks the baseline
+        # is read from, on one BLAS thread: the library's own linear
+        # algebra, which ran on the caller's threads in a fit off the
+        # fold pools (the deployed refit, a sequential walk-forward).
+        # Under OpenBLAS 0.3.31 the solve's last bits followed the thread
+        # count from about 100 features, and with them the coefficients.
+        with single_threaded_blas():
+            for _iteration in range(self.max_iter):
+                eta = np.clip(Zs @ beta, -30.0, 30.0)
+                wr = w * np.exp(eta)
+                s0 = np.cumsum(wr)[group_end]
+                s1 = np.cumsum(wr[:, None] * Zs, axis=0)[group_end]
+                s2 = np.cumsum(
+                    wr[:, None, None] * (Zs[:, :, None] * Zs[:, None, :]), axis=0
+                )[group_end]
+                mean = s1 / s0[:, None]
+                score = ((w * e)[:, None] * (Zs - mean)).sum(axis=0)
+                gradient = score - self.alpha * beta
+                curvature = s2 / s0[:, None, None] - mean[:, :, None] * mean[:, None, :]
+                hessian = (
+                    -((w * e)[:, None, None] * curvature).sum(axis=0) - self.alpha * eye
+                )
+                try:
+                    step = np.linalg.solve(-hessian + 1e-10 * eye, gradient)
+                except np.linalg.LinAlgError:
+                    ridged = -hessian + 1e-6 * eye
+                    step = np.linalg.lstsq(ridged, gradient, rcond=None)[0]
+                beta = beta + step
+                if np.max(np.abs(step)) < self.tol:
+                    break
+            log_risk = Z @ beta
         self.coef_ = beta / self.scale_
         self.n_iter_ = _iteration + 1
         self.n_features_in_ = p
@@ -259,7 +270,7 @@ class CoxPHRegressor:
         # say not only who goes first but how likely each is to have
         # gone by a given time -- what a Brier score is read from.
         self.baseline_times_, self.baseline_cumhaz_ = breslow_baseline(
-            duration, event, Z @ beta, weights
+            duration, event, log_risk, weights
         )
         return self
 
@@ -267,7 +278,10 @@ class CoxPHRegressor:
         if self.coef_ is None:
             raise ValidationError("CoxPHRegressor.predict called before fit.")
         X = np.asarray(X, dtype=float)
-        return (X - self.mean_) @ self.coef_
+        # The product's last bits follow the BLAS thread count from a few
+        # hundred features (300 differed at 16 threads), as the fit's do.
+        with single_threaded_blas():
+            return (X - self.mean_) @ self.coef_
 
     def predict_survival_function(self, X: Any, times: Any) -> np.ndarray:
         """S(t | x) at each of `times`, one row per row of X."""

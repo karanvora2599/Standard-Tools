@@ -30,6 +30,14 @@ projection (20,000 rows of 30 features), the VIFs and `collinear` block of
 the ADF statistic's least squares and Gram products gave the same bits there
 at every limit; they run under it too, since a product of the same kind,
 np.cov's, followed the thread count on the CI runners.
+
+A later CHANGELOG entry of 2026-10-04 took the last of them:
+the tests of a mean over dates -- a run's headline, `score_predictions`'
+headline, Diebold-Mariano and `compare_signals` -- whose dot products have
+as many terms as there are dates, so their last bits followed the thread
+count above 10,000 dates under OpenBLAS 0.3.27 and 0.3.31 alike; and the Cox
+model's own fit, whose solve of a 100-feature Hessian gave other bits at
+two and four threads than at one under 0.3.31.
 """
 
 from __future__ import annotations
@@ -45,6 +53,7 @@ import pytest
 
 from standard_quant_tools import _blas
 from standard_quant_tools._blas import single_threaded_blas
+from standard_quant_tools.agent.runtimes import handoff
 from standard_quant_tools.analysis.cointegration import (
     cointegration_test,
     half_life_statistics,
@@ -56,10 +65,21 @@ from standard_quant_tools.analysis.order_book import book_metrics
 from standard_quant_tools.analysis.pca import factor_contributions, pca_returns
 from standard_quant_tools.analysis.stationarity import run_stationarity_tests
 from standard_quant_tools.error import ValidationError
+from standard_quant_tools.modeling.adapters import RegressionAdapter
+from standard_quant_tools.modeling.agent.models import ScorePredictionsInput
+from standard_quant_tools.modeling.agent.statistics_models import CompareSignalsInput
+from standard_quant_tools.modeling.agent.statistics_tools import compare_signals
+from standard_quant_tools.modeling.agent.tools import score_predictions
 from standard_quant_tools.modeling.analysis.feature_report import redundancy_report
+from standard_quant_tools.modeling.engine import _headline_report
+from standard_quant_tools.modeling.estimators.survival import CoxPHRegressor
 from standard_quant_tools.modeling.features import network
 from standard_quant_tools.modeling.preprocessing.base import FoldContext
 from standard_quant_tools.modeling.preprocessing.steps import PCAWhiten
+from standard_quant_tools.modeling.validation.comparison import (
+    diebold_mariano,
+    mean_vs_null_test,
+)
 from standard_quant_tools.portfolio import construction
 from standard_quant_tools.portfolio.covariance import estimate_covariance
 from standard_quant_tools.portfolio.optimize import (
@@ -410,6 +430,98 @@ def _book(snapshots, levels, seed):
 
 BOOK = _book(600, 10, 101)
 
+#: Past the 10,000 terms where OpenBLAS splits a dot product across threads:
+#: 12,000 dates, a long daily history or an intraday one.
+LONG_DATES = pd.bdate_range("1975-01-01", periods=12_000)
+
+
+def _overlapping(seed, mean):
+    """A per-date series with the autocorrelation an overlapping label
+    gives -- each value the mean of five consecutive draws -- built without
+    a product."""
+    draws = np.random.default_rng(seed).normal(scale=0.1, size=LONG_DATES.size + 4)
+    values = sum(draws[k : k + LONG_DATES.size] for k in range(5)) / 5.0
+    return pd.Series(values + mean, index=LONG_DATES)
+
+
+LONG_IC = _overlapping(103, 0.01)
+LONG_IC_OTHER = LONG_IC + _overlapping(107, 0.0)
+LOSS_A = _overlapping(109, 0.0) ** 2 + 1.0
+LOSS_B = _overlapping(113, 0.0) ** 2 + 1.0
+
+
+def _ic_mapping(series):
+    return {str(date.date()): float(value) for date, value in series.items()}
+
+
+def _compare_signals(**fields):
+    return compare_signals(
+        CompareSignalsInput(
+            mode="ic_series",
+            ic_a=_ic_mapping(LONG_IC),
+            ic_b=_ic_mapping(LONG_IC_OTHER),
+            n_bootstrap=100,
+            **fields,
+        )
+    ).model_dump()
+
+
+_PUBLISHED = {}
+
+
+def _score_predictions():
+    """`score_predictions` on three names over the 12,000 dates, its
+    predictions published once."""
+    if "ref" not in _PUBLISHED:
+        rng = np.random.default_rng(127)
+        names = 3
+        signal = rng.normal(size=names * LONG_DATES.size)
+        frame = pd.DataFrame(
+            {
+                "date": np.repeat(LONG_DATES, names),
+                "entity": np.tile(["A", "B", "C"], LONG_DATES.size),
+                "prediction": signal,
+                "target": 0.2 * signal + rng.normal(size=signal.size),
+            }
+        )
+        _PUBLISHED["ref"] = handoff.publish(
+            frame, kind="predictions", run_id="blas_limit", name="long"
+        )
+    return score_predictions(
+        ScorePredictionsInput(
+            predictions_ref=_PUBLISHED["ref"], task="regression", horizon=5
+        )
+    ).model_dump()
+
+
+def _cox_wide():
+    """Two Newton steps of the Cox fit over 100 features: where, under
+    OpenBLAS 0.3.31, the solve of the Hessian gave other last bits at two
+    and four threads than at one, and the coefficients with it."""
+    rng = np.random.default_rng(131)
+    X = rng.normal(size=(300, 100))
+    risk = np.exp(np.sum(X[:, :10] * 0.05, axis=1))
+    duration = rng.exponential(1.0 / risk)
+    censor = rng.exponential(2.0, size=300)
+    event = (duration <= censor).astype(float)
+    duration = np.round(np.minimum(duration, censor), 2) + 0.01
+    model = CoxPHRegressor(alpha=0.1, max_iter=2).fit(
+        X, np.column_stack([duration, event])
+    )
+    return [model.coef_, model.baseline_times_, model.baseline_cumhaz_]
+
+
+def _cox_predict_wide():
+    """The Cox model's risk scores over 300 features: a product whose last
+    bits followed the thread count at 16 threads, so `predict` runs under
+    the limit as the fit does (see the CHANGELOG entry of 2026-10-04)."""
+    rng = np.random.default_rng(137)
+    model = CoxPHRegressor()
+    model.coef_ = rng.normal(scale=0.05, size=300)
+    model.mean_ = rng.normal(size=300)
+    return model.predict(rng.normal(size=(5_000, 300)))
+
+
 CALLS = {
     "_repair_psd": lambda: construction._repair_psd(RAGGED, "test"),
     "risk_parity": lambda: construction.risk_parity(RAGGED, max_iterations=200),
@@ -462,6 +574,29 @@ CALLS = {
         SPREAD, fitted_residual=True
     ),
     "book_metrics": lambda: book_metrics(BOOK),
+    # A later CHANGELOG entry of 2026-10-04: the tests of a mean over the
+    # dates, whose dot products split across threads above 10,000 dates,
+    # and the Cox fit's own linear algebra.
+    "mean_vs_null_test_long": lambda: mean_vs_null_test(LONG_IC.to_numpy(), horizon=5),
+    "mean_vs_null_test_long_named_lag": lambda: mean_vs_null_test(
+        LONG_IC.to_numpy(), lag=10
+    ),
+    "run_headline_long": lambda: _headline_report(
+        RegressionAdapter(),
+        "regression",
+        {"cs_rank_ic_mean": float(LONG_IC.mean())},
+        LONG_IC,
+        5,
+    ),
+    "score_predictions_long": _score_predictions,
+    "diebold_mariano_long": lambda: diebold_mariano(LOSS_A, LOSS_B, horizon=5),
+    "diebold_mariano_long_named_lag": lambda: diebold_mariano(
+        LOSS_A, LOSS_B, lag=10, horizon=5
+    ),
+    "compare_signals_long": lambda: _compare_signals(horizon=5),
+    "compare_signals_long_named_lag": lambda: _compare_signals(hac_lag=10),
+    "cox_ph_wide": _cox_wide,
+    "cox_ph_predict_wide": _cox_predict_wide,
 }
 
 

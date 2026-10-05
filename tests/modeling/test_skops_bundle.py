@@ -14,6 +14,8 @@ bundle.
 import io
 import json
 import re
+import struct
+import time
 import warnings
 import zipfile
 from pathlib import Path
@@ -27,6 +29,7 @@ from standard_quant_tools.modeling import engine
 from standard_quant_tools.modeling.capabilities import modeling_capabilities
 from standard_quant_tools.modeling.estimators.registry import ESTIMATOR_REGISTRY
 from standard_quant_tools.modeling.estimators.survival import CoxPHRegressor
+from standard_quant_tools.modeling.registry import serialization
 from standard_quant_tools.modeling.registry.model_registry import (
     load_manifest,
     load_model,
@@ -35,6 +38,7 @@ from standard_quant_tools.modeling.registry.model_registry import (
 from standard_quant_tools.modeling.registry.package import verify_model_package
 from standard_quant_tools.modeling.registry.serialization import (
     FORMAT_ENV,
+    OLDEST_SKOPS,
     TRUSTED_PREFIX,
     TRUSTED_TYPES,
     TRUSTED_TYPES_SKOPS,
@@ -164,6 +168,20 @@ class TestTheBundle:
 
     def test_the_capability_report_says_whether_bundles_are_written(self):
         assert modeling_capabilities()["optional_dependencies"]["skops"] is True
+
+
+class _Clock:
+    """What `zipfile` reads the time from, stopped at `when` (seconds since
+    the epoch): an archive written under it is dated `when`."""
+
+    def __init__(self, when: int) -> None:
+        self.when = when
+
+    def time(self) -> int:
+        return self.when
+
+    def localtime(self, seconds=None):
+        return time.localtime(self.when if seconds is None else seconds)
 
 
 def _fitted(seed: int = 0):
@@ -348,9 +366,138 @@ def _shared_or_not(shared: bool, tol_value: str = "0.5") -> bytes:
     return buffer.getvalue()
 
 
+#: The date and attributes the rewrite gives every member.
+_EPOCH = (1980, 1, 1, 0, 0, 0)
+_RW_OWNER = 0o600 << 16
+
+
+def _sparse_matrix():
+    import scipy.sparse as sp
+
+    rows, cols = np.array([0, 0, 1, 3, 3, 4]), np.array([1, 4, 2, 0, 3, 4])
+    values = np.array([0.5, -1.25, 2.0, 3.5, -0.75, 1.0])
+    return sp.csr_matrix((values, (rows, cols)), shape=(5, 6))
+
+
+def _npz(matrix) -> bytes:
+    """The archive `scipy.sparse.save_npz` writes, which is what skops
+    stores a sparse matrix as."""
+    import scipy.sparse as sp
+
+    buffer = io.BytesIO()
+    sp.save_npz(buffer, matrix)
+    return buffer.getvalue()
+
+
+def _made_on(archive: bytes, system: int) -> bytes:
+    """`archive` with every member recorded as made on `system` -- 0 is
+    what Python's zipfile records on Windows, 3 elsewhere -- and nothing
+    else changed: the one byte of each central-directory record that holds
+    it."""
+    data = bytearray(archive)
+    with zipfile.ZipFile(io.BytesIO(archive)) as source:
+        offset, count = source.start_dir, len(source.infolist())
+    for _ in range(count):
+        assert bytes(data[offset : offset + 4]) == b"PK\x01\x02"
+        data[offset + 5] = system
+        name, extra, comment = struct.unpack(
+            "<HHH", bytes(data[offset + 28 : offset + 34])
+        )
+        offset += 46 + name + extra + comment
+    return bytes(data)
+
+
+def _sparse_shaped(inner: bytes, address: int, stamp) -> bytes:
+    """An archive laid out the way skops 0.15 lays out a sparse matrix: the
+    matrix's own archive stored under its object's address and named by it
+    in `schema.json`, every member dated `stamp`."""
+    schema = {
+        "__class__": "csr_matrix",
+        "__module__": "scipy.sparse._csr",
+        "__loader__": "SparseMatrixNode",
+        "type": "scipy",
+        "file": f"{address}.npz",
+        "__id__": address,
+        "protocol": 2,
+        "_skops_version": "0.15.0",
+    }
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        for name, payload in (
+            (f"{address}.npz", inner),
+            ("schema.json", json.dumps(schema, indent=2).encode("utf-8")),
+        ):
+            archive.writestr(zipfile.ZipInfo(name, date_time=stamp), payload)
+    return buffer.getvalue()
+
+
+def _npz_with_a_text_member() -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("data.npy", _array_npy([1.0]))
+        archive.writestr("notes.txt", "planted")
+    return buffer.getvalue()
+
+
+def _assert_same_matrix(loaded, matrix):
+    assert type(loaded) is type(matrix) and loaded.shape == matrix.shape
+    for field in ("data", "indices", "indptr"):
+        assert getattr(loaded, field).dtype == getattr(matrix, field).dtype
+        assert getattr(loaded, field).tobytes() == getattr(matrix, field).tobytes()
+
+
 class TestTheRewriteNeedsNoSkops:
     """The rewrite is zip and JSON alone, so it is checked on every CI leg,
     including those that do not install the `skops` extra."""
+
+    def test_a_sparse_matrix_is_one_archive_on_any_operating_system(self):
+        """skops stores a scipy sparse matrix as the archive
+        `scipy.sparse.save_npz` writes, whose members numpy dates
+        1980-01-01 but records as made on the machine's operating system,
+        so the same matrix was other bytes on Windows than on Linux or
+        macOS (the CHANGELOG entry of 2026-10-04). Rewritten, the two are
+        one archive: its own members in their order with numpy's bytes,
+        stored uncompressed, dated 1980-01-01, made on Unix; and it loads
+        to the same matrix."""
+        import scipy.sparse as sp
+
+        matrix = _sparse_matrix()
+        npz = _npz(matrix)
+        windows, unix = _made_on(npz, 0), _made_on(npz, 3)
+        assert windows != unix
+        with zipfile.ZipFile(io.BytesIO(windows)) as archive:
+            assert {info.create_system for info in archive.infolist()} == {0}
+        first = _sparse_shaped(windows, 2269133876912, (2026, 10, 4, 9, 25, 38))
+        second = _sparse_shaped(unix, 1407375360, (2026, 10, 4, 9, 25, 40))
+        rewritten = deterministic_archive(first)
+        assert rewritten == deterministic_archive(second)
+        assert deterministic_archive(rewritten) == rewritten
+        with zipfile.ZipFile(io.BytesIO(rewritten)) as archive:
+            assert [i.filename for i in archive.infolist()] == ["1.npz", "schema.json"]
+            schema = json.loads(archive.read("schema.json"))
+            inner = archive.read("1.npz")
+        assert (schema["file"], schema["__id__"]) == ("1.npz", 1)
+        with (
+            zipfile.ZipFile(io.BytesIO(npz)) as written,
+            zipfile.ZipFile(io.BytesIO(inner)) as kept,
+        ):
+            names = [info.filename for info in written.infolist()]
+            assert [info.filename for info in kept.infolist()] == names
+            for info in kept.infolist():
+                assert info.date_time == _EPOCH
+                assert (info.create_system, info.external_attr) == (3, _RW_OWNER)
+                assert info.compress_type == zipfile.ZIP_STORED
+                assert kept.read(info.filename) == written.read(info.filename)
+        _assert_same_matrix(sp.load_npz(io.BytesIO(inner)), matrix)
+
+    def test_a_member_that_is_not_an_archive_of_arrays_is_kept(self):
+        """Null case: an `.npz` member that is not a zip of `.npy` arrays
+        is kept byte for byte rather than rewritten into something else."""
+        stamp = (2026, 10, 4, 9, 0, 0)
+        for inner in (b"not an archive", _npz_with_a_text_member()):
+            rewritten = deterministic_archive(_sparse_shaped(inner, 7, stamp))
+            with zipfile.ZipFile(io.BytesIO(rewritten)) as archive:
+                assert archive.read("1.npz") == inner
 
     def test_which_objects_a_model_shared_does_not_reach_the_bytes(self):
         """A fit shares objects a load holds as copies, and skops records
@@ -383,15 +530,20 @@ class TestTheRewriteNeedsNoSkops:
             fields = json.loads(archive.read("schema.json"))["content"]["content"]
         assert (fields["alpha"]["__id__"], fields["tol"]["__id__"]) == (3, 4)
 
-    def test_the_extra_requires_the_release_the_trusted_types_were_read_off(self):
+    def test_the_extra_requires_the_oldest_release_verified(self):
         """`TRUSTED_TYPES` was read off skops 0.15, and the `skops` extra
-        allowed 0.10, whose defaults can name types the loader refuses
-        (the CHANGELOG entry of 2026-10-04)."""
+        allowed 0.10, whose defaults can name types the loader refuses.
+        Every registered estimator's bundle was then verified under 0.10 to
+        0.14 (the CHANGELOG entries of 2026-10-04): 0.14 passes, 0.11 to
+        0.13 name scikit-learn's loss types and refuse every boosting
+        bundle, and 0.10 does not import beside scikit-learn 1.9. The extra
+        requires the oldest that passes."""
         pyproject = (Path(__file__).resolve().parents[2] / "pyproject.toml").read_text(
             encoding="utf-8"
         )
         [floor] = re.findall(r'^\s*"skops>=([0-9.]+)"', pyproject, flags=re.MULTILINE)
-        assert floor == TRUSTED_TYPES_SKOPS
+        assert floor == OLDEST_SKOPS == "0.14"
+        assert TRUSTED_TYPES_SKOPS == "0.15"
 
     def test_addresses_uuids_and_clocks_do_not_reach_the_bytes(self):
         first = _skops_shaped(
@@ -504,6 +656,46 @@ class TestTheSameModelGivesTheSameBytes:
         restored = sio.load(path, trusted=sio.get_untrusted_types(file=path))
         assert np.array_equal(restored.predict(X), forest.predict(X))
 
+    def test_a_model_holding_a_sparse_matrix_gives_one_archive(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """A nearest-neighbours model fitted on sparse rows keeps them, and
+        skops stores them as an archive inside the bundle (the CHANGELOG
+        entry of 2026-10-04). Two dumps a second apart are one file once
+        rewritten; it loads to an equal matrix and the same predictions,
+        and the model loaded from it writes the same file. The registry
+        still writes no bundle for it: skops trusts no concrete sparse type
+        by default, no registered estimator holds one, and the loader
+        refuses it by name."""
+        import scipy.sparse as sp
+        import skops.io as sio
+        from sklearn.neighbors import KNeighborsRegressor
+
+        rng = np.random.default_rng(5)
+        X = sp.csr_matrix(sp.random(60, 8, density=0.3, random_state=5))
+        model = KNeighborsRegressor(n_neighbors=3).fit(X, rng.standard_normal(60))
+        assert sp.issparse(model._fit_X)
+        raw = []
+        # An odd second and the one after it: zip dates count in two-second
+        # steps, so the two dumps carry different dates.
+        for when in (1_790_000_001, 1_790_000_002):
+            with monkeypatch.context() as patch:
+                patch.setattr(zipfile, "time", _Clock(when))
+                raw.append(sio.dumps(model))
+        assert raw[0] != raw[1]
+        rewritten = deterministic_archive(raw[0])
+        assert rewritten == deterministic_archive(raw[1])
+        trusted = sio.get_untrusted_types(data=rewritten)
+        assert trusted == ["scipy.sparse._csr.csr_matrix"]
+        loaded = sio.loads(rewritten, trusted=trusted)
+        _assert_same_matrix(loaded._fit_X, model._fit_X)
+        assert np.array_equal(loaded.predict(X), model.predict(X))
+        assert deterministic_archive(sio.dumps(loaded)) == rewritten
+        with caplog.at_level("WARNING"):
+            assert dump_estimator(tmp_path, "neighbours", model) is None
+        assert "['scipy.sparse._csr.csr_matrix']" in caplog.text
+        assert state_hash(model) is None
+
     def test_what_loads_is_unchanged(self, tmp_path):
         """The rewritten archive loads to the estimator the original loads
         to: the same predictions, parameters and bytes value, and the same
@@ -587,6 +779,14 @@ def _cases():
 
 
 _CASES = _cases()
+#: The cases whose estimator is LightGBM's or XGBoost's own scikit-learn
+#: model, rather than this package's model holding a booster.
+_LIBRARY_MODELS = [
+    case
+    for case in _CASES
+    if _is_booster(case[1])
+    and not ESTIMATOR_REGISTRY[case[:2]].__module__.startswith(TRUSTED_PREFIX)
+]
 
 
 def _case_id(case):
@@ -676,14 +876,16 @@ class TestEveryRegisteredEstimatorLoads:
         """Registration wrote a bundle the loader then refused, and the
         manifest listed it as a format the model has (the CHANGELOG entry
         of 2026-10-04). No bundle is written now, and the log names the
-        type; a bundle skops writes for it is still refused by that name."""
+        library's type it is refused by -- the model's own, or the booster
+        a model of this package holds; a bundle skops writes for it is
+        still refused by the booster's name."""
         import skops.io as sio
 
         model, _X, path = bundles[case]
         assert path is None
         with caplog.at_level("WARNING"):
             assert dump_estimator(tmp_path, "again", model) is None
-        assert re.search(r"(lightgbm|xgboost)\.[\w.]*Booster", caplog.text)
+        assert re.search(r"\['(lightgbm|xgboost)\.[\w.]+'", caplog.text)
         assert "registered with joblib only" in caplog.text
         assert not (tmp_path / "again.skops").exists()
         assert state_hash(model) is None
@@ -692,16 +894,69 @@ class TestEveryRegisteredEstimatorLoads:
         with pytest.raises(ValidationError, match=r"(lightgbm|xgboost)\.[\w.]*Booster"):
             load_estimator(str(written))
 
+    @pytest.mark.parametrize("case", _LIBRARY_MODELS, ids=_case_id)
+    def test_a_booster_s_own_type_is_read_before_anything_is_dumped(
+        self, bundles, case, tmp_path, monkeypatch, caplog
+    ):
+        """A LightGBM or XGBoost model was dumped whole -- LightGBM's whole
+        model text rendered, twice -- only for the loader to refuse the
+        bundle by type (the CHANGELOG entry of 2026-10-04). The model's own
+        type is the bundle's root, which skops names exactly when it names
+        an empty instance of that type, so the refusal is read off the type
+        and nothing is dumped. The type named is one the dump itself names
+        and the loader refuses."""
+        import skops.io as sio
+
+        model = bundles[case][0]
+        own = f"{type(model).__module__}.{type(model).__name__}"
+        assert own.startswith(("lightgbm.", "xgboost."))
+        assert serialization._refused_by_its_own_type(model) == [own]
+        named = [str(t) for t in sio.get_untrusted_types(data=sio.dumps(model))]
+        assert own in serialization._refused(named)
+
+        def _dumped(*_args, **_kwargs):
+            raise AssertionError("the estimator was dumped")
+
+        monkeypatch.setattr(sio, "dump", _dumped)
+        monkeypatch.setattr(serialization, "reproducible_state", _dumped)
+        with caplog.at_level("WARNING"):
+            assert dump_estimator(tmp_path, "early", model) is None
+        assert f"would hold type(s) the loader refuses: ['{own}']" in caplog.text
+        assert "registered with joblib only" in caplog.text
+        assert state_hash(model) is None
+        assert not (tmp_path / "early.skops").exists()
+
+    def test_no_other_estimator_is_decided_by_its_type(self, bundles):
+        """Null case: every estimator whose bundle loads, and this
+        package's survival models holding an XGBoost booster, are dumped
+        and read back as before; their own types decide nothing."""
+        for case, (model, _X, _path) in bundles.items():
+            if case not in _LIBRARY_MODELS:
+                assert serialization._refused_by_its_own_type(model) == [], case
+
     def test_the_trusted_types_are_the_ones_the_estimators_hold(self, bundles):
-        """Exactly: every type trusted by name is one some registered
-        estimator holds, and every one they hold is trusted."""
+        """Exactly, under the skops they were read off: every type trusted
+        by name is one some registered estimator holds, and every one they
+        hold is trusted. skops 0.14 trusts the two tree types by default,
+        so there the types held are the other three."""
+        import skops
+
         held = set()
         for case, (_model, _X, path) in bundles.items():
             if not _is_booster(case[1]):
                 held.update(
                     t for t in untrusted_types(path) if not t.startswith(TRUSTED_PREFIX)
                 )
-        assert held == set(TRUSTED_TYPES)
+        assert held <= set(TRUSTED_TYPES)
+        if serialization._release(skops.__version__) >= serialization._release(
+            TRUSTED_TYPES_SKOPS
+        ):
+            assert held == set(TRUSTED_TYPES)
+        else:
+            assert set(TRUSTED_TYPES) - held == {
+                "sklearn.tree._tree.Tree",
+                "sklearn.ensemble._hist_gradient_boosting.predictor.TreePredictor",
+            }
 
     def test_a_scikit_learn_type_the_library_never_writes_is_refused(self, tmp_path):
         """Null case: trusting the Adam optimizer an MLP holds does not
@@ -728,22 +983,29 @@ class TestEveryRegisteredEstimatorLoads:
     ):
         """`TRUSTED_TYPES` was read off skops 0.15; under an older skops,
         whose defaults can name other types, the refusal says so (the
-        CHANGELOG entry of 2026-10-04). Under this release it does not."""
+        CHANGELOG entry of 2026-10-04). Since the bundles were verified
+        back to 0.14, the note is for a release older than that. Under a
+        release the extra allows it is not given."""
         import skops
         import skops.io as sio
 
         path = tmp_path / "foreign.skops"
         sio.dump(_NotOurs(), path)
-        with pytest.raises(ValidationError) as current:
-            load_estimator(str(path))
-        assert "derived on skops" not in str(current.value)
+        for allowed in (skops.__version__, OLDEST_SKOPS + ".0"):
+            monkeypatch.setattr(skops, "__version__", allowed)
+            with pytest.raises(ValidationError) as current:
+                load_estimator(str(path))
+            assert "derived on skops" not in str(current.value), allowed
         monkeypatch.setattr(skops, "__version__", "0.12.1")
         with pytest.raises(ValidationError) as older:
             load_estimator(str(path))
         assert "_NotOurs" in str(older.value)
         assert (
-            f"derived on skops {TRUSTED_TYPES_SKOPS}; this process has skops 0.12.1"
-            in str(older.value)
+            f"derived on skops {TRUSTED_TYPES_SKOPS} and verified back to "
+            f"{OLDEST_SKOPS}; this process has skops 0.12.1" in str(older.value)
+        )
+        assert f"The `skops` extra requires {OLDEST_SKOPS} or later." in str(
+            older.value
         )
 
     def test_a_registered_forest_loads_from_its_bundle(self, patched_multi_factory):
@@ -768,6 +1030,41 @@ class TestEveryRegisteredEstimatorLoads:
         X = _features(model_id)
         via_skops = load_model(model_id, format="skops")
         assert np.array_equal(via_skops.predict(X), load_model(model_id).predict(X))
+
+
+@needs_skops
+class TestWhatAModelsOwnTypeDecides:
+    """The refusal read off a model's own type, before anything is dumped
+    (the CHANGELOG entry of 2026-10-04), is read only where skops can
+    answer for an empty instance of that type; anywhere else the dump
+    decides, as it did."""
+
+    def test_a_type_from_elsewhere_is_refused_by_its_name(self):
+        own = f"{_NotOurs.__module__}._NotOurs"
+        assert serialization._refused_by_its_own_type(_NotOurs()) == [own]
+
+    def test_a_type_with_a_finalizer_is_not_made_empty(self):
+        class _Finalized:
+            def __del__(self):
+                self.handle.close()  # an empty instance has no handle
+
+        model = _Finalized()
+        model.handle = io.BytesIO()
+        assert serialization._refused_by_its_own_type(model) == []
+
+    def test_a_type_skops_cannot_write_empty_is_left_to_the_dump(
+        self, tmp_path, caplog
+    ):
+        class _NeedsState:
+            def __getstate__(self):
+                return {"value": self.value}
+
+        model = _NeedsState()
+        model.value = 1
+        assert serialization._refused_by_its_own_type(model) == []
+        with caplog.at_level("WARNING"):
+            assert dump_estimator(tmp_path, "needs_state", model) is None
+        assert "_NeedsState']" in caplog.text
 
 
 def _distinct_ids(raw: bytes) -> int:
@@ -859,7 +1156,10 @@ class TestARegisteredBooster:
         assert manifest.formats == ["joblib"]
         assert "model.skops" not in manifest.content_hashes
         assert not (_artifacts.run_dir(model_id) / "model.skops").exists()
-        assert "lightgbm.basic.Booster" in caplog.text
+        # Named by the model's own type, which decides the refusal before
+        # anything is dumped (the CHANGELOG entry of 2026-10-04); the
+        # booster inside it named it before.
+        assert "['lightgbm.sklearn.LGBMRegressor']" in caplog.text
         with pytest.raises(ValidationError, match="no skops bundle"):
             load_model(model_id, format="skops")
         assert load_model(model_id).predict(_features(model_id)).shape[0] > 0

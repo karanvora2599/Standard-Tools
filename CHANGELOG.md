@@ -1,5 +1,106 @@
 # Changelog
 
+## A refused booster bundle is decided before anything is dumped, the skops extra allows 0.14, and the tests of a mean and the Cox fit run on one BLAS thread
+
+- **A LightGBM or XGBoost model's bundle is refused before anything is
+  dumped.** Registration dumped the whole model -- LightGBM's model text
+  rendered twice -- only for the loader to refuse the bundle by type. The
+  model is the bundle's root node, and skops picks a node by an object's
+  type and names it by the type's module and name, so an empty instance
+  of the model's type is named exactly when the model would be; that dump
+  decides, in 0.1 to 0.3 ms. When the model's own type is one the loader
+  refuses -- every LightGBM and XGBoost scikit-learn model -- nothing is
+  dumped, `formats` is `["joblib"]` as before, and the warning names that
+  type (`['lightgbm.sklearn.LGBMRegressor']`) where it named the three
+  the dump held (`['collections.OrderedDict', 'lightgbm.basic.Booster',
+  'lightgbm.sklearn.LGBMRegressor']`): the booster's type is known only
+  by rendering the booster. Every other model is dumped and its types
+  read back as before, among them this package's `xgboost_cox` and
+  `xgboost_aft`, refused by the booster they hold; types this package
+  owns or trusts by name are not asked about. `dump_estimator`, medians
+  of 9 to 25 interleaved calls on Python 3.12: LightGBM 29.5 -> 0.24 ms
+  at 100 trees and 475 -> 0.28 ms at 1,000; XGBoost 4.7 -> 0.20 ms and
+  46 -> 0.28 ms; a ridge 2.47 -> 2.78 ms (1.07-1.11x); a
+  histogram-boosting model and a forest 0.98-1.01x.
+- **A sparse matrix's bundle is one file on any operating system.** skops
+  stores a scipy sparse matrix inside the bundle as the archive
+  `scipy.sparse.save_npz` writes. Its members do not carry the clock --
+  numpy dates them 1980-01-01, so two dumps a second apart already
+  rewrote to one file -- but they record the operating system that wrote
+  them (0 on Windows, 3 elsewhere), and they are deflated, whose bytes
+  depend on the zlib build. The rewrite now writes that inner archive as
+  it writes the bundle: each member in its place with numpy's bytes,
+  dated 1980-01-01, made on Unix, rw-------, stored uncompressed.
+  `load_npz` reads it to an equal matrix. On a 2,000 x 50 matrix of
+  10,000 values the bundle grows from 113 to 152 KB, and the rewrite
+  takes 1.3 ms. The registry writes no such bundle, as before: skops
+  trusts no concrete sparse type by default, no registered estimator
+  holds one, and the loader refuses the bundle by the matrix's type
+  (`scipy.sparse._csr.csr_matrix`).
+- **The `skops` extra requires 0.14.** The bundle tests were run under
+  skops 0.10 to 0.14 in scratch environments beside scikit-learn 1.9.1
+  and numpy 2.0.2. Under 0.14 all 127 pass. Under 0.11, 0.12 and 0.13,
+  21 fail, the same 21 each: those releases name scikit-learn's loss and
+  link types (`HalfSquaredError`, `HalfBinomialLoss`, `PinballLoss`,
+  `IdentityLink`, `LogitLink`, `Interval`) and the histogram-boosting
+  `_BinMapper`, which 0.14 trusts by default, so the loader refuses --
+  and registration does not write -- the bundle of every
+  gradient-boosting, histogram-boosting and quantile gradient-boosting
+  fit. 0.10 does not import beside scikit-learn 1.9.1 (`cannot import
+  name 'Huber' from 'sklearn.linear_model._sgd_fast'`). `TRUSTED_TYPES`
+  is still the list read off 0.15 (0.14 trusts its two tree types
+  itself); `serialization.OLDEST_SKOPS` is 0.14, and the refusal's note
+  names a skops older than that. A bundle records the skops release that
+  wrote it, so the same model's `model.skops` hash differs between 0.14
+  and 0.15.
+- **A run's headline, `score_predictions`, Diebold-Mariano and
+  `compare_signals` are the same bits at any BLAS thread count.**
+  `newey_west_variance`, `cosine_variance` and `mean_vs_null_test` take
+  dot products as long as the dates, and OpenBLAS splits a dot product of
+  more than 10,000 terms across threads, so above 10,000 dates their last
+  bits followed the caller's thread count under OpenBLAS 0.3.27 and
+  0.3.31 alike. They run under `single_threaded_blas()` now. What moves,
+  once, at the default 16 threads: at 12,000 to 50,000 dates the t
+  statistics, variances and lag-1 autocorrelations by at most 7.3e-16
+  relative and the p-values by at most 8.7e-14; at 9,000 dates nothing.
+  The cost, with and without the limit call by call, as the ratio of the
+  minimums and the median ratio on Python 3.12 and 3.11: at 504 dates
+  `mean_vs_null_test` 1.02-1.03x (174 -> 179 us), `diebold_mariano`
+  0.99-1.03x, `compare_signals` 0.98-1.00x and `newey_west_variance` at
+  lag 10 1.16-1.19x (20 -> 23 us); at 12,000 dates the one-thread
+  products are faster: `mean_vs_null_test` 32-34 -> 12-13 ms,
+  `diebold_mariano` 0.38-0.39x, `compare_signals` 0.84-0.86x. Entering
+  and leaving the outermost limit costs 6.5-7.6 us, a nested one 1.4 us.
+- **The Cox fit's Newton steps run on one BLAS thread.** `cox_ph`'s
+  products, its solve of the Hessian and its least-squares fallback ran
+  on the caller's threads in every fit off the fold pools -- the deployed
+  refit, the folds at a budget of 1 -- and under OpenBLAS 0.3.31 the
+  solve's last bits followed the thread count from 100 features, and the
+  coefficients with them. At the default 16 threads under 0.3.31 (Python
+  3.11, numpy 2.4), 90 to 118 of 100 to 128 coefficients move by at most
+  6.5e-14 relative, the baseline cumulative hazard by 1.0e-15, and the
+  risk scores computed from them; under 0.3.27 (Python 3.12, numpy 2.0)
+  nothing moves, nor at 8 or 60 features under either. A fit of 15,030 x
+  8 takes 0.99-1.01x as long; of 400 x 100, 1.00-1.01x under 0.3.27 and
+  0.66-0.69x under 0.3.31 (968 -> 711 ms). `predict` runs under the limit
+  too: its product over 300 features gave other last bits at 4 and 16
+  threads than at one, for 6 to 7 of 5,000 risk scores, under both
+  OpenBLAS builds; it was the same at 100.
+- **Tested.** Ten calls join the tests that require the same bits at
+  caller limits of one, two and four and at the default, at 12,000 dates
+  or 100 features: `mean_vs_null_test` and `diebold_mariano` with and
+  without a named lag, the run headline, `score_predictions`,
+  `compare_signals` both ways, a Cox fit and Cox risk scores over 300
+  features; on the code before, eight of the first nine fail under
+  OpenBLAS 0.3.27 and all nine under 0.3.31. The sparse
+  rewrite is held on archives written as Windows and as Linux write them,
+  and on a nearest-neighbours model dumped at two clock times a second
+  apart: one file, an equal matrix and the same predictions loaded, and
+  the same file from the model loaded back. Each LightGBM and XGBoost
+  model's refusal is held to the dump's own -- the type it names is one
+  the dump names and the loader refuses -- and is reached with the dump
+  made to fail; every other registered estimator is left to the dump.
+
 ## The MLPs stop early on the last dates of each training window
 
 - **The validation rows are the window's last dates.** An `mlp` spec with

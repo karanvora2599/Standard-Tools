@@ -48,6 +48,14 @@ being inferred from them. See the CHANGELOG entry of 2026-09-21 for why
 the second and third were added: the first was reachable only through a
 comparison of two registered models, and a family of p-values from
 anywhere else had no correction at all.
+
+THE SAME BITS AT ANY THREAD COUNT. The long-run variances and the test
+of a mean are dot products over the dates, and OpenBLAS splits a dot
+product of more than 10,000 terms across its threads, so above 10,000
+dates their last bits followed the caller's BLAS thread count -- and with
+them a run's headline, `score_predictions`' headline, Diebold-Mariano and
+`compare_signals`. `newey_west_variance`, `cosine_variance` and
+`mean_vs_null_test` run their products under `single_threaded_blas()`.
 """
 
 from __future__ import annotations
@@ -58,6 +66,7 @@ from typing import Any, Dict, List, Optional, Sequence
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools._blas import single_threaded_blas
 from standard_quant_tools.analysis.inference import _block_indices
 from standard_quant_tools.error import ValidationError
 
@@ -176,11 +185,12 @@ def newey_west_variance(values: np.ndarray, lag: int) -> float:
     if n < 2:
         return float("nan")
     centered = x - x.mean()
-    variance = float(np.dot(centered, centered) / n)
-    for k in range(1, min(int(lag), n - 1) + 1):
-        weight = 1.0 - k / (lag + 1.0)
-        autocov = float(np.dot(centered[k:], centered[:-k]) / n)
-        variance += 2.0 * weight * autocov
+    with single_threaded_blas():
+        variance = float(np.dot(centered, centered) / n)
+        for k in range(1, min(int(lag), n - 1) + 1):
+            weight = 1.0 - k / (lag + 1.0)
+            autocov = float(np.dot(centered[k:], centered[:-k]) / n)
+            variance += 2.0 * weight * autocov
     return variance / n
 
 
@@ -214,9 +224,10 @@ def cosine_variance(values: np.ndarray, n_frequencies: int) -> float:
     table = np.cos(np.arange(period, dtype=np.float64) * (math.pi / (2.0 * n)))
     odd = 2 * np.arange(n, dtype=np.int64) + 1
     total = 0.0
-    for j in range(1, count + 1):
-        projection = float(np.dot(table[(j * odd) % period], centered))
-        total += projection * projection
+    with single_threaded_blas():
+        for j in range(1, count + 1):
+            projection = float(np.dot(table[(j * odd) % period], centered))
+            total += projection * projection
     return (2.0 / n) * total / count / n
 
 
@@ -365,32 +376,36 @@ def mean_vs_null_test(
     }
     if n < 2:
         return out
-    centered = x - x.mean()
-    denominator = float(np.dot(centered, centered))
-    if denominator > 0.0:
-        out["autocorrelation_lag1"] = float(
-            np.dot(centered[1:], centered[:-1]) / denominator
-        )
-    if float(np.ptp(x)) == 0.0:
-        # Every value the same. Their mean is rounded, so the deviations
-        # from it are a few ulps rather than zero, and a variance of those
-        # made a t of 1e31 out of a constant.
-        return out
-    distance = float(x.mean()) - float(null)
-    if lag is None:
-        variance = cosine_variance(x, int(degrees or 0))
-    else:
-        variance = newey_west_variance(x, int(lag))
-    if math.isfinite(variance) and variance > 0.0:
-        t_stat = distance / math.sqrt(variance)
-        out["t_stat"] = float(t_stat)
+    # Its dot products on one BLAS thread, with the variances' own limits
+    # nested inside this one: OpenBLAS splits a dot product of more than
+    # 10,000 terms across threads, and the last bits then follow the count.
+    with single_threaded_blas():
+        centered = x - x.mean()
+        denominator = float(np.dot(centered, centered))
+        if denominator > 0.0:
+            out["autocorrelation_lag1"] = float(
+                np.dot(centered[1:], centered[:-1]) / denominator
+            )
+        if float(np.ptp(x)) == 0.0:
+            # Every value the same. Their mean is rounded, so the deviations
+            # from it are a few ulps rather than zero, and a variance of
+            # those made a t of 1e31 out of a constant.
+            return out
+        distance = float(x.mean()) - float(null)
         if lag is None:
-            out["p_value"] = _student_t_p_value(t_stat, int(degrees or 0))
+            variance = cosine_variance(x, int(degrees or 0))
         else:
-            out["p_value"] = float(math.erfc(abs(t_stat) / math.sqrt(2.0)))
-    plain = newey_west_variance(x, 0)
-    if math.isfinite(plain) and plain > 0.0:
-        out["t_stat_uncorrected"] = float(distance / math.sqrt(plain))
+            variance = newey_west_variance(x, int(lag))
+        if math.isfinite(variance) and variance > 0.0:
+            t_stat = distance / math.sqrt(variance)
+            out["t_stat"] = float(t_stat)
+            if lag is None:
+                out["p_value"] = _student_t_p_value(t_stat, int(degrees or 0))
+            else:
+                out["p_value"] = float(math.erfc(abs(t_stat) / math.sqrt(2.0)))
+        plain = newey_west_variance(x, 0)
+        if math.isfinite(plain) and plain > 0.0:
+            out["t_stat_uncorrected"] = float(distance / math.sqrt(plain))
     return out
 
 

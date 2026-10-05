@@ -33,7 +33,10 @@ refuse -- and the manifest's `formats` says `["joblib"]`; asking for
 skops on such a model is refused by name rather than answered with
 joblib. A bundle the loader refuses is not written, because a format
 listed on the manifest that can never load is not a format the model
-has.
+has. When the estimator's own type is one the loader refuses -- every
+LightGBM and XGBoost scikit-learn model -- that is read off its type
+before anything is dumped, and the log names that type; otherwise the
+bundle is dumped and its types read back.
 
 THE SAME MODEL, THE SAME BYTES. A skops archive as `skops.io.dump` writes
 it differs between two runs that fit the same model: each zip member
@@ -46,7 +49,10 @@ manifest hashes the file, so `model.skops`'s content hash never
 reproduced. `dump_estimator` rewrites the archive before it is saved:
 ids numbered 1, 2, 3 in the order `schema.json` first names them, each
 member file renamed to match, padding bytes zero, and every member dated
-1980-01-01 with fixed attributes. The loader reads ids only to tell one
+1980-01-01 with fixed attributes. A scipy sparse matrix is stored as an
+archive of its own, whose members numpy dates 1980-01-01 but marks with
+the operating system it ran on; that archive is rewritten the same way,
+its members stored uncompressed. The loader reads ids only to tell one
 object from another, members only by the names `schema.json` gives, and
 an array's fields but never its padding; an archive written before loads
 as it always did.
@@ -120,8 +126,9 @@ FORMATS = ("joblib", "skops")
 #: names them (skops 0.15, scikit-learn 1.9): trees of a random forest,
 #: gradient boosting and the quantile gradient boosting; trees of a
 #: histogram-boosting model; the per-fold calibrators of a calibrated
-#: classifier; the optimizer of an MLP. A fixed list, so a bundle naming
-#: any other type is still refused by name.
+#: classifier; the optimizer of an MLP. skops 0.14 trusts the two tree
+#: types by default and names the other three. A fixed list, so a bundle
+#: naming any other type is still refused by name.
 TRUSTED_TYPES = (
     "sklearn.calibration._CalibratedClassifier",
     "sklearn.calibration._SigmoidCalibration",
@@ -129,11 +136,17 @@ TRUSTED_TYPES = (
     "sklearn.neural_network._stochastic_optimizers.AdamOptimizer",
     "sklearn.tree._tree.Tree",
 )
-#: The skops release `TRUSTED_TYPES` was read off, and the oldest the
-#: `skops` extra allows. Another release's defaults can differ, so its
-#: `get_untrusted_types` can name types this list lacks, which the loader
-#: refuses by name.
+#: The skops release `TRUSTED_TYPES` was read off.
 TRUSTED_TYPES_SKOPS = "0.15"
+#: The oldest skops release every registered estimator's bundle was
+#: verified on -- written, loaded back to the same predictions, one bundle
+#: for a fit and its loads, a foreign type refused by name -- and the
+#: oldest the `skops` extra allows. skops 0.11 to 0.13 name scikit-learn's
+#: loss and link types and the histogram-boosting bin mapper, which 0.14
+#: trusts by default, so the loader refused the bundle of every gradient-
+#: boosting, histogram-boosting and quantile gradient-boosting fit; 0.10
+#: does not import beside scikit-learn 1.9.
+OLDEST_SKOPS = "0.14"
 
 #: Where `reproducible_state` looks for trees, bin mappers and LightGBM
 #: models: objects from these packages are walked through their
@@ -193,20 +206,62 @@ def _release(version: str) -> Tuple[int, ...]:
 
 
 def _older_skops_note() -> str:
-    """A sentence naming the installed skops when it is older than the one
-    `TRUSTED_TYPES` was read off, else empty."""
+    """A sentence naming the installed skops when it is older than the
+    oldest release the bundles were verified on, else empty."""
     try:
         import skops
     except ImportError:  # pragma: no cover - callers have checked
         return ""
     installed = str(getattr(skops, "__version__", ""))
-    if not installed or _release(installed) >= _release(TRUSTED_TYPES_SKOPS):
+    if not installed or _release(installed) >= _release(OLDEST_SKOPS):
         return ""
     return (
-        f" TRUSTED_TYPES was derived on skops {TRUSTED_TYPES_SKOPS}; this "
-        f"process has skops {installed}, whose defaults can name types "
-        f"skops {TRUSTED_TYPES_SKOPS} does not. The `skops` extra requires "
-        f"{TRUSTED_TYPES_SKOPS} or later."
+        f" TRUSTED_TYPES was derived on skops {TRUSTED_TYPES_SKOPS} and "
+        f"verified back to {OLDEST_SKOPS}; this process has skops "
+        f"{installed}, whose defaults can name types those releases trust. "
+        f"The `skops` extra requires {OLDEST_SKOPS} or later."
+    )
+
+
+def _refused_by_its_own_type(estimator: Any) -> List[str]:
+    """
+    `[the estimator's own type]` when that type alone means
+    `load_estimator` would refuse its bundle, read without dumping the
+    estimator; empty when its type does not decide, and only the dump can.
+
+    The estimator is the bundle's root node. skops chooses a node by the
+    object's type and trusts or names it by the type's module and name, so
+    an instance of the same type holding nothing is named exactly when the
+    estimator is. Dumping that empty instance takes 0.1 to 0.3 ms; the
+    estimator's own dump renders everything it holds (a LightGBM model's
+    whole model text) only for the loader to refuse it. A type the loader
+    trusts by name (this package's, `TRUSTED_TYPES`) is never refused, so
+    it is not asked about. A type with a finalizer, which might not expect
+    an empty instance, one that cannot be made empty, or one whose empty
+    instance skops cannot write decides nothing.
+    """
+    import skops.io as sio
+
+    kind = type(estimator)
+    own = f"{kind.__module__}.{kind.__name__}"
+    if not _refused([own]) or getattr(kind, "__del__", None) is not None:
+        return []  # a type the loader trusts by name, or one not made empty
+    try:
+        empty = kind.__new__(kind)
+        named = [str(t) for t in sio.get_untrusted_types(data=sio.dumps(empty))]
+    except Exception:  # noqa: BLE001 - undecided: the dump decides
+        return []
+    return [own] if own in _refused(named) else []
+
+
+def _log_refused(estimator: Any, refused: List[str], level: int) -> None:
+    logger.log(
+        level,
+        "[modeling] the skops bundle of %s would hold type(s) the loader "
+        "refuses: %s; the model is registered with joblib only.%s",
+        type(estimator).__name__,
+        refused[:5],
+        _older_skops_note(),
     )
 
 
@@ -216,12 +271,18 @@ def _bundle(estimator: Any, level: int = logging.WARNING) -> Optional[bytes]:
     `reproducible_state` and rewritten by `deterministic_archive`. None
     -- logged at `level` -- when skops is not installed, cannot serialize
     the estimator or read back what it wrote, or writes a type
-    `load_estimator` refuses.
+    `load_estimator` refuses. When the estimator's own type is one the
+    loader refuses (a LightGBM or XGBoost model), that is known before
+    anything is dumped, and nothing is (see `_refused_by_its_own_type`).
     """
     if not skops_available():
         return None
     import skops.io as sio
 
+    refused = _refused_by_its_own_type(estimator)
+    if refused:
+        _log_refused(estimator, refused, level)
+        return None
     buffer = io.BytesIO()
     try:
         with reproducible_state(estimator):
@@ -248,14 +309,7 @@ def _bundle(estimator: Any, level: int = logging.WARNING) -> Optional[bytes]:
         )
         return None
     if refused:
-        logger.log(
-            level,
-            "[modeling] the skops bundle of %s would hold type(s) the loader "
-            "refuses: %s; the model is registered with joblib only.%s",
-            type(estimator).__name__,
-            refused[:5],
-            _older_skops_note(),
-        )
+        _log_refused(estimator, refused, level)
         return None
     return deterministic_archive(data)
 
@@ -746,6 +800,59 @@ def _zeroed_padding(payload: bytes) -> bytes:
     return payload[:header] + data.tobytes()
 
 
+def _fixed_info(name: str, compress_type: int) -> zipfile.ZipInfo:
+    """A zip entry for `name` dated 1980-01-01, made on Unix, rw-------."""
+    fixed = zipfile.ZipInfo(name, date_time=_ZIP_EPOCH)
+    fixed.compress_type = compress_type
+    fixed.create_system = _CREATE_SYSTEM
+    fixed.external_attr = _EXTERNAL_ATTR
+    return fixed
+
+
+def _normalized_npz(payload: bytes) -> bytes:
+    """
+    The archive inside a sparse matrix's member, rewritten the way the
+    bundle around it is; any other member as it was.
+
+    skops stores a scipy sparse matrix as the `.npz` archive
+    `scipy.sparse.save_npz` writes: one `.npy` member per array, deflated
+    by numpy and dated 1980-01-01, but recorded as made on the machine's
+    operating system (0 on Windows, 3 elsewhere), so the same matrix gave
+    other bytes on Windows than on Linux or macOS. Each member is kept --
+    its name, its place and its bytes -- and written dated 1980-01-01,
+    made on Unix, rw-------, and stored uncompressed, as the bundle's own
+    arrays are: deflate does not fix its output, and two zlib builds can
+    compress the same bytes differently. `scipy.sparse.load_npz` reads
+    stored and deflated members alike. An archive with a member that is
+    not a `.npy`, or a name twice, is kept as written.
+    """
+    try:
+        with zipfile.ZipFile(io.BytesIO(payload)) as source:
+            names = [info.filename for info in source.infolist()]
+            if len(set(names)) != len(names) or not all(
+                name.endswith(".npy") for name in names
+            ):
+                return payload
+            members = [(name, source.read(name)) for name in names]
+    except Exception:  # noqa: BLE001 - not an archive this can read: keep it
+        return payload
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as target:
+        for name, member in members:
+            target.writestr(_fixed_info(name, zipfile.ZIP_STORED), member)
+    return out.getvalue()
+
+
+def _normalized_member(name: str, payload: bytes) -> bytes:
+    """A member as the rewrite writes it: an array's padding zeroed, a
+    sparse matrix's inner archive normalized, anything else as it was."""
+    if name.endswith(".npy"):
+        return _zeroed_padding(payload)
+    if name.endswith(".npz"):
+        return _normalized_npz(payload)
+    return payload
+
+
 def deterministic_archive(data: bytes) -> bytes:
     """
     A skops archive rewritten so the same model gives the same bytes,
@@ -755,9 +862,10 @@ def deterministic_archive(data: bytes) -> bytes:
     each member renamed to match and written once per name (see
     `_Rewrite`), in the order the schema names them (the order skops writes
     them) with `schema.json` last, each dated 1980-01-01 with fixed
-    attributes and its own compression, and an array's padding bytes zero
-    (see `_zeroed_padding`). `schema.json` is written back as skops writes
-    it: two-space indent, keys in their order.
+    attributes and its own compression, an array's padding bytes zero
+    (see `_zeroed_padding`), and a sparse matrix's own archive rewritten
+    alike (see `_normalized_npz`). `schema.json` is written back as skops
+    writes it: two-space indent, keys in their order.
 
     An archive holding a reference node keeps its ids' grouping, numbered
     the same way. An archive this does not recognise -- no `schema.json`,
@@ -774,11 +882,7 @@ def deterministic_archive(data: bytes) -> bytes:
             return data
         schema = json.loads(source.read(_SCHEMA))
         payloads = {
-            info.filename: (
-                _zeroed_padding(source.read(info.filename))
-                if info.filename.endswith(".npy")
-                else source.read(info.filename)
-            )
+            info.filename: _normalized_member(info.filename, source.read(info.filename))
             for info in infos
             if info.filename != _SCHEMA
         }
@@ -799,12 +903,9 @@ def deterministic_archive(data: bytes) -> bytes:
     out = io.BytesIO()
     with zipfile.ZipFile(out, "w") as target:
         for name, original in [*rewrite.sources.items(), (_SCHEMA, _SCHEMA)]:
-            fixed = zipfile.ZipInfo(name, date_time=_ZIP_EPOCH)
-            fixed.compress_type = compression[original]
-            fixed.create_system = _CREATE_SYSTEM
-            fixed.external_attr = _EXTERNAL_ATTR
             target.writestr(
-                fixed, renamed if original == _SCHEMA else payloads[original]
+                _fixed_info(name, compression[original]),
+                renamed if original == _SCHEMA else payloads[original],
             )
     return out.getvalue()
 
@@ -825,7 +926,7 @@ def load_estimator(path: str) -> Any:
     Any other type is refused BY NAME before anything is constructed. That
     is the property the format is for: a bundle that names a type this
     registry never writes did not come from this registry. Under a skops
-    older than `TRUSTED_TYPES_SKOPS` the refusal says so.
+    older than `OLDEST_SKOPS` the refusal says so.
     """
     _require()
     import skops.io as sio
@@ -849,6 +950,7 @@ def load_estimator(path: str) -> Any:
 __all__ = [
     "FORMATS",
     "FORMAT_ENV",
+    "OLDEST_SKOPS",
     "TRUSTED_PREFIX",
     "TRUSTED_TYPES",
     "TRUSTED_TYPES_SKOPS",

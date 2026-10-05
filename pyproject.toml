@@ -124,11 +124,11 @@ remote = [
 ]
 # The skops bundle beside model.joblib: the estimator loadable without
 # executing pickle. Registration writes it when the package is present.
-# 0.15 is the release the loader's trusted types were read off and the
-# oldest verified; another release's defaults can name types the loader
-# then refuses by name.
+# The loader's trusted types were read off 0.15; 0.14 is the oldest
+# release every registered estimator's bundle was verified on. 0.11 to
+# 0.13 name scikit-learn's loss types, which the loader refuses by name.
 skops = [
-    "skops>=0.15"
+    "skops>=0.14"
 ]
 # Not used by the runtime: the oracle the survival Brier-score tests
 # compare the native implementation against.
