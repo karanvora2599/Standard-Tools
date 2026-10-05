@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from standard_quant_tools.analysis import order_events as order_events_module
 from standard_quant_tools.analysis.order_events import (
     ORDER_EVENT_COLUMNS,
     event_rates,
@@ -347,3 +348,82 @@ class TestTheReport:
         assert report["rates"]["cancel_to_add"] > 0
         assert report["lifetimes"]["cancelled"]["n"] > 0
         assert report["lifetimes"]["still_resting"] > 0
+
+
+@pytest.mark.skipif(
+    not order_events_module.HAS_CPP, reason="native extension not built"
+)
+class TestBothPathsGiveTheSameReport:
+    """
+    The queue and lifetime passes are the extension's kernels when it is
+    built, the loops above otherwise (see the CHANGELOG entry of
+    2026-10-04): 8.0 s of a 2,000,000-event session's report in the loops.
+    The report is the same on both paths, every float to the bit, on the
+    realistic session above and on one opened by a snapshot and cut by a
+    CLEAR, with cancels of orders the window never saw.
+    """
+
+    @staticmethod
+    def _both(events):
+        native = order_event_metrics(events)
+        order_events_module.HAS_CPP = False
+        try:
+            python = order_event_metrics(events)
+        finally:
+            order_events_module.HAS_CPP = True
+        return native, python
+
+    @staticmethod
+    def _session(seed):
+        rng = np.random.default_rng(seed)
+        rows = [(0.0, 900 + i, "A", "B", 99.0 + i % 3, 100.0) for i in range(5)]
+        oid = 0
+        for step in range(600):
+            oid += 1
+            t = 1.0 + step * 0.01
+            side = "B" if step % 2 else "A"
+            price = 100.0 + float(rng.integers(-3, 4))
+            rows.append((t, oid, "A", side, price, float(rng.integers(1, 9) * 100)))
+            if step % 3 == 0:
+                rows.append((t + 0.004, oid, "C", side, price, 100.0))
+            elif step % 5 == 0:
+                rows.append((t + 0.003, oid, "F", side, price, 50.0))
+            if step % 50 == 7:
+                rows.append((t + 0.002, 900 + step % 5, "C", "B", 99.0, 100.0))
+            if step == 300:
+                rows.append((t + 0.001, 0, "R", "N", float("nan"), float("nan")))
+        frame = _events(rows)
+        flags = np.zeros(len(frame), dtype=np.int64)
+        flags[:5] = 32
+        frame["flags"] = flags
+        return frame
+
+    @pytest.mark.parametrize("seed", [0, 1])
+    def test_the_same_report(self, seed):
+        native, python = self._both(self._session(seed))
+        assert native == python
+        for kind in ("filled", "cancelled"):
+            for key, value in native["lifetimes"][kind].items():
+                want = python["lifetimes"][kind][key]
+                assert np.float64(value).tobytes() == np.float64(want).tobytes(), key
+
+    def test_the_realistic_session(self):
+        rng = np.random.default_rng(4)
+        rows = []
+        oid = 0
+        for step in range(400):
+            oid += 1
+            rows.append((step * 0.1, oid, "A", "B", 100.0, float(rng.integers(1, 50))))
+            if step % 3 == 0:
+                rows.append((step * 0.1 + 0.05, oid, "C", "B", 100.0, 10.0))
+        native, python = self._both(_events(rows))
+        assert native == python
+
+    def test_a_small_frame_on_its_own_runs_the_loop(self):
+        """Below 64 events a standalone pass codes nothing: the three
+        factorize calls cost more than the loop (0.82-0.92x at 25-50)."""
+        events = self._session(0).iloc[:40]
+        assert not order_events_module._sized_for_native(events)
+        assert queue_positions(events) == order_events_module._queue_positions(
+            events, None
+        )

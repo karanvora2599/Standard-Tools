@@ -1,6 +1,6 @@
 /**
  * C++ unit tests for the chain kernels in options.cpp: implied volatility
- * and Black-Scholes-Merton greeks over a batch.
+ * and Black-Scholes-Merton greeks over a batch, and the binomial lattice.
  *
  * The Python suite (tests/analysis/test_options_batch.py) holds these
  * kernels to the scalar Python functions result for result. What is checked
@@ -545,6 +545,99 @@ static void test_an_empty_batch_is_a_no_op() {
     CHECK(true);
 }
 
+// ── The binomial lattice ────────────────────────────────────────────────────
+
+namespace {
+
+// The lattice as the numpy loop forms it: a fresh array per level, each
+// node from the level below, maximum returning its second argument on a tie.
+std::vector<double> lattice_reference(const std::vector<double>& up,
+                                      const std::vector<double>& down, double spot,
+                                      double strike, double sign, double p, double disc,
+                                      bool american) {
+    const std::size_t steps = up.size() - 1;
+    auto max2 = [](double a, double b) { return (a > b || a != a) ? a : b; };
+    auto node = [&](std::size_t level, std::size_t i) {
+        return (spot * up[level - i]) * down[i];
+    };
+    std::vector<double> values(steps + 1), levels(6);
+    for (std::size_t i = 0; i <= steps; ++i)
+        values[i] = max2(sign * (node(steps, i) - strike), 0.0);
+    const double q = 1.0 - p;
+    for (std::size_t level = steps; level-- > 0;) {
+        std::vector<double> next(level + 1);
+        for (std::size_t i = 0; i <= level; ++i) {
+            next[i] = disc * (p * values[i] + q * values[i + 1]);
+            if (american) next[i] = max2(next[i], sign * (node(level, i) - strike));
+        }
+        values.swap(next);
+        if (level <= 2)
+            for (std::size_t i = 0; i <= level; ++i)
+                levels[level * (level + 1) / 2 + i] = values[i];
+    }
+    return levels;
+}
+
+struct Crr {
+    std::vector<double> up, down;
+    double p, disc;
+};
+
+Crr crr(double t, double vol, double r, double q, std::size_t steps) {
+    const double dt = t / static_cast<double>(steps);
+    const double u = std::exp(vol * std::sqrt(dt));
+    const double d = 1.0 / u;
+    const double growth = std::exp((r - q) * dt);
+    Crr c{std::vector<double>(steps + 1), std::vector<double>(steps + 1),
+          (growth - d) / (u - d), std::exp(-r * dt)};
+    for (std::size_t k = 0; k <= steps; ++k) {
+        c.up[k] = std::pow(u, static_cast<double>(k));
+        c.down[k] = std::pow(d, static_cast<double>(k));
+    }
+    return c;
+}
+
+std::vector<double> lattice(const Crr& c, double spot, double strike, double sign,
+                            bool american) {
+    std::vector<double> levels(6, kNaN);
+    CHECK(sqt::binomial_lattice(c.up.data(), c.down.data(), c.up.size() - 1, spot,
+                                strike, sign, c.p, c.disc, american, levels.data()));
+    return levels;
+}
+
+}  // namespace
+
+// The in-place, one-buffer kernel against a fresh array per level, every
+// level 0-2 value bit for bit, at the strike (where a put's payoff is -0.0)
+// and either side of it.
+static void test_the_lattice_is_the_level_by_level_loop() {
+    for (std::size_t steps : {3u, 4u, 10u, 200u, 1001u}) {
+        for (double strike : {80.0, 100.0, 125.0}) {
+            for (double sign : {1.0, -1.0}) {
+                for (bool american : {false, true}) {
+                    const Crr c = crr(0.75, 0.35, 0.04, 0.03, steps);
+                    const auto got = lattice(c, 100.0, strike, sign, american);
+                    const auto want = lattice_reference(c.up, c.down, 100.0, strike, sign,
+                                                        c.p, c.disc, american);
+                    for (std::size_t i = 0; i < 6; ++i) CHECK(same(got[i], want[i]));
+                }
+            }
+        }
+    }
+}
+
+// 2,000 steps: the European prices are within a cent of Black-Scholes, and
+// an American put on a dividend payer is worth more than the European.
+static void test_the_lattice_converges_and_prices_early_exercise() {
+    const Crr c = crr(1.0, 0.3, 0.04, 0.03, 2000);
+    const double euro_put = lattice(c, 100.0, 110.0, -1.0, false)[0];
+    const double amer_put = lattice(c, 100.0, 110.0, -1.0, true)[0];
+    const double euro_call = lattice(c, 100.0, 110.0, 1.0, false)[0];
+    CHECK_NEAR(euro_put, price_of(100.0, 110.0, 1.0, 0.3, 0.04, 0.03, false), 0.01);
+    CHECK_NEAR(euro_call, price_of(100.0, 110.0, 1.0, 0.3, 0.04, 0.03, true), 0.01);
+    CHECK(amer_put > euro_put + 0.1);
+}
+
 int main() {
     test_hull_textbook_prices();
     test_greeks_match_the_library_units();
@@ -563,6 +656,8 @@ int main() {
     test_every_refusal_has_its_own_code();
     test_zero_and_negative_rates_and_yields_solve();
     test_an_empty_batch_is_a_no_op();
+    test_the_lattice_is_the_level_by_level_loop();
+    test_the_lattice_converges_and_prices_early_exercise();
 
     std::printf("%d/%d checks passed\n", g_tests_run - g_tests_failed, g_tests_run);
     return g_tests_failed == 0 ? 0 : 1;

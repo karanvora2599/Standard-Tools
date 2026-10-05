@@ -42,6 +42,19 @@ from standard_quant_tools._special import norm_cdf
 from standard_quant_tools.analysis._series import clean_series
 from standard_quant_tools.error import ValidationError
 
+# Optional native fast path for one EM step of `detect_regimes` (everything
+# but numpy's exp). The numpy loop stays as the reference and the fallback.
+_cpp_core: Any = None
+HAS_CPP = False
+try:
+    from standard_quant_tools import (
+        _sqt_core as _cpp_core,  # type: ignore[attr-defined]
+    )
+
+    HAS_CPP = hasattr(_cpp_core, "regime_em_step")
+except ImportError:
+    pass
+
 logger = logging.getLogger(__name__)
 
 #: MacKinnon (1994) response-surface critical values for the ADF t-statistic
@@ -454,33 +467,18 @@ def detect_regimes(
     variances = np.full(n_regimes, float(values.var(ddof=1)))
     weights = np.full(n_regimes, 1.0 / n_regimes)
 
-    responsibility = np.zeros((n, n_regimes))
-    for _ in range(max_iterations):
-        for k in range(n_regimes):
-            responsibility[:, k] = weights[k] * _gaussian(
-                values, means[k], variances[k]
-            )
-        totals = responsibility.sum(axis=1, keepdims=True)
-        totals[totals == 0] = 1e-300
-        responsibility /= totals
-
-        counts = responsibility.sum(axis=0)
-        new_means = (responsibility * values[:, None]).sum(axis=0) / np.maximum(
-            counts, 1e-12
-        )
-        new_vars = (responsibility * (values[:, None] - new_means) ** 2).sum(
-            axis=0
-        ) / np.maximum(counts, 1e-12)
-        new_vars = np.maximum(new_vars, 1e-12)
-        if np.allclose(new_means, means, atol=1e-10):
-            means, variances = new_means, new_vars
-            break
-        means, variances, weights = new_means, new_vars, counts / n
+    em = _em_native if HAS_CPP else _em_python
+    responsibility, means, variances, weights = em(
+        values, means, variances, weights, max_iterations
+    )
 
     order = np.argsort(variances)
     labels = np.argmax(responsibility, axis=1)
-    remap = {old: new for new, old in enumerate(order)}
-    labels = np.array([remap[int(l)] for l in labels])
+    # Old label -> new label as one gather; the same integers the dict
+    # lookup per observation gave.
+    remap = np.empty(n_regimes, dtype=labels.dtype)
+    remap[order] = np.arange(n_regimes, dtype=labels.dtype)
+    labels = remap[labels]
 
     switches = int((np.diff(labels) != 0).sum())
     persistence = 1.0 - switches / max(len(labels) - 1, 1)
@@ -513,6 +511,74 @@ def detect_regimes(
             else []
         ),
     }
+
+
+def _em_python(values, means, variances, weights, max_iterations):
+    """
+    The EM loop in numpy: the fallback for `_em_native` and the reference
+    it is tested against. Returns the last responsibilities and the means,
+    variances and weights the loop ended on.
+    """
+    n, n_regimes = len(values), len(means)
+    responsibility = np.zeros((n, n_regimes))
+    for _ in range(max_iterations):
+        for k in range(n_regimes):
+            responsibility[:, k] = weights[k] * _gaussian(
+                values, means[k], variances[k]
+            )
+        totals = responsibility.sum(axis=1, keepdims=True)
+        totals[totals == 0] = 1e-300
+        responsibility /= totals
+
+        counts = responsibility.sum(axis=0)
+        new_means = (responsibility * values[:, None]).sum(axis=0) / np.maximum(
+            counts, 1e-12
+        )
+        new_vars = (responsibility * (values[:, None] - new_means) ** 2).sum(
+            axis=0
+        ) / np.maximum(counts, 1e-12)
+        new_vars = np.maximum(new_vars, 1e-12)
+        if np.allclose(new_means, means, atol=1e-10):
+            means, variances = new_means, new_vars
+            break
+        means, variances, weights = new_means, new_vars, counts / n
+    return responsibility, means, variances, weights
+
+
+def _em_native(values, means, variances, weights, max_iterations):
+    """
+    The same loop with each step after the exponentials in
+    `_sqt_core.regime_em_step`, and the same doubles.
+
+    The exponentials stay numpy's, one `np.exp` per regime over a
+    contiguous row of n exponents, as `_gaussian` calls it: numpy's
+    float64 exp is its own routine on some machines and the C library's on
+    others, so only numpy's own call gives numpy's bits everywhere. The
+    kernel answers the np.allclose test as numpy's isclose forms it; the
+    weights update stays here. On 2,000-5,000 returns with 2-4 regimes the
+    numpy loop was 23-60 ms (always 100 iterations; see the CHANGELOG entry
+    of 2026-10-04).
+    """
+    n, n_regimes = len(values), len(means)
+    values = np.ascontiguousarray(values, dtype=np.float64)
+    if max_iterations <= 0:
+        return np.zeros((n, n_regimes)), means, variances, weights
+    exponents = np.empty((n_regimes, n))
+    for k in range(n_regimes):
+        exponents[k] = -0.5 * (values - means[k]) ** 2 / variances[k]
+    exponentials = np.empty_like(exponents)
+    for _ in range(max_iterations):
+        for k in range(n_regimes):
+            np.exp(exponents[k], out=exponentials[k])
+        responsibility, counts, new_means, new_vars, exponents, converged = (
+            _cpp_core.regime_em_step(values, exponentials, means, variances, weights)
+        )
+        if converged:
+            means, variances = new_means, new_vars
+            break
+        means, variances, weights = new_means, new_vars, counts / n
+    # Regime-major in the kernel; the (n, k) view holds the same values.
+    return responsibility.T, means, variances, weights
 
 
 def _gaussian(x: np.ndarray, mean: float, variance: float) -> np.ndarray:

@@ -20,6 +20,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from standard_quant_tools.analysis import stationarity
 from standard_quant_tools.analysis.stationarity import (
     andrews_bandwidth,
     detect_regimes,
@@ -719,3 +720,43 @@ class TestRegimes:
         series = pd.Series(np.random.default_rng(0).normal(size=N), index=IDX)
         with pytest.raises(ValidationError, match="between 2 and 5"):
             detect_regimes(series, n_regimes=n)
+
+
+@pytest.mark.skipif(not stationarity.HAS_CPP, reason="native extension not built")
+class TestRegimesOnBothPaths:
+    """
+    Each EM step after numpy's exponentials is the extension's
+    `regime_em_step` when it is built, the numpy loop otherwise (see the
+    CHANGELOG entry of 2026-10-04). The labels, the regimes and every
+    float in them are the same on both paths, on the series the tests
+    above fit and on 2,000 daily returns with 2 to 5 regimes.
+    """
+
+    @staticmethod
+    def _both(series, n_regimes):
+        native = detect_regimes(series, n_regimes=n_regimes)
+        stationarity.HAS_CPP = False
+        try:
+            python = detect_regimes(series, n_regimes=n_regimes)
+        finally:
+            stationarity.HAS_CPP = True
+        return native, python
+
+    @pytest.mark.parametrize("n_regimes", [2, 3, 4, 5])
+    @pytest.mark.parametrize("seed", [0, 1, 3])
+    def test_the_same_fit(self, n_regimes, seed):
+        rng = np.random.default_rng(seed)
+        series = pd.Series(
+            np.concatenate([rng.normal(0, 0.5, 200), rng.normal(0, 3.0, 200)]),
+            index=IDX,
+        )
+        native, python = self._both(series, n_regimes)
+        assert native == python
+
+    @pytest.mark.parametrize("n_regimes", [2, 3, 4, 5])
+    def test_two_thousand_returns(self, n_regimes):
+        rng = np.random.default_rng(7)
+        vol = np.where((np.arange(2_000) // 250) % 2 == 0, 0.008, 0.02)
+        series = pd.Series(rng.normal(0.0003, vol))
+        native, python = self._both(series, n_regimes)
+        assert native == python

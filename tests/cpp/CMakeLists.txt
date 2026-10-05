@@ -89,6 +89,8 @@ sqt_kernel_library(sqt_options_impl ON options.cpp)
 sqt_kernel_library(sqt_cusum_impl OFF cusum.cpp)
 # The pair loop runs in parallel; the test holds it to one thread's answer.
 sqt_kernel_library(sqt_correlation_impl ON correlation.cpp)
+sqt_kernel_library(sqt_order_events_impl OFF order_events.cpp)
+sqt_kernel_library(sqt_regimes_impl OFF regimes.cpp)
 
 # See src/standard_quant_tools/_cpp/CMakeLists.txt's matching block for why
 # these flags are x86/x64-gated: they're x86-only and a hard compile error
@@ -162,6 +164,12 @@ add_test(NAME cpp_cusum COMMAND test_cusum)
 # compile under one no-contraction rule.
 sqt_cpp_test(test_correlation sqt_correlation_impl)
 add_test(NAME cpp_correlation COMMAND test_correlation)
+
+sqt_cpp_test(test_order_events sqt_order_events_impl)
+add_test(NAME cpp_order_events COMMAND test_order_events)
+
+sqt_cpp_test(test_regimes sqt_regimes_impl)
+add_test(NAME cpp_regimes COMMAND test_regimes)
 
 # ── Fuzz/property harness (correctness/portability pass item 20a) ────────────
 # Randomized-input stress test for cointegration.cpp's gauss_elim (via

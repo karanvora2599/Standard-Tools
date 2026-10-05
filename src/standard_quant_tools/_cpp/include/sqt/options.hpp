@@ -204,4 +204,46 @@ void black_scholes_greeks_batch(const double* spot, std::size_t n_spots,
                                 const std::uint8_t* is_call, std::size_t n_contracts,
                                 bool grid, BlackScholesGreeksOut out);
 
+/**
+ * Backward induction through a Cox-Ross-Rubinstein lattice: the loop of
+ * `analysis.pricing._binomial`, which prices an American option.
+ *
+ * WHY THIS IS NATIVE. The Python runs one numpy expression per level, so a
+ * tree of n steps is about 6n array calls, each over at most n + 1 nodes:
+ * 0.95 ms at the 200 steps the pricing tool defaults to and 63 ms at the
+ * 5,000 it accepts, 95-98% of the tool's call. Here it is one pass per
+ * level over a buffer that stays in L1.
+ *
+ * THE SAME ARITHMETIC, NOT A SIMILAR ONE. With S[k] = spot * up_powers[k],
+ * the node prices of level L are S[L - i] * down_powers[i] -- the product
+ * `spot * up_powers[L::-1] * down_powers[:L + 1]` forms, left to right --
+ * and, as numpy evaluates the Python:
+ *
+ *     value[i] = maximum(sign * (price(steps, i) - strike), 0.0)
+ *     for L = steps - 1 .. 0:
+ *         value[i] = discount * (p * value[i] + (1 - p) * value[i + 1])
+ *         if american: value[i] = maximum(value[i], sign * (price(L, i) - strike))
+ *
+ * with `1 - p` formed once, as the Python forms it once, and `maximum` as
+ * numpy's on x86: a NaN propagates, and a tie returns the second argument
+ * (np.maximum(0.0, -0.0) is -0.0; a put's payoff at a node priced exactly at
+ * the strike is -0.0). The powers come in from numpy, so the one call this
+ * would otherwise make to a math library is numpy's on every platform, and
+ * the unit is compiled without contraction. On x86 the result is the Python
+ * loop's bit for bit. Where numpy's maximum breaks a +0.0/-0.0 tie the other
+ * way (Arm's vmaxq returns +0.0), only the sign of a zero can differ.
+ *
+ * `levels` receives the values of levels 0, 1 and 2 in that order (1 + 2 + 3
+ * doubles), which is what the price, delta and gamma read. `steps` must be at
+ * least 3, so that level 2 is reached by induction; both power arrays hold
+ * steps + 1 values. Nothing is allocated but
+ * one buffer of steps + 1 doubles.
+ *
+ * @return false if that buffer could not be allocated.
+ */
+bool binomial_lattice(const double* up_powers, const double* down_powers,
+                      std::size_t steps, double spot, double strike, double sign,
+                      double probability, double discount, bool american,
+                      double* levels);
+
 }  // namespace sqt

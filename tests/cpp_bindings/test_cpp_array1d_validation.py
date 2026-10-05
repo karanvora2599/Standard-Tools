@@ -80,6 +80,36 @@ _BINDINGS_WITH_FIRST_ARG_BAD = [
         "permutation_null_ic",
         (_BAD_2D, _GOOD_1D, np.zeros(20, dtype=np.int64), 1, 5, 0, True),
     ),
+    # The binomial lattice's powers, the regime step's observations, and the
+    # order-event passes' first code array (see the CHANGELOG entry of
+    # 2026-10-04).
+    ("binomial_lattice", (_BAD_2D, _GOOD_1D, 100.0, 100.0, 1.0, 0.5, 0.99, True)),
+    (
+        "regime_em_step",
+        (_BAD_2D, np.ones((2, 20)), np.zeros(2), np.ones(2), np.full(2, 0.5)),
+    ),
+    (
+        "order_queue_ahead",
+        (
+            np.zeros((10, 2), dtype=np.int64),
+            1,
+            np.zeros(20, dtype=np.int64),
+            np.zeros(20, dtype=np.int64),
+            _GOOD_1D,
+            _GOOD_1D,
+            np.zeros(20, dtype=bool),
+        ),
+    ),
+    (
+        "order_lifetimes",
+        (
+            np.zeros((10, 2), dtype=np.int64),
+            1,
+            np.zeros(20, dtype=np.int64),
+            np.zeros(20, dtype=bool),
+            np.zeros(20, dtype=np.int64),
+        ),
+    ),
 ]
 
 

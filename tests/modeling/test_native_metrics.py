@@ -358,9 +358,9 @@ class TestLabelUniqueness:
     """
     The worst per-row cost in the module before it got a kernel: 5.7
     microseconds per row at 2,000,000 rows, because the Python loops once
-    per entity. The kernel is gated by size, since below the crossover the
-    argument conversion costs more than the loop saves -- a fast path that
-    is slower is a bug, not a trade-off.
+    per entity. The kernel serves every size: it was once gated at 50,000
+    rows, when the argument conversion went through pandas, and wins at
+    every size since that conversion went away.
     """
 
     @staticmethod
@@ -449,6 +449,57 @@ class TestLabelUniqueness:
         entities = np.repeat([f"E{i}" for i in range(200)], 300)
         out = weights_module.label_uniqueness_weights(dates, ends, entities)
         np.testing.assert_allclose(out, np.ones(n), rtol=0, atol=1e-12)
+
+    @pytest.mark.parametrize("seed", [0, 1, 2])
+    def test_rows_on_a_repeated_date_weigh_the_same_on_both_backends(
+        self, monkeypatch, seed
+    ):
+        """
+        Rows of one entity on the same date take their positions on that
+        entity's date axis in row order on both backends. A tied row's
+        position decides which bars its label spans, so the order matters:
+        the kernel's sort left it to the sort, and on panels like these
+        (8 entities, 300 dates, 30% of dates repeated up to four times,
+        label ends 1-7 bars ahead, rows shuffled) its weights were up to
+        1.5 (mean 1) off the fallback's stable sort. The engine never
+        hands over such a panel, which upstream refuses, but a direct
+        caller can. Both now give the same bits (see the CHANGELOG entry
+        of 2026-10-04).
+        """
+        from standard_quant_tools.modeling.validation import weights as weights_module
+
+        rng = np.random.default_rng(seed)
+        dates, ends, entities = [], [], []
+        index = pd.bdate_range("2015-01-02", periods=300).to_numpy()
+        for entity in range(8):
+            repeats = np.where(
+                rng.random(index.size) < 0.3, rng.integers(2, 5, index.size), 1
+            )
+            row_dates = np.repeat(index, repeats)
+            ahead = np.searchsorted(index, row_dates) + rng.integers(
+                1, 8, row_dates.size
+            )
+            row_ends = np.where(
+                ahead < index.size,
+                index[np.minimum(ahead, index.size - 1)],
+                np.datetime64("NaT"),
+            ).astype("datetime64[ns]")
+            dates.append(row_dates)
+            ends.append(row_ends)
+            entities.append(np.full(row_dates.size, f"E{entity}", dtype=object))
+        shuffle = rng.permutation(sum(d.size for d in dates))
+        dates = np.concatenate(dates)[shuffle]
+        ends = np.concatenate(ends)[shuffle]
+        entities = np.concatenate(entities)[shuffle]
+
+        native = weights_module.label_uniqueness_weights(dates, ends, entities)
+        monkeypatch.setattr(weights_module, "HAS_CPP", False)
+        python = weights_module.label_uniqueness_weights(dates, ends, entities)
+        assert native.tobytes() == python.tobytes()
+        # The ties are real: tied rows with different label ends weigh
+        # differently, so a different order would move them.
+        frame = pd.DataFrame({"d": dates, "e": entities, "w": python})
+        assert (frame.groupby(["e", "d"])["w"].nunique() > 1).any()
 
 
 class TestRankWithinDate:

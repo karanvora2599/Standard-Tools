@@ -29,6 +29,7 @@ import math
 
 import pytest
 
+from standard_quant_tools.analysis import pricing
 from standard_quant_tools.analysis.options import black_scholes_price
 from standard_quant_tools.analysis.pricing import MODELS, price_option
 from standard_quant_tools.error import ValidationError
@@ -651,3 +652,59 @@ class TestTheLatticeIsOneArrayOperationPerLevel:
             **{**BASE, "model": "binomial", "american": american, "steps": 5000}
         )
         assert time.perf_counter() - start < 2.0
+
+
+@pytest.mark.skipif(not pricing.HAS_CPP, reason="native extension not built")
+class TestTheNativeLatticeMovedNoNumber:
+    """
+    The lattice's backward induction is the extension's `binomial_lattice`
+    when it is built, the numpy loop otherwise (see the CHANGELOG entry of
+    2026-10-04). The two give the same price, delta and gamma to the bit:
+    the American and European cases these tests price above, at the default
+    200 steps and at 2,000, through the function and through the tool.
+    """
+
+    @pytest.mark.parametrize("steps", [10, 200, 2000])
+    @pytest.mark.parametrize("option_type", ["call", "put"])
+    @pytest.mark.parametrize("american", [False, True])
+    def test_the_same_doubles_on_both_paths(self, steps, option_type, american):
+        kw = dict(
+            BASE,
+            option_type=option_type,
+            model="binomial",
+            dividend_yield=0.03,
+            american=american,
+            steps=steps,
+        )
+        native = price_option(**kw)
+        pricing.HAS_CPP = False
+        try:
+            python = price_option(**kw)
+        finally:
+            pricing.HAS_CPP = True
+        for key in ("price", "delta", "gamma"):
+            assert math.copysign(1.0, native[key]) == math.copysign(1.0, python[key])
+            assert native[key] == python[key], key
+        assert native == python
+
+    def test_the_tool_reports_the_same_numbers(self):
+        from standard_quant_tools.agent.models import OptionPricingInput
+        from standard_quant_tools.agent.runtimes.derivatives.tools import (
+            get_option_pricing,
+        )
+
+        request = OptionPricingInput(
+            **BASE,
+            option_type="put",
+            model="binomial",
+            dividend_yield=0.03,
+            american=True,
+            binomial_steps=2000,
+        )
+        native = get_option_pricing(request).model_dump()
+        pricing.HAS_CPP = False
+        try:
+            python = get_option_pricing(request).model_dump()
+        finally:
+            pricing.HAS_CPP = True
+        assert native == python

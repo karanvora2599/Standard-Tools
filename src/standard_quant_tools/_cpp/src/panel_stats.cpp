@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <limits>
 #include <new>
+#include <utility>
 #include <vector>
 
 #ifdef _OPENMP
@@ -978,11 +979,13 @@ bool label_uniqueness(const long long* dates,
 
         std::vector<std::size_t> rows;
         std::vector<long long> axis;
+        std::vector<std::pair<long long, std::size_t>> keyed;
         std::vector<double> delta, cumulative;
         try {
             rows.assign(order.begin() + static_cast<std::ptrdiff_t>(base),
                         order.begin() + static_cast<std::ptrdiff_t>(base + n));
             axis.resize(n);
+            keyed.resize(n);
             delta.assign(n + 1, 0.0);
             cumulative.resize(n + 1);
         } catch (const std::bad_alloc&) {
@@ -995,11 +998,28 @@ bool label_uniqueness(const long long* dates,
         // reason label ends are carried as timestamps rather than integer
         // offsets: with entities on different calendars, t+horizon of one
         // entity's bars is not t+horizon of the global panel's dates.
-        std::sort(rows.begin(), rows.end(),
-                  [dates](std::size_t a, std::size_t b) {
-                      return dates[a] < dates[b];
-                  });
-        for (std::size_t i = 0; i < n; ++i) axis[i] = dates[rows[i]];
+        //
+        // Rows on the same date keep their row order, as the fallback's
+        // stable argsort keeps them: a tied row's position decides which
+        // bars its label spans, so an order left to the sort gave a
+        // 3,900-row panel with repeated (entity, date) rows weights up to
+        // 1.5 (mean 1) off the fallback's. Sorting (date, row) pairs breaks
+        // a tie on the row index, which is the stable order, and sorts them
+        // as values, so a comparison reads two adjacent pairs rather than
+        // two dates scattered over the panel (one thread: 0.89-0.94x the
+        // previous kernel's time on 31,680 and 500,000 rows).
+        //
+        // An entity whose rows already run in date order -- every panel in
+        // (date, entity) order, which is how the engine hands them over --
+        // is in that order already, so it is checked in one pass and not
+        // sorted: the same permutation, without the n log n.
+        for (std::size_t i = 0; i < n; ++i) keyed[i] = {dates[rows[i]], rows[i]};
+        if (!std::is_sorted(keyed.begin(), keyed.end()))
+            std::sort(keyed.begin(), keyed.end());
+        for (std::size_t i = 0; i < n; ++i) {
+            axis[i] = keyed[i].first;
+            rows[i] = keyed[i].second;
+        }
 
         // Concurrency by difference array: +1 where a label starts, -1 just
         // past where it ends, then a running sum. O(n) for what would

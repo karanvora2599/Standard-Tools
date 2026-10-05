@@ -368,8 +368,10 @@ def modeling_capabilities() -> Dict[str, Any]:
 #: instruction-set path the rolling kernels take on this machine. 40 with
 #: cusum_peaks, the CUSUM scan of the AR(1) null in liquidity_events. 41
 #: with pearson_correlation, pandas' correlation matrix for
-#: hierarchical_risk_parity.
-_EXPECTED_NATIVE_EXPORTS = 41
+#: hierarchical_risk_parity. 45 with binomial_lattice (the binomial option
+#: tree), regime_em_step (detect_regimes' EM step), and order_queue_ahead
+#: and order_lifetimes (the two order-event passes).
+_EXPECTED_NATIVE_EXPORTS = 45
 
 
 def _importable(module: str) -> bool:

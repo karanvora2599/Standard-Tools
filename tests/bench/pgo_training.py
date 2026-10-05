@@ -8,8 +8,9 @@ SQT_PGO_USE configure folds them into the profile.
 It calls the raw bindings of every kernel family -- indicators, single and
 batched backtests, the signal state machines, the portfolio bar loop,
 rolling regression, Hurst, cointegration, Monte Carlo, GARCH, the Kalman
-filters, the CUSUM scan, the panel statistics, the option chains and the
-correlation matrix -- over a spread of sizes and parameters, with inputs
+filters, the CUSUM scan, the panel statistics, the option chains, the
+correlation matrix, the binomial lattice, the regime EM step and the two
+order-event passes -- over a spread of sizes and parameters, with inputs
 drawn from their own seeds rather than from the benchmark's. A profile only
 knows the paths it was shown, so a kernel this script leaves out is
 optimized as if it were cold.
@@ -238,6 +239,54 @@ def correlation(c, rng):
     c.pearson_correlation(gapped, 1)
 
 
+def lattice_regimes_and_order_events(c, rng):
+    # The binomial lattice, European and American, calls and puts, at the
+    # tool's default 200 steps and up to 2,000.
+    for steps in (10, 200, 2_000):
+        dt = rng.uniform(0.1, 2.0) / steps
+        up = np.exp(rng.uniform(0.1, 0.6) * np.sqrt(dt))
+        powers = np.arange(steps + 1, dtype=float)
+        u, d = np.power(up, powers), np.power(1.0 / up, powers)
+        growth, disc = np.exp(0.01 * dt), np.exp(-0.04 * dt)
+        p = (growth - 1.0 / up) / (up - 1.0 / up)
+        for sign in (1.0, -1.0):
+            for american in (False, True):
+                c.binomial_lattice(
+                    u, d, 100.0, rng.uniform(70, 130), sign, p, disc, american
+                )
+    # The regime step, 2 to 5 regimes, as detect_regimes drives it.
+    for n, k in ((250, 2), (2_000, 3), (5_000, 4), (2_000, 5)):
+        x = rng.normal(0.0003, 0.012, n)
+        means = np.quantile(x, np.linspace(0.1, 0.9, k))
+        variances, weights = np.full(k, x.var(ddof=1)), np.full(k, 1.0 / k)
+        exponents = np.stack(
+            [-0.5 * (x - m) ** 2 / v for m, v in zip(means, variances)]
+        )
+        for _ in range(20):
+            _, counts, means, variances, exponents, _ = c.regime_em_step(
+                x, np.exp(exponents), means, variances, weights
+            )
+            weights = counts / n
+    # The order-event passes over a coded stream: adds, cancels, fills,
+    # trades, a clear, and the snapshot that opens it.
+    n = 200_000
+    actions = rng.choice([0, 0, 0, 1, 1, 2, 4], size=n).astype(np.int64)
+    actions[n // 2] = 3
+    orders = np.minimum(np.cumsum(actions == 0), n - 1).astype(np.int64)
+    terminate = (actions == 1) | (actions == 2)
+    orders[terminate] = np.maximum(
+        orders[terminate] - rng.integers(0, 50, terminate.sum()), 0
+    )
+    sides = rng.integers(0, 2, n).astype(np.int64)
+    price = 100.0 + rng.integers(-8, 9, n) * 0.01
+    size = rng.integers(1, 9, n) * 100.0
+    snapshot = np.zeros(n, dtype=bool)
+    snapshot[:100] = True
+    stamps = np.cumsum(rng.integers(1, 10_000_000, n)).astype(np.int64)
+    c.order_queue_ahead(orders, n, actions, sides, price, size, snapshot)
+    c.order_lifetimes(orders, n, actions, snapshot, stamps)
+
+
 def main():
     status = standard_quant_tools.native_build_status()
     if not status.used:
@@ -261,6 +310,7 @@ def main():
             options,
             # Last, so every family above draws the inputs it always has.
             correlation,
+            lattice_regimes_and_order_events,
         ):
             family(c, rng)
         print(f"round {round_ + 1}/{ROUNDS} done", flush=True)

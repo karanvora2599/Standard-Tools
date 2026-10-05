@@ -51,6 +51,23 @@ import pandas as pd
 
 from standard_quant_tools.error import ValidationError
 
+# Optional native fast path for the two per-event loops below, the queue
+# pass and the lifetime pass: 94% of `order_event_metrics` on a
+# 2,000,000-event session in Python. The loops stay as the reference and
+# the fallback.
+_cpp_core: Any = None
+HAS_CPP = False
+try:
+    from standard_quant_tools import (
+        _sqt_core as _cpp_core,  # type: ignore[attr-defined]
+    )
+
+    HAS_CPP = hasattr(_cpp_core, "order_queue_ahead") and hasattr(
+        _cpp_core, "order_lifetimes"
+    )
+except ImportError:
+    pass
+
 #: The canonical order-event columns. Named here because this module reads
 #: them and `DataProvider.get_order_events` declares them, the same split
 #: `order_book.py` and `get_order_book` already use.
@@ -116,8 +133,26 @@ def _snapshot_mask(frame: pd.DataFrame) -> np.ndarray:
     return np.zeros(len(frame), dtype=bool)
 
 
+def _is_datetime(dtype: Any) -> bool:
+    return isinstance(dtype, pd.DatetimeTZDtype) or (
+        isinstance(dtype, np.dtype) and dtype.kind == "M"
+    )
+
+
+def _as_datetimes(stamps: pd.Series) -> pd.Series:
+    """
+    `pd.to_datetime(stamps, errors="coerce")`, without the pass it makes
+    over a column that already holds datetimes: it returns the same dtype
+    and the same values (checked on pandas 2.3 and 3.0, every unit, naive
+    and zoned), after 0.4 s on 2,000,000 zoned nanosecond stamps.
+    """
+    if _is_datetime(stamps.dtype):
+        return stamps
+    return pd.to_datetime(stamps, errors="coerce")
+
+
 def _elapsed_seconds(stamps: pd.Series) -> Optional[float]:
-    valid = pd.to_datetime(stamps, errors="coerce").dropna()
+    valid = _as_datetimes(stamps).dropna()
     if len(valid) < 2:
         return None
     span = (valid.max() - valid.min()).total_seconds()
@@ -160,7 +195,31 @@ def queue_positions(events: pd.DataFrame) -> Dict[str, Any]:
     subtracted it from the orders the window HAD seen, pushing an
     already-short queue further toward zero without a trace. See the
     CHANGELOG entry of 2026-09-27.
+
+    THE PASS IS NATIVE when the extension carries it and the frame holds
+    64 events or more: the same state machine over coded columns, giving
+    the same numbers (see the CHANGELOG entry of 2026-10-04). A frame whose
+    order ids or sides cannot be coded the way the loop compares them -- a
+    missing id on an add, cancel or fill, a missing side on an add -- runs
+    the loop.
     """
+    codes = _native_codes(events, sides=True) if _sized_for_native(events) else None
+    return _queue_positions(events, codes)
+
+
+def _queue_positions(
+    events: pd.DataFrame, codes: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
+    if codes is not None and codes["sides"] is not None:
+        ahead, warm_up = _queue_pass_native(events, codes)
+    else:
+        ahead, warm_up = _queue_pass_python(events)
+    return _queue_summary(ahead, warm_up)
+
+
+def _queue_pass_python(events: pd.DataFrame):
+    """The queue pass as a loop over events: the fallback for
+    `_sqt_core.order_queue_ahead` and the reference it is tested against."""
     resting: Dict[Any, float] = {}
     # order_id -> [level key, size still resting], for every order this
     # window saw added (a snapshot add included).
@@ -224,7 +283,34 @@ def queue_positions(events: pd.DataFrame) -> Dict[str, Any]:
         "n_unseen_decrements": int(n_unseen_decrements),
         "unseen_size": float(unseen_size),
     }
-    if not ahead:
+    return ahead, warm_up
+
+
+def _queue_pass_native(events: pd.DataFrame, codes: Dict[str, Any]):
+    """The queue pass in `_sqt_core.order_queue_ahead`, over the codes."""
+    ahead, n_snapshot_orders, n_unseeded_adds, n_unseen_decrements, unseen_size = (
+        _cpp_core.order_queue_ahead(
+            codes["orders"],
+            codes["n_orders"],
+            codes["actions"],
+            codes["sides"],
+            pd.to_numeric(events["price"], errors="coerce").to_numpy(dtype="float64"),
+            pd.to_numeric(events["size"], errors="coerce").to_numpy(dtype="float64"),
+            codes["snapshot"],
+        )
+    )
+    warm_up = {
+        "n_snapshot_orders": int(n_snapshot_orders),
+        "n_unseeded_adds": int(n_unseeded_adds),
+        "queue_is_lower_bound": bool(n_unseeded_adds > 0),
+        "n_unseen_decrements": int(n_unseen_decrements),
+        "unseen_size": float(unseen_size),
+    }
+    return ahead, warm_up
+
+
+def _queue_summary(ahead, warm_up: Dict[str, Any]) -> Dict[str, Any]:
+    if len(ahead) == 0:
         return {
             "n_adds": 0,
             "mean_queue_ahead": None,
@@ -255,7 +341,35 @@ def order_lifetimes(events: pd.DataFrame) -> Dict[str, Any]:
     lifetime is longer than anything observable and folding it in as the
     time since the window started would bias every average downward --
     worst for exactly the long-resting orders a queue study cares about.
+
+    THE PASS IS NATIVE when the extension carries it and the frame holds
+    64 events or more, with each lifetime turned into seconds as
+    Timedelta.total_seconds() turns it -- whole microseconds, so a lifetime
+    under one reads 0.0 -- and the same numbers (see the CHANGELOG entry of
+    2026-10-04). A frame the codes cannot represent, or whose timestamps do
+    not parse to one datetime column, runs the loop.
     """
+    codes = _native_codes(events, stamps=True) if _sized_for_native(events) else None
+    return _order_lifetimes(events, codes)
+
+
+def _order_lifetimes(
+    events: pd.DataFrame, codes: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
+    passed = None
+    if codes is not None and codes["stamps"] is not None:
+        passed = _lifetime_pass_native(codes)
+    if passed is None:
+        passed = _lifetime_pass_python(events)
+    filled, cancelled, still_resting, censored, from_snapshot, known_at_open = passed
+    return _lifetime_summary(
+        filled, cancelled, still_resting, censored, from_snapshot, known_at_open
+    )
+
+
+def _lifetime_pass_python(events: pd.DataFrame):
+    """The lifetime pass as a loop over events: the fallback for
+    `_sqt_core.order_lifetimes` and the reference it is tested against."""
     added: Dict[Any, Any] = {}
     # Orders the window's snapshot showed already resting: known, but
     # with no observable start, so a later cancel or fill is neither a
@@ -290,8 +404,80 @@ def order_lifetimes(events: pd.DataFrame) -> Dict[str, Any]:
                 continue
             seconds = (when - start).total_seconds()
             (cancelled if action == CANCEL else filled).append(float(seconds))
+    return filled, cancelled, len(added), censored, from_snapshot, len(known_at_open)
 
-    def _summary(values: List[float]) -> Dict[str, Any]:
+
+def _lifetime_pass_native(codes: Dict[str, Any]):
+    """The lifetime pass in `_sqt_core.order_lifetimes`, or None when a
+    lifetime cannot be held exactly (the loop then runs, and raises where
+    pandas does)."""
+    stamps, unit = codes["stamps"]
+    filled, cancelled, still_resting, censored, from_snapshot, known_at_open, over = (
+        _cpp_core.order_lifetimes(
+            codes["orders"],
+            codes["n_orders"],
+            codes["actions"],
+            codes["snapshot"],
+            stamps,
+        )
+    )
+    if over:
+        return None
+    filled_seconds = _total_seconds(filled, unit)
+    cancelled_seconds = _total_seconds(cancelled, unit)
+    if filled_seconds is None or cancelled_seconds is None:
+        return None
+    return (
+        filled_seconds,
+        cancelled_seconds,
+        int(still_resting),
+        int(censored),
+        int(from_snapshot),
+        int(known_at_open),
+    )
+
+
+#: Microseconds per unit of each datetime64 resolution pandas uses, as a
+#: (multiplier, divisor) pair: whole microseconds are value * m // d.
+_MICROSECONDS = {"s": (1_000_000, 1), "ms": (1_000, 1), "us": (1, 1), "ns": (1, 1_000)}
+
+#: Past this many microseconds an int64 product or a float64 conversion is
+#: no longer exact; such a lifetime (more than 285 years) runs the loop.
+_EXACT_MICROSECONDS = 2**53
+
+
+def _total_seconds(durations: np.ndarray, unit: str) -> Optional[np.ndarray]:
+    """
+    Durations in `unit` as Timedelta.total_seconds() returns them, or None.
+
+    pandas computes total_seconds() from the timedelta's components:
+    days * 86400 + seconds, an integer, plus microseconds / 1e6 -- with the
+    nanoseconds dropped (floored, so -1 ns is -1 us) and the integer part
+    added to the fraction in floating point. So 1.234567891 s is 1.234567,
+    and 21.472982 s is 21.472982000000002 where a single division gives
+    21.472982. This forms the same three numbers and the same sum.
+    """
+    if unit not in _MICROSECONDS:
+        return None
+    durations = np.asarray(durations, dtype=np.int64)
+    multiplier, divisor = _MICROSECONDS[unit]
+    # Compared from both sides rather than through abs(), which wraps at
+    # INT64_MIN.
+    limit = _EXACT_MICROSECONDS // multiplier
+    if multiplier > 1 and ((durations > limit) | (durations < -limit)).any():
+        return None
+    micro = np.floor_divide(durations, divisor) * multiplier
+    whole = np.floor_divide(micro, 1_000_000)
+    if ((whole > _EXACT_MICROSECONDS) | (whole < -_EXACT_MICROSECONDS)).any():
+        return None
+    fraction = micro - whole * 1_000_000
+    return whole.astype(np.float64) + fraction / 1_000_000
+
+
+def _lifetime_summary(
+    filled, cancelled, still_resting, censored, from_snapshot, known_at_open
+) -> Dict[str, Any]:
+    def _summary(values) -> Dict[str, Any]:
         # QUANTILES, NOT JUST A MEAN AND A MEDIAN. Order lifetimes are one
         # of the most skewed distributions this library measures -- a
         # cancelled-order median of 10.1 ms against a mean of 475.7 ms, a
@@ -300,7 +486,7 @@ def order_lifetimes(events: pd.DataFrame) -> Dict[str, Any]:
         # passive order ever rests long enough to fill. The quartiles say
         # how wide the bulk is and p90/p99 say how long the long ones live.
         keys = ("p25_seconds", "p75_seconds", "p90_seconds", "p99_seconds")
-        if not values:
+        if len(values) == 0:
             empty: Dict[str, Any] = {
                 "n": 0,
                 "mean_seconds": None,
@@ -325,14 +511,108 @@ def order_lifetimes(events: pd.DataFrame) -> Dict[str, Any]:
         "cancelled": _summary(cancelled),
         # Still open when the window closed: right-censored, and reported
         # for the same reason the left-censored count is.
-        "still_resting": int(len(added)),
+        "still_resting": int(still_resting),
         "terminated_without_an_add": censored,
         # Terminated orders the snapshot had shown resting: explained,
         # not censored -- they were 54.5% of the censored count on a CME
         # reopen before the snapshot was read.
         "terminated_from_snapshot": int(from_snapshot),
-        "resting_at_open": int(len(known_at_open) + from_snapshot),
+        "resting_at_open": int(known_at_open + from_snapshot),
     }
+
+
+#: Below this many events a standalone queue or lifetime pass runs the loop.
+#: Coding the columns costs three pd.factorize calls, and on their own the
+#: two passes measured 0.82-0.92x of the loop at 25-50 events and 1.1-1.5x
+#: from 75. `order_event_metrics` codes the columns once for both passes,
+#: and is faster natively at every size measured (1.10x at 25 events), so
+#: it is not gated.
+_NATIVE_MIN_EVENTS = 64
+
+
+def _sized_for_native(events: pd.DataFrame) -> bool:
+    return len(events) >= _NATIVE_MIN_EVENTS
+
+
+#: The action codes the kernels read, by the comparisons the loops make.
+_CODE_ADD, _CODE_CANCEL, _CODE_FILL, _CODE_CLEAR, _CODE_OTHER = 0, 1, 2, 3, 4
+
+
+def _action_code(value: Any) -> int:
+    """One action value's code: the branch each loop takes for it."""
+    if value == CLEAR:
+        return _CODE_CLEAR
+    if value == ADD:
+        return _CODE_ADD
+    if value in (CANCEL, FILL):
+        return _CODE_CANCEL if value == CANCEL else _CODE_FILL
+    return _CODE_OTHER
+
+
+def _factorized(values: np.ndarray) -> Optional[tuple]:
+    """pd.factorize, or None for a column it cannot hash (the loops can
+    still compare such values, so they run instead)."""
+    try:
+        codes, uniques = pd.factorize(values, sort=False)
+    except TypeError:
+        return None
+    return np.asarray(codes, dtype=np.int64), uniques
+
+
+def _native_codes(
+    events: pd.DataFrame, *, sides: bool = False, stamps: bool = False
+) -> Optional[Dict[str, Any]]:
+    """
+    The columns as the kernels read them, or None to run the loops.
+
+    Two values are one order (or one side) to the loops exactly when they
+    are one dict key, which is what pd.factorize groups by: equal and of
+    equal hash, -0.0 with 0.0, 1 with 1.0. A missing value is where the two
+    part: factorize codes NaN and None as -1, while a dict holds None as a
+    key and never finds a NaN it was handed from a float column. So an
+    order id missing on an add, cancel or fill, or a side missing on an
+    add, sends the frame to the loops (`sides` is then None for the queue,
+    and the whole result None). The timestamps are their integers in the
+    column's own unit, or None when they do not parse to one datetime
+    column.
+    """
+    if not HAS_CPP:
+        return None
+    action_values = _factorized(events["action"].to_numpy())
+    order_values = _factorized(events["order_id"].to_numpy())
+    if action_values is None or order_values is None:
+        return None
+    codes, uniques = action_values
+    table = np.array(
+        [_action_code(value) for value in uniques] + [_CODE_OTHER], dtype=np.int64
+    )
+    actions = table[codes]
+    order_codes, order_uniques = order_values
+    if (order_codes[actions <= _CODE_FILL] < 0).any():
+        return None
+    out: Dict[str, Any] = {
+        "actions": actions,
+        "orders": order_codes,
+        "n_orders": int(len(order_uniques)),
+        "snapshot": _snapshot_mask(events),
+        "sides": None,
+        "stamps": None,
+    }
+    if sides:
+        side_values = _factorized(events["side"].to_numpy())
+        if (
+            side_values is not None
+            and not (side_values[0][actions == _CODE_ADD] < 0).any()
+        ):
+            out["sides"] = side_values[0]
+    if stamps:
+        parsed = _as_datetimes(events["timestamp"])
+        if _is_datetime(parsed.dtype):
+            out["stamps"] = (
+                np.asarray(parsed.array.asi8, dtype=np.int64),
+                str(getattr(parsed.dt, "unit", "ns")),
+            )
+    return out
 
 
 def event_rates(events: pd.DataFrame) -> Dict[str, Any]:
@@ -347,10 +627,14 @@ def event_rates(events: pd.DataFrame) -> Dict[str, Any]:
     # tick the clock (a snapshot-bearing window read 16,000x too many
     # events per second before this).
     snapshot = _snapshot_mask(events)
-    live = events.loc[~snapshot] if snapshot.any() else events
-    seconds = _elapsed_seconds(live["timestamp"])
-    counts = live["action"].value_counts().to_dict()
-    total = int(len(live))
+    # The two columns read, not the whole frame: the same rows in the same
+    # order as `events.loc[~snapshot]`, without copying the other columns.
+    stamps, actions = events["timestamp"], events["action"]
+    if snapshot.any():
+        stamps, actions = stamps[~snapshot], actions[~snapshot]
+    seconds = _elapsed_seconds(stamps)
+    counts = actions.value_counts().to_dict()
+    total = int(len(actions))
     per_action = {str(k): int(v) for k, v in counts.items()}
     rates = (
         {str(k): float(v) / seconds for k, v in per_action.items()} if seconds else {}
@@ -383,20 +667,22 @@ def order_event_metrics(
     frame = _require(events, name)
     warnings: List[str] = []
 
-    unknown = sorted(set(frame["action"].dropna().unique()) - set(ACTION_MEANINGS))
+    # The distinct actions, read once for the three notes below.
+    present = set(frame["action"].dropna().unique())
+    unknown = sorted(present - set(ACTION_MEANINGS))
     if unknown:
         warnings.append(
             f"NOTE: action code(s) {unknown} are not in this feed's known "
             f"vocabulary {sorted(ACTION_MEANINGS)}; their events are counted "
             "in the totals and ignored by the queue and lifetime measures."
         )
-    if CLEAR in set(frame["action"].dropna().unique()):
+    if CLEAR in present:
         warnings.append(
             "NOTE: the window contains a CLEAR, so the book was wiped inside "
             "it. Queue depth resets there rather than carrying across, which "
             "is right, but means the measures span a discontinuity."
         )
-    if MODIFY in set(frame["action"].dropna().unique()):
+    if MODIFY in present:
         warnings.append(
             "NOTE: MODIFY events are counted but do not adjust queue depth "
             "here. A modify that raises size or changes price loses queue "
@@ -418,7 +704,8 @@ def order_event_metrics(
             "zero, which would read as a quiet market."
         )
 
-    lifetimes = order_lifetimes(frame)
+    codes = _native_codes(frame, sides=True, stamps=True)
+    lifetimes = _order_lifetimes(frame, codes)
     if lifetimes["terminated_without_an_add"]:
         warnings.append(
             f"NOTE: {lifetimes['terminated_without_an_add']:,} order(s) were "
@@ -428,7 +715,7 @@ def order_event_metrics(
             "lifetime is longer than anything this window can see."
         )
 
-    queue = queue_positions(frame)
+    queue = _queue_positions(frame, codes)
     if queue["queue_is_lower_bound"]:
         removed = (
             f" {queue['n_unseen_decrements']:,} cancel(s) or fill(s) removed "

@@ -26,6 +26,7 @@
 
 #include "sqt/numerics.hpp"
 
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstdint>
@@ -576,6 +577,84 @@ static void test_permutation_zero_draws_is_a_no_op() {
     expect_near(out[0], 5.0, 0.0, "nothing was written");
 }
 
+// -- label_uniqueness ---------------------------------------------------------
+
+// Rows of one entity on the same date take their places on its date axis in
+// row order, the order of the Python fallback's stable argsort. A tied row's
+// place decides which bars its label spans, so the weights follow it. The
+// reference below is the fallback's arithmetic on a stable sort; 120 rows per
+// entity are past the length at which a library sort stops insertion-sorting,
+// where an unstable sort first reorders ties.
+static void test_label_uniqueness_ties_keep_row_order() {
+    std::printf("test_label_uniqueness_ties_keep_row_order\n");
+    const std::size_t per_entity = 120, n_entities = 2;
+    const std::size_t n = per_entity * n_entities;
+    const long long nat = std::numeric_limits<long long>::min();
+    std::vector<long long> dates(n), ends(n), entity(n);
+    for (std::size_t k = 0; k < n; ++k) {
+        // A scrambled row order (37 and 240 are coprime), entities
+        // interleaved, three rows on each date, label ends 1-5 dates ahead.
+        const std::size_t i = (k * 37) % n;
+        const std::size_t local = i / n_entities;
+        const long long day = static_cast<long long>(local / 3);
+        dates[k] = day * 1000;
+        ends[k] = (day + 1 + static_cast<long long>((local * 7) % 5)) * 1000;
+        if (day >= 38) ends[k] = nat;
+        entity[k] = static_cast<long long>(i % n_entities);
+    }
+    std::vector<double> got(n);
+    expect(sqt::label_uniqueness(dates.data(), ends.data(), entity.data(), n,
+                                 n_entities, got.data()),
+           "label_uniqueness success");
+
+    std::vector<double> want(n, 1.0);
+    for (std::size_t e = 0; e < n_entities; ++e) {
+        std::vector<std::size_t> rows;
+        for (std::size_t k = 0; k < n; ++k)
+            if (entity[k] == static_cast<long long>(e)) rows.push_back(k);
+        std::stable_sort(rows.begin(), rows.end(),
+                         [&](std::size_t a, std::size_t b) { return dates[a] < dates[b]; });
+        const std::size_t m = rows.size();
+        std::vector<long long> axis(m);
+        for (std::size_t i = 0; i < m; ++i) axis[i] = dates[rows[i]];
+        std::vector<std::size_t> end_pos(m);
+        std::vector<double> delta(m + 1, 0.0);
+        for (std::size_t i = 0; i < m; ++i) {
+            std::size_t p = i;
+            if (ends[rows[i]] != nat) {
+                const auto up = std::upper_bound(axis.begin(), axis.end(), ends[rows[i]]);
+                const auto dist = up - axis.begin();
+                if (dist > 0 && static_cast<std::size_t>(dist - 1) > p)
+                    p = static_cast<std::size_t>(dist - 1);
+            }
+            end_pos[i] = p;
+            delta[i] += 1.0;
+            delta[p + 1] -= 1.0;
+        }
+        std::vector<double> cumulative(m + 1, 0.0);
+        double running = 0.0;
+        for (std::size_t i = 0; i < m; ++i) {
+            running += delta[i];
+            cumulative[i + 1] = cumulative[i] + 1.0 / std::max(running, 1.0);
+        }
+        for (std::size_t i = 0; i < m; ++i)
+            want[rows[i]] = (cumulative[end_pos[i] + 1] - cumulative[i]) /
+                            static_cast<double>(end_pos[i] - i + 1);
+    }
+    double total = 0.0;
+    for (double w : want) total += w;
+    const double mean = total / static_cast<double>(n);
+    bool tied_rows_differ = false;
+    for (std::size_t k = 0; k < n; ++k) {
+        want[k] /= mean;
+        expect_near(got[k], want[k], 1e-12, "a tied row weighs as in row order");
+        for (std::size_t j = k + 1; j < n; ++j)
+            if (entity[j] == entity[k] && dates[j] == dates[k] && want[j] != want[k])
+                tied_rows_differ = true;
+    }
+    expect(tied_rows_differ, "tied rows weigh differently, so their order shows");
+}
+
 int main() {
     std::printf("=== sqt panel_stats tests ===\n");
     test_quantile_is_linearly_interpolated();
@@ -608,6 +687,7 @@ int main() {
     test_permutation_stays_in_range();
     test_permutation_skips_single_row_dates();
     test_permutation_zero_draws_is_a_no_op();
+    test_label_uniqueness_ties_keep_row_order();
 
     std::printf("\n%d assertion(s), %d failed\n", g_tests_run, g_tests_failed);
     return g_tests_failed == 0 ? 0 : 1;

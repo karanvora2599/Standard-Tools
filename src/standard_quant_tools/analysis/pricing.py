@@ -51,6 +51,20 @@ from standard_quant_tools.error import ValidationError
 
 logger = logging.getLogger(__name__)
 
+# Optional native fast path for the lattice's backward induction, the
+# 95-98% of a binomial price the numpy loop below spends one array call per
+# node level on. The loop stays as the reference and the fallback.
+_cpp_core: Any = None
+HAS_CPP = False
+try:
+    from standard_quant_tools import (
+        _sqt_core as _cpp_core,  # type: ignore[attr-defined]
+    )
+
+    HAS_CPP = hasattr(_cpp_core, "binomial_lattice")
+except ImportError:
+    pass
+
 #: Every model this spec accepts. `american` is a property of the model
 #: rather than a flag, because only the lattice can price one.
 MODELS = ("black_scholes", "black_76", "bachelier", "binomial")
@@ -392,6 +406,14 @@ def _binomial(
     now a numpy expression per level with the same arithmetic in the same
     order, and the node prices are formed only where they are read (every
     level for an American exercise check, the first three for the greeks).
+
+    THE INDUCTION IS NATIVE when the extension carries `binomial_lattice`:
+    the same arithmetic over one buffer, with the powers formed here by
+    numpy as before, and the same doubles on x86 (see the CHANGELOG entry
+    of 2026-10-04). An American put: 1.13 ms -> 0.04 ms at 200 steps,
+    17.8 -> 2.5 ms at 2,000. At 5,000 steps both paths spend most of their
+    time on subnormal node values (2.6% of nodes fall below 2.2e-308 far
+    out of the money) and the gain is 1.5x.
     """
     if steps < 10:
         raise ValidationError("binomial: steps must be at least 10")
@@ -418,23 +440,24 @@ def _binomial(
     def _node_prices(level: int) -> np.ndarray:
         return spot * up_powers[level::-1] * down_powers[: level + 1]
 
-    values = np.maximum(sign * (_node_prices(steps) - strike), 0.0)
-
-    node_cache: Dict[int, Any] = {}
-    for step in range(steps - 1, -1, -1):
-        values = discount * (
-            probability * values[:-1] + (1.0 - probability) * values[1:]
+    if HAS_CPP:
+        levels = _cpp_core.binomial_lattice(
+            up_powers,
+            down_powers,
+            float(spot),
+            float(strike),
+            sign,
+            probability,
+            discount,
+            bool(american),
         )
-        if american or step <= 2:
-            prices = _node_prices(step)
-            if american:
-                values = np.maximum(values, sign * (prices - strike))
-            if step <= 2:
-                node_cache[step] = (prices.tolist(), values.tolist())
-
-    price = float(values[0])
-    p1, v1 = node_cache[1]
-    p2, v2 = node_cache[2]
+        price = float(levels[0])
+        p1, v1 = _node_prices(1).tolist(), levels[1:3].tolist()
+        p2, v2 = _node_prices(2).tolist(), levels[3:6].tolist()
+    else:
+        price, (p1, v1), (p2, v2) = _binomial_levels(
+            _node_prices, steps, strike, sign, probability, discount, american
+        )
     delta = (v1[0] - v1[1]) / (p1[0] - p1[1])
     upper = (v2[0] - v2[1]) / (p2[0] - p2[1])
     lower = (v2[1] - v2[2]) / (p2[1] - p2[2])
@@ -459,6 +482,30 @@ def _binomial(
             "black_scholes for a European vega and theta."
         ],
     }
+
+
+def _binomial_levels(node_prices, steps, strike, sign, probability, discount, american):
+    """
+    The lattice's backward induction in numpy, one expression per level:
+    the fallback for `_sqt_core.binomial_lattice` and the reference it is
+    tested against. Returns the price and the (node prices, values) of
+    levels 1 and 2, which the greeks read.
+    """
+    values = np.maximum(sign * (node_prices(steps) - strike), 0.0)
+
+    node_cache: Dict[int, Any] = {}
+    for step in range(steps - 1, -1, -1):
+        values = discount * (
+            probability * values[:-1] + (1.0 - probability) * values[1:]
+        )
+        if american or step <= 2:
+            prices = node_prices(step)
+            if american:
+                values = np.maximum(values, sign * (prices - strike))
+            if step <= 2:
+                node_cache[step] = (prices.tolist(), values.tolist())
+
+    return float(values[0]), node_cache[1], node_cache[2]
 
 
 __all__ = [

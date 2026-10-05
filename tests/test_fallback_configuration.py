@@ -1,7 +1,7 @@
 """
 The configuration this package could not run, and the surveys it broke.
 
-Twenty modules each decide `HAS_CPP` for themselves by probing
+Twenty-three modules each decide `HAS_CPP` for themselves by probing
 `_sqt_core`. That per-symbol design is right -- a kernel added later falls
 back on its own rather than all-or-nothing -- but it meant the NO-EXTENSION
 configuration could not be executed. Every fallback was reachable only by
@@ -38,7 +38,10 @@ NATIVE_AWARE_MODULES = (
     "analysis.liquidity_events",
     "analysis.multi_factor",
     "analysis.options_batch",
+    "analysis.order_events",
+    "analysis.pricing",
     "analysis.regression",
+    "analysis.stationarity",
     "backtest.engine",
     "backtest.monte_carlo",
     "backtest.portfolio_engine",
@@ -88,7 +91,7 @@ _FLAGS = """
 
 class TestTheSwitchReachesEveryModule:
     def test_all_of_them_fall_back_together(self):
-        """One name made unimportable flips all twenty, because they all
+        """One name made unimportable flips all twenty-three, because they all
         import the same one. No module needed changing."""
         import json
 

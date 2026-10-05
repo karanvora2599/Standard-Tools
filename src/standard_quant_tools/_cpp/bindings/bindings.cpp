@@ -28,6 +28,8 @@
 #include "sqt/build_info.hpp"
 #include "sqt/isa_dispatch.hpp"
 #include "sqt/correlation.hpp"
+#include "sqt/order_events.hpp"
+#include "sqt/regimes.hpp"
 
 namespace py = pybind11;
 
@@ -2297,7 +2299,8 @@ PYBIND11_MODULE(_sqt_core, m) {
         "Average uniqueness of each row's label, within its entity.\n\n"
         "Timestamps are nanoseconds since the epoch; numpy's NaT (INT64_MIN)\n"
         "marks a label that never resolves and spans only its own bar. Rows\n"
-        "need not be sorted. Concurrency is accumulated with a difference\n"
+        "need not be sorted; rows of one entity on the same date keep their\n"
+        "row order. Concurrency is accumulated with a difference\n"
         "array, which is O(n) where sweeping every label's span would be\n"
         "O(n * horizon).\n\n"
         "Returns weights normalized to mean 1, so enabling weighting does\n"
@@ -2663,4 +2666,343 @@ PYBIND11_MODULE(_sqt_core, m) {
         "Returns a (n_cols, n_cols) float64 array, exactly symmetric. values\n"
         "must be 2-D, read in place in C or Fortran order; anything else raises\n"
         "ValueError.");
+
+    // ── The binomial lattice ──────────────────────────────────────────────────
+    //
+    // analysis.pricing._binomial validates the contract, forms the powers,
+    // the probability and the discount, and reads the greeks off the levels
+    // returned; this is its backward induction only. The scalars are not
+    // validated here for the reason the option kernels give: the Python
+    // layer refuses what cannot be priced before anything is called.
+
+    m.def(
+        "binomial_lattice",
+        [](Array1D up_powers,
+           Array1D down_powers,
+           double spot,
+           double strike,
+           double sign,
+           double probability,
+           double discount,
+           bool american) -> py::array_t<double>
+        {
+            constexpr const char* fn = "binomial_lattice";
+            require_1d(up_powers, "up_powers");
+            require_1d(down_powers, "down_powers");
+            if (up_powers.size() != down_powers.size())
+                throw std::invalid_argument(
+                    std::string(fn) + ": up_powers and down_powers must have the same "
+                    "length (steps + 1), got " + std::to_string(up_powers.size()) +
+                    " and " + std::to_string(down_powers.size()));
+            if (up_powers.size() < 4)
+                throw std::invalid_argument(
+                    std::string(fn) + ": the lattice needs at least 3 steps (4 powers), "
+                    "got " + std::to_string(up_powers.size()) + " powers");
+            const auto steps = static_cast<std::size_t>(up_powers.size() - 1);
+            py::array_t<double> levels(6);
+            const double* up = up_powers.data();
+            const double* down = down_powers.data();
+            double* out = levels.mutable_data();
+            bool ok = true;
+            {
+                py::gil_scoped_release release;
+                ok = sqt::binomial_lattice(up, down, steps, spot, strike, sign,
+                                           probability, discount, american, out);
+            }
+            if (!ok)
+                throw std::runtime_error(std::string(fn) + ": could not allocate a buffer");
+            return levels;
+        },
+        py::arg("up_powers"),
+        py::arg("down_powers"),
+        py::arg("spot"),
+        py::arg("strike"),
+        py::arg("sign"),
+        py::arg("probability"),
+        py::arg("discount"),
+        py::arg("american"),
+        "Backward induction through a Cox-Ross-Rubinstein lattice of\n"
+        "len(up_powers) - 1 steps, the loop of analysis.pricing._binomial.\n\n"
+        "Node i of level L is priced (spot * up_powers[L - i]) * down_powers[i].\n"
+        "The terminal values are maximum(sign * (price - strike), 0.0); each\n"
+        "level back is discount * (probability * v[i] + (1 - probability) *\n"
+        "v[i + 1]), and with american the maximum of that and sign * (price -\n"
+        "strike). maximum is numpy's on x86 (a NaN propagates, a tie returns the\n"
+        "second argument). The arithmetic is the numpy loop's, operation for\n"
+        "operation, and its result bit for bit on x86; where numpy breaks a\n"
+        "+0.0/-0.0 tie the other way (Arm), only the sign of a zero can differ.\n\n"
+        "Returns a float64 array of 6: level 0's value (the price), level 1's\n"
+        "two and level 2's three, from the highest node down. The two power\n"
+        "arrays must be 1-D, of one length and at least 4 long; anything else\n"
+        "raises ValueError.");
+
+    // ── One EM step of the regime mixture ─────────────────────────────────────
+    //
+    // analysis.stationarity.detect_regimes keeps the loop, the weights update
+    // and numpy's exp; this is the rest of one step and the convergence
+    // test. The exponentials are read as the (k, n) rows np.exp wrote them.
+
+    m.def(
+        "regime_em_step",
+        [](Array1D values,
+           py::array_t<double, py::array::c_style | py::array::forcecast> exponentials,
+           Array1D means,
+           Array1D variances,
+           Array1D weights) -> py::tuple
+        {
+            constexpr const char* fn = "regime_em_step";
+            require_1d(values, "values");
+            require_1d(means, "means");
+            require_1d(variances, "variances");
+            require_1d(weights, "weights");
+            if (exponentials.ndim() != 2)
+                throw std::invalid_argument(
+                    std::string(fn) + ": exponentials must be a 2-D array (k, n), got "
+                    "ndim=" + std::to_string(exponentials.ndim()));
+            const py::ssize_t k = exponentials.shape(0);
+            const py::ssize_t n = exponentials.shape(1);
+            if (n != values.size())
+                throw std::invalid_argument(
+                    std::string(fn) + ": exponentials has " + std::to_string(n) +
+                    " columns for " + std::to_string(values.size()) + " values");
+            // Two to seven: numpy sums one regime's column pairwise (an (n, 1)
+            // array is contiguous along axis 0), and eight or more values
+            // across a row pairwise too, so outside this range the kernel's
+            // sums would not be numpy's.
+            if (k < 2 || k > 7)
+                throw std::invalid_argument(
+                    std::string(fn) + ": the mixture needs 2 to 7 regimes, got " +
+                    std::to_string(k));
+            if (means.size() != k || variances.size() != k || weights.size() != k)
+                throw std::invalid_argument(
+                    std::string(fn) + ": means, variances and weights need one value "
+                    "per regime (" + std::to_string(k) + "), got " +
+                    std::to_string(means.size()) + ", " +
+                    std::to_string(variances.size()) + " and " +
+                    std::to_string(weights.size()));
+            py::array_t<double> responsibility({k, n});
+            py::array_t<double> counts(k);
+            py::array_t<double> new_means(k);
+            py::array_t<double> new_variances(k);
+            py::array_t<double> next_exponents({k, n});
+            std::vector<double> totals(static_cast<std::size_t>(n));
+            const double* x = values.data();
+            const double* e = exponentials.data();
+            const double* mu = means.data();
+            const double* v = variances.data();
+            const double* w = weights.data();
+            double* r = responsibility.mutable_data();
+            double* c = counts.mutable_data();
+            double* nm = new_means.mutable_data();
+            double* nv = new_variances.mutable_data();
+            double* u = next_exponents.mutable_data();
+            double* t = totals.data();
+            bool converged = false;
+            {
+                py::gil_scoped_release release;
+                converged = sqt::regime_em_step(x, static_cast<std::size_t>(n), e, mu, v,
+                                                w, static_cast<std::size_t>(k), r, c, nm,
+                                                nv, u, t);
+            }
+            return py::make_tuple(responsibility, counts, new_means, new_variances,
+                                  next_exponents, converged);
+        },
+        py::arg("values"),
+        py::arg("exponentials"),
+        py::arg("means"),
+        py::arg("variances"),
+        py::arg("weights"),
+        "One EM step of the Gaussian mixture detect_regimes fits, from the\n"
+        "exponentials of its exponents (row j is np.exp of regime j's).\n\n"
+        "r[j, i] = weights[j] * (exponentials[j, i] / sqrt(2 * pi * variances[j])),\n"
+        "each observation's column divided by its left-to-right sum (1e-300 if\n"
+        "0); counts, means and variances are the observation-ordered sums the\n"
+        "numpy expressions form, with the 1e-12 floors. The arithmetic is the\n"
+        "numpy step's, operation for operation, and its result bit for bit.\n\n"
+        "Returns (responsibility (k, n), counts (k,), new means (k,), new\n"
+        "variances (k,), next_exponents (k, n), converged): responsibility is\n"
+        "the transpose of the Python's (n, k) array, next_exponents is\n"
+        "-0.5 * (x - mean) ** 2 / variance under the new means and variances,\n"
+        "and converged is np.allclose(new means, means, atol=1e-10). values,\n"
+        "means, variances and weights must be 1-D and exponentials (k, n) with\n"
+        "2 <= k <= 7 (one regime's sums, and eight or more, numpy forms\n"
+        "pairwise); anything else raises ValueError.");
+
+    // ── Order-event passes ────────────────────────────────────────────────────
+    //
+    // analysis.order_events codes each column the way its loops compare it
+    // (pd.factorize for order ids and sides, one comparison per distinct
+    // action) and refuses the kernel for a frame those codes cannot
+    // represent; these two run the loops over the codes.
+
+    m.def(
+        "order_queue_ahead",
+        [](py::object order_codes_obj,
+           py::ssize_t n_orders,
+           py::object actions_obj,
+           py::object side_codes_obj,
+           Array1D price,
+           Array1D size,
+           py::array_t<bool, py::array::c_style | py::array::forcecast> snapshot)
+            -> py::tuple
+        {
+            constexpr const char* fn = "order_queue_ahead";
+            const IndexArray order_codes = exact_int64(order_codes_obj, "order_codes", fn);
+            const IndexArray actions = exact_int64(actions_obj, "actions", fn);
+            const IndexArray side_codes = exact_int64(side_codes_obj, "side_codes", fn);
+            require_1d(order_codes, "order_codes");
+            require_1d(actions, "actions");
+            require_1d(side_codes, "side_codes");
+            require_1d(price, "price");
+            require_1d(size, "size");
+            require_1d(snapshot, "snapshot");
+            const py::ssize_t n = actions.size();
+            if (order_codes.size() != n || side_codes.size() != n || price.size() != n ||
+                size.size() != n || snapshot.size() != n)
+                throw std::invalid_argument(
+                    std::string(fn) + ": order_codes, actions, side_codes, price, size "
+                    "and snapshot must have the same length");
+            if (n_orders < 0)
+                throw std::invalid_argument(std::string(fn) + ": n_orders must be >= 0");
+            std::vector<std::int8_t> action_codes(static_cast<std::size_t>(n));
+            const long long* a = actions.data();
+            const long long* o = order_codes.data();
+            const long long* s = side_codes.data();
+            for (py::ssize_t i = 0; i < n; ++i) {
+                if (a[i] < sqt::kOrderAdd || a[i] > sqt::kOrderOther)
+                    throw std::invalid_argument(
+                        std::string(fn) + ": actions[" + std::to_string(i) + "] = " +
+                        std::to_string(a[i]) + " is not an action code (0-4)");
+                action_codes[static_cast<std::size_t>(i)] = static_cast<std::int8_t>(a[i]);
+                const bool keyed = a[i] == sqt::kOrderAdd || a[i] == sqt::kOrderCancel ||
+                                   a[i] == sqt::kOrderFill;
+                if (keyed && (o[i] < 0 || o[i] >= n_orders))
+                    throw std::invalid_argument(
+                        std::string(fn) + ": order_codes[" + std::to_string(i) + "] = " +
+                        std::to_string(o[i]) + " is outside [0, " +
+                        std::to_string(n_orders) + ") on an add, cancel or fill");
+                if (a[i] == sqt::kOrderAdd && s[i] < 0)
+                    throw std::invalid_argument(
+                        std::string(fn) + ": side_codes[" + std::to_string(i) + "] = " +
+                        std::to_string(s[i]) + " is negative on an add");
+            }
+            py::array_t<double> ahead(n);
+            const double* p = price.data();
+            const double* q = size.data();
+            const auto* snap = reinterpret_cast<const std::uint8_t*>(snapshot.data());
+            double* out = ahead.mutable_data();
+            sqt::QueueAheadCounts counts;
+            bool ok = true;
+            {
+                py::gil_scoped_release release;
+                ok = sqt::order_queue_ahead(o, static_cast<std::size_t>(n_orders),
+                                            action_codes.data(), s, p, q, snap,
+                                            static_cast<std::size_t>(n), out, counts);
+            }
+            if (!ok)
+                throw std::runtime_error(std::string(fn) + ": could not allocate a buffer");
+            ahead.resize({static_cast<py::ssize_t>(counts.n_ahead)});
+            return py::make_tuple(ahead, counts.n_snapshot_orders, counts.n_unseeded_adds,
+                                  counts.n_unseen_decrements, counts.unseen_size);
+        },
+        py::arg("order_codes"),
+        py::arg("n_orders"),
+        py::arg("actions"),
+        py::arg("side_codes"),
+        py::arg("price"),
+        py::arg("size"),
+        py::arg("snapshot"),
+        "The queue pass of analysis.order_events.queue_positions, over codes.\n\n"
+        "actions: 0 add, 1 cancel, 2 fill, 3 clear, 4 anything else. In event\n"
+        "order: a clear forgets every order and level; a row whose price or\n"
+        "size is not finite is skipped; an add records the size resting at its\n"
+        "level (side code, price) and rests its own; a cancel or fill of an\n"
+        "order the window added takes min(size, remaining) from its level,\n"
+        "floored at 0.0. The float operations are the loop's, in its order, so\n"
+        "every value is the loop's bit for bit.\n\n"
+        "Returns (ahead, n_snapshot_orders, n_unseeded_adds,\n"
+        "n_unseen_decrements, unseen_size). Every array must be 1-D and of one\n"
+        "length, order codes in [0, n_orders) on an add, cancel or fill and side\n"
+        "codes >= 0 on an add; anything else raises ValueError.");
+
+    m.def(
+        "order_lifetimes",
+        [](py::object order_codes_obj,
+           py::ssize_t n_orders,
+           py::object actions_obj,
+           py::array_t<bool, py::array::c_style | py::array::forcecast> snapshot,
+           py::object stamps_obj) -> py::tuple
+        {
+            constexpr const char* fn = "order_lifetimes";
+            const IndexArray order_codes = exact_int64(order_codes_obj, "order_codes", fn);
+            const IndexArray actions = exact_int64(actions_obj, "actions", fn);
+            const IndexArray stamps = exact_int64(stamps_obj, "stamps", fn);
+            require_1d(order_codes, "order_codes");
+            require_1d(actions, "actions");
+            require_1d(snapshot, "snapshot");
+            require_1d(stamps, "stamps");
+            const py::ssize_t n = actions.size();
+            if (order_codes.size() != n || snapshot.size() != n || stamps.size() != n)
+                throw std::invalid_argument(
+                    std::string(fn) + ": order_codes, actions, snapshot and stamps must "
+                    "have the same length");
+            if (n_orders < 0)
+                throw std::invalid_argument(std::string(fn) + ": n_orders must be >= 0");
+            std::vector<std::int8_t> action_codes(static_cast<std::size_t>(n));
+            const long long* a = actions.data();
+            const long long* o = order_codes.data();
+            for (py::ssize_t i = 0; i < n; ++i) {
+                if (a[i] < sqt::kOrderAdd || a[i] > sqt::kOrderOther)
+                    throw std::invalid_argument(
+                        std::string(fn) + ": actions[" + std::to_string(i) + "] = " +
+                        std::to_string(a[i]) + " is not an action code (0-4)");
+                action_codes[static_cast<std::size_t>(i)] = static_cast<std::int8_t>(a[i]);
+                const bool keyed = a[i] == sqt::kOrderAdd || a[i] == sqt::kOrderCancel ||
+                                   a[i] == sqt::kOrderFill;
+                if (keyed && (o[i] < 0 || o[i] >= n_orders))
+                    throw std::invalid_argument(
+                        std::string(fn) + ": order_codes[" + std::to_string(i) + "] = " +
+                        std::to_string(o[i]) + " is outside [0, " +
+                        std::to_string(n_orders) + ") on an add, cancel or fill");
+            }
+            py::array_t<long long> filled(n);
+            py::array_t<long long> cancelled(n);
+            const auto* snap = reinterpret_cast<const std::uint8_t*>(snapshot.data());
+            const long long* t = stamps.data();
+            long long* f = filled.mutable_data();
+            long long* c = cancelled.mutable_data();
+            sqt::LifetimeCounts counts;
+            bool ok = true;
+            {
+                py::gil_scoped_release release;
+                ok = sqt::order_lifetimes(o, static_cast<std::size_t>(n_orders),
+                                          action_codes.data(), snap, t,
+                                          static_cast<std::size_t>(n), f, c, counts);
+            }
+            if (!ok)
+                throw std::runtime_error(std::string(fn) + ": could not allocate a buffer");
+            filled.resize({static_cast<py::ssize_t>(counts.n_filled)});
+            cancelled.resize({static_cast<py::ssize_t>(counts.n_cancelled)});
+            return py::make_tuple(filled, cancelled, counts.still_resting,
+                                  counts.terminated_without_an_add,
+                                  counts.terminated_from_snapshot, counts.known_at_open,
+                                  counts.overflowed);
+        },
+        py::arg("order_codes"),
+        py::arg("n_orders"),
+        py::arg("actions"),
+        py::arg("snapshot"),
+        py::arg("stamps"),
+        "The lifetime pass of analysis.order_events.order_lifetimes, over codes.\n\n"
+        "actions as for order_queue_ahead; stamps are integers in the\n"
+        "timestamps' own unit, INT64_MIN (NaT) for a row the loop skips. A\n"
+        "snapshot add marks its order resting at the open, another add starts\n"
+        "its order's clock, and a cancel or fill of a started order records\n"
+        "end - start, in event order.\n\n"
+        "Returns (filled, cancelled, still_resting, terminated_without_an_add,\n"
+        "terminated_from_snapshot, known_at_open, overflowed): the durations as\n"
+        "int64 arrays in the stamps' unit, and overflowed True when a duration\n"
+        "left int64 (nothing else is then valid). Every array must be 1-D and\n"
+        "of one length, order codes in [0, n_orders) on an add, cancel or fill;\n"
+        "anything else raises ValueError.");
 }

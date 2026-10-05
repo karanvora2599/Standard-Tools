@@ -22,6 +22,8 @@ set(SQT_SOURCES
     src/options.cpp
     src/cusum.cpp
     src/correlation.cpp
+    src/order_events.cpp
+    src/regimes.cpp
     src/build_info.cpp
     bindings/bindings.cpp
 )

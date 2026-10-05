@@ -255,6 +255,59 @@ def cases():
         True,
         lambda: c.pearson_correlation(returns, 1),
     )
+    # The serial kernels of the CHANGELOG entry of 2026-10-04, drawn last so
+    # no other input moves: a 2,000-step American put, one regime EM step
+    # on 5,000 returns with 4 regimes, and the two order-event passes over a
+    # 200,000-event coded stream.
+    steps = 2_000
+    dt = 1.0 / steps
+    up = np.exp(0.3 * np.sqrt(dt))
+    powers = np.arange(steps + 1, dtype=float)
+    lattice_up, lattice_down = np.power(up, powers), np.power(1.0 / up, powers)
+    probability = (np.exp(0.01 * dt) - 1.0 / up) / (up - 1.0 / up)
+    case(
+        "binomial_lattice 2000 steps, American",
+        False,
+        lambda: c.binomial_lattice(
+            lattice_up,
+            lattice_down,
+            100.0,
+            110.0,
+            -1.0,
+            probability,
+            np.exp(-0.04 * dt),
+            True,
+        ),
+    )
+    x = rng.normal(0.0003, 0.012, 5_000)
+    means = np.quantile(x, np.linspace(0.1, 0.9, 4))
+    variances = np.full(4, x.var(ddof=1))
+    exponentials = np.exp(
+        np.stack([-0.5 * (x - m) ** 2 / v for m, v in zip(means, variances)])
+    )
+    case(
+        "regime_em_step 5000 x 4",
+        False,
+        lambda: c.regime_em_step(x, exponentials, means, variances, np.full(4, 0.25)),
+    )
+    n = 200_000
+    actions = rng.choice([0, 0, 0, 1, 1, 2, 4], size=n).astype(np.int64)
+    orders = np.minimum(np.cumsum(actions == 0), n - 1).astype(np.int64)
+    sides = rng.integers(0, 2, n).astype(np.int64)
+    price = 100.0 + rng.integers(-8, 9, n) * 0.01
+    size = rng.integers(1, 9, n) * 100.0
+    snapshot = np.zeros(n, dtype=bool)
+    stamps = np.cumsum(rng.integers(1, 10_000_000, n)).astype(np.int64)
+    case(
+        "order_queue_ahead 200k events",
+        False,
+        lambda: c.order_queue_ahead(orders, n, actions, sides, price, size, snapshot),
+    )
+    case(
+        "order_lifetimes 200k events",
+        False,
+        lambda: c.order_lifetimes(orders, n, actions, snapshot, stamps),
+    )
     return out
 
 

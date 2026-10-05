@@ -1,5 +1,98 @@
 # Changelog
 
+## The order-event passes, the binomial lattice and the regime EM step run natively with the same numbers, and the uniqueness weights order a repeated date as their fallback does
+
+- **`label_uniqueness_weights` orders rows of one entity on one date by
+  row on both backends.** The kernel sorted each entity's rows by date
+  alone with `std::sort`, so rows sharing an (entity, date) took the
+  positions the sort left them in, while the fallback's stable argsort
+  keeps row order; a tied row's position decides which bars its label
+  spans. On panels of 8 entities and 300 dates with 30% of dates repeated
+  two to four times (3,800-3,900 rows, shuffled), every weight differed,
+  by up to 1.5 (mean 1). The kernel now sorts (date, row) pairs, which is
+  the stable order, and skips the sort for an entity whose rows already
+  run in date order. Upstream refuses such panels, so no engine run
+  changes: on the live 31,680-row panel and on 500,000 rows (500 entities
+  x 1,000 days, shuffled and in date order) the weights are bit-identical
+  to the previous build's. Medians of 40-200 interleaved calls: 0.94-1.03x
+  the previous kernel's time on all threads, 0.89-0.94x on one. The kernel
+  has had no size gate since the argument conversion stopped going through
+  pandas; two guides still describe the 50,000-row gate.
+- **The two loops of `order_event_metrics` are native.** The queue pass
+  and the lifetime pass were a Python loop over every event with a dict
+  per order and per price level: 8.5 s of the report on a
+  2,000,000-event session, the cap `get_order_event_metrics` reads by
+  default, against 0.15 s to read the session's Parquet file.
+  `order_queue_ahead` and `order_lifetimes` run the same state machines
+  over coded columns (order ids and sides through `pd.factorize`, which
+  groups values as a dict does; each action by the comparisons the loops
+  make), with the same float operations in the same order, and each
+  lifetime is turned into seconds as `Timedelta.total_seconds()` does it:
+  whole microseconds, the integer seconds added to the fraction in
+  floating point. Every number in the report is the loop's, floats to the
+  bit, for order ids of any dtype, integer or string sides, timestamps in
+  s, ms, us or ns, naive or zoned, or parsed from strings. A frame the codes
+  cannot represent the way the loops compare it -- a missing order id on
+  an add, cancel or fill, a missing side on an add -- runs the loops.
+  Measured against the previous module, medians: the report 770 -> 50 ms
+  at 200,000 events and 8,516 -> 498 ms at 2,000,000; `queue_positions`
+  4,327 -> 232 ms and `order_lifetimes` 3,936 -> 176 ms at 2,000,000.
+  Called on their own, the two passes run the loops below 64 events,
+  where three `pd.factorize` calls cost more than the loop (0.82-0.92x at
+  25-50 events, 1.1-1.5x from 75); the report codes its columns once for
+  both and is faster at every size measured (1.10x at 25 events).
+- **`event_rates` reads two columns.** It copied every column of the
+  snapshot-free rows to read the timestamps and actions, and ran
+  `pd.to_datetime` over a column that already held datetimes (0.4 s on
+  2,000,000 zoned stamps, for the same dtype and values on pandas 2.3 and
+  3.0). The report also reads the distinct actions once instead of three
+  times. 184 -> 137 ms at 2,000,000 events, the same result.
+- **The binomial lattice's backward induction is native.** One numpy
+  expression per level was 95-98% of a binomial `get_option_pricing`
+  call. `binomial_lattice` runs the same operations over one buffer, with
+  the powers still formed by numpy and numpy's tie rule for `maximum`, so
+  price, delta and gamma are the numpy loop's doubles on x86; where
+  numpy's maximum breaks a +0.0/-0.0 tie the other way (Arm), only the
+  sign of a zero node can differ. An American put, medians: 1.13 -> 0.04
+  ms at the default 200 steps, 17.8 -> 2.5 ms at 2,000, and 726 -> 27 ms
+  for a chain of 476 contracts at 256 steps priced one call each. At
+  5,000 steps both paths spend most of their time on subnormal node
+  values (2.6% of nodes fall below 2.2e-308 far out of the money):
+  67 -> 45 ms.
+- **`detect_regimes` runs each EM step natively after numpy's
+  exponentials.** The fit runs 100 iterations on every series measured,
+  each about 8k + 10 numpy calls. The exponentials stay one `np.exp` per
+  regime, as before, because numpy's float64 exp is its own routine on
+  some x86 machines and the C library's elsewhere; `regime_em_step` does
+  the rest of the step, the `np.allclose` convergence test as numpy's
+  isclose forms it, and the next step's exponents. numpy sums over axis 0
+  of an (n, k) array row by row and over k < 8 values left to right, and
+  the kernel adds in the same order, so labels, regimes and every float
+  are the numpy loop's to the bit; it refuses one regime and eight or
+  more, which numpy sums pairwise (`detect_regimes` fits 2 to 5).
+  Medians: 21.5-25.9 -> 4.8-7.2 ms on 2,000 returns with 2-4 regimes,
+  46.9-57.6 -> 10.2-16.1 ms on 5,000; the regime tool with its prices
+  from the disk cache 25.4-65.7 -> 8.9-21.9 ms. numpy's exp is now the
+  larger part of a step (about 105 us of 160 at 5,000 returns and 4
+  regimes).
+- **The futures engine's bar loop stays in Python.** The loop is
+  2.0-2.2 us a bar, 20-49% of `run_futures_simulation` (2.5-21.9 ms at
+  252-5,040 daily bars) and 10-21% of `run_futures_backtest` (4.6-50.6
+  ms): removing it entirely would make the tool at most 1.11-1.27x
+  faster. As much time goes to the pandas conversions before the loop
+  (1.6-10.3 ms: a `pd.Timestamp` per contract-map key and the date
+  parsing of every map), which no kernel reaches.
+- **None of the new kernels is parallel.** The order passes are state
+  machines, a lattice level is at most a few microseconds, and one EM step
+  on 5,000 returns with 4 regimes is about 55 us, under the 150 us a region
+  needs before it goes parallel.
+- The extension exports 45 symbols (41 before), which
+  `list_modeling_capabilities` now expects; the C++ suite has 16
+  executables (order events and regimes added) and 95,816 checks. Measured
+  on an i7-13620H under Windows 11, MSVC 19.44 with `/arch:AVX2`, Python
+  3.12, numpy 2.0.2, pandas 2.3.3, against the previous module or build in
+  the same process; every compared result equal.
+
 ## The rest of the library's own BLAS work runs on one thread, and a cointegration test spends a seventh as long in Python
 
 - **`pca_whiten`, the feature VIFs, the half-life t-statistic and the

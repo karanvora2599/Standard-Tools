@@ -254,7 +254,8 @@ bool permutation_null_ic(const double* target,
  * buckets by entity and orders each entity by its OWN date axis, which is
  * the point of carrying label ends as timestamps: with entities on
  * different calendars, t+horizon of one entity's bars is not t+horizon of
- * the global panel's dates.
+ * the global panel's dates. Rows of one entity on the same date keep their
+ * row order, the order of a stable sort by date.
  *
  * Weights come back normalized to mean 1 over every row, so turning
  * weighting on does not also rescale the effective regularization strength.

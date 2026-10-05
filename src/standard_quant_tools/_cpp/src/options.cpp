@@ -10,6 +10,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <new>
+#include <vector>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -711,6 +713,70 @@ void black_scholes_greeks_batch(const double* spot, std::size_t n_spots,
                          volatility, rate, dividend_yield, is_call, n_contracts, grid, out);
             break;
     }
+}
+
+
+namespace {
+
+// numpy's float64 `maximum` on x86: a NaN in either argument comes back,
+// and otherwise the larger, with a tie going to the SECOND argument. The
+// tie matters here, unlike in cusum.cpp: a put's payoff at a node priced
+// exactly at the strike is -1.0 * 0.0 = -0.0, and numpy returns b for
+// maximum(+0.0, -0.0) and maximum(-0.0, +0.0) alike (measured on numpy 2.0
+// and 2.4, at every array length). `a != a` rather than std::isnan, as in
+// cusum.cpp: one compare under /fp:precise.
+inline double np_maximum_tie_second(double a, double b) {
+    const double larger = (a > b) ? a : b;
+    return (a != a) ? a : larger;
+}
+
+}  // namespace
+
+bool binomial_lattice(const double* up_powers, const double* down_powers,
+                      std::size_t steps, double spot, double strike, double sign,
+                      double probability, double discount, bool american,
+                      double* levels) {
+    std::vector<double> values;
+    std::vector<double> spot_up;
+    try {
+        values.resize(steps + 1);
+        spot_up.resize(steps + 1);
+    } catch (const std::bad_alloc&) {
+        return false;
+    }
+    // spot * up_powers[k] is the first product of every node price whose up
+    // exponent is k, at every level: formed once, it is the same double.
+    for (std::size_t k = 0; k <= steps; ++k) spot_up[k] = spot * up_powers[k];
+
+    for (std::size_t i = 0; i <= steps; ++i) {
+        const double price = spot_up[steps - i] * down_powers[i];
+        values[i] = np_maximum_tie_second(sign * (price - strike), 0.0);
+    }
+
+    // (1.0 - probability) is a Python float the expression forms once.
+    const double stay = 1.0 - probability;
+    double* v = values.data();
+    for (std::size_t level = steps; level-- > 0;) {
+        // In place, front to back: value[i + 1] is read before it is
+        // overwritten on the next iteration, so every read is the level
+        // below's value, as numpy's two slices are.
+        if (american) {
+            for (std::size_t i = 0; i <= level; ++i) {
+                const double held = discount * (probability * v[i] + stay * v[i + 1]);
+                const double price = spot_up[level - i] * down_powers[i];
+                v[i] = np_maximum_tie_second(held, sign * (price - strike));
+            }
+        } else {
+            for (std::size_t i = 0; i <= level; ++i)
+                v[i] = discount * (probability * v[i] + stay * v[i + 1]);
+        }
+        if (level <= 2) {
+            // Level L's L + 1 values start at offset L(L + 1) / 2.
+            double* out = levels + level * (level + 1) / 2;
+            for (std::size_t i = 0; i <= level; ++i) out[i] = v[i];
+        }
+    }
+    return true;
 }
 
 }  // namespace sqt
