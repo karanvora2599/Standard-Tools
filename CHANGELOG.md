@@ -1,5 +1,23 @@
 # Changelog
 
+## The guides describe the MLPs' early stopping, the booster bundles, the last BLAS work and the futures reads
+
+- **15_modeling**: the MLPs' early stopping on the window's last dates,
+  its measurements and its bounds row; the fold record for an `mlp`; a
+  booster's bundle refused by the model's own type before anything is
+  dumped; a sparse matrix's inner archive; the skops releases verified
+  (0.14 and 0.15; 0.11 to 0.13 refuse the boosting models' loss and
+  binning types; 0.10 does not import beside scikit-learn 1.9.1); the Cox
+  fit and its risk scores under the one-thread limit; the tests of a mean
+  on one BLAS thread beside the Diebold-Mariano paragraph.
+- **16_performance**: the tests of a mean and the Cox fit in the runtime
+  defaults, with their measured cost; the conversions around the futures
+  loop and `event_rates`' counts, with the survey row's figures marked as
+  measured before them.
+- **22_microstructure**: the order `counts_by_action` keeps.
+- **README**: 16,489 tests; with the extension required, `-m "not
+  integration"` gives 16,324 passing and 87 skipped.
+
 ## The futures account reads its dates in bulk and event_rates counts actions by object, with the same results
 
 - **The futures engine converts its maps once, not key by key.** Before

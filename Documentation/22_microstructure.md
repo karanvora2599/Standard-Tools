@@ -507,7 +507,7 @@ of one name at ten levels is about 42 MB — so price the request with
 | **Queue ahead** | Resting size at an order's own price level when it arrives — the number that decides whether a passive order fills. Depth gives the level total and cannot say how much is in front of you |
 | **Order lifetime** | Time from add to cancel or fill. No snapshot equivalent exists at all |
 | **Cancel-to-add, cancel-to-trade** | A snapshot sees size vanish and cannot tell a cancel from a fill. A trade is counted ONCE: the `T` prints when the feed carries them, else the fills — an execution is a `T` and an `F` for the same event, and counting both counted every trade twice |
-| **Event intensity by action** | A snapshot stream measures the SAMPLING rate when sampled and the update rate when not, and nothing in the frame says which |
+| **Event intensity by action** | A snapshot stream measures the SAMPLING rate when sampled and the update rate when not, and nothing in the frame says which. `counts_by_action` lists actions by count, largest first; equal counts follow `value_counts`' order, which is first appearance under pandas 3 and its quicksort's under pandas 2 |
 
 ### Censoring is counted, not folded in
 

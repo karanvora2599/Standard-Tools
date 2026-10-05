@@ -80,11 +80,44 @@ more than marginally faster:
 | `order_events`' queue and lifetime passes | 8.0–8.5 s at 2,000,000 events | 94% of `order_event_metrics`; the Parquet read is 0.15 s | Ported: 17× on the report |
 | `pricing._binomial`'s backward induction | 0.95 ms (200 steps) to 63 ms (5,000) | 95–98% of `get_option_pricing` | Ported: 7–28× below 5,000 steps |
 | `detect_regimes`' EM loop | 23–60 ms (2,000–5,000 returns, 2–4 regimes) | 87–95% of the regime tool from the disk cache | Ported, after numpy's `exp`: 3.6–4.6× |
-| `run_futures_simulation`'s bar loop | 2.0–2.2 µs a bar | 20–49% of the engine, 10–21% of `run_futures_backtest` (4.6–50.6 ms at 252–5,040 bars) | Not ported: removing the loop entirely bounds the tool at 1.11–1.27×, and the pandas conversions before the loop (1.6–10.3 ms) cost as much |
+| `run_futures_simulation`'s bar loop | 2.0–2.2 µs a bar | 20–49% of the engine, 10–21% of `run_futures_backtest` (4.6–50.6 ms at 252–5,040 bars), measured before the conversions below | Not ported: removing the loop entirely bounded the tool at 1.11–1.27×. The conversions around it, which cost as much, now read arrays (below) |
 
 None of the three new kernels is parallel: the order passes are state
 machines, a lattice level is a few microseconds, and one EM step on 5,000
 returns with 4 regimes is about 55 µs, under the 150 µs floor.
+
+**The conversions around the futures loop (2026-10-04).** Before its bar
+loop, `run_futures_simulation` spent 8.7 ms at 5,040 daily bars (9.9 ms
+with ISO-string keys) converting its maps, as long as the loop itself
+(9.7–11.2 ms). The price and target index is now built by one
+`DatetimeIndex(keys)` call when the keys are Timestamps in one zone, the
+call pandas' own inference ends in; an index that is already a
+DatetimeIndex without repeated stamps skips `pd.to_datetime`, which boxed
+every stamp to hand back the same index; and a contract map of 128 or more
+keys spelled 'YYYY-MM-DD' is parsed by numpy in one call and matched to the
+bars by integer instant instead of a Timestamp per key and a hash per bar.
+`parse_date_keys`, which every tool taking a date-keyed map calls, reads
+its missing-date and repeated-date refusals from the parsed index
+(11.0 → 5.4 ms at 5,040 keys), and `run_futures_backtest` returns its
+equity curve by the index's `.date` rather than a Timestamp per bar. The
+work before the loop is now 3.9 ms (6.2 ms with ISO strings), and
+`run_futures_backtest` takes 5.0, 11.2 and 31.3 ms at 252, 1,260 and 5,040
+daily bars, against 6.6, 15.7 and 53.0 ms (pandas 2.3; 4.9, 10.1 and
+32.3 ms under pandas 3.0). Every output is the previous code's to the bit,
+refusals and warnings included.
+
+**`event_rates` (2026-10-04).** The rate block of `order_event_metrics`
+counted actions with `value_counts`, which hashes every row as a string.
+A column of one-letter codes holds five or six Python objects, so it is
+now counted by object identity and only those objects are compared; the
+clock is read from the stamps' integers. 138 → 65 ms at 2,000,000 events
+and 13.2 → 6.3 ms at 200,000 under pandas 2.3; under pandas 3.0,
+80 → 53 ms and 9.8 → 7.3 ms on its string column, which `value_counts`
+still counts, and 122 → 61 ms at 2,000,000 on an object column.
+`counts_by_action` keeps `value_counts`' key order: by count, largest
+first, with equal counts in whatever order `value_counts`' own sort gives
+them, which under pandas 2 is a quicksort and not always the order of
+first appearance.
 
 **A third honest finding, from the modeling kernels.** That work opened by
 stating a *ceiling* rather than a target: feature preprocessing was 47–56%
@@ -537,7 +570,45 @@ median ratio after/before on Python 3.12 and 3.11:
 The one that loses is the tall SVD: 50,000 × 30 takes 58–62 ms on one thread
 against 41–45 ms on sixteen. Estimator fits are unchanged: a budget of 1, a
 search that does not pool and the full-panel refit keep the process's BLAS
-setting for the estimator itself.
+setting for the estimator itself, except `cox_ph`, whose Newton steps are
+the library's own linear algebra and run under the limit wherever it is
+fitted.
+
+**And the tests of a mean, and the Cox fit.** `newey_west_variance`,
+`cosine_variance` and `mean_vs_null_test` take dot products with as many
+terms as there are dates, so above 10,000 dates their last bits followed
+the thread count under OpenBLAS 0.3.27 and 0.3.31, and with them a run's
+headline, `score_predictions`' headline, the Diebold-Mariano test and
+`compare_signals`. `cox_ph` solved its Hessian on the caller's threads in
+the refit and at a budget of 1, and under 0.3.31 from 100 features that
+solve's last bits followed the count. Both run under the limit since
+2026-10-04, and each whole output is the same bits at caller limits of
+1, 2, 4 and 16. What moved, once, at 16 threads: at 12,000 to 50,000
+dates the statistics, variances and lag-1 autocorrelations by at most
+7.3e-16 relative and the p-values by at most 8.7e-14 (nothing at 9,000
+dates); under 0.3.31 the Cox coefficients at 100 to 128 features by at
+most 6.5e-14 and the baseline hazard by 1.0e-15 (nothing under 0.3.27,
+nor at 8 or 60 features). The cost, run with and without the limit call
+by call, as the ratio of the minimums and the median ratio after/before
+on Python 3.12 and 3.11:
+
+| Call | Size | After/before |
+|---|---|---|
+| `mean_vs_null_test` (a run's headline) | 504 dates | 1.02–1.03× (174 → 179 µs) |
+| `newey_west_variance`, lag 10 | 504 dates | 1.16–1.19× (20 → 23 µs) |
+| `diebold_mariano` | 504 dates | 0.99–1.03× |
+| `compare_signals`, IC series, 2,000 resamples | 504 dates | 0.98–1.00× |
+| `mean_vs_null_test` | 12,000 dates | 0.35–0.37× |
+| `diebold_mariano` | 12,000 dates | 0.38–0.39× |
+| `compare_signals`, IC series | 12,000 dates | 0.84–0.86× |
+| `cox_ph` fit | 15,030 × 8 | 0.99–1.01× |
+| `cox_ph` fit | 400 × 100 | 1.00–1.01× (0.3.27), 0.66–0.69× (0.3.31) |
+
+Entering and leaving the outermost limit costs 6.5–7.6 µs, a nested one
+1.4 µs. A Cox model's `predict` runs under the limit too: its product
+reduces over the features, the same bits at 1, 2, 4 and 16 threads at 100
+features, but at 300 other last bits at 4 and 16 threads than at 1, on 6
+to 7 of 5,000 scores.
 
 ---
 ## When a kernel goes parallel
