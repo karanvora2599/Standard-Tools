@@ -132,3 +132,81 @@ class TestThroughARun:
 
         _z, p, _pos, _neg = auc_vs_chance(0.501, _metrics(0.5, 500))
         assert p > 0.05
+
+
+class TestAVerdictAlreadyOnDisk:
+    """The other half: manifests written BEFORE the test was a test.
+
+    Fixing `_headline_report` stopped new runs recording an unbacked True.
+    The ones already registered keep theirs, because a manifest is immutable
+    -- and the one holding it was in `production`, where both readers
+    believed it: `list_models` rendered "beats null", and the promotion gate
+    returns early on True without looking at anything else.
+
+    `headline_test` already promised this in its docstring -- None when "a
+    run registered before the test existed" -- and simply never enforced it.
+    A verdict whose every statistic is absent is a comparison, not a result,
+    and reads as the third state.
+    """
+
+    @staticmethod
+    def _manifest(block):
+        return type("M", (), {"validation_report": {"headline": block}})()
+
+    def test_a_verdict_with_no_statistic_is_withdrawn(self):
+        """The live case: mdl_f7a88c30e0ca, in production, reporting True."""
+        from standard_quant_tools.modeling.agent.tools import headline_test
+
+        block = headline_test(self._manifest({
+            "metric": "auc", "null": 0.5, "value": 0.5048538266416421,
+            "n_dates": None, "t_stat": None, "p_value": None,
+            "beats_null": True,
+        }))
+        assert block["beats_null"] is None
+        assert "verdict_withdrawn" in block
+        # The measurement itself is untouched -- only the claim about it.
+        assert block["value"] == 0.5048538266416421
+
+    def test_a_verdict_with_a_p_value_is_left_alone(self):
+        """The same AUC, tested. False must stay False, not become None:
+        "did not beat its null" and "was never asked" are different, and the
+        gate's sentences for them are different."""
+        from standard_quant_tools.modeling.agent.tools import headline_test
+
+        block = headline_test(self._manifest({
+            "metric": "auc", "null": 0.5, "value": 0.5048538266416421,
+            "n_dates": 420, "t_stat": 0.17144314636641872,
+            "p_value": 0.8638753310688991, "beats_null": False,
+        }))
+        assert block["beats_null"] is False
+        assert "verdict_withdrawn" not in block
+
+    def test_a_true_backed_by_a_p_value_survives(self):
+        """A real pass is not collateral damage."""
+        from standard_quant_tools.modeling.agent.tools import headline_test
+
+        block = headline_test(self._manifest({
+            "metric": "auc", "null": 0.5, "value": 0.72,
+            "n_dates": 420, "t_stat": 6.1, "p_value": 1e-9,
+            "beats_null": True,
+        }))
+        assert block["beats_null"] is True
+
+    def test_an_empty_block_is_still_empty(self):
+        """17 of this registry's 20 manifests have no headline block at all.
+        They were already None and must not acquire a withdrawal note."""
+        from standard_quant_tools.modeling.agent.tools import headline_test
+
+        assert headline_test(self._manifest({})) == {}
+        assert headline_test(type("M", (), {"validation_report": {}})()) == {}
+
+    def test_the_t_stat_alone_counts_as_evidence(self):
+        """A ranking run records `t_stat` and may record no `p_value`; that
+        is a test and keeps its verdict."""
+        from standard_quant_tools.modeling.agent.tools import headline_test
+
+        block = headline_test(self._manifest({
+            "metric": "cs_rank_ic_mean", "null": 0.0, "value": 0.03,
+            "t_stat": 2.4, "p_value": None, "beats_null": True,
+        }))
+        assert block["beats_null"] is True

@@ -1396,10 +1396,47 @@ def headline_test(manifest) -> Dict[str, Any]:
     not be made (no headline value, no null for the task, a run registered
     before the test existed), which is NOT the same as False and must not
     be read as either an endorsement or a failure.
+
+    A VERDICT WITH NO STATISTIC BEHIND IT IS NOT A VERDICT, and this is where
+    that is enforced rather than merely promised above. Runs registered before
+    the headline test became a test carry `beats_null` from a point comparison
+    -- `value > null`, so an AUC of 0.50485 against 0.5 recorded True -- with
+    `p_value`, `t_stat` and `n_dates` all null. Read literally, such a block
+    claims the model beat chance on evidence the block itself does not have,
+    and both readers believed it: `list_models` showed it, and the promotion
+    gate returns early on True, which is how one reached production. Measured
+    on this registry: 17 of 20 manifests carry no verdict, 2 carry one backed
+    by a real p-value, and 1 carries a verdict with nothing behind it.
+
+    So the block is normalised on read: a `beats_null` whose test statistics
+    are all absent becomes None -- the third state, "no test was made" --
+    which the gate already refuses and already lets an operator waive on the
+    record. The manifest on disk is untouched; it is immutable and its bytes
+    still hash. This is a read, as the paragraph above promises.
     """
     report = getattr(manifest, "validation_report", None) or {}
     block = report.get("headline") or {}
-    return block if isinstance(block, dict) else {}
+    if not isinstance(block, dict):
+        return {}
+    if block.get("beats_null") is not None and not _has_evidence(block):
+        demoted = dict(block)
+        demoted["beats_null"] = None
+        demoted["verdict_withdrawn"] = (
+            "recorded before the headline test was a test: the verdict came "
+            "from comparing the value to the null, with no statistic behind it"
+        )
+        return demoted
+    return block
+
+
+#: The fields any real headline test writes. `n_dates` alone is not enough --
+#: a block can know how many dates it had and still not have tested them.
+_TEST_STATISTICS = ("p_value", "t_stat", "t_stat_uncorrected")
+
+
+def _has_evidence(block: Dict[str, Any]) -> bool:
+    """Whether a headline block carries a statistic, not just a comparison."""
+    return any(block.get(name) is not None for name in _TEST_STATISTICS)
 
 
 def _beats_null(manifest) -> Optional[bool]:
