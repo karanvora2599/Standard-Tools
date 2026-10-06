@@ -52,6 +52,7 @@ from .coverage import (
 )
 from .fetch import fetch_universe_ohlcv
 from .integrity import DATA_HASH_VERSION, build_environment, panel_data_hash
+from .derived import apply_derived, derived_output_names
 from .lags import expand_lags, expanded_feature_ids, lags_by_output_name
 from .leakage import check_point_in_time_safety
 from .missing import forward_fill_bounded
@@ -501,8 +502,15 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
     # full expanded column list, generated in ONE place so the panel's
     # column order, X's column order and the importance vector's order
     # cannot drift apart.
-    lags_requested = lags_by_output_name(spec.features)
-    expanded_names = expanded_feature_ids(spec.features)
+    # BOTH KINDS, in one list. The helpers are duck-typed on
+    # `output_name` and `lags`, and a derived column is a panel column like
+    # any other -- it has to appear in the expanded name list or the
+    # dataset would carry a column its own feature_ids do not mention.
+    # Derived AFTER the base features, which is the order they are
+    # computed in and therefore the panel's column order.
+    all_feature_specs = [*spec.features, *spec.derived]
+    lags_requested = lags_by_output_name(all_feature_specs)
+    expanded_names = expanded_feature_ids(all_feature_specs)
     # {feature output name: values forward-filled across every entity},
     # reported rather than applied silently -- see dataset/missing.py.
     fill_counts: Dict[str, int] = {}
@@ -568,6 +576,13 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
                 )
                 for name, count in filled.items():
                     fill_counts[name] = fill_counts.get(name, 0) + count
+            # DERIVED FEATURES HERE: after the fill, before the lags. After
+            # the fill so a lag of a derived column is a lag of the filled
+            # inputs, which is the same reason the fill precedes the shift
+            # above; before the lags so a derived column can itself be
+            # lagged like any other. Still inside one entity's frame, so
+            # nothing reaches another symbol's rows.
+            entity_frame = apply_derived(entity_frame, spec.derived)
             per_entity_features[symbol] = expand_lags(entity_frame, lags_requested)
             if include_target:
                 # The FULL frame and the feature context, not Close alone:

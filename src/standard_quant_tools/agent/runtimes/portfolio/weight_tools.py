@@ -90,6 +90,30 @@ class ConstructWeightsInput(BaseModel):
     vol_lookback: int = Field(
         20, gt=1, description="vol_scaled only: the volatility window."
     )
+    net_exposure: Optional[float] = Field(
+        None,
+        description=(
+            "Target sum(w), hit EXACTLY alongside gross_leverage. Set it (0 "
+            "for market-neutral) and the long and short books are sized "
+            "independently -- L = (gross + net) / 2, S = (gross - net) / 2 -- "
+            "so both targets hold at once, which a single rescale cannot do. "
+            "This is the construction the portfolio evaluator backtests "
+            "with; without it the deployed book is a different portfolio "
+            "from the one that was measured."
+        ),
+    )
+    max_position_weight: Optional[float] = Field(
+        None,
+        gt=0.0,
+        le=1.0,
+        description=(
+            "Cap on any one name's |weight|, with the excess redistributed "
+            "across the names still under the cap so the book still hits its "
+            "gross target. A model backtested at 0.05 and deployed without "
+            "this can hold far more than 0.05 in one name — same scores, "
+            "same method, a different portfolio."
+        ),
+    )
     dollar_neutral: bool = Field(
         False,
         description=(
@@ -203,12 +227,85 @@ def construct_weights_from_scores(
         )
 
     warnings: List[str] = []
-    if input_data.dollar_neutral:
+    targeted = (
+        input_data.net_exposure is not None
+        or input_data.max_position_weight is not None
+    )
+    if targeted and input_data.dollar_neutral:
+        raise ValidationError(
+            "dollar_neutral=True cannot be combined with net_exposure or "
+            "max_position_weight: they are two ways to set the same thing "
+            "and the second would silently undo the first. "
+            "dollar_neutral shifts the book to ~0 net and lets gross drift; "
+            "net_exposure=0 hits BOTH targets exactly. Use one."
+        )
+
+    if targeted:
+        # THE CONSTRUCTION THE BACKTEST USES. `apply_exposure_targets` was
+        # reachable only inside the simulation path, which needs at least
+        # two rebalance dates, so a model measured at max_position_weight
+        # deployed through a door that had no such parameter -- two
+        # portfolios, both called "the model". It is already a per-DATE
+        # function, so the live door only ever had to call it.
+        #
+        # Deferred import for the reason portfolio_eval defers its own
+        # handoff import: at module level the two packages form a cycle.
+        from standard_quant_tools.modeling.portfolio_eval import (
+            apply_exposure_targets,
+        )
+
+        net = float(input_data.net_exposure or 0.0)
+        cap = float(
+            input_data.max_position_weight
+            if input_data.max_position_weight is not None
+            else 1.0
+        )
+        gross = float(input_data.gross_leverage)
+        if abs(net) > gross:
+            raise ValidationError(
+                f"net_exposure={net} cannot exceed gross_leverage={gross}: a "
+                "book cannot be more net than it is gross."
+            )
+        # copy=True: `to_numpy` can hand back a read-only view of the
+        # frame's own block, and the rows are assigned in place below.
+        values = weights.to_numpy(dtype=float, copy=True)
+        shortfalls = 0
+        net_misses = 0
+        for row in range(values.shape[0]):
+            values[row], diagnostics = apply_exposure_targets(
+                values[row], gross, net, cap
+            )
+            if diagnostics.get("realized_gross", gross) < gross - 1e-9:
+                shortfalls += 1
+            # The net miss is the one that matters more for a book built
+            # to be market-neutral: an unfillable half leaves the other
+            # half exposed, and the gross number alone does not say so.
+            if abs(diagnostics.get("realized_net", net) - net) > 1e-9:
+                net_misses += 1
+        weights = pd.DataFrame(
+            values, index=weights.index, columns=weights.columns
+        )
+        if shortfalls or net_misses:
+            # The same silence the evaluator's diagnostics had to break: a
+            # one-sided book cannot fill both halves, so the targets are
+            # missed and the numbers alone do not say why.
+            warnings.append(
+                f"{shortfalls} of {len(weights)} date(s) came in below the "
+                f"requested gross of {gross:.2f} and {net_misses} missed the "
+                f"requested net of {net:+.2f}. That happens when the scores "
+                "are one-sided — there is no book on that side to fill — or "
+                f"when max_position_weight={cap} leaves too few names under "
+                "the cap to absorb a half. A book built for net 0 that "
+                "cannot fill one half is NOT market-neutral, whatever it "
+                "was asked for."
+            )
+    elif input_data.dollar_neutral:
         weights = sizing.dollar_neutral(weights)
         warnings.append(
             "Dollar-neutralised AFTER construction, so net exposure is ~0 "
             "and gross may differ from the requested leverage -- the shift "
-            "preserves ordering, not scale."
+            "preserves ordering, not scale. net_exposure=0 hits both "
+            "targets exactly instead."
         )
 
     ref = publish(

@@ -210,6 +210,86 @@ class FeatureSpec(BaseModel):
         return self.alias or self.id
 
 
+class DerivedFeatureSpec(BaseModel):
+    """
+    A feature computed from other features on the same row.
+
+    "Momentum per unit of volatility", "the spread between two horizons of
+    the same feature", "this one minus that one" -- all unexpressible
+    before, because `FeatureSpec.requires` names OHLCV columns and nothing
+    named another feature.
+
+    POINTWISE ON PURPOSE. Every operator here is a row-wise function of
+    columns on the same row: no state, no window, nothing fitted. That is
+    a leakage decision, not a limitation of effort. A derived column
+    therefore needs exactly the history its inputs needed -- the warm-up
+    the spec already resolves for them -- and nothing it computes can
+    reach across a fold boundary, because there is nothing to fit.
+
+    A FITTED DERIVATION BELONGS IN PREPROCESSING. "This feature net of
+    beta" is a regression, and a regression run over an entity's whole
+    history at build time is fitted on the test window as well. Steps in
+    `preprocessing/` are fitted per fold on training rows only, which is
+    where that has to happen; `residual_ols` is refused here by name
+    rather than offered as a plausible option that quietly leaks.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(
+        ...,
+        min_length=1,
+        description=(
+            "The panel column this produces. Must not collide with a "
+            "feature's `output_name` or another derived name."
+        ),
+    )
+    op: Literal["ratio", "difference", "product", "sum"] = Field(
+        ...,
+        description=(
+            "'ratio' a / b, with a zero denominator giving NaN rather than "
+            "an infinity -- an infinity survives into the model as a finite "
+            "number under most imputations, which is the quiet failure. "
+            "'difference' a - b. 'product' a * b. 'sum' a + b. All are "
+            "pointwise, so none costs warm-up or can leak."
+        ),
+    )
+    inputs: List[str] = Field(
+        ...,
+        min_length=2,
+        max_length=2,
+        description=(
+            "The two columns, by `output_name`: a feature of this spec or a "
+            "derived feature defined EARLIER in the list. Earlier only, so "
+            "the order of evaluation is the order written and a cycle "
+            "cannot be expressed in the first place."
+        ),
+    )
+    lags: List[Annotated[int, Field(ge=1, le=MAX_LAG)]] = Field(
+        default_factory=list,
+        max_length=MAX_LAGS_PER_FEATURE,
+        description=(
+            "Bars of history of THIS derived column to add as extra "
+            "columns, exactly as FeatureSpec.lags does — the derivation "
+            "happens before the lag expansion, so a derived column lags "
+            "like any other and the lag is of the derived value rather "
+            "than of its inputs."
+        ),
+    )
+
+    @property
+    def output_name(self) -> str:
+        """The panel column this produces.
+
+        Named to match `FeatureSpec.output_name` because the lag helpers
+        are duck-typed on it: one list of both kinds goes to
+        `expanded_feature_ids` and `lags_by_output_name`, so the panel's
+        column order, X's column order and the importance vector's order
+        are still generated in one place.
+        """
+        return self.name
+
+
 class TargetSpec(BaseModel):
     # extra="forbid" like every top-level input model. Without it a
     # nested typo was silently dropped: `validate_model_spec` -- the
@@ -562,6 +642,18 @@ class DatasetSpec(BaseModel):
     start: str = Field(..., description="Start date YYYY-MM-DD.")
     end: str = Field(..., description="End date YYYY-MM-DD.")
     features: List[FeatureSpec] = Field(..., min_length=1)
+    derived: List[DerivedFeatureSpec] = Field(
+        default_factory=list,
+        description=(
+            "Features computed from other features on the same row — "
+            "'momentum per unit of volatility', the spread between two "
+            "horizons of one feature. Evaluated in the order written, after "
+            "the missing-value policy and before lags, so a derived column "
+            "can be lagged like any other and a lag of it is a lag of the "
+            "filled inputs. Pointwise only: a fitted derivation such as a "
+            "residual belongs in preprocessing, where the fold boundary is."
+        ),
+    )
     target: TargetSpec
     benchmark: str = Field(
         "SPY",
@@ -714,6 +806,33 @@ class DatasetSpec(BaseModel):
             f"features would produce duplicate panel column(s): {dupes} — two aliases "
             "(or an alias and another feature's id) resolve to the same column name."
         )
+
+    @model_validator(mode="after")
+    def _derived_features_are_resolvable(self) -> "DatasetSpec":
+        """Every derived input already exists, and no name is claimed twice.
+
+        Inputs may name a base feature or a derived one defined EARLIER,
+        which is what makes a cycle inexpressible rather than detected: by
+        the time a name can be referenced it has already been produced.
+        """
+        available = {f.output_name for f in self.features}
+        for derived in self.derived:
+            if derived.name in available:
+                raise ValueError(
+                    f"derived feature {derived.name!r} collides with a column "
+                    "that already exists. Give it a name of its own."
+                )
+            missing = [name for name in derived.inputs if name not in available]
+            if missing:
+                raise ValueError(
+                    f"derived feature {derived.name!r} reads {missing}, which "
+                    f"is not available where it is defined. Known here: "
+                    f"{sorted(available)}. An input must be a feature of this "
+                    "spec or a derived feature defined EARLIER in the list — "
+                    "earlier only, so a cycle cannot be written."
+                )
+            available.add(derived.name)
+        return self
 
     @model_validator(mode="after")
     def _start_before_end(self) -> "DatasetSpec":
