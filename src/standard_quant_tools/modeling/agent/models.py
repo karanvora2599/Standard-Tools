@@ -1454,6 +1454,23 @@ class EvaluateModelPortfolioResult(ExplainsNulls):
         "audit record still points at.",
     )
     equity_curve_uri: str
+    target_weights_ref: str = Field(
+        ...,
+        description="The same weight panel as a handoff reference "
+        "(`sqt://weight_panel/...`). The URI above is a path, and "
+        "`handoff.register` refuses to adopt a path for a non-external kind, "
+        "so without this an agent holding the result could not hand the "
+        "weights to anything — this evaluation was a terminal node.",
+    )
+    equity_curve_ref: str = Field(
+        ...,
+        description="The simulated equity curve as a handoff reference "
+        "(`sqt://equity_curve/...`), which is what every reference-taking "
+        "tool accepts: get_deflated_sharpe_ratio, the PBO procedure, the "
+        "reality check, a re-simulation under different costs. This is the "
+        "one number that answers 'would this have made money', and it could "
+        "not previously be deflated.",
+    )
     provenance: Dict[str, Any] = Field(
         ...,
         description="Prediction, weight and equity-curve hashes plus the "
@@ -2553,6 +2570,15 @@ class JoinPointInTimeResult(BaseModel):
     model_config = _NO_PROTECTED_NAMESPACES
 
     dataset_id: str
+    joined_dataset_id: Optional[str] = Field(
+        None,
+        description="The joined panel registered as a dataset: pass THIS to "
+        "run_model_experiment, not the dataset you joined onto. None when the "
+        "source panel carries no label, since there would be nothing to fit. "
+        "Without it this tool was a dead end — the joined frame existed as a "
+        "path nothing could read, while the join is the stated route to event "
+        "features.",
+    )
     joined_uri: str = Field(
         ..., description="sqt:// reference to the panel with the fields added."
     )

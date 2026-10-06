@@ -591,3 +591,64 @@ class TestAgentSurface:
         # already have been sanitized, not left for a strict parser to reject.
         json.dumps(payload, allow_nan=False)
         assert payload["model_id"] == registered_model
+
+
+class TestItIsNotATerminalNode:
+    """The evaluation publishes its two outputs as handoff references.
+
+    It returned parquet PATHS only. `handoff.register` refuses to adopt a
+    path for a non-external kind, so an agent holding the result could not
+    mint a reference, and everything downstream takes one: re-simulating
+    under different costs, `get_deflated_sharpe_ratio`, the PBO procedure,
+    the reality check, capacity estimation.
+
+    So the one number that answers "would this have made money" was the one
+    number that could never be deflated. Both kinds already existed.
+    """
+
+    def test_both_refs_come_back(self, registered_model):
+        result = evaluate_model_portfolio(registered_model)
+        assert result["target_weights_ref"].startswith("sqt://weight_panel/")
+        assert result["equity_curve_ref"].startswith("sqt://equity_curve/")
+        # The paths stay, for existing callers and the MCP resource layer.
+        assert result["target_weights_uri"]
+        assert result["equity_curve_uri"]
+
+    def test_the_refs_resolve_to_the_same_values(self, registered_model):
+        """A reference nothing can read is no better than a path."""
+        from standard_quant_tools.agent.runtimes import handoff
+
+        result = evaluate_model_portfolio(registered_model)
+
+        curve = handoff.resolve(result["equity_curve_ref"], expect="equity_curve")
+        assert len(curve) == result["coverage"]["n_simulated_bars"]
+
+        panel = handoff.resolve(result["target_weights_ref"], expect="weight_panel")
+        # A mapping kind resolves as {ticker: {date: weight}}.
+        assert set(panel) <= set(result["coverage"]["entities"])
+        assert panel
+
+    def test_a_mismatched_kind_fails_by_name(self, registered_model):
+        """Which is the reason to address the bytes by kind at all."""
+        from standard_quant_tools.agent.runtimes import handoff
+
+        result = evaluate_model_portfolio(registered_model)
+        with pytest.raises(ValidationError):
+            handoff.resolve(result["equity_curve_ref"], expect="weight_panel")
+
+    def test_the_tool_surface_carries_them(self, registered_model):
+        """The library result and the agent-facing model are separate
+        shapes, and only the second is what the service answers with."""
+        result = evaluate_model_portfolio_tool(
+            EvaluateModelPortfolioInput(model_id=registered_model)
+        )
+        assert result.target_weights_ref.startswith("sqt://weight_panel/")
+        assert result.equity_curve_ref.startswith("sqt://equity_curve/")
+
+    def test_evaluating_twice_yields_the_same_references(self, registered_model):
+        """The name carries the frame's own digest, so a reference that
+        resolved once resolves to the same value."""
+        first = evaluate_model_portfolio(registered_model)
+        second = evaluate_model_portfolio(registered_model)
+        assert first["equity_curve_ref"] == second["equity_curve_ref"]
+        assert first["target_weights_ref"] == second["target_weights_ref"]

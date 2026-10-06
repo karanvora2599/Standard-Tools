@@ -1119,6 +1119,39 @@ def _simulate_predictions_portfolio(
         overwrite=True,
     )
 
+    # THE SAME BYTES, ADDRESSED BY KIND. The URIs above stay for existing
+    # callers and the MCP resource layer; these are what every
+    # reference-taking tool in every runtime accepts. Without them this
+    # function was a terminal node: `handoff.register` refuses to adopt a
+    # path for a non-external kind, so an agent holding the URI could not
+    # mint a reference, and the equity curve of the one simulation that
+    # answers "would this have made money" could not be handed to
+    # `get_deflated_sharpe_ratio`, the PBO procedure, the reality check or
+    # a re-simulation under different costs.
+    #
+    # `overwrite=True` for the same reason the artifacts above use it: the
+    # name carries the frame's own digest, so re-evaluating the same
+    # portfolio rewrites identical bytes under an identical name, and a
+    # reference that resolved once resolves to the same value.
+    from standard_quant_tools.agent.runtimes import handoff
+
+    weights_ref = handoff.publish(
+        weights,
+        "weight_panel",
+        run_id,
+        f"target_weights_{weights_hash}_ref",
+        producer="modeling.evaluate_model_portfolio",
+        overwrite=True,
+    )
+    equity_curve_ref = handoff.publish(
+        equity_curve,
+        "equity_curve",
+        run_id,
+        f"portfolio_equity_{equity_hash}_ref",
+        producer="modeling.evaluate_model_portfolio",
+        overwrite=True,
+    )
+
     return {
         "metrics": metrics,
         "transform_diagnostics": transform_diagnostics,
@@ -1133,6 +1166,8 @@ def _simulate_predictions_portfolio(
         },
         "target_weights_uri": weights_uri,
         "equity_curve_uri": equity_uri,
+        "target_weights_ref": weights_ref,
+        "equity_curve_ref": equity_curve_ref,
         # The inputs that determined the numbers above and that this
         # function can vouch for on its own. A caller holding a manifest
         # adds the lineage only it knows (the predictions digest, the

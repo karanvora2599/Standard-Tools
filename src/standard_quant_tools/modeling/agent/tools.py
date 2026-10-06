@@ -145,6 +145,7 @@ from .models import (
     PitValidationResult,
     PromoteModelInput,
     PromoteModelResult,
+    ExternalTarget,
     RegisterExternalPanelInput,
     RegisterExternalPanelResult,
     RunModelExperimentInput,
@@ -4228,17 +4229,89 @@ def join_point_in_time(input_data: JoinPointInTimeInput) -> JoinPointInTimeResul
     # takes the whole row with it.
     warnings = coverage_report(joined, sorted(added))
 
+    # CONTENT-ADDRESSED, because a dataset is registered against these
+    # bytes below. The name was the fixed "pit_joined" inside the SOURCE
+    # dataset's directory, so joining twice overwrote it -- harmless while
+    # nothing read the file, and a hazard once a dataset loads from it,
+    # since the second join would change what the first one reads. The
+    # digest in the name is the convention the portfolio weights use: the
+    # same join rewrites identical bytes under an identical name.
+    from standard_quant_tools.audit.hashing import canonical_frame_hash
+
+    joined_hash = canonical_frame_hash(joined)
     uri = _artifacts.save_artifact(
-        joined, run_id=input_data.dataset_id, name="pit_joined"
+        joined,
+        run_id=input_data.dataset_id,
+        name=f"pit_joined_{joined_hash}",
+        overwrite=True,
     )
+
+    # A JOIN THAT CANNOT BE FITTED ON IS A DEAD END. `joined_uri` used to be
+    # the whole answer and nothing consumed it: no dataset id came back, so
+    # no lab tool and no experiment could read the result, while this join
+    # is the library's stated route to event features. Registered through
+    # `register_external_panel` rather than a second implementation here --
+    # a joined panel IS a feature matrix computed elsewhere, and the target
+    # declarations carry across unchanged because a built dataset records
+    # them in the shape that tool reads.
+    joined_dataset_id, registration_warnings = _register_joined_panel(
+        uri, _meta, joined
+    )
+    warnings = [*warnings, *registration_warnings]
+
     return JoinPointInTimeResult(
         dataset_id=input_data.dataset_id,
+        joined_dataset_id=joined_dataset_id,
         joined_uri=uri,
         n_rows=int(len(joined)),
         fields_added=added,
         coverage=coverage,
         warnings=warnings,
     )
+
+
+def _register_joined_panel(uri: str, meta: Dict[str, Any], joined: Any):
+    """The joined panel as a dataset that can be fitted on.
+
+    Returns (dataset_id, warnings). The id is None when the source panel
+    carries no label -- there is nothing to fit, and saying so beats
+    registering a dataset no experiment can use.
+    """
+    declared = list(meta.get("targets") or [])
+    target_id = meta.get("target_id")
+    if not declared and not target_id:
+        return None, [
+            "No dataset was registered for the joined panel: the source "
+            "dataset records no target, so there is nothing to fit. The "
+            "joined frame is at joined_uri and can be registered with "
+            "register_external_panel once it has a label."
+        ]
+
+    kwargs: Dict[str, Any] = {
+        "path": str(uri),
+        "interval": str(meta.get("interval") or "1d"),
+    }
+    if declared:
+        kwargs["targets"] = [ExternalTarget(**target) for target in declared]
+    else:
+        target_type, _, horizon = str(target_id).partition(":")
+        kwargs["target_type"] = target_type
+        kwargs["horizon"] = int(horizon)
+        kwargs["target_column"] = "target"
+        from ..dataset.alignment import LABEL_END_COL
+
+        if LABEL_END_COL in joined.columns:
+            kwargs["label_end_column"] = LABEL_END_COL
+
+    registered = register_external_panel(RegisterExternalPanelInput(**kwargs))
+    return registered.dataset_id, [
+        f"The joined panel is registered as dataset {registered.dataset_id!r} "
+        f"with {len(registered.feature_ids)} features — pass that to "
+        "run_model_experiment, not the dataset you joined onto. It is "
+        "registered BY REFERENCE against the joined artifact, so the "
+        "warnings register_external_panel records apply to it too.",
+        *registered.warnings,
+    ]
 
 
 MODELING_TOOL_DISPATCH = {
