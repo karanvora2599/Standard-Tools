@@ -201,15 +201,68 @@ class ExperimentPlan:
     n_inner_final: int = 0
     n_fits_final_search: int = 0
     final_search_hash: Optional[str] = None
+    #: Rows in the panel, and the widest fold's estimated train+test bytes
+    #: at 8 bytes a float over the expanded column count. Arithmetic over
+    #: numbers already here; None when the plan was made without a panel.
+    n_panel_rows: Optional[int] = None
+    n_columns: Optional[int] = None
+    max_fold_bytes: Optional[int] = None
+    #: The bounds the spec asked for, None when it asked for none.
+    max_panel_rows: Optional[int] = None
+    max_fold_bytes_allowed: Optional[int] = None
+    #: 'low', 'medium' or 'high' -- the class, never converted to seconds.
+    fit_cost: Optional[str] = None
 
     @property
     def within_budget(self) -> bool:
-        return self.n_fits <= self.max_fits
+        return (
+            self.n_fits <= self.max_fits
+            and not self._row_overrun()
+            and not self._byte_overrun()
+        )
+
+    def _row_overrun(self) -> bool:
+        return (
+            self.max_panel_rows is not None
+            and self.n_panel_rows is not None
+            and self.n_panel_rows > self.max_panel_rows
+        )
+
+    def _byte_overrun(self) -> bool:
+        return (
+            self.max_fold_bytes_allowed is not None
+            and self.max_fold_bytes is not None
+            and self.max_fold_bytes > self.max_fold_bytes_allowed
+        )
 
     def refuse_over_budget(self, where: str) -> None:
         """Raise, by name, when the plan costs more than the spec allows."""
         if self.within_budget:
             return
+        # MEMORY BEFORE FITS. A panel too big to hold is refused on its own
+        # terms rather than through a fit count that may be perfectly
+        # modest -- the two ceilings answer different questions, and
+        # reporting the wrong one sends the caller to shrink the wrong
+        # thing.
+        if self._row_overrun():
+            raise ValidationError(
+                f"{where}: this dataset has {self.n_panel_rows:,} rows, over "
+                f"budget.max_panel_rows={self.max_panel_rows:,}. Nothing was "
+                "fitted. Shorten the window, narrow the universe, or raise "
+                "the bound on purpose. Columns have carried a ceiling for "
+                "this reason since MAX_EXPANDED_COLUMNS; rows are the other "
+                "half of the same product."
+            )
+        if self._byte_overrun():
+            raise ValidationError(
+                f"{where}: the widest fold's train and test matrices come to "
+                f"about {self.max_fold_bytes / 1e6:,.0f} MB "
+                f"({self.n_panel_rows:,} rows x {self.n_columns} columns x 8 "
+                f"bytes), over budget.max_fold_bytes="
+                f"{self.max_fold_bytes_allowed / 1e6:,.0f} MB. Nothing was "
+                "fitted. Fewer lags, fewer features, a shorter window, or "
+                "raise the bound on purpose."
+            )
         raise ValidationError(
             f"{where}: this spec implies {self.n_fits:,} estimator fits "
             f"({len(self.folds)} fold(s) x ({self.fits_per_fit} + "
@@ -235,6 +288,16 @@ class ExperimentPlan:
             "n_fits": self.n_fits,
             "max_fits": self.max_fits,
             "within_budget": self.within_budget,
+            # The other half of the cost. Bytes are exact arithmetic over
+            # what is already here; `fit_cost` is the class the registry
+            # records and is NOT multiplied into a duration, because it
+            # never was one.
+            "n_panel_rows": self.n_panel_rows,
+            "n_columns": self.n_columns,
+            "max_fold_bytes": self.max_fold_bytes,
+            "max_panel_rows": self.max_panel_rows,
+            "max_fold_bytes_allowed": self.max_fold_bytes_allowed,
+            "fit_cost": self.fit_cost,
             "dataset_hash": self.dataset_hash,
             "n_purged": self.n_purged,
             "folds": [f.to_dict() for f in self.folds],
@@ -400,6 +463,17 @@ def plan_experiment(
         if search is not None
         else None
     )
+    # Widest fold's train+test matrices at 8 bytes a float. The purge has
+    # already been applied to `n_train_rows`, so this is the rows that will
+    # actually be held, not the rows the fold spans.
+    n_columns = len(feature_ids) if feature_ids else None
+    max_fold_bytes = None
+    if n_columns and panel is not None:
+        widest = max(
+            (int(f.n_train_rows or 0) + int(f.n_test_rows or 0)) for f in folds
+        ) if folds else 0
+        max_fold_bytes = int(widest * n_columns * 8)
+
     return ExperimentPlan(
         method=model_spec.validation.method,
         n_dates=n_dates,
@@ -416,7 +490,36 @@ def plan_experiment(
         n_inner_final=int(n_inner_final),
         n_fits_final_search=n_fits_final_search,
         final_search_hash=final_search_hash,
+        # The memory half of the cost. `n_train_rows` per fold and the
+        # column count are already here, so this is arithmetic and not an
+        # estimate of anything unmeasured: 8 bytes a float, train plus
+        # test, at the widest fold.
+        n_panel_rows=int(len(panel)) if panel is not None else None,
+        n_columns=n_columns,
+        max_fold_bytes=max_fold_bytes,
+        max_panel_rows=model_spec.budget.max_panel_rows,
+        max_fold_bytes_allowed=model_spec.budget.max_fold_bytes,
+        # The CLASS the registry records, carried as it stands. Never
+        # multiplied into seconds: it was never a duration.
+        fit_cost=_fit_cost_class(model_spec),
     )
+
+
+def _fit_cost_class(model_spec: ModelSpec) -> Optional[str]:
+    """'low', 'medium' or 'high' for this spec's estimator, or None.
+
+    Reported beside the fit count so a reader sees "3,200 fits of a
+    high-cost estimator". The library keeps this a class on purpose --
+    `EstimatorCost.fit_cost` is "read off one fit" -- and turning it into
+    seconds here would manufacture a measurement nobody made.
+    """
+    try:
+        from .estimators.registry import estimator_cost
+
+        cost = estimator_cost(model_spec.task, model_spec.estimator.type)
+        return cost.fit_cost if cost is not None else None
+    except Exception:  # pragma: no cover - a report must not fail a run
+        return None
 
 
 __all__ = [

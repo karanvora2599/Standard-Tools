@@ -2275,6 +2275,15 @@ def run_experiment(
                 "node_hash": fold.node_hash,
             }
         )
+        # EVERY ENTRY UNDER THIS FOLD'S KEY IS NOW DEAD. The key is
+        # content-hashed per fold, so nothing can look it up again -- and
+        # without this the train and test matrices of every completed fold
+        # stayed resident until the run ended. Only for a cache this run
+        # OWNS: a caller that passed its own `fold_cache` is reusing
+        # entries across runs by definition, and evicting them would turn
+        # its cache into a miss-generator.
+        if fold_cache is None:
+            cache.drop(fold.preprocessing_hash)
         if outcome["early_stopping"] is not None:
             # The stopping rule of histogram boosting or an MLP as this fold
             # ran it: the validation dates, the rows the embargo left out,

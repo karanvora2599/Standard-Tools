@@ -1610,6 +1610,35 @@ class ComputeBudgetSpec(BaseModel):
             "validate_model_spec reports the count without running."
         ),
     )
+    max_panel_rows: Optional[int] = Field(
+        None,
+        ge=1,
+        description=(
+            "Ceiling on the panel's rows, refused before anything is built. "
+            "Columns are already bounded (MAX_EXPANDED_COLUMNS = 400) "
+            "because an agent 'would otherwise discover the cost as a memory "
+            "error rather than as a refusal' — rows are the other half of "
+            "the same product and had no bound at all. At 1-minute bars, 500 "
+            "names over 10 years is about 500 million rows. None means no "
+            "row bound, which is the behaviour every existing spec has."
+        ),
+    )
+    max_fold_bytes: Optional[int] = Field(
+        None,
+        ge=1,
+        description=(
+            "Ceiling on the estimated bytes one fold's train and test "
+            "matrices occupy — rows x expanded columns x 8, which is "
+            "arithmetic over numbers the plan already holds. Refused before "
+            "anything is fitted. None means no bound.\n\n"
+            "There is deliberately no ceiling in SECONDS: "
+            "`EstimatorCost.fit_cost` is a class ('low', 'medium', 'high') "
+            "read off one fit, not a duration, and multiplying it by a fit "
+            "count would produce a number that looks measured and is "
+            "guessed. The plan reports the fit count beside the cost class "
+            "instead."
+        ),
+    )
     max_parallelism: Union[
         Literal["auto"], Annotated[int, Field(ge=1, le=MAX_PARALLELISM_CEILING)]
     ] = Field(

@@ -366,8 +366,18 @@ class QuantileTransform(Preprocessor):
             raw = np.quantile(values, grid)
             # Collapse tied quantile values to one knot at their mean
             # probability, so np.interp sees a strictly increasing axis.
-            unique = np.unique(raw)
-            knots = np.array([grid[raw == v].mean() for v in unique])
+            #
+            # QUADRATIC IN n_quantiles AS A LIST COMPREHENSION. `grid[raw
+            # == v]` rescans the whole of `raw` once per unique value --
+            # 10^6 comparisons per column at the default 1,000 and 10^8 at
+            # the 10,000 ceiling, for a step whose whole job is a table
+            # lookup. `return_inverse` gives each element's bucket in one
+            # pass and `bincount` sums the grid into those buckets, so the
+            # mean per knot is two linear passes over the same arrays:
+            # O(q log q) for the sort inside `unique`, and nothing else.
+            # The knots are identical -- the same groups, the same means.
+            unique, inverse = np.unique(raw, return_inverse=True)
+            knots = np.bincount(inverse, weights=grid) / np.bincount(inverse)
             quantiles[c] = [float(v) for v in unique]
             probabilities[c] = [float(p) for p in knots]
         return {"quantiles": quantiles, "probabilities": probabilities}

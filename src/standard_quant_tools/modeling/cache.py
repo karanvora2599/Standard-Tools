@@ -132,5 +132,31 @@ class FoldCache:
         if projectable and (widest is None or set(widest.columns) < set(wanted)):
             self._widest[key] = entry
 
+    def drop(self, key: str) -> int:
+        """Forget every entry under one key; returns how many were held.
+
+        NOTHING EVICTED BEFORE THIS. The key is content-hashed per fold, so
+        in a single run every entry under a finished fold's key is provably
+        dead the moment that fold is recorded -- no later lookup can ever
+        name it again -- and the matrices were held until the run ended
+        anyway. On a long walk-forward that is every fold's train and test
+        matrices resident at once, which is the memory the run did not need
+        to be using.
+
+        The engine calls this only for a cache it OWNS. A caller that
+        passed its own `fold_cache` is reusing entries across runs by
+        definition, and dropping them would turn its cache into a
+        miss-generator; `stats()` makes the difference visible either way.
+
+        The counters are left alone: hits and misses describe what the run
+        did, not what it is still holding, and resetting them here would
+        make a run that evicted look like a run that never looked.
+        """
+        dropped = [k for k in self._exact if k[0] == key]
+        for entry_key in dropped:
+            del self._exact[entry_key]
+        self._widest.pop(key, None)
+        return len(dropped)
+
 
 __all__ = ["FoldCache", "column_wise_pipeline"]

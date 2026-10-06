@@ -191,6 +191,44 @@ class PlanModelExperimentResult(BaseModel):
             "nothing is fitted either way."
         ),
     )
+    n_panel_rows: Optional[int] = Field(
+        None,
+        description=(
+            "Rows in the panel. Columns have carried a ceiling since "
+            "MAX_EXPANDED_COLUMNS = 400, because an agent 'would otherwise "
+            "discover the cost as a memory error rather than as a refusal'; "
+            "rows are the other half of the same product and had no bound. "
+            "None when the plan was made from the date axis alone."
+        ),
+    )
+    n_columns: Optional[int] = Field(
+        None, description="Expanded feature columns, lags included."
+    )
+    max_fold_bytes: Optional[int] = Field(
+        None,
+        description=(
+            "The widest fold's train plus test matrices, rows x columns x 8. "
+            "Arithmetic over numbers already in the plan, not an estimate of "
+            "anything unmeasured."
+        ),
+    )
+    max_panel_rows: Optional[int] = Field(
+        None, description="The row ceiling this spec asked for, if any."
+    )
+    max_fold_bytes_allowed: Optional[int] = Field(
+        None, description="The byte ceiling this spec asked for, if any."
+    )
+    fit_cost: Optional[str] = Field(
+        None,
+        description=(
+            "'low', 'medium' or 'high' for this spec's estimator — the class "
+            "the registry records, read off one fit. Beside `n_fits` it says "
+            "'8 fits of a high-cost estimator', which is the honest form of "
+            "pricing a plan. It is NOT multiplied into seconds: it was never "
+            "a duration, and a number that looks measured and is guessed is "
+            "worse than no number."
+        ),
+    )
     dataset_hash: Optional[str] = None
     has_panel: bool = Field(
         ...,

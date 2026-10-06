@@ -72,6 +72,28 @@ def _is_default_pooled(steps: Sequence[Tuple[str, Dict[str, Any]]]) -> bool:
     return True
 
 
+def _fused_span(steps: Sequence[Tuple[str, Dict[str, Any]]]) -> Optional[int]:
+    """Where the fused pair starts in this pipeline, or None.
+
+    A CONTIGUOUS SUBSEQUENCE, not the whole list. The kernel serves
+    `winsorize(0.01, 0.99)` immediately followed by `zscore`, and that pair
+    is no less present for having a step on either side of it -- but
+    `_is_default_pooled` compared the whole pipeline, so one extra step
+    dropped everything to pandas. Measured in this repo's own table: the
+    same ablation is 4.37 s on the default pipeline and 43.8 s with
+    `winsorize + quantile_transform + zscore`.
+
+    The first match wins. A pipeline carrying the pair twice is already
+    strange, and taking the earlier one keeps the choice independent of
+    what follows it.
+    """
+    pair = len(_DEFAULT_POOLED)
+    for start in range(len(steps) - pair + 1):
+        if _is_default_pooled(steps[start : start + pair]):
+            return start
+    return None
+
+
 def _normalize(steps: Sequence[Any]) -> List[Tuple[str, Dict[str, Any]]]:
     """(type, resolved params) per step, from StepSpec objects or tuples."""
     out = []
@@ -153,13 +175,26 @@ def fit_pipeline(
         stats = fit_preprocessing(X)
         return _fused_state(columns, stats), apply_preprocessing(X, stats)
 
+    # The pair may sit anywhere in a longer pipeline, and the kernel serves
+    # it there too. The entries it writes are the ordinary two, so the
+    # state is the same whichever path produced it.
+    span = _fused_span(normalized)
     fitted: List[Dict[str, Any]] = []
     current = X
-    for step_type, params in normalized:
+    index = 0
+    while index < len(normalized):
+        if index == span:
+            stats = fit_preprocessing(current)
+            fitted.extend(_fused_state(list(current.columns), stats)["steps"])
+            current = apply_preprocessing(current, stats)
+            index += len(_DEFAULT_POOLED)
+            continue
+        step_type, params = normalized[index]
         step = build_step(step_type, params)
         state = step.fit(current, ctx)
         current = step.transform(current, state, ctx)
         fitted.append({"type": step_type, "params": params, "state": state})
+        index += 1
     return {"version": STATE_VERSION, "columns": columns, "steps": fitted}, current
 
 
@@ -184,10 +219,36 @@ def apply_pipeline(
     stats = _fused_stats(state)
     if stats is not None:
         return apply_preprocessing(X, stats)
+
+    entries = state["steps"]
+    span = _fused_span(
+        [(e["type"], e.get("params") or {}) for e in entries]
+    )
     current = X
-    for entry in state["steps"]:
+    index = 0
+    while index < len(entries):
+        if index == span:
+            pair = entries[index : index + len(_DEFAULT_POOLED)]
+            lo, hi = pair[0]["state"]["lo"], pair[0]["state"]["hi"]
+            mean, std = pair[1]["state"]["mean"], pair[1]["state"]["std"]
+            current = apply_preprocessing(
+                current,
+                {
+                    c: {
+                        "lo": lo[c],
+                        "hi": hi[c],
+                        "mean": mean[c],
+                        "std": std[c],
+                    }
+                    for c in current.columns
+                },
+            )
+            index += len(_DEFAULT_POOLED)
+            continue
+        entry = entries[index]
         step = build_step(entry["type"], entry.get("params") or {})
         current = step.transform(current, entry.get("state") or {}, ctx)
+        index += 1
     return current
 
 
