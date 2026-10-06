@@ -1053,6 +1053,34 @@ def _simulate_predictions_portfolio(
                 "was dropped (fill_price='next_open')."
             )
     if len(rebalance_dates) < 2:
+        # WHICH OF THE TWO CAUSES. This blamed the frequency in both
+        # cases, so a run whose predictions simply do not overlap the price
+        # calendar was told to "use a higher frequency" -- and found daily
+        # failing identically, because daily is already the highest and
+        # the frequency was never the problem. Measured live: 504
+        # prediction dates, 0 tradable at weekly AND at daily.
+        selected = select_rebalance_dates(
+            pd.DatetimeIndex(score_panel.index), transform.rebalance_frequency
+        )
+        if len(selected) >= 2:
+            first, last = score_panel.index[0], score_panel.index[-1]
+            raise ValidationError(
+                f"{len(selected)} rebalance date(s) were selected from "
+                f"{len(score_panel.index)} prediction date(s), and "
+                f"{len(rebalance_dates)} of them are in the master trading "
+                "calendar — the intersection of every entity's price index. "
+                "The frequency is not the problem and raising it will not "
+                f"help. The predictions span {pd.Timestamp(first).date()} to "
+                f"{pd.Timestamp(last).date()}; the prices "
+                + (
+                    f"span {pd.Timestamp(master_index[0]).date()} to "
+                    f"{pd.Timestamp(master_index[-1]).date()}"
+                    if len(master_index)
+                    else "are empty for this universe"
+                )
+                + ". Fetch prices covering the prediction window, or check "
+                "that the entities are the ones the model was fitted on."
+            )
         raise ValidationError(
             f"only {len(rebalance_dates)} tradable rebalance date(s) remain after "
             f"applying rebalance_frequency={transform.rebalance_frequency!r} to "

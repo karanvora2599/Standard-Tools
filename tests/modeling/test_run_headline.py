@@ -293,33 +293,54 @@ class TestTheHeadlineInARun:
         )
         headline = noise["validation_report"]["headline"]
         assert headline["metric"] == "auc" and headline["null"] == 0.5
-        assert headline["t_stat"] is None and headline["n_dates"] is None
-        assert headline["beats_null"] == (headline["value"] > 0.5)
+        # An AUC now carries the Hanley-McNeil z and p, from the class
+        # counts `oos_metrics` already records. This asserted
+        # `beats_null == (value > 0.5)` with `t_stat is None` -- the point
+        # comparison written down as the contract, under which an AUC of
+        # 0.5000001 was a win.
+        assert headline["t_stat"] is not None
+        assert headline["n_dates"] is not None
+        if headline["beats_null"] is True:
+            assert headline["p_value"] < 0.05
         signal = run_experiment(
             _dataset(1.0, classification=True),
             _spec("logistic", task="classification"),
             "ds",
             register=False,
         )
-        assert signal["validation_report"]["headline"]["beats_null"] is True
+        strong = signal["validation_report"]["headline"]
+        # A real signal still reads as one -- the test has to be passable.
+        assert strong["beats_null"] is True and strong["p_value"] < 0.05
         assert not [w for w in signal["warnings"] if w.startswith("auc is")]
 
 
 class TestThePointComparisons:
-    def test_survival_is_compared_with_one_half(self):
+    def test_survival_is_compared_and_NOT_tested(self):
+        """A concordance mean has no standard error in `oos_metrics`, so
+        there is nothing to test it with.
+
+        This asserted `beats_null is False` at 0.48 and `is True` at 0.6 --
+        a bare `value > null` recorded as a verdict. Both are None now,
+        which is the third state meaning "no test was made": it refuses a
+        deployment stage rather than opening one, and does not pretend the
+        difference was shown to be real. Inventing a standard error here
+        would repeat in a new place the mistake this change removes.
+        """
         from standard_quant_tools.modeling.engine import _headline_report
 
-        block, warnings = _headline_report(
-            SurvivalAdapter(), "survival", {"cs_concordance_mean": 0.48}, None, 5
-        )
-        assert block["null"] == 0.5 and block["beats_null"] is False
-        (line,) = warnings
-        assert "the risk scores did not order the durations" in line
-        assert "rank survival models by" in line
-        block, warnings = _headline_report(
-            SurvivalAdapter(), "survival", {"cs_concordance_mean": 0.6}, None, 5
-        )
-        assert block["beats_null"] is True and warnings == []
+        for value in (0.48, 0.6):
+            block, warnings = _headline_report(
+                SurvivalAdapter(),
+                "survival",
+                {"cs_concordance_mean": value},
+                None,
+                5,
+            )
+            assert block["null"] == 0.5
+            assert block["beats_null"] is None
+            (line,) = warnings
+            assert "COMPARISON rather than a test" in line
+            assert "beats_null is null, not false" in line
 
     def test_a_missing_or_undefined_headline_is_not_judged(self):
         """A three-class AUC is NaN; nothing to compare, nothing said."""

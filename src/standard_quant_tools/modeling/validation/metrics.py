@@ -623,6 +623,13 @@ def classification_metrics(
     truth = np.asarray(y_true, dtype=float)
     positive_rate = float(np.mean(truth == 1.0))
     metrics["positive_rate"] = positive_rate
+    # THE COUNT BEHIND THE RATE. A rate with no n supports no test, and
+    # the headline's AUC test needs exactly this: the Hanley-McNeil
+    # standard error is a function of the area and the two class counts,
+    # which `positive_rate` and this between them give. Without it an AUC
+    # could only be COMPARED with 0.5, which is how 0.5000001 came to read
+    # as a win.
+    metrics["n_rows"] = int(truth.size)
 
     # THE LARGEST CLASS SHARE, over however many classes there are.
     # `max(positive_rate, 1 - positive_rate)` is the binary formula, and

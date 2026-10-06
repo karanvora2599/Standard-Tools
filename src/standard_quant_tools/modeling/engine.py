@@ -528,6 +528,55 @@ def _frequency_reason(n_dates: int, horizon: "int | None") -> str:
     return f"{COSINE_FREQUENCY_SCALE:g} x {n_dates:,}^(2/3)"
 
 
+def auc_vs_chance(
+    value: float, oos_metrics: Dict[str, float]
+) -> "Optional[Tuple[float, float, float, float]]":
+    """
+    (z, two-sided p, n_positive, n_negative) for an AUC against 0.5, or None.
+
+    Hanley and McNeil's standard error, which needs only the area and the
+    two class counts -- and both counts are recoverable from metrics the
+    run already records, `positive_rate` and `n_oos_rows`. So this costs
+    nothing and replaces a bare `value > null` that called an AUC of
+    0.5000001 a win.
+
+        Q1 = A / (2 - A)          the probability two positives both rank
+                                  above a random negative
+        Q2 = 2A^2 / (1 + A)       and the mirror for two negatives
+
+    Returns None when the counts are not recorded or a class is empty --
+    an AUC over one class is not an AUC -- so the caller reports "no test
+    was made" rather than a number with nothing behind it.
+    """
+    rate = oos_metrics.get("positive_rate")
+    # The run records `n_oos_rows` and the metrics function records
+    # `n_rows`; `score_predictions` goes through the second, so reading
+    # only the first made the scoring surface untestable for no reason.
+    rows = oos_metrics.get("n_oos_rows")
+    if rows is None:
+        rows = oos_metrics.get("n_rows")
+    if rate is None or rows is None:
+        return None
+    n_positive = float(rate) * float(rows)
+    n_negative = (1.0 - float(rate)) * float(rows)
+    if n_positive < 1.0 or n_negative < 1.0:
+        return None
+    area = float(value)
+    q1 = area / (2.0 - area)
+    q2 = 2.0 * area * area / (1.0 + area)
+    variance = (
+        area * (1.0 - area)
+        + (n_positive - 1.0) * (q1 - area * area)
+        + (n_negative - 1.0) * (q2 - area * area)
+    ) / (n_positive * n_negative)
+    if not math.isfinite(variance) or variance <= 0.0:
+        return None
+    z_stat = (area - 0.5) / math.sqrt(variance)
+    # Two-sided normal tail without pulling in scipy for one number.
+    p_value = math.erfc(abs(z_stat) / math.sqrt(2.0))
+    return z_stat, p_value, n_positive, n_negative
+
+
 def _headline_report(
     adapter: Any,
     task: str,
@@ -580,19 +629,51 @@ def _headline_report(
     )
 
     if adapter.headline_series is None:
-        beats = bool(value > null)
-        block["beats_null"] = beats
-        if beats:
-            return block, []
+        # A POINT COMPARISON IS NOT A TEST. This read `value > null`, so an
+        # AUC of 0.5000001 "beat its null" exactly as 0.75 did, with no
+        # sample size and no p-value behind the True. That True is now
+        # load-bearing -- Carbon's promotion gate opens on it -- so the
+        # weakest possible evidence opened the strongest door.
         where = "out of sample" if scope == "out-of-sample" else f"on the {scope} rows"
         what = (
             "the predicted probabilities did not separate the classes"
             if task == "classification"
             else "the risk scores did not order the durations"
         )
+        tested = auc_vs_chance(value, oos_metrics)
+        if tested is None:
+            # No test exists here from what is recorded -- a concordance
+            # mean has no standard error in `oos_metrics` -- and inventing
+            # one would repeat the mistake in a new place. None is the
+            # third state the rest of the system reads as "no test was
+            # made", which refuses a deployment stage rather than opening
+            # one.
+            block["beats_null"] = None
+            return block, [
+                f"{metric} is {value:.4f} against the {null} a random "
+                f"ordering scores, and that is a COMPARISON rather than a "
+                "test: nothing here gives it a standard error, so whether "
+                "the difference could have arisen by chance is unknown. "
+                f"beats_null is null, not false. {rank_by}"
+            ]
+        z_stat, p_value, n_positive, n_negative = tested
+        block.update(
+            {
+                "t_stat": z_stat,
+                "p_value": p_value,
+                "n_dates": int(n_positive + n_negative),
+            }
+        )
+        beats = bool(p_value < 0.05 and value > null)
+        block["beats_null"] = beats
+        if beats:
+            return block, []
         return block, [
-            f"{metric} is {value:.4f}, at or below the {null} a random "
-            f"ordering scores: {where}, {what}. {rank_by}"
+            f"{metric} is {value:.4f} against the {null} a random ordering "
+            f"scores, and the difference is not significant: z = {z_stat:.2f}, "
+            f"two-sided p = {p_value:.3f} by the Hanley-McNeil standard error "
+            f"on {int(n_positive):,} positive and {int(n_negative):,} "
+            f"negative rows. {where}, {what}. {rank_by}"
         ]
 
     values = (

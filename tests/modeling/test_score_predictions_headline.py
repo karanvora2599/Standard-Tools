@@ -157,8 +157,12 @@ class TestWhatTheRunWouldSay:
         assert result.headline["metric"] == "auc"
         assert result.headline["null"] == 0.5
         assert result.headline["value"] == result.metrics["auc"]
-        assert result.headline["t_stat"] is None
-        assert result.beats_null is (result.metrics["auc"] > 0.5) is True
+        # Tested now, not compared: this asserted `t_stat is None` and
+        # `beats_null is (auc > 0.5)`, which is the point comparison as a
+        # contract. A True has to be backed by a p-value.
+        assert result.headline["t_stat"] is not None
+        assert result.beats_null is True
+        assert result.headline["p_value"] < 0.05
         assert result.beats_baseline is None
 
 
