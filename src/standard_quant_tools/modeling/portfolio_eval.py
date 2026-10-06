@@ -537,7 +537,46 @@ def transform_predictions_to_weights(
         )
         per_date.append(diag)
 
+    # TURNOVER DAMPING, after the books are built and before anything is
+    # measured off them. A blend toward the previous row: every name moves
+    # the same fraction of its own distance, so the target's ordering
+    # survives exactly and what is given up is the speed of adjustment.
+    #
+    # It is applied here, sequentially, because each row's starting point
+    # is the row before it AFTER damping -- not the undamped target, which
+    # would let the book drift arbitrarily far from where it actually is.
+    n_damped = 0
+    realized_turnover: List[float] = []
+    if spec.max_turnover is not None:
+        cap = float(spec.max_turnover)
+        previous = np.zeros(final.shape[1])
+        for i in range(final.shape[0]):
+            target = np.nan_to_num(final[i])
+            move = float(np.abs(target - previous).sum())
+            if i > 0 and move > cap > 0.0:
+                final[i] = previous + (cap / move) * (target - previous)
+                n_damped += 1
+                move = cap
+            else:
+                final[i] = target
+            realized_turnover.append(move)
+            previous = final[i]
+
     out = pd.DataFrame(final, index=score_panel.index, columns=score_panel.columns)
+
+    if spec.max_turnover is not None:
+        # The books moved, so the exposures must be re-measured from the
+        # rows that will actually be traded rather than from the targets
+        # they were damped away from.
+        damped = out.to_numpy(dtype=float)
+        per_date = [
+            {
+                **diag,
+                "realized_gross": float(np.abs(row).sum()),
+                "realized_net": float(row.sum()),
+            }
+            for diag, row in zip(per_date, damped)
+        ]
 
     realized_gross = np.array([d["realized_gross"] for d in per_date])
     shortfall = realized_gross < spec.gross_exposure - 1e-6
@@ -554,6 +593,14 @@ def transform_predictions_to_weights(
         "n_dates_below_target_gross": int(shortfall.sum()),
         "n_dates_with_no_position": int(empty_dates.sum()),
         "max_abs_weight": float(np.nanmax(np.abs(final))) if final.size else 0.0,
+        # What the damping did, when it was asked for. None is not zero:
+        # a run that damped nothing and a run that could not damp are
+        # different, and only one of them was asked.
+        "max_turnover": spec.max_turnover,
+        "n_dates_damped": n_damped if spec.max_turnover is not None else None,
+        "mean_rebalance_turnover": (
+            float(np.mean(realized_turnover)) if realized_turnover else None
+        ),
     }
 
     # THE SHORTFALL HAS TO SAY SOMETHING. `n_dates_below_target_gross` was

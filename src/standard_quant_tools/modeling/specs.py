@@ -2012,6 +2012,27 @@ class PredictionTransformSpec(BaseModel):
         description="Bars of trailing returns used for volatility_scale. "
         "Counted in BARS of the dataset's own interval, not calendar days.",
     )
+    max_turnover: Optional[float] = Field(
+        None,
+        gt=0.0,
+        description=(
+            "The most sum(|w_t - w_{t-1}|) a single rebalance may be. Above "
+            "it the book moves only the fraction of the way to the target "
+            "that the cap allows — every name the same fraction of its own "
+            "distance, so the target's ordering is preserved exactly and "
+            "what is given up is speed of adjustment, not the signal.\n\n"
+            "Turnover was measurable and not controllable: "
+            "`mean_turnover_pct` is reported after the simulation and "
+            "nothing in the transform moved it, so 'wins on IC, loses on "
+            "turnover-adjusted economics' was a sentence with no lever "
+            "behind it.\n\n"
+            "A damped row no longer hits gross_exposure and net_exposure "
+            "exactly: it lies between two books that each did. That drift "
+            "is reported rather than corrected, because re-applying the "
+            "targets would change the turnover again — a loop with no fixed "
+            "point worth claiming. None (the default) damps nothing."
+        ),
+    )
     rebalance_frequency: Literal["daily", "weekly", "monthly"] = Field(
         "weekly",
         description=(
