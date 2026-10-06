@@ -318,3 +318,61 @@ class TestJoinKeysOfDifferentResolutions:
         )
         with pytest.raises(ValidationError, match="available_time"):
             asof_join(panel, records, fields=["eps"])
+
+
+class TestAZonedPanelJoins:
+    """A timezone-aware panel is the common case and used to raise.
+
+    Found by driving the tool against a registered dataset, not by the
+    suite, whose fixtures are all naive:
+
+        MergeError: incompatible merge keys [0] datetime64[ns, UTC] and
+        dtype('<M8[ns]'), must be the same type
+
+    `_one_resolution` reconciled the two sides' resolution -- which pandas 3
+    made necessary -- and not their zone, so the join raised before doing
+    anything on every panel carrying one. That is why the dead end behind
+    it went unnoticed: the tool could not be reached.
+    """
+
+    @staticmethod
+    def _zoned(frame, column, zone="UTC"):
+        out = frame.copy()
+        out[column] = pd.to_datetime(out[column]).dt.tz_localize(zone)
+        return out
+
+    def test_a_zoned_panel_and_naive_records(self):
+        panel = self._zoned(_panel(["2026-11-01"], entities=("AAA",)), "date")
+        joined = asof_join(panel, EARNINGS, fields=["eps"])
+        assert joined["eps"].notna().all()
+
+    def test_naive_panel_and_zoned_records(self):
+        panel = _panel(["2026-11-01"], entities=("AAA",))
+        records = self._zoned(EARNINGS, "available_time")
+        records = self._zoned(records, "event_time")
+        joined = asof_join(panel, records, fields=["eps"])
+        assert joined["eps"].notna().all()
+
+    def test_both_zoned_in_different_zones(self):
+        """Converted to UTC rather than one to the other, so the answer
+        does not depend on which argument came first."""
+        panel = self._zoned(
+            _panel(["2026-11-01"], entities=("AAA",)), "date", "America/New_York"
+        )
+        records = self._zoned(EARNINGS, "available_time", "Europe/London")
+        records = self._zoned(records, "event_time", "Europe/London")
+        joined = asof_join(panel, records, fields=["eps"])
+        assert joined["eps"].notna().all()
+
+    def test_a_zone_does_not_change_which_record_is_chosen(self):
+        """The instants are the same, so the as-of answer is the same."""
+        panel = _panel(["2026-11-01"], entities=("AAA",))
+        naive = asof_join(panel, EARNINGS, fields=["eps"])
+        zoned = asof_join(self._zoned(panel, "date"), EARNINGS, fields=["eps"])
+        assert list(naive["eps"]) == list(zoned["eps"])
+
+    def test_two_naive_sides_are_untouched(self):
+        """The common fixture shape must not start carrying a zone."""
+        panel = _panel(["2026-11-01"], entities=("AAA",))
+        joined = asof_join(panel, EARNINGS, fields=["eps"])
+        assert getattr(joined["date"].dtype, "tz", None) is None

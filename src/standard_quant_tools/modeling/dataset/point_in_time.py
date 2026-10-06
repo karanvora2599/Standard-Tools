@@ -216,18 +216,59 @@ def asof_join(
 _UNITS = ("s", "ms", "us", "ns")
 
 
+def _one_timezone(left: pd.Series, right: pd.Series) -> Tuple[pd.Series, pd.Series]:
+    """Both join keys in one frame of reference, as UTC instants.
+
+    Naive where both sides are naive, so a panel and a record set that
+    never carried a zone are untouched.
+    """
+    left_zone = getattr(left.dtype, "tz", None)
+    right_zone = getattr(right.dtype, "tz", None)
+    if left_zone is None and right_zone is None:
+        return left, right
+    if left_zone is not None and right_zone is not None:
+        return left.dt.tz_convert("UTC"), right.dt.tz_convert("UTC")
+    # Exactly one side is aware. It becomes the instants it already
+    # represents, which the naive side is then directly comparable with.
+    if left_zone is not None:
+        return left.dt.tz_convert("UTC").dt.tz_localize(None), right
+    return left, right.dt.tz_convert("UTC").dt.tz_localize(None)
+
+
 def _one_resolution(
     left: pd.Series, left_name: str, right: pd.Series, right_name: str
 ) -> Tuple[pd.Series, pd.Series]:
-    """Both join keys at one resolution, the finer of the two.
+    """Both join keys comparable: one timezone, then one resolution.
 
-    pandas 3 keeps the resolution a column was built with -- a parsed date
-    or a range comes out in microseconds where another source carries
-    nanoseconds -- and `merge_asof` refuses keys whose resolutions differ,
-    where pandas 2 held every timestamp in nanoseconds. The finer unit is
-    used so no timestamp is rounded; a key too far from 1970 for it is
-    refused by name.
+    TIMEZONE FIRST, and this is the one that was missing. A registered
+    panel's date column is timezone-aware and a records frame parsed from
+    date strings is naive, so `merge_asof` refused the pair outright --
+    measured against a real dataset: "incompatible merge keys [0]
+    datetime64[ns, UTC] and dtype('<M8[ns]'), must be the same type". The
+    join raised before it could do anything, on every panel carrying a
+    zone, which is most of them.
+
+    An aware column becomes its UTC instants, naive -- the rule
+    `preprocessing/base.datetime_values` already applies wherever this
+    library compares dates, for the reason it gives there: "two values of
+    one column are equal, ordered and apart by the same amount as instants
+    as they were as zoned timestamps". An as-of join needs ordering and
+    distance and nothing else, so the conversion costs it nothing. Two
+    aware sides are both moved to UTC rather than one to the other's zone,
+    so the result does not depend on which argument came first.
+
+    What a zone DOES change is a calendar label, and nothing here reads
+    one: the comparison is `available_time <= date` on the timestamps the
+    caller supplied, which is what the docstring above promises.
+
+    THEN RESOLUTION, the finer of the two. pandas 3 keeps the resolution a
+    column was built with -- a parsed date or a range comes out in
+    microseconds where another source carries nanoseconds -- and
+    `merge_asof` refuses keys whose resolutions differ, where pandas 2 held
+    every timestamp in nanoseconds. The finer unit is used so no timestamp
+    is rounded; a key too far from 1970 for it is refused by name.
     """
+    left, right = _one_timezone(left, right)
     units = [getattr(s.dt, "unit", "ns") for s in (left, right)]
     finest = max(units, key=_UNITS.index)
     converted = []
