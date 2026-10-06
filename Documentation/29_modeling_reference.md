@@ -87,7 +87,7 @@ Parameter values are bounded as well as named; see [15_modeling.md](15_modeling.
 | survival | `xgboost_aft` | *optional: `xgboost`* | `aft_loss_distribution`, `aft_loss_distribution_scale`, `colsample_bytree`, `learning_rate`, `max_depth`, `min_child_weight`, `n_estimators`, `reg_alpha`, `reg_lambda`, `subsample` |
 | survival | `xgboost_cox` | *optional: `xgboost`* | `colsample_bytree`, `learning_rate`, `max_depth`, `min_child_weight`, `n_estimators`, `reg_alpha`, `reg_lambda`, `subsample` |
 
-## Preprocessing steps (9)
+## Preprocessing steps (10)
 
 Composed in order by `PreprocessingSpec.steps`; each is fitted on the fold's training rows and its state applied to the test rows, then persisted with the model as `preprocessing_state.json`. `normalization='pooled'` resolves to `winsorize` then `zscore`; `'cross_sectional'` to `cross_sectional_standardize`.
 
@@ -95,6 +95,7 @@ Composed in order by `PreprocessingSpec.steps`; each is fitted on the fold's tra
 |---|---|---|---|---|---|
 | `cross_sectional_rank` |  |  | stateless | yes | Replace each value with its rank inside that date's cross-section, mapped to [-0.5, 0.5] — the same mapping the forward_return_rank TARGET uses, so feature and label share a scale. Immune to the fat tails that move a mean and a standard deviation, so pair it with a rank target for a model judged on cross-sectional IC. Stateless: nothing crosses the fold boundary. A one-entity date has no cross-section and becomes NaN. |
 | `cross_sectional_standardize` | `clip_sigma` | `clip_sigma=3.0` | stateless | yes | Standardize within each date's cross-section and clip at clip_sigma, so what reaches the model is each entity's position relative to its peers that day. Stateless: nothing crosses the fold boundary. |
+| `group_demean` |  | `groups={}` | stateless | yes | Subtract each date's GROUP mean, so the model sees an entity's position within its sector rather than its sector's move. `groups` is an entity -> label map and is a PARAMETER, not a lookup: a sector read at fit time would neutralise differently next month, so a registered model would not reproduce, and it would apply today's classification to history. Stateless. A group of one, and an entity with no group, are NaN rather than a fabricated zero. |
 | `impute` | `fill_value`, `strategy` | `fill_value=0.0`, `strategy='median'` | fitted on train | yes | Fill NaN with the training fold's median or mean, or a constant. A missing test value receives the TRAINING statistic, never the test fold's own. |
 | `missing_indicator` |  |  | stateless | yes | Add a <column>__missing indicator (1.0 where NaN) for every input column, keeping the originals. Meaningful once the dataset's missing-data policy lets NaN reach the engine; pair with impute. |
 | `pca_whiten` | `n_components`, `whiten` | `n_components=8`, `whiten=True` | fitted on train | no | Replace the columns with their leading n_components principal components, fitted on the training fold and scaled to unit variance when whiten is set. Not column-wise: every output depends on every input. Refuses NaN; put impute before it. |

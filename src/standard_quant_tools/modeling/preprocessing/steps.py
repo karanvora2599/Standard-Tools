@@ -290,6 +290,90 @@ class CrossSectionalRank(Preprocessor):
         return values.where(counts > 1)
 
 
+class GroupDemean(Preprocessor):
+    """
+    Subtract each date's GROUP mean, so what reaches the model is the
+    entity's position within its own sector rather than its sector's.
+
+    A momentum feature on a panel of banks and miners carries the
+    industry's move as well as the name's; a model fitted on it learns the
+    industry rotation and reports it as stock selection. Demeaning within
+    the group removes the part every name in that group shared.
+
+    THE GROUPS ARE A PARAMETER AND NOT A LOOKUP. A step that asked a
+    provider for a sector at fit time would neutralise differently next
+    month against the same panel, so a registered model would not
+    reproduce: its manifest would describe a pipeline whose behaviour lives
+    outside it. It is also the survivorship shape this repo documents for
+    universe membership — today's classification applied to history. Passed
+    in, the map is validated at the spec boundary, hashed into the dataset
+    and model identity, and written into `preprocessing_state.json` with
+    everything else. `sector_groups` builds one from a provider, once, and
+    returns the warning that belongs with it.
+
+    Stateless, for the reason `cross_sectional_standardize` is: each date's
+    groups are formed from that date's own cross-section, which is
+    contemporaneous information a live model also has, so nothing crosses
+    the fold boundary.
+
+    A GROUP OF ONE, AND AN ENTITY WITH NO GROUP, ARE BOTH NaN. A singleton
+    group's mean is the name itself, so demeaning it gives exactly 0.0 for
+    every such row — a fabricated "average for its sector" that destroys
+    the feature while looking like a measurement. NaN is the same call
+    `targets/builtin._stage_rank` makes where it says a one-name
+    cross-section "is not a measurement", and the same one
+    `cross_sectional_rank` makes. The impute step then treats it like any
+    other hole, the engine reports it in `missing_rate_train`, and a column
+    that is NaN in every training row of a fold is refused by name.
+    """
+
+    id = "group_demean"
+    stateless = True
+    column_wise = True
+
+    def fit(self, X: pd.DataFrame, ctx: FoldContext) -> Dict[str, Any]:
+        return {}
+
+    def transform(self, X: pd.DataFrame, state: Dict[str, Any], ctx: FoldContext):
+        if ctx.dates is None or len(ctx.dates) != len(X):
+            raise ValidationError(
+                "group_demean needs one date per row: got "
+                f"{0 if ctx.dates is None else len(ctx.dates)} dates for "
+                f"{len(X)} rows."
+            )
+        if ctx.entities is None:
+            raise ValidationError(
+                "group_demean needs the entity of each row to look its group "
+                "up, and this panel carries none. A panel without entity "
+                "identity has no cross-section to neutralise within."
+            )
+        groups = self.params.get("groups") or {}
+        if not groups:
+            raise ValidationError(
+                "group_demean was given no `groups` map. The groups are a "
+                "parameter rather than a lookup on purpose — a sector read "
+                "at fit time would neutralise differently next month and a "
+                "registered model would not reproduce. Build one with "
+                "`sector_groups` and pass it in."
+            )
+        if X.empty or X.shape[1] == 0:
+            return X.copy()
+
+        labels = np.array(
+            [str(groups.get(str(entity), "")) for entity in ctx.entities],
+            dtype=object,
+        )
+        keys = [np.asarray(ctx.dates), labels]
+        grouped = X.groupby(keys, sort=False)
+        demeaned = X - grouped.transform("mean")
+        # A group of one has no within-group position to report, and an
+        # unmapped entity has no group at all. Both are NaN rather than a
+        # fabricated zero.
+        demeaned = demeaned.where(grouped.transform("count") > 1)
+        demeaned[labels == ""] = np.nan
+        return demeaned
+
+
 class RobustScale(Preprocessor):
     """
     Centre by the training median and scale by the median absolute
@@ -633,6 +717,25 @@ register_preprocessor(
 
 register_preprocessor(
     PreprocessorDefinition(
+        id=GroupDemean.id,
+        description=(
+            "Subtract each date's GROUP mean, so the model sees an entity's "
+            "position within its sector rather than its sector's move. "
+            "`groups` is an entity -> label map and is a PARAMETER, not a "
+            "lookup: a sector read at fit time would neutralise differently "
+            "next month, so a registered model would not reproduce, and it "
+            "would apply today's classification to history. Stateless. A "
+            "group of one, and an entity with no group, are NaN rather than "
+            "a fabricated zero."
+        ),
+        cls=GroupDemean,
+        schema=EstimatorParamSchema(bounds={}),
+        default_params={"groups": {}},
+    )
+)
+
+register_preprocessor(
+    PreprocessorDefinition(
         id=RobustScale.id,
         description=(
             "Centre by the training median and scale by the median absolute "
@@ -723,6 +826,7 @@ register_preprocessor(
 
 __all__ = [
     "CrossSectionalRank",
+    "GroupDemean",
     "CrossSectionalStandardize",
     "Impute",
     "MissingIndicator",

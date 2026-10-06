@@ -331,7 +331,7 @@ class TestTheEngineLabelsByThePipelineOutput:
 
 
 class TestTheCatalog:
-    def test_all_nine_steps_are_registered_with_their_flags(self):
+    def test_all_ten_steps_are_registered_with_their_flags(self):
         reported = {
             e["id"]: e for e in modeling_capabilities()["preprocessing"]["steps"]
         }
@@ -343,6 +343,10 @@ class TestTheCatalog:
             # "immune to a fat-tailed return distribution" and the same
             # argument on the feature side had no step to make it.
             "cross_sectional_rank",
+            # Sector-neutralisation. Its blocker -- "per-ticker
+            # beta/sector metadata this repo does not carry" -- had gone
+            # stale: TickerInfo.sector exists.
+            "group_demean",
             "robust_scale",
             "quantile_transform",
             "missing_indicator",
@@ -357,3 +361,14 @@ class TestTheCatalog:
         # also has, so nothing crosses the fold boundary.
         assert reported["cross_sectional_rank"]["stateless"] is True
         assert reported["cross_sectional_rank"]["params"] == []
+        # The groups are a PARAMETER and not a lookup: a sector read at fit
+        # time would neutralise differently next month, so a registered
+        # model would not reproduce.
+        assert reported["group_demean"]["stateless"] is True
+        # `params` lists the SCHEMA's bounded names and `groups` is an
+        # entity -> label map, not a bounded scalar, so it is advertised
+        # through `default_params` instead. A reader of the catalog still
+        # sees that the parameter exists, which matters: the step refuses
+        # without it.
+        assert reported["group_demean"]["params"] == []
+        assert reported["group_demean"]["default_params"] == {"groups": {}}
