@@ -34,16 +34,16 @@ scoped to four categories rather than all of them, so it advertises 58 of the
 
 | Runtime | Tools | Schema cost | Categories | Deep documentation |
 |---|---:|---:|---|---|
-| `research` | 42 | 62 KB | `screener`, `analysis`, `quant_research` | [08_analysis.md](08_analysis.md), [23_inference.md](23_inference.md) |
-| `modeling` | 38 | 182 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
+| `research` | 42 | 63 KB | `screener`, `analysis`, `quant_research` | [08_analysis.md](08_analysis.md), [23_inference.md](23_inference.md) |
+| `modeling` | 38 | 197 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
 | `backtest` | 35 | 86 KB | `backtest_execution`, `backtest_validation`, `custom_signal` | [04_backtesting.md](04_backtesting.md), [24_overfitting.md](24_overfitting.md) |
 | `meta` | 25 | 25 KB | `discovery`, `provenance` | [27_meta.md](27_meta.md), [10_auditability.md](10_auditability.md) |
 | `data` | 21 | 36 KB | *(one surface)* | [26_data.md](26_data.md) |
-| `portfolio` | 19 | 36 KB | `portfolio_risk` | [05_portfolio.md](05_portfolio.md) |
+| `portfolio` | 19 | 37 KB | `portfolio_risk` | [05_portfolio.md](05_portfolio.md) |
 | `delta_one` | 18 | 44 KB | *(one surface)* | [28_delta_one.md](28_delta_one.md) |
 | `microstructure` | 17 | 31 KB | *(one surface)* | [22_microstructure.md](22_microstructure.md) |
 | `derivatives` | 12 | 23 KB | *(one surface)* | [21_derivatives.md](21_derivatives.md) |
-| `feature_lab` | 11 | 47 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
+| `feature_lab` | 11 | 50 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
 | **Total** | **238** | | | |
 
 ---
@@ -1220,7 +1220,7 @@ How concentrated a portfolio is, in numbers with known interpretations. Effectiv
 Turn alpha scores into portfolio weights and STOP, so the weights can be looked at before anything is simulated. Rank, top/bottom, z-score or volatility-scaled construction, optionally dollar-neutralised. This is the step that is otherwise buried inside a larger operation: when a model's backtest looks wrong, seeing the weights is what separates a bad signal from bad construction. Returns TARGET weights, not a P&L.
 
 **Required:** `scores_ref`, `run_id`, `name`  
-**Optional:** `method`, `gross_leverage`, `n_long`, `n_short`, `returns_ref`, `vol_lookback`, `dollar_neutral`
+**Optional:** `method`, `gross_leverage`, `n_long`, `n_short`, `returns_ref`, `vol_lookback`, `net_exposure`, `max_position_weight`, `dollar_neutral`
 
 #### `estimate_covariance`
 
