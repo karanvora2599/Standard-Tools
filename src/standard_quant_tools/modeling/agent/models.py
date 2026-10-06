@@ -1567,11 +1567,28 @@ class BacktestModelSignalResult(BaseModel):
         description=(
             "An `sqt://signal_panel/...` reference holding {ticker: {date: "
             "value}} with every value exactly -1.0, 0.0 or 1.0. Pass it to "
-            "run_signal_panel_backtest as `signal_panel_ref` with "
-            "signal_type='direction' and fill_price='next_open'. Nothing was "
-            "backtested here: the fill convention, the costs, the tickers "
-            "and the date range are backtest decisions, and this runtime "
-            "does not own them."
+            "run_signal_panel_backtest as `signal_panel_ref` — or just copy "
+            "`backtest_arguments`, which carries this and the rest. Nothing "
+            "was backtested here: the costs, the capital and the benchmark "
+            "are backtest decisions and this runtime does not own them. The "
+            "window and the fill convention are not among them — they are "
+            "properties of this panel, and they are in "
+            "`backtest_arguments` for that reason."
+        ),
+    )
+    backtest_arguments: Dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "What to pass run_signal_panel_backtest to price THIS panel: the "
+            "reference, the tickers, the span the panel actually covers, and "
+            "fill_price='next_open'. Copy it rather than retyping. That fill "
+            "convention is not a preference — a signal dated t is computed "
+            "from bar t's own OHLC and is not knowable until t's close has "
+            "printed, so pricing it at that close is look-ahead, and "
+            "SignalPanelBacktestInput.fill_price DEFAULTS to 'close'. The "
+            "costs, the capital and the benchmark are not here: those are "
+            "the backtester's decisions, while the window and the fill are "
+            "properties of the panel."
         ),
     )
     model_id: str

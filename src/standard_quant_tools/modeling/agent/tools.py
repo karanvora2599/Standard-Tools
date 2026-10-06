@@ -1325,8 +1325,32 @@ def backtest_model_signal(
     ]
     warnings.extend(list(manifest.dataset_warnings or []))
 
+    # THE ARGUMENTS THIS PANEL IMPLIES, so the next call is a copy and not
+    # a reconstruction. `SignalPanelBacktestInput.fill_price` defaults to
+    # "close", which is precisely the look-ahead the warning above
+    # describes -- a signal dated t is not knowable until t's close has
+    # printed. Leaving that to whether the caller read a warning string and
+    # retyped a parameter is the gap; so is the window, since tickers and
+    # dates retyped by hand can price a different span than was validated.
+    #
+    # Only what the panel determines. The costs, the capital and the
+    # benchmark are genuinely the backtester's decisions and are left to it,
+    # which is what this runtime's docstring means by not owning them.
+    backtest_arguments = {
+        "signal_panel_ref": ref,
+        "tickers": sorted(panel),
+        "start_date": calendar[0] if calendar else "",
+        "end_date": calendar[-1] if calendar else "",
+        "fill_price": "next_open",
+        # The panel holds exactly -1.0, 0.0 or 1.0, so it is a direction
+        # and not a weight. Priced as weights, a book of +1s is 1x gross
+        # per name rather than a long position.
+        "signal_type": "direction",
+    }
+
     return BacktestModelSignalResult(
         signal_panel_ref=ref,
+        backtest_arguments=backtest_arguments,
         model_id=input_data.model_id,
         task=str(manifest.task),
         entities=sorted(panel),

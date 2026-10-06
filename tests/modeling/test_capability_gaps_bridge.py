@@ -581,3 +581,88 @@ class TestScoreModelPublishesAReference:
         )
         assert result.n_observations == attached.n_rows
         assert result.n_dates == 1
+
+
+class TestTheWindowAndTheFillComeWithThePanel:
+    """The bridge returns the arguments its panel implies.
+
+    It warned, in prose, that the panel must be priced with
+    `fill_price='next_open'` -- "a signal dated t is not knowable until t's
+    close has printed". `SignalPanelBacktestInput.fill_price` defaults to
+    `"close"`. So the DEFAULT pricing of a panel this bridge publishes was
+    exactly the look-ahead the bridge told you to avoid, and the only thing
+    between them was whether the caller read a warning string and retyped a
+    parameter.
+
+    The window has the same shape: tickers and dates retyped by hand can
+    price a different span than was validated.
+    """
+
+    def test_the_arguments_describe_this_panel(self, patched_multi_factory):
+        model = _trained(_dataset())
+        result = backtest_model_signal(
+            BacktestModelSignalInput(
+                model_id=model.model_id, run_id="bridge_args", name="panel"
+            )
+        )
+        arguments = result.backtest_arguments
+        assert arguments["signal_panel_ref"] == result.signal_panel_ref
+        assert arguments["tickers"] == result.entities
+        assert arguments["start_date"] == result.first_date
+        assert arguments["end_date"] == result.last_date
+        assert arguments["signal_type"] == "direction"
+
+    def test_the_fill_is_the_one_the_warning_asks_for(self, patched_multi_factory):
+        """And it is NOT the backtester's default, which is the point."""
+        model = _trained(_dataset())
+        result = backtest_model_signal(
+            BacktestModelSignalInput(
+                model_id=model.model_id, run_id="bridge_fill", name="panel"
+            )
+        )
+        assert result.backtest_arguments["fill_price"] == "next_open"
+        assert SignalPanelBacktestInput.model_fields["fill_price"].default == "close"
+
+    def test_they_are_accepted_as_they_stand(self, patched_multi_factory):
+        """Well-formed is not enough: the point is that a caller can copy
+        them rather than reconstruct them, so the backtester has to take
+        them exactly as given."""
+        model = _trained(_dataset())
+        result = backtest_model_signal(
+            BacktestModelSignalInput(
+                model_id=model.model_id, run_id="bridge_accept", name="panel"
+            )
+        )
+        backtested = run_signal_panel_backtest(
+            SignalPanelBacktestInput(**result.backtest_arguments)
+        )
+        assert set(backtested.per_ticker) == set(result.entities)
+        assert math.isfinite(backtested.portfolio_metrics["sharpe_ratio"])
+
+    def test_copying_them_matches_reconstructing_them_by_hand(
+        self, patched_multi_factory
+    ):
+        """The hand-built call above this class is the one they replace."""
+        model = _trained(_dataset())
+        result = backtest_model_signal(
+            BacktestModelSignalInput(
+                model_id=model.model_id, run_id="bridge_same", name="panel"
+            )
+        )
+        copied = run_signal_panel_backtest(
+            SignalPanelBacktestInput(**result.backtest_arguments)
+        )
+        by_hand = run_signal_panel_backtest(
+            SignalPanelBacktestInput(
+                tickers=result.entities,
+                start_date=result.first_date,
+                end_date=result.last_date,
+                signal_panel_ref=result.signal_panel_ref,
+                signal_type=SignalType.DIRECTION,
+                fill_price="next_open",
+            )
+        )
+        assert (
+            copied.portfolio_metrics["sharpe_ratio"]
+            == by_hand.portfolio_metrics["sharpe_ratio"]
+        )
