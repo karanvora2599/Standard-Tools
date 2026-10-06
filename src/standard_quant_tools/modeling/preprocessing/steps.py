@@ -32,6 +32,8 @@ from standard_quant_tools.modeling.estimators.bounds import (
 )
 from standard_quant_tools.modeling.features.transforms import (
     _refuse_infinite_training_values,
+    cross_sectional_counts,
+    rank_within_date,
     standardize_cross_sectional,
 )
 
@@ -222,6 +224,70 @@ class CrossSectionalStandardize(Preprocessor):
         return standardize_cross_sectional(
             X, ctx.dates, float(self.params["clip_sigma"])
         )
+
+
+class CrossSectionalRank(Preprocessor):
+    """
+    Replace each value with its rank inside that date's cross-section,
+    mapped to [-0.5, 0.5].
+
+    WHY A RANK AND NOT A STANDARDIZATION. `cross_sectional_standardize`
+    subtracts a mean and divides by a standard deviation, and both are
+    moved by the same fat tails the features have: one 8-sigma name sets
+    the scale for every other name that day. A rank is moved by none of
+    them -- it is immune to the distribution's shape entirely, and only
+    the ORDER survives, which for a model judged on cross-sectional IC is
+    the part being scored.
+
+    This is the argument the library already makes on the label side.
+    `forward_return_rank` "matches how the model is SCORED, which is the
+    cross-sectional rank IC, and is immune to a fat-tailed return
+    distribution", and the measured failure on the feature side is on
+    record in `Documentation/15_modeling.md`: a feature whose
+    cross-sectional standard deviation ran 0.23 to 22.4, where "a rank of
+    it sorted names by price level as much as by momentum".
+
+    THE MAPPING IS THE LABEL'S. `(rank - 1) / (n - 1) - 0.5`, exactly what
+    `targets/builtin._stage_rank` applies, so a ranked feature and a ranked
+    target are on the same scale and a coefficient between them means what
+    it looks like. Raw ranks would not be: a 30-name date ranks 1..30 and a
+    500-name date 1..500, so the same feature would carry a different scale
+    on every date.
+
+    Stateless, for the reason `cross_sectional_standardize` is: each date
+    is ranked against its own cross-section, which is contemporaneous
+    information a live model also has, so nothing is fitted and nothing
+    crosses the fold boundary.
+
+    A date with one entity has no cross-section and becomes NaN rather than
+    a fabricated 0.0 -- the same decision `_stage_rank` makes, where it says
+    a one-name rank "is not a measurement". The impute step then treats it
+    like any other missing value, and a panel of mostly single-entity dates
+    produces an all-NaN column, which the fold check refuses by name.
+    """
+
+    id = "cross_sectional_rank"
+    stateless = True
+    column_wise = True
+
+    def fit(self, X: pd.DataFrame, ctx: FoldContext) -> Dict[str, Any]:
+        return {}
+
+    def transform(self, X: pd.DataFrame, state: Dict[str, Any], ctx: FoldContext):
+        if ctx.dates is None or len(ctx.dates) != len(X):
+            raise ValidationError(
+                "cross_sectional_rank needs one date per row: got "
+                f"{0 if ctx.dates is None else len(ctx.dates)} dates for "
+                f"{len(X)} rows."
+            )
+        if X.empty or X.shape[1] == 0:
+            return X.copy()
+        dates = np.asarray(ctx.dates)
+        ranks = rank_within_date(X, dates)
+        counts = cross_sectional_counts(X, dates)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            values = (ranks - 1.0) / (counts - 1.0) - 0.5
+        return values.where(counts > 1)
 
 
 class RobustScale(Preprocessor):
@@ -538,6 +604,25 @@ register_preprocessor(
 
 register_preprocessor(
     PreprocessorDefinition(
+        id=CrossSectionalRank.id,
+        description=(
+            "Replace each value with its rank inside that date's "
+            "cross-section, mapped to [-0.5, 0.5] — the same mapping the "
+            "forward_return_rank TARGET uses, so feature and label share a "
+            "scale. Immune to the fat tails that move a mean and a standard "
+            "deviation, so pair it with a rank target for a model judged on "
+            "cross-sectional IC. Stateless: nothing crosses the fold "
+            "boundary. A one-entity date has no cross-section and becomes "
+            "NaN."
+        ),
+        cls=CrossSectionalRank,
+        schema=EstimatorParamSchema(bounds={}),
+        default_params={},
+    )
+)
+
+register_preprocessor(
+    PreprocessorDefinition(
         id=RobustScale.id,
         description=(
             "Centre by the training median and scale by the median absolute "
@@ -627,6 +712,7 @@ register_preprocessor(
 )
 
 __all__ = [
+    "CrossSectionalRank",
     "CrossSectionalStandardize",
     "Impute",
     "MissingIndicator",

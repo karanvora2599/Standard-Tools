@@ -331,7 +331,7 @@ class TestTheEngineLabelsByThePipelineOutput:
 
 
 class TestTheCatalog:
-    def test_all_eight_steps_are_registered_with_their_flags(self):
+    def test_all_nine_steps_are_registered_with_their_flags(self):
         reported = {
             e["id"]: e for e in modeling_capabilities()["preprocessing"]["steps"]
         }
@@ -339,6 +339,10 @@ class TestTheCatalog:
             "winsorize",
             "zscore",
             "cross_sectional_standardize",
+            # The rank the LABEL side already had. `forward_return_rank` is
+            # "immune to a fat-tailed return distribution" and the same
+            # argument on the feature side had no step to make it.
+            "cross_sectional_rank",
             "robust_scale",
             "quantile_transform",
             "missing_indicator",
@@ -348,3 +352,8 @@ class TestTheCatalog:
         assert reported["pca_whiten"]["column_wise"] is False
         assert reported["missing_indicator"]["stateless"] is True
         assert reported["impute"]["params"] == ["fill_value", "strategy"]
+        # Stateless for the reason cross_sectional_standardize is: each
+        # date is ranked against its own cross-section, which a live model
+        # also has, so nothing crosses the fold boundary.
+        assert reported["cross_sectional_rank"]["stateless"] is True
+        assert reported["cross_sectional_rank"]["params"] == []

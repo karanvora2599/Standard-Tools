@@ -66,6 +66,10 @@ from .validation.comparison import (
 )
 from .validation.conformal import conformal_radius, held_out_residuals
 from .validation.diagnostics import fold_feature_importance, summarize_importance
+from .validation.permutation import (
+    permutation_importance,
+    summarize_permutation,
+)
 from .validation.distributional import distributional_metrics, quantile_column
 from .validation.metrics import (
     aggregate_cross_sectional_ic,
@@ -1663,6 +1667,7 @@ def run_experiment(
     early_stopping_notes: List[EarlyStoppingFit] = []
     fold_metrics = []
     fold_importance = []
+    fold_permutation = []
     # The columns the ESTIMATOR sees: the pipeline's output, which is the
     # dataset's feature columns for every step that maps columns onto
     # themselves and something else for a step that adds or replaces them
@@ -2186,6 +2191,31 @@ def run_experiment(
                 None if stopping is None else stopping.report(estimator)
             ),
             "importance": fold_feature_importance(estimator, prepared["fold_columns"]),
+            # SCORED BY THE FOLD'S OWN PATH. `_predict_fold` is what
+            # produced `metrics` above, so a drop is in the number this
+            # fold already reports -- not a second metric invented here.
+            # The estimator is fitted and the test rows are sliced, which
+            # is why this is the only place it can be cheap.
+            "permutation": (
+                permutation_importance(
+                    lambda frame: _predict_fold(
+                        adapter,
+                        model_spec,
+                        estimator,
+                        frame,
+                        test_y,
+                        datetime_values(test_df["date"]),
+                        train_y=train_y,
+                    )[0].get(adapter.headline, float("nan")),
+                    test_X,
+                    datetime_values(test_df["date"]),
+                    columns=prepared["fold_columns"],
+                    n_repeats=int(model_spec.permutation_importance.n_repeats),
+                    seed=int(model_spec.permutation_importance.seed),
+                )
+                if model_spec.permutation_importance is not None
+                else None
+            ),
         }
 
     def _record_fold(prepared: Dict[str, Any], outcome: Dict[str, Any]) -> None:
@@ -2258,6 +2288,8 @@ def run_experiment(
         tested_dates[fold.test_positions] = True
         fold_metrics.append(metrics)
         fold_importance.append(outcome["importance"])
+        if outcome["permutation"] is not None:
+            fold_permutation.append(outcome["permutation"])
         oos_frame = pd.DataFrame(
             {
                 "date": test_df["date"].to_numpy(),
@@ -2350,6 +2382,13 @@ def run_experiment(
         if prefix == adapter.headline_series:
             headline_series = pooled
     importance_summary = summarize_importance(fold_importance, model_columns or [])
+    # The spread ACROSS FOLDS is reported beside the mean, because a
+    # feature that mattered in one fold and not the others mattered in one
+    # regime, and a mean alone hides that the way a mean of fold metrics
+    # hides an unstable model.
+    permutation_summary = (
+        summarize_permutation(fold_permutation) if fold_permutation else None
+    )
 
     # Sample size discounted for target overlap. A `horizon`-bar forward
     # return generated every bar produces labels sharing horizon-1 of their
@@ -2587,6 +2626,9 @@ def run_experiment(
         # Where feature_importance_summary came from: 'coefficients',
         # 'feature_importances' or 'none'.
         "importance_source": _importance_source(fold_importance),
+        # None when it was not asked for, so an absent key and a measured
+        # zero are not the same thing.
+        "permutation_importance": permutation_summary,
         "folds": fold_records,
     }
 

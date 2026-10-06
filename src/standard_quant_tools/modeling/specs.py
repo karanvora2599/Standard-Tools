@@ -1565,6 +1565,36 @@ class ConformalSpec(BaseModel):
     )
 
 
+class PermutationImportanceSpec(BaseModel):
+    """Scramble each feature on the fold's own test rows and watch the
+    headline fall."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    n_repeats: int = Field(
+        5,
+        ge=1,
+        le=50,
+        description=(
+            "Permutations per feature per fold. One repeat is a single draw "
+            "of a random permutation and its drop carries the variance of "
+            "that draw, which on a short test window is most of the number. "
+            "The cost is linear in this: n_features x n_repeats PREDICTS per "
+            "fold, against the one FIT per feature per fold that "
+            "run_feature_ablation pays."
+        ),
+    )
+    seed: int = Field(
+        0,
+        ge=0,
+        description=(
+            "Seeds the permutations, so a run reports the same drops twice. "
+            "Separate from ModelSpec.random_seed: changing how the features "
+            "were shuffled must not change how the model was fitted."
+        ),
+    )
+
+
 class ModelSpec(BaseModel):
     # extra="forbid" like every top-level input model. Without it a
     # nested typo was silently dropped: `validate_model_spec` -- the
@@ -1587,6 +1617,25 @@ class ModelSpec(BaseModel):
             "point score, and the metrics gain the pinball loss per level, "
             "the crossing rate, and coverage and width for each symmetric "
             "pair such as 0.05 and 0.95."
+        ),
+    )
+    permutation_importance: Optional[PermutationImportanceSpec] = Field(
+        None,
+        description=(
+            "Measure each feature by scrambling it within each date on the "
+            "fold's own test rows and watching the headline fall. Off by "
+            "default because it costs predictions; `coef_` and "
+            "`feature_importances_` are reported for free because the "
+            "estimator computed them while fitting.\n\n"
+            "It answers a different question from run_feature_ablation, "
+            "which REFITS without the feature and so lets the others take "
+            "over its job: that is 'would a model built without this have "
+            "been worse', while this is 'does THIS model use it'. A feature "
+            "with a perfect substitute scores near zero under ablation and "
+            "can score high here, and the difference is information.\n\n"
+            "Shuffled WITHIN each date: a global shuffle would move a value "
+            "into another date's cross-section and break the panel as well "
+            "as the feature, so the drop would confound the two."
         ),
     )
     intervals: Optional[ConformalSpec] = Field(
