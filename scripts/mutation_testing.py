@@ -296,6 +296,33 @@ MUTATIONS: List[Mutation] = [
         "            )",
         "tests/surface/test_invariants.py",
     ),
+    Mutation(
+        # The fixed 9.0 back as the default: calibrated for independent
+        # noise, it fired on 40 of 40 no-shift AR(0.9) bases.
+        "basis dislocation: a fixed threshold whatever the basis's memory",
+        SRC / "delta_one/basis.py",
+        "        calibrate_threshold=calibrate,\n",
+        "        calibrate_threshold=False,\n",
+        "tests/delta_one/test_a_persistent_basis_is_not_a_shift.py",
+    ),
+    Mutation(
+        # Memory read off the whole series, shift included: a step looks
+        # like persistence and raises the null that judges it.
+        "basis dislocation: measure the memory on the whole series",
+        SRC / "delta_one/basis.py",
+        '        memory_window="reference",\n',
+        '        memory_window="series",\n',
+        "tests/delta_one/test_a_persistent_basis_is_not_a_shift.py",
+    ),
+    Mutation(
+        # The warm-up's marginal sd back as the scale: no-shift AR(0.9)
+        # streams alerted 20 of 20 times against it.
+        "spread monitor: standardize by the marginal sd",
+        SRC / "delta_one/streaming.py",
+        '        z = (value - mean) / state["baseline_long_run_std"]\n',
+        "        z = (value - mean) / std\n",
+        "tests/delta_one/test_a_persistent_basis_is_not_a_shift.py",
+    ),
 ]
 
 

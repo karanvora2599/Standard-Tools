@@ -34,7 +34,6 @@ import numpy as np
 from standard_quant_tools.analysis.liquidity_events import (
     DEFAULT_REFERENCE_FRACTION,
     DEFAULT_SLACK,
-    DEFAULT_THRESHOLD,
 )
 from standard_quant_tools.delta_one.basis import basis_history, detect_basis_dislocation
 from standard_quant_tools.error import ValidationError
@@ -53,7 +52,7 @@ def basis_scan(
     min_observations: int = 30,
     top_n: int = 10,
     reference_fraction: float = DEFAULT_REFERENCE_FRACTION,
-    threshold: float = DEFAULT_THRESHOLD,
+    threshold: Optional[float] = None,
     slack: float = DEFAULT_SLACK,
     max_breaks: int = 3,
 ) -> Dict[str, Any]:
@@ -80,7 +79,11 @@ def basis_scan(
     entry of 2026-09-22, so a scan could not be made stricter than a
     single-pair call could. None of them can reorder `ranked`: the ranking
     is on |z| from `basis_history`, and these decide only which pairs carry
-    a shift beside that level.
+    a shift beside that level. `threshold=None`, the default, calibrates
+    each pair's threshold to that pair's own memory, as the detector does;
+    at the fixed 9.0 a scan of ten persistent bases (lag-1 0.9) with no
+    shift in any of them reported a shift in all ten. Each row says the
+    threshold and memory its shift was judged at.
 
     Returns every pair it could evaluate in `ranked`, ordered by absolute
     z-score -- a pair whose basis does not move, or whose z-score is
@@ -191,6 +194,8 @@ def basis_scan(
                 row["shift_severity"] = shift.get("severity")
                 row["shift_at"] = shift.get("first_crossing")
                 row["shift_in_reference_sd"] = shift.get("shift_in_reference_sd")
+                row["shift_threshold"] = shift.get("threshold")
+                row["shift_lag1_autocorrelation"] = shift.get("lag1_autocorrelation")
                 row["warnings"].extend(shift.get("warnings", []))
             except ValidationError as exc:
                 # The level still stands even when the detector refuses --
@@ -198,6 +203,8 @@ def basis_scan(
                 # a pair whose z-score was computed fine.
                 row["shift_detected"] = None
                 row["shift_severity"] = None
+                row["shift_threshold"] = None
+                row["shift_lag1_autocorrelation"] = None
                 row["warnings"].append(f"Change detection could not run: {exc}")
 
         ranked.append(row)
@@ -249,7 +256,9 @@ def basis_scan(
         "window": window,
         "detect_shifts": bool(detect_shifts),
         "reference_fraction": float(reference_fraction),
-        "threshold": float(threshold),
+        # None when each pair's threshold was calibrated to its own memory;
+        # the row's `shift_threshold` is then the one that pair was judged at.
+        "threshold": None if threshold is None else float(threshold),
         "slack": float(slack),
         "max_breaks": int(max_breaks),
         "ranked": ranked[:top_n],

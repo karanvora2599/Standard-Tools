@@ -51,8 +51,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from standard_quant_tools.analysis.derivatives import MAX_PRICE, MIN_TIME_TO_EXPIRY
 from standard_quant_tools.analysis.liquidity_events import (
     DEFAULT_SLACK,
-    DEFAULT_THRESHOLD,
     DEGENERATE_BASELINE_CV,
+    lag1_bias_corrected,
 )
 from standard_quant_tools.error import ValidationError
 
@@ -70,7 +70,24 @@ __all__ = [
 #: Bumped when the state's shape changes. A monitor resumed from a state
 #: written by older code would otherwise carry accumulators that mean
 #: something slightly different, and the drift would be invisible.
-MONITOR_VERSION = 3
+#: 4: the warm-up measures its own persistence and the CUSUM is
+#: standardized by the long-run standard deviation, so a version-3
+#: monitor's accumulators are in different units from this one's.
+MONITOR_VERSION = 4
+
+#: Below this many effective observations -- the warm-up discounted by its
+#: own persistence, warmup * (1 - rho) / (1 + rho) -- the baseline mean is
+#: uncertain enough that false alarms run above design even with the
+#: long-run scale, and the result says so. Measured on 1,500-tick AR(1)
+#: streams with no shift: 12% at rho = 0.5 and a warm-up of 60 (20
+#: effective), 29% at rho = 0.9 and 60 (about 3), 7.5% at 0.9 and 150
+#: (about 8), 0.5% at 0.9 and 300.
+_MIN_EFFECTIVE_WARMUP = 20.0
+
+#: The persistence the long-run scale will account for, at most. Past it
+#: the long-run variance (1 + rho) / (1 - rho) diverges, and a spread that
+#: persistent is a unit root a frozen baseline cannot describe at all.
+_MAX_WARMUP_LAG1 = 0.95
 
 #: Observations gathered before the baseline is fixed. Below about this the
 #: standard deviation is too noisy to standardize against, and a detector
@@ -209,8 +226,17 @@ def new_spread_monitor(
         # `std <= 0` guard and produced a CUSUM statistic of 1.7 BILLION.
         "mean": 0.0,
         "m2": 0.0,
+        # The warm-up's lag-1 co-moment, for its persistence: products of
+        # successive values measured from the first one, which keeps the
+        # sums near the spread's own scale rather than its level.
+        "lag_origin": None,
+        "lag_cross": 0.0,
         "baseline_mean": None,
         "baseline_std": None,
+        # The warm-up's bias-corrected lag-1 autocorrelation, floored at 0,
+        # and the long-run standard deviation the CUSUM is standardized by.
+        "baseline_lag1": None,
+        "baseline_long_run_std": None,
         # Set at freeze time when the warm-up saw no real variation. Nothing
         # is tested against such a baseline -- a near-zero denominator turns
         # any move into an enormous z -- and the monitor keeps accumulating
@@ -300,6 +326,7 @@ def update_spread_monitor(
     for index, (a, b) in enumerate(zip(primary_values, reference_values)):
         value = _channel_value(channel, a, b, expiries, index)
 
+        previous = state["last_value"]
         state["n"] += 1
         state["last_value"] = value
 
@@ -308,6 +335,12 @@ def update_spread_monitor(
             delta = value - state["mean"]
             state["mean"] += delta / state["n"]
             state["m2"] += delta * (value - state["mean"])
+            # And the lag-1 co-moment, measured from the first warm-up value.
+            if state["n"] == 1:
+                state["lag_origin"] = value
+            else:
+                origin = state["lag_origin"]
+                state["lag_cross"] += (value - origin) * (previous - origin)
             if state["n"] == state["warmup"]:
                 _freeze_baseline(state, warnings)
                 froze_this_call = True
@@ -339,7 +372,18 @@ def update_spread_monitor(
             _refreeze_if_possible(state, value, warnings)
             continue
 
-        z = (value - mean) / std
+        # STANDARDIZED BY THE LONG-RUN SD, not the warm-up's own. A CUSUM
+        # sums its z's, and the sum of a persistent spread's deviations
+        # grows like its long-run variance, (1 + rho) / (1 - rho) times the
+        # marginal one -- 19 times at rho = 0.9. Against the marginal sd the
+        # threshold, calibrated on independent noise, is crossed by noise:
+        # 1,500-tick streams with no shift alerted 20 of 20 times at
+        # rho = 0.9 and 18 of 20 at 0.5. Against the long-run sd the
+        # monitor's sums are the size independent noise's are, and the
+        # rates fall to 29% and 12% at the default warm-up of 60 -- what
+        # remains is a baseline estimated from few effective observations,
+        # which `effective_warmup` reports and a longer warm-up removes.
+        z = (value - mean) / state["baseline_long_run_std"]
         state["up"] = max(0.0, state["up"] + z - state["slack"])
         state["down"] = max(0.0, state["down"] - z - state["slack"])
         statistic = max(state["up"], state["down"])
@@ -399,6 +443,24 @@ def update_spread_monitor(
             "normal the world is still abnormal. reset_spread_monitor when "
             "the new level is the one to watch from."
         )
+    lag1 = state.get("baseline_lag1")
+    effective = (
+        state["warmup"] * (1.0 - lag1) / (1.0 + lag1)
+        if lag1 is not None and not state.get("degenerate_baseline")
+        else None
+    )
+    if effective is not None and effective < _MIN_EFFECTIVE_WARMUP:
+        warnings.append(
+            f"The warm-up's lag-1 autocorrelation is {lag1:.2f}, so its "
+            f"{state['warmup']} observations carry about {effective:.0f} "
+            "independent observations' worth of baseline. The CUSUM is "
+            "standardized by the long-run sd, which accounts for the "
+            "persistence, but a baseline mean from so little is uncertain "
+            "and false alarms run above design: measured on 1,500-tick "
+            "streams with no shift, 29% at 0.9 with a warm-up of 60 and 12% "
+            "at 0.5, against 7.5% at 0.9 with 150 and 0.5% with 300. Open "
+            "the monitor with a longer warm-up for a persistent spread."
+        )
     if channel == "relative_bps":
         warnings.append(
             "The relative_bps channel STEPS at a contract roll, because the "
@@ -420,6 +482,9 @@ def update_spread_monitor(
         "threshold": float(state["threshold"]),
         "baseline_mean": state["baseline_mean"],
         "baseline_std": state["baseline_std"],
+        "lag1_autocorrelation": lag1,
+        "baseline_long_run_std": state.get("baseline_long_run_std"),
+        "effective_warmup": effective,
         "degenerate_baseline": bool(state.get("degenerate_baseline")),
         "warnings": warnings,
     }
@@ -464,8 +529,12 @@ def reset_spread_monitor(
                 "n": 0,
                 "mean": 0.0,
                 "m2": 0.0,
+                "lag_origin": None,
+                "lag_cross": 0.0,
                 "baseline_mean": None,
                 "baseline_std": None,
+                "baseline_lag1": None,
+                "baseline_long_run_std": None,
                 "degenerate_baseline": False,
             }
         )
@@ -589,6 +658,13 @@ def _refreeze_if_possible(
         return
     state["baseline_mean"] = float(mean)
     state["baseline_std"] = float(std)
+    # NO PERSISTENCE ADJUSTMENT on a re-frozen baseline. Its window is a
+    # flat stretch and then whatever supplied the dispersion -- usually the
+    # step this path exists to catch -- and a step reads as persistence: the
+    # long-run scale measured there would widen the baseline by the very
+    # move it should report.
+    state["baseline_lag1"] = 0.0
+    state["baseline_long_run_std"] = float(std)
     state["degenerate_baseline"] = False
     state["up"] = 0.0
     state["down"] = 0.0
@@ -615,6 +691,35 @@ def _degenerate(mean: float, std: float) -> bool:
     return bool(coefficient < DEGENERATE_BASELINE_CV)
 
 
+def _warmup_lag1(state: Dict[str, Any]) -> float:
+    """
+    The warm-up's lag-1 autocorrelation, bias-corrected, in [0, 0.95].
+
+    From the co-moment carried through the warm-up: with every value
+    measured from the first, y_1 = 0, and the lag-1 sum about the mean is
+    cross - (n + 1) ybar^2 + ybar y_n -- the same number
+    `_lag1_autocorrelation` forms from the values, without keeping them.
+
+    FLOORED AT ZERO, which the batch detector's null does not need. Here
+    the estimate sets a scale, and a negative one from 60 ticks of
+    independent noise would NARROW it below the marginal sd and loosen
+    the detector: measured on 1,500-tick independent streams, false alarms
+    went from 4.5% to 9.0% unfloored and to 3.0% floored.
+    """
+    n = int(state["n"])
+    m2 = float(state["m2"])
+    origin = state.get("lag_origin")
+    if n < 3 or m2 <= 0.0 or origin is None:
+        return 0.0
+    ybar = float(state["mean"]) - origin
+    last = float(state["last_value"]) - origin
+    lag_sum = float(state["lag_cross"]) - (n + 1) * ybar * ybar + ybar * last
+    rho = lag1_bias_corrected(lag_sum / m2, n)
+    if not math.isfinite(rho):
+        return 0.0
+    return float(min(max(rho, 0.0), _MAX_WARMUP_LAG1))
+
+
 def _freeze_baseline(state: Dict[str, Any], warnings: List[str]) -> None:
     """Fix the baseline from the warm-up, then never touch it again."""
     n = state["n"]
@@ -624,6 +729,9 @@ def _freeze_baseline(state: Dict[str, Any], warnings: List[str]) -> None:
     std = math.sqrt(max(variance, 0.0))
     state["baseline_mean"] = float(mean)
     state["baseline_std"] = float(std)
+    lag1 = _warmup_lag1(state)
+    state["baseline_lag1"] = lag1
+    state["baseline_long_run_std"] = float(std * math.sqrt((1.0 + lag1) / (1.0 - lag1)))
     state["degenerate_baseline"] = _degenerate(
         state["baseline_mean"], state["baseline_std"]
     )
@@ -704,8 +812,13 @@ _CARRIED = (
     "label",
     "mean",
     "m2",
+    "lag_origin",
+    "lag_cross",
+    "last_value",
     "baseline_mean",
     "baseline_std",
+    "baseline_lag1",
+    "baseline_long_run_std",
     "up",
     "down",
     "peak",
@@ -764,15 +877,29 @@ def _check_accumulators(state: Dict[str, Any]) -> None:
         state["degenerate_m2"] = non_negative(
             state["degenerate_m2"], "state.degenerate_m2"
         )
+    state["lag_cross"] = finite(state["lag_cross"], "state.lag_cross")
+    for key in ("lag_origin", "last_value"):
+        if state[key] is not None:
+            state[key] = finite(state[key], f"state.{key}")
 
     frozen = state["n"] >= state["warmup"]
     mean, std = state["baseline_mean"], state["baseline_std"]
     if not frozen:
-        if mean is not None or std is not None:
+        if (
+            mean is not None
+            or std is not None
+            or state["baseline_lag1"] is not None
+            or state["baseline_long_run_std"] is not None
+        ):
             raise ValidationError(
                 f"state has seen {state['n']} of its {state['warmup']} warm-up "
                 "observations and already carries a baseline; a baseline is "
                 "fixed only when the warm-up completes."
+            )
+        if state["n"] > 0 and state["lag_origin"] is None:
+            raise ValidationError(
+                f"state has seen {state['n']} warm-up observations and carries "
+                "no lag_origin, so the warm-up's persistence cannot be measured."
             )
         return
     if mean is None or std is None:
@@ -794,6 +921,28 @@ def _check_accumulators(state: Dict[str, Any]) -> None:
             f"{state['baseline_std']:g}), which is "
             f"{'' if expected else 'not '}degenerate."
         )
+    # The long-run sd is what every z is divided by, so it is recomputed
+    # from the persistence and the sd rather than trusted, like the flag.
+    lag1, scale = state["baseline_lag1"], state["baseline_long_run_std"]
+    if lag1 is None or scale is None:
+        raise ValidationError(
+            f"state has seen {state['n']} observations, past its warm-up of "
+            f"{state['warmup']}, and carries no baseline persistence."
+        )
+    lag1 = finite(lag1, "state.baseline_lag1")
+    if not 0.0 <= lag1 <= _MAX_WARMUP_LAG1:
+        raise ValidationError(
+            f"state.baseline_lag1={lag1!r} is outside [0, {_MAX_WARMUP_LAG1}], "
+            "the range a warm-up's persistence is held to."
+        )
+    scale = non_negative(scale, "state.baseline_long_run_std")
+    implied = state["baseline_std"] * math.sqrt((1.0 + lag1) / (1.0 - lag1))
+    if not math.isclose(scale, implied, rel_tol=1e-9, abs_tol=0.0):
+        raise ValidationError(
+            f"state.baseline_long_run_std={scale:g} disagrees with its own "
+            f"baseline sd and persistence, which give {implied:g}."
+        )
+    state["baseline_lag1"], state["baseline_long_run_std"] = lag1, scale
 
 
 def _whole(value: Any, name: str, *, minimum: Optional[int] = None) -> int:

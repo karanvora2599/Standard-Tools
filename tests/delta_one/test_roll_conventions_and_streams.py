@@ -391,18 +391,32 @@ class TestTheScanExposesItsDetector:
     def test_the_defaults_are_the_single_pair_detectors(self):
         """The null case: a scan asked for nothing still runs the detector
 
-        the single-pair tool would have run."""
-        scanned = scan_basis_dislocations(BasisScanInput(pairs=self._pairs()))
+        the single-pair tool would have run -- with each pair's threshold
+        calibrated to that pair's own persistence rather than a fixed 9.0,
+        which on these independent bases gives the same two findings."""
+        from standard_quant_tools.delta_one.basis import detect_basis_dislocation
+
+        pairs = self._pairs()
+        scanned = scan_basis_dislocations(BasisScanInput(pairs=pairs))
         assert (
             scanned.reference_fraction,
             scanned.threshold,
             scanned.slack,
             scanned.max_breaks,
-        ) == (0.3, 9.0, 0.5, 3)
+        ) == (0.3, None, 0.5, 3)
         assert {row.label for row in scanned.ranked if row.shift_detected} == {
             "wide",
             "marginal",
         }
+        rows = {row.label: row for row in scanned.ranked}
+        for pair in pairs:
+            single = detect_basis_dislocation(spot=pair.spot, futures=pair.futures)
+            assert single["threshold_source"] == "calibrated"
+            assert rows[pair.label].shift_threshold == single["threshold"]
+            assert (
+                rows[pair.label].shift_lag1_autocorrelation
+                == single["lag1_autocorrelation"]
+            )
 
 
 class TestTheContractSpecificationModuleIsGone:

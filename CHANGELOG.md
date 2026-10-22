@@ -1,5 +1,59 @@
 # Changelog
 
+## A persistent basis is no longer read as a shifted one: the basis detector calibrates its threshold to the basis's memory, and the spread monitor standardizes by the long-run sd
+
+- **The three CUSUM detectors fired on noise.** `detect_basis_dislocation`,
+  `basis_scan` over it, and the streaming spread monitor compared a running
+  sum of standardized deviations with a threshold calibrated on independent
+  noise. A basis is persistent: it wanders from its baseline with nothing
+  having shifted, and a CUSUM sums the wander. On AR(1) bases with no shift
+  at all, at lag-1 autocorrelation 0 / 0.5 / 0.9: the detector fired on
+  2 / 26 / 40 of 40 (250 observations), the scan flagged 10 of 10
+  persistent pairs, and the monitor alerted on 1 / 18 / 20 of 20
+  1,500-tick streams, 20 of 20 at 0.9 even with warm-ups of 150 and 300.
+  `cusum` had computed the lag-1 autocorrelation and its own false-alarm
+  rate -- 0.64 and 0.99 at 0.5 and 0.9 -- and the detector dropped both.
+- **The batch detector calibrates.** `threshold=None` is now the default
+  for `detect_basis_dislocation`, `basis_scan` and both tools: the
+  threshold is the 95th percentile of an AR(1) null with the basis's
+  lag-1 autocorrelation, so false alarms stay near 5% whatever the memory.
+  The memory is read off the REFERENCE window, bias-corrected by
+  (1 + 3 rho) / n, through a new `memory_window="reference"` on `cusum`:
+  a shift after the window looks like persistence and must not raise the
+  null that judges it. On 200 bases per cell, false alarms 3.5% / 5.5% /
+  8.5%; a 2-sd shift at 60% found 100% / 99% / 59% (whole-series memory:
+  1.0% / 2.0% / 3.5% and 32% at 0.9). On the test's seeds, 1 / 2 / 3 of
+  40 fire and the scan flags none of the ten. A number is used as given,
+  as before.
+- **The monitor standardizes by the long-run sd.** The warm-up now carries
+  a lag-1 co-moment, O(1) like its Welford sums, and the CUSUM divides by
+  baseline_std x sqrt((1 + rho) / (1 - rho)), rho bias-corrected and
+  floored at 0 so noise cannot narrow it. On the test's seeds: 1 / 1 / 6
+  of 20 at a warm-up of 60, and 2 and 0 of 20 at 150 and 300. What
+  remains at 60 is a baseline from about five effective observations;
+  `effective_warmup` reports it and a warning below 20 says to lengthen
+  the warm-up. A re-frozen degenerate baseline takes no persistence
+  adjustment, since its window holds the step it exists to catch.
+  `MONITOR_VERSION` is 4: a version-3 state is refused, as the version
+  rule says, because its accumulators are in other units.
+- **The diagnostics reach the caller.** The detector returns
+  `threshold_source` (`calibrated` / `caller` / `default`),
+  `lag1_autocorrelation` and `false_alarm_rate_at_threshold`; a scan row
+  `shift_threshold` and `shift_lag1_autocorrelation`; the monitor
+  `lag1_autocorrelation`, `baseline_long_run_std` and `effective_warmup`.
+  A caller's threshold with a false-alarm rate above 10% on this basis is
+  warned about. The change-point segmenter assumes independence and found
+  breaks in 92 of 100 no-shift AR(0.9) channels (13 at 0.5, 0
+  independent), so its "breaks CUSUM did not flag" warning now says so on
+  a persistent basis.
+- Tests: false-alarm rates on simulated null bases for all three
+  detectors, a real shift still found by each, the fixed 9.0 still firing
+  and warned about, the diagnostics on the wire, and the monitor's
+  co-moment held to the lag-1 its values give directly. Two tests that
+  pinned the old scale and the scan's 9.0 default now pin the new ones.
+  The mutation catalogue gains three entries, all killed. Four unused
+  names in `basis.py`, `streaming.py` and `results.py` are gone.
+
 ## The purged splitter purges both sides of a test block, so no training row sits inside a test label's window
 
 - **The purge had one side.** `combinatorial_purged_cv` (and the

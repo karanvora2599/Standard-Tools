@@ -325,7 +325,10 @@ class TestADegenerateBaselineIsNeverTested:
         """The null case: CV 1e-2 is not degenerate, is never re-frozen, and
 
         its statistic is the textbook CUSUM against the warm-up's own mean
-        and sample sd, recomputed here from scratch."""
+        and LONG-RUN sd -- the sample sd widened by the warm-up's own
+        persistence, sqrt((1 + rho) / (1 - rho)) with rho bias-corrected and
+        floored at zero -- all recomputed here from scratch, so the monitor's
+        O(1) co-moment is held to the lag-1 the values give directly."""
         out, warm = _warm(1e-2)
         assert out["degenerate_baseline"] is False
         moved = update_spread_monitor(out["state"], **_at(30.3, 20))
@@ -334,10 +337,16 @@ class TestADegenerateBaselineIsNeverTested:
         mean, sd = float(np.mean(warm)), float(np.std(warm, ddof=1))
         assert moved["baseline_mean"] == pytest.approx(mean, rel=1e-9)
         assert moved["baseline_std"] == pytest.approx(sd, rel=1e-9)
+        centred = warm - mean
+        rho = float((centred[1:] * centred[:-1]).sum() / (centred**2).sum())
+        rho = min(max(rho + (1.0 + 3.0 * rho) / len(warm), 0.0), 0.95)
+        long_run = sd * math.sqrt((1.0 + rho) / (1.0 - rho))
+        assert moved["lag1_autocorrelation"] == pytest.approx(rho, abs=1e-9)
+        assert moved["baseline_long_run_std"] == pytest.approx(long_run, rel=1e-9)
         value = (100.0 * (1 + 30.3 / 10_000.0) / 100.0 - 1.0) * 10_000.0
         up = down = 0.0
         for _ in range(20):
-            z = (value - mean) / sd
+            z = (value - mean) / long_run
             up, down = max(0.0, up + z - 0.5), max(0.0, down - z - 0.5)
         assert moved["statistic"] == pytest.approx(max(up, down), rel=1e-9)
 

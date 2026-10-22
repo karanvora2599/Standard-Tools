@@ -48,7 +48,7 @@ from standard_quant_tools.analysis.structure import detect_change_points
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.metrics.risk_metrics import has_no_dispersion
 
-from ._numbers import finite, positive
+from ._numbers import positive
 from .carry import forward_price, observed_carry_rate, solve_carry
 
 __all__ = ["basis_history", "cash_futures_basis", "detect_basis_dislocation"]
@@ -347,7 +347,7 @@ def detect_basis_dislocation(
     futures: Sequence[float],
     time_to_expiry: Optional[Sequence[float]] = None,
     reference_fraction: float = DEFAULT_REFERENCE_FRACTION,
-    threshold: float = DEFAULT_THRESHOLD,
+    threshold: Optional[float] = None,
     slack: float = DEFAULT_SLACK,
     max_breaks: int = 3,
 ) -> Dict[str, Any]:
@@ -376,13 +376,30 @@ def detect_basis_dislocation(
     where the segment boundaries are and what the level was on each side.
     Agreement between them is worth more than either alone.
 
-    THE THRESHOLD IS THE LIBRARY'S CALIBRATED ONE, not the textbook 5.0.
-    That figure is quoted as an average RUN LENGTH -- one false alarm every
-    so many observations -- and this asks a different question, "did
-    anything happen anywhere in this window", which any fixed threshold
-    eventually answers yes to. `liquidity_events` measured it on noise with
-    no change in it: 5.0 gives 51% false alarms over 300 observations. Its
-    9.0 is used here rather than a number invented for this module.
+    THE THRESHOLD IS CALIBRATED TO THIS BASIS'S OWN MEMORY, not the
+    textbook 5.0 and no longer the library's fixed 9.0. The textbook
+    figure is quoted as an average RUN LENGTH, and this asks "did anything
+    happen anywhere in this window", which any fixed threshold eventually
+    answers yes to: `liquidity_events` measured 5.0 at 51% false alarms
+    over 300 observations, and calibrated 9.0 for 5%. But that 9.0 is for
+    INDEPENDENT noise, and a basis is persistent -- it wanders from its
+    baseline for weeks with nothing having shifted, and a CUSUM reads the
+    wander as a shift. Measured on 250 observations with no shift at all,
+    9.0 fired on 2 of 40 independent spreads, 26 of 40 with lag-1
+    autocorrelation 0.5 and 40 of 40 at 0.9; `cusum` had computed its own
+    false-alarm rate at 0.64 and 0.99 and this function dropped it.
+
+    So with `threshold=None`, the default, the threshold is the 95th
+    percentile of the peak statistic of an AR(1) null with this basis's
+    lag-1 autocorrelation, measured on the reference window so that a
+    shift after it cannot inflate the null that judges it: 3.5%, 5.5% and
+    8.5% false alarms at 0, 0.5 and 0.9 (200 spreads each), and a 2-sd
+    shift at 60% found 100%, 99% and 59% of the time. The last is the
+    honest cost of persistence: on an AR(0.9) basis a 2-sd move is close
+    to what the basis does by itself. A number is used as a fixed
+    threshold, as before, and `false_alarm_rate_at_threshold` says what it
+    costs on this basis. `lag1_autocorrelation` and `threshold_source`
+    report what ran.
     """
     s = _series(spot, "spot")
     f = _series(futures, "futures")
@@ -418,16 +435,31 @@ def detect_basis_dislocation(
         channel = (f / s - 1.0) * 10_000.0
         units = "bps of spot"
 
+    calibrate = threshold is None
     detected = cusum(
         channel,
         slack=slack,
-        threshold=threshold,
+        threshold=DEFAULT_THRESHOLD if calibrate else threshold,
         reference_fraction=reference_fraction,
+        calibrate_threshold=calibrate,
+        memory_window="reference",
     )
     # The degenerate-baseline branch returns a SHORTER dict, so read it by
     # `.get` rather than by key -- a flat reference window is a statement
     # about the window and not a failure to detect anything.
     triggered = bool(detected.get("triggered", False))
+    used_threshold = float(detected.get("threshold", DEFAULT_THRESHOLD))
+    lag1 = detected.get("lag1_autocorrelation")
+    false_alarm_rate = detected.get("false_alarm_rate_at_threshold")
+    if not calibrate:
+        threshold_source = "caller"
+    elif detected.get("threshold_calibrated"):
+        threshold_source = "calibrated"
+    else:
+        # A constant reference window: nothing to calibrate against, and
+        # nothing can trigger, so the default is reported as what stood.
+        threshold_source = "default"
+    persistent = lag1 is not None and np.isfinite(lag1) and lag1 >= 0.3
 
     breaks: Dict[str, Any] = {"n_breaks": 0, "breaks": []}
     try:
@@ -448,19 +480,53 @@ def detect_basis_dislocation(
         )
     if triggered:
         warnings.append(
-            f"A sustained shift crossed the CUSUM threshold. Before treating "
+            "A sustained shift crossed the CUSUM threshold. Before treating "
             "it as a dislocation, rule out the mechanical causes in order: a "
             "contract roll inside the window (the basis steps because the "
             "time to expiry did), a dividend going ex, and a change in the "
             "financing curve. Only then is it the market repricing carry."
         )
-    if breaks.get("n_breaks") and not triggered:
+    if threshold_source == "calibrated" and persistent:
         warnings.append(
+            f"This basis has lag-1 autocorrelation {lag1:.2f}, so the CUSUM "
+            f"threshold is {used_threshold:.1f} rather than the "
+            f"{DEFAULT_THRESHOLD:g} that holds for independent noise: a "
+            "persistent basis wanders from its baseline with nothing having "
+            "shifted, and the threshold is the one an AR(1) basis with this "
+            "memory crosses 5% of the time over a window this long."
+        )
+    if (
+        threshold_source == "caller"
+        and false_alarm_rate is not None
+        and np.isfinite(false_alarm_rate)
+        and false_alarm_rate > 0.10
+    ):
+        warnings.append(
+            f"At the threshold given, {used_threshold:g}, an AR(1) basis with "
+            f"this one's lag-1 autocorrelation ({lag1:.2f}) and no shift at "
+            f"all crosses {false_alarm_rate:.0%} of the time over a window "
+            "this long. Read a trigger here against that rate, or leave "
+            "`threshold` unset to have it calibrated to 5%."
+        )
+    if breaks.get("n_breaks") and not triggered:
+        note = (
             f"Change-point detection found {breaks['n_breaks']} break(s) that "
             "CUSUM did not flag. The two disagree when a shift is large but "
             "brief -- segmentation sees the level change, CUSUM needs it to "
             "persist. Read the segment means before deciding which is right."
         )
+        if persistent:
+            # The segmenter treats observations as independent. Measured on
+            # 250 observations with no shift: it found breaks in 0 of 100
+            # independent channels, 13 of 100 at lag-1 0.5, 92 of 100 at 0.9.
+            note += (
+                f" But the segmenter treats observations as independent, and "
+                f"at this basis's lag-1 autocorrelation ({lag1:.2f}) it finds "
+                "breaks in noise with no shift in it: 13 of 100 such channels "
+                "at 0.5 and 92 of 100 at 0.9. Without the CUSUM, do not read "
+                "these as shifts."
+            )
+        warnings.append(note)
     if time_to_expiry is None:
         warnings.append(
             "Measured in bps of spot, NOT annualized -- no time_to_expiry "
@@ -490,7 +556,14 @@ def detect_basis_dislocation(
         "shift": detected.get("shift"),
         "shift_in_reference_sd": detected.get("shift_in_reference_sd"),
         "n_reference": detected.get("n_reference"),
-        "threshold": float(threshold),
+        "threshold": used_threshold,
+        # What the threshold was and why, and the memory it was set for.
+        # `cusum` computed the last two all along; they were dropped here,
+        # which left a trigger on a persistent basis with nothing to read
+        # it against.
+        "threshold_source": threshold_source,
+        "lag1_autocorrelation": lag1,
+        "false_alarm_rate_at_threshold": false_alarm_rate,
         "n_breaks": int(breaks.get("n_breaks", 0)),
         "breaks": breaks.get("breaks", []),
         "warnings": warnings,

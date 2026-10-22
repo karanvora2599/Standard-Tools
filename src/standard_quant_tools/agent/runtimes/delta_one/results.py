@@ -37,9 +37,9 @@ schema that omitted it would train agents to ignore it.
 
 from __future__ import annotations
 
-from typing import Annotated, Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
+from pydantic import BeforeValidator, ConfigDict, Field
 
 from standard_quant_tools.agent.runtimes._json_safe import (
     ExplainsNulls,
@@ -677,7 +677,29 @@ class BasisDislocationResult(_Result):
     shift: Stat = None
     shift_in_reference_sd: Stat = None
     n_reference: Optional[int] = None
-    threshold: Stat = None
+    threshold: Stat = Field(
+        None, description="The CUSUM threshold that ran; see threshold_source."
+    )
+    threshold_source: Literal["calibrated", "caller", "default"] = Field(
+        "calibrated",
+        description="'calibrated': the 95th percentile of an AR(1) null with "
+        "this basis's persistence, so false alarms stay near 5%. 'caller': "
+        "the threshold given, used as is. 'default': a constant reference "
+        "window left nothing to calibrate against, and nothing can trigger.",
+    )
+    lag1_autocorrelation: Stat = Field(
+        None,
+        description="The basis's lag-1 autocorrelation, measured on the "
+        "reference window and bias-corrected: the persistence the threshold "
+        "is set for. A persistent basis wanders far from its baseline with "
+        "nothing having shifted, and a fixed threshold reads that as a shift.",
+    )
+    false_alarm_rate_at_threshold: Stat = Field(
+        None,
+        description="How often an AR(1) basis with this persistence and NO "
+        "shift crosses this threshold over a window this long. Near 0.05 "
+        "when calibrated; read a caller's threshold against it.",
+    )
     n_breaks: int = 0
     breaks: List[BasisBreak] = Field(default_factory=list)
 
@@ -718,6 +740,24 @@ class SpreadMonitorResult(_Result):
     threshold: Stat = None
     baseline_mean: Stat = Field(None, description="Null until the warm-up completes.")
     baseline_std: Stat = None
+    lag1_autocorrelation: Stat = Field(
+        None,
+        description="The warm-up's lag-1 autocorrelation, bias-corrected and "
+        "floored at 0. Null until the warm-up completes.",
+    )
+    baseline_long_run_std: Stat = Field(
+        None,
+        description="What every observation is standardized by: baseline_std "
+        "x sqrt((1 + rho) / (1 - rho)). A CUSUM sums its deviations, and a "
+        "persistent spread's sums grow with this, not with baseline_std -- "
+        "against which no-shift AR(0.9) streams alerted 20 times in 20.",
+    )
+    effective_warmup: Stat = Field(
+        None,
+        description="The warm-up discounted by its own persistence, warmup x "
+        "(1 - rho) / (1 + rho). Below 20 the baseline mean is uncertain and "
+        "false alarms run above design; a warning says so.",
+    )
     degenerate_baseline: bool = Field(
         False,
         description="The warm-up saw no variation, so the statistic divides "
@@ -764,6 +804,16 @@ class BasisScanRow(_Result):
         None,
         description="The shift in reference standard deviations, from the "
         "shift detector.",
+    )
+    shift_threshold: Stat = Field(
+        None,
+        description="The CUSUM threshold this pair's shift was judged at -- "
+        "calibrated to its own persistence unless the scan was given one.",
+    )
+    shift_lag1_autocorrelation: Stat = Field(
+        None,
+        description="This basis's lag-1 autocorrelation on the reference "
+        "window, the persistence its threshold was set for.",
     )
 
 

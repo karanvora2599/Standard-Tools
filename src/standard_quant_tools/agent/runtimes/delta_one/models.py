@@ -729,13 +729,18 @@ class BasisDislocationInput(BaseModel):
         description="Fraction of the START used to learn normal. A baseline "
         "drawn from the whole series hides the shift inside it.",
     )
-    threshold: float = Field(
-        9.0,
+    threshold: Optional[float] = Field(
+        None,
         gt=0,
         le=1000,
-        description="CUSUM decision threshold. 9.0 is calibrated, not the "
-        "textbook 5.0, which measures 51% false alarms over 300 "
-        "observations when asking whether anything happened anywhere.",
+        description="CUSUM decision threshold. Leave it unset to have it "
+        "calibrated to this basis's own persistence: the 95th percentile "
+        "of an AR(1) null with the basis's lag-1 autocorrelation, so false "
+        "alarms stay near 5% however persistent the basis is. The fixed "
+        "9.0 holds only for independent noise -- on a basis with lag-1 "
+        "autocorrelation 0.9 and no shift at all it fired 40 times in 40. "
+        "A number is used as given, and false_alarm_rate_at_threshold says "
+        "what it costs on this basis.",
     )
     slack: float = Field(
         0.5, ge=0, le=100, description="Standardized deviations absorbed per step."
@@ -920,16 +925,17 @@ class BasisScanInput(BaseModel):
         "series hides the shift inside it. Ignored when detect_shifts is "
         "false.",
     )
-    threshold: float = Field(
-        9.0,
+    threshold: Optional[float] = Field(
+        None,
         gt=0,
         le=1000,
         description="CUSUM decision threshold for the shift detector, the "
-        "same knob detect_basis_dislocation takes and calibrated the same "
-        "way: 9.0 against the textbook 5.0, which measures 51% false alarms "
-        "over 300 observations when asking whether anything happened "
-        "anywhere. Raise it to rank only the unmistakable shifts; it cannot "
-        "change the z-score ordering, which is what the scan ranks on.",
+        "same knob detect_basis_dislocation takes. Leave it unset to have "
+        "each pair's calibrated to that pair's own persistence, which keeps "
+        "false alarms near 5% -- at a fixed 9.0, ten persistent bases with "
+        "no shift in any of them all reported one. A number applies to "
+        "every pair as given. It cannot change the z-score ordering, which "
+        "is what the scan ranks on.",
     )
     slack: float = Field(
         0.5,
