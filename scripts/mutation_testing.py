@@ -141,11 +141,48 @@ MUTATIONS: List[Mutation] = [
         # is the same mutation the old anchor made: every block becomes
         # one observation, so the resample is IID and the serial
         # correlation the block bootstrap exists to preserve is gone.
+        #
+        # The anchor carries the moving-block start line because the
+        # circular draw beside it opens with the same `span` line, and an
+        # anchor that matches twice mutates nothing.
         "bootstrap: force an IID resample regardless of block_size",
         SRC / "_resampling.py",
-        "    span = min(block_size, n)",
-        "    span = 1",
+        "    span = min(block_size, n)\n"
+        "    n_blocks = int(math.ceil(target / span))\n"
+        "    starts = rng.integers(0, n - span + 1, n_blocks)",
+        "    span = 1\n"
+        "    n_blocks = int(math.ceil(target / span))\n"
+        "    starts = rng.integers(0, n - span + 1, n_blocks)",
         "tests/analysis/test_inference.py",
+    ),
+    Mutation(
+        # The circular draw with its starts confined as the moving draw's
+        # are: the wrap then never happens and the edges are under-drawn.
+        "resampling: a circular block draw that never wraps",
+        SRC / "_resampling.py",
+        "    starts = rng.integers(0, n, n_blocks)",
+        "    starts = rng.integers(0, n - span + 1, n_blocks)",
+        "tests/backtesting/test_overfitting.py",
+    ),
+    Mutation(
+        # The reality check's own summed draw, with its starts confined to
+        # [0, n - block]: the moving draw again, whose edges are under-drawn
+        # and whose null is off centre.
+        "reality check: draw block starts without wrapping the series",
+        SRC / "backtesting/overfitting.py",
+        "        n_starts = n\n",
+        "        n_starts = n - block_size + 1\n",
+        "tests/backtesting/test_overfitting.py",
+    ),
+    Mutation(
+        # Drop the sqrt(n / (n - b)) widening as a cosmetic factor near 1.
+        # It is 1.095 at 120 days with 20-day blocks, and without it White's
+        # best of three rejected 37 of 400 true nulls at a nominal 5%.
+        "reality check: drop the block-bootstrap variance scale",
+        SRC / "backtesting/overfitting.py",
+        "    return math.sqrt(n / (n - block_size)) if block_size < n else 1.0\n",
+        "    return 1.0\n",
+        "tests/backtesting/test_overfitting.py",
     ),
     Mutation(
         # Moved here from backtesting/overfitting.py, where this check used

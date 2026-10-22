@@ -669,27 +669,136 @@ class TestRealityCheckCalibration:
         assert any("20 of 21 candidates are far below" in w for w in white["warnings"])
 
 
+class TestRealityCheckOnAShortSeries:
+    """
+    THE BUG, measured where it lived. A block bootstrap's null was too
+    narrow on a short series: a moving-block draw under-weights the series'
+    edges, so it is not centred on the sample mean the null subtracts, and
+    its variance of a mean is sigma^2 (1 - b/n) / n with no dependence at
+    all -- 17% short at 120 days with 20-day blocks. On 2,000 nulls per
+    cell, White's best of three rejected 10.2% of the time at 120 days and
+    a strategy against one equal alternative 9.3%; the circular, rescaled
+    null gives 6.2% and 6.6%. Hansen's SPA was at 4.3% and is unchanged.
+
+    Four hundred draws each, standard error about 1.1%; each bound sits
+    between where the fix lands and where the bug was.
+    """
+
+    def test_whites_best_of_three_is_near_nominal(self):
+        """44 of these 400 rejected before (11.0%), 26 now (6.5%)."""
+        fires = 0
+        for seed in range(400):
+            rng = np.random.default_rng(70_000 + seed)
+            fires += reality_check(
+                candidate_returns=pd.DataFrame(rng.normal(0, 0.01, (120, 3))),
+                benchmark_returns=pd.Series(rng.normal(0, 0.01, 120)),
+                n_bootstrap=200,
+                block_size=20,
+                seed=seed,
+            )["significant_at_05"]
+        assert 0.02 <= fires / 400 <= 0.08, f"{fires}/400 against a nominal 5%"
+
+    def test_a_strategy_against_its_equal_alternative_is_near_nominal(self):
+        """42 of these 400 rejected before (10.5%), 28 now (7.0%)."""
+        fires = 0
+        for seed in range(400):
+            rng = np.random.default_rng(80_000 + seed)
+            fires += reality_check(
+                question="beats_every_alternative",
+                strategy_returns=pd.Series(rng.normal(0, 0.01, 120)),
+                alternative_returns=pd.DataFrame(rng.normal(0, 0.01, (120, 1))),
+                n_bootstrap=200,
+                block_size=20,
+                seed=seed,
+            )["significant_at_05"]
+        assert 0.02 <= fires / 400 <= 0.08, f"{fires}/400 against a nominal 5%"
+
+    def test_the_circular_draw_reaches_every_day_equally_often(self):
+        """The centring the null relies on, checked directly: a circular
+        draw reaches the first and last day as often as the middle one,
+        where a moving-block draw reaches the first day only from a block
+        that starts on it."""
+        from standard_quant_tools._resampling import (
+            block_indices,
+            circular_block_indices,
+        )
+
+        n, block, draws = 120, 20, 4000
+        rng = np.random.default_rng(5)
+        circular = np.bincount(
+            np.concatenate(
+                [circular_block_indices(n, block, rng) for _ in range(draws)]
+            ),
+            minlength=n,
+        )
+        moving = np.bincount(
+            np.concatenate([block_indices(n, block, rng) for _ in range(draws)]),
+            minlength=n,
+        )
+        expected = draws  # n draws of n days each, spread over n days
+        assert circular.sum() == moving.sum() == draws * n
+        for day in (0, n // 2, n - 1):
+            assert abs(circular[day] / expected - 1.0) < 0.1, (day, circular[day])
+        assert moving[0] < expected * 0.15
+        assert moving[n - 1] < expected * 0.15
+
+    def test_each_result_says_which_bootstrap_ran(self):
+        rng = np.random.default_rng(15)
+        candidates = pd.DataFrame(rng.normal(0, 0.01, (200, 3)))
+        white = reality_check(candidate_returns=candidates, n_bootstrap=200)
+        hansen = reality_check(
+            candidate_returns=candidates, method="hansen_spa", n_bootstrap=200
+        )
+        pair = reality_check(
+            question="beats_every_alternative",
+            strategy_returns=pd.Series(rng.normal(0, 0.01, 200)),
+            alternative_returns=candidates,
+            n_bootstrap=200,
+        )
+        for result in (white, pair):
+            assert result["bootstrap_scheme"] == "circular_block"
+            assert result["bootstrap_scale"] == pytest.approx(math.sqrt(200 / 180))
+            assert any("wrap around the sample" in w for w in result["warnings"])
+        assert hansen["bootstrap_scheme"] == "moving_block"
+        assert hansen["bootstrap_scale"] == 1.0
+        assert not any("wrap around the sample" in w for w in hansen["warnings"])
+
+
 class TestTheSummedBootstrapIsTheResample:
     """The bootstrap adds precomputed block sums instead of gathering rows;
-    it must give what resampling the rows with `block_indices` gives, draw
-    for draw, including the cut last block and the per-draw errors."""
+    it must give what resampling the rows with `circular_block_indices`
+    gives -- times the variance scale -- or, for Hansen's moving draw,
+    `block_indices`, draw for draw, including the cut last block and the
+    per-draw errors."""
 
+    @pytest.mark.parametrize("circular", [True, False])
     @pytest.mark.parametrize("n, block", [(500, 20), (503, 20), (97, 7), (60, 1)])
-    def test_draw_for_draw(self, n, block):
-        from standard_quant_tools._resampling import block_indices
+    def test_draw_for_draw(self, n, block, circular):
+        from standard_quant_tools._resampling import (
+            block_indices,
+            circular_block_indices,
+        )
         from standard_quant_tools.backtesting.overfitting import _rc_bootstrap_means
 
         values = np.random.default_rng(n).normal(0, 0.01, (n, 3))
-        draws, errors = _rc_bootstrap_means(values, 50, block, 7, studentise=True)
+        draws, errors = _rc_bootstrap_means(
+            values, 50, block, 7, studentise=True, circular=circular
+        )
         centred = values - values.mean(axis=0)
         rng = np.random.default_rng(7)
         whole = n // block
+        resample = circular_block_indices if circular else block_indices
+        scale = math.sqrt(n / (n - block)) if circular else 1.0
         for b in range(50):
-            sample = centred[block_indices(n, block, rng)]
-            np.testing.assert_allclose(draws[b], sample.mean(axis=0), atol=1e-15)
+            sample = centred[resample(n, block, rng)]
+            np.testing.assert_allclose(
+                draws[b], scale * sample.mean(axis=0), atol=1e-15
+            )
             blocks = sample[: whole * block].reshape(whole, block, 3).mean(axis=1)
             np.testing.assert_allclose(
-                errors[b], np.sqrt(blocks.var(axis=0, ddof=1) * block / n), rtol=1e-9
+                errors[b],
+                scale * np.sqrt(blocks.var(axis=0, ddof=1) * block / n),
+                rtol=1e-9,
             )
 
 

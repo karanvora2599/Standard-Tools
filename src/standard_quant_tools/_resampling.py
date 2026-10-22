@@ -29,6 +29,24 @@ WHY BLOCKS AT ALL. An iid bootstrap destroys serial correlation, and every
 statistic these callers bootstrap -- Sharpe ratios, drawdowns, reality-check
 maxima -- depends on it. Resampling blocks keeps the local dependence
 structure inside each block, at the cost of breaking it at the seams.
+
+TWO SCHEMES, AND WHY THE SECOND IS NOT THE FIRST. `block_indices` is the
+moving-block draw: a block starts anywhere in `[0, n - block_size]`, so the
+first and last `block_size - 1` observations are reached through fewer
+starts than the middle ones -- the first observation only by a block that
+starts on it. `circular_block_indices` (Politis and Romano 1992) wraps the
+series into a circle, so every start is legal and every observation is
+drawn equally often. That is the property a test that CENTRES its null on
+the sample mean needs, and `reality_check` is that test: on 120 days with
+20-day blocks the moving draw left its null too narrow and it rejected a
+true null 9-12% of the time at a nominal 5%.
+
+The moving draw stays for everyone else, deliberately. Its other callers
+draw intervals and forward paths rather than a centred null, and two
+twins reproduce its draws bit for bit -- the batched resampler in
+`analysis/inference.py` and the native forward-path kernel in
+`monte_carlo.cpp` -- so changing the shared scheme would move every seeded
+interval and simulation and part each from its twin.
 """
 
 from __future__ import annotations
@@ -39,7 +57,7 @@ import numpy as np
 
 from standard_quant_tools.numeric_contract import require_positive_int
 
-__all__ = ["block_indices"]
+__all__ = ["block_indices", "circular_block_indices"]
 
 
 def block_indices(
@@ -94,3 +112,39 @@ def block_indices(
     n_blocks = int(math.ceil(target / span))
     starts = rng.integers(0, n - span + 1, n_blocks)
     return (starts[:, None] + np.arange(span)).ravel()[:target]
+
+
+def circular_block_indices(
+    n: int,
+    block_size: int,
+    rng: np.random.Generator,
+    target: int | None = None,
+) -> np.ndarray:
+    """
+    Indices for one circular-block resample of length `target`.
+
+    The moving-block draw of `block_indices` with the series bent into a
+    circle: a start is drawn from all `n` positions and a block that runs
+    past the last observation continues from the first. Every observation
+    is then reached by exactly `block_size` starts, so each is drawn equally
+    often and the expected resampled mean IS the sample mean -- which the
+    moving draw's is not. See the module docstring for who uses which.
+
+    The seam the wrap adds, last observation to first, is one more seam of
+    the kind every block bootstrap already has between its blocks.
+
+    Arguments are refused and clamped exactly as `block_indices` refuses
+    and clamps them.
+    """
+    if target is None:
+        target = n
+    n = require_positive_int(n, "n", "circular_block_indices")
+    block_size = require_positive_int(
+        block_size, "block_size", "circular_block_indices"
+    )
+    target = require_positive_int(target, "target", "circular_block_indices")
+
+    span = min(block_size, n)
+    n_blocks = int(math.ceil(target / span))
+    starts = rng.integers(0, n, n_blocks)
+    return ((starts[:, None] + np.arange(span)) % n).ravel()[:target]

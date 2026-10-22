@@ -1,5 +1,60 @@
 # Changelog
 
+## White's reality check and the pairwise test draw their null in circular blocks widened by the block bootstrap's own bias, so a short series rejects a true null near 5%
+
+- **The null was too narrow on short series**, in the rewritten reality
+  check as in the one before it. On true nulls with 20-day blocks and 500
+  bootstrap draws, 2,000 series per cell, at 60 / 120 / 250 / 500 days
+  against a nominal 5%: White's best of three candidates against a
+  benchmark rejected 11.4 / 10.2 / 6.7 / 6.1%, and a strategy against one
+  equal alternative (`beats_every_alternative`'s least favourable case)
+  12.8 / 9.3 / 7.7 / 6.2%. Under AR(0.3) returns at 120 and 250 days,
+  7.5 / 6.6% and 9.8 / 5.3%; under GARCH, 10.6 / 6.7% and 10.2 / 8.1%.
+- **Two causes.** The summed bootstrap drew `block_indices`'s moving
+  blocks, which reach the first and last `block_size - 1` days through
+  fewer starts, so a draw's mean is not centred on the sample mean the
+  null subtracts. And a block bootstrap's variance of a mean is the
+  Bartlett sum of autocovariances taken about the sample mean, whose
+  expectation with no dependence at all is sigma^2 (1 - b/n) / n: 17%
+  short at 120 days (0.829 measured against 0.833 derived).
+- **The fix, in `_rc_bootstrap_means`:** the series is wrapped into a
+  circle so every day starts a block -- the draw of the new
+  `_resampling.circular_block_indices` (Politis and Romano 1992), still
+  summed rather than gathered -- and the draws are multiplied by
+  sqrt(n / (n - b)), Bessel's correction at b = 1. White's statistic now
+  rejects 6.1 / 6.2 / 5.7 / 5.4%, and 5.5 / 4.8% under AR(0.3) and
+  6.6 / 5.8% under GARCH; the pairwise test 7.8 / 6.6 / 6.2 / 6.0%,
+  6.6 / 5.5% and 6.6 / 5.6%. What remains at 60 days is the noise in a
+  variance from four blocks. Power at 250 days on a candidate 0.08% a day
+  better: 13.0% against 15.3% (White) and 20.9% against 23.6% (pairwise),
+  part of which was the excess size.
+- **Hansen's SPA is unchanged, because it was not over-rejecting:**
+  3.8 / 4.3 / 5.4 / 4.9% on the same nulls, 4.1 / 3.6% under AR(0.3) and
+  5.5 / 5.0% under GARCH. Its observed statistic divides by
+  `_rc_standard_errors`, which is biased low the same way (E[se^2] /
+  (sigma^2 / n) measured 0.728 / 0.822 / 0.922 / 0.962), and each draw by
+  an error from a handful of blocks, which gives the null heavy tails;
+  the two offset. The circular draw alone took it to 2.1% at 60 days, and
+  correcting the standard error alone to 2.6 / 3.3 / 4.6%, with power
+  falling from 11.9% to 9.7%, so Hansen keeps the moving draw
+  (`circular=False`, bit for bit what it drew before) and the standard
+  error keeps its bias, now documented where it is computed.
+- **`block_indices` is unchanged**: its other callers draw intervals and
+  forward paths rather than a centred null, and the batched resampler in
+  `analysis/inference.py` and the native kernel in `monte_carlo.cpp`
+  reproduce its draws bit for bit. Every seeded p-value of White's
+  statistic and the pairwise test changes; Hansen's do not.
+- Each result gains `bootstrap_scheme` (`"circular_block"`, or
+  `"moving_block"` under Hansen) and `bootstrap_scale`, and the
+  block-bootstrap warning says what both are where they apply.
+- Tests: 400 true nulls on 120 days reject 26 times for White's (44
+  before, 37 with the scale removed) and 28 times for the pairwise test
+  (42 before); the summed draw is held to `circular_block_indices` times
+  the scale, and Hansen's to `block_indices`, draw for draw; a circular
+  draw reaches the first, middle and last day equally often. The
+  mutation catalogue gains both halves of the fix, and the IID
+  mutation's anchor carries one more line so it stays unique.
+
 ## A variance ratio of returns reads the returns as the walk's steps, so a random walk tested on its returns reads one
 
 - **Returns were differenced a second time.** `run_stationarity_tests`

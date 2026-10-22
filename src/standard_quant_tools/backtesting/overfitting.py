@@ -648,6 +648,7 @@ def _rc_bootstrap_means(
     seed: int,
     *,
     studentise: bool = False,
+    circular: bool = True,
 ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
     """
     Each bootstrap draw's mean of every column, minus the sample mean --
@@ -663,19 +664,68 @@ def _rc_bootstrap_means(
     the sample's error rejected a no-edge best-of-ten 9% of the time at
     500 days, against 6% when each draw carries its own.
 
-    THE RESAMPLE IS `block_indices`'s, summed rather than gathered. Each
-    draw takes the same block starts from the same generator calls -- ceil(n
-    / block_size) blocks, the last cut to n rows -- but adds up precomputed
-    block sums instead of gathering n rows per column, which is what makes
-    20,000 draws over a few hundred candidates affordable. The tests hold it
-    to the row-by-row resample.
+    THE RESAMPLE IS `circular_block_indices`'s (with `circular=False`,
+    `block_indices`'s), summed rather than gathered. Each draw takes the
+    same block starts from the same generator calls -- ceil(n / block_size)
+    blocks, the last cut to n rows -- but adds up precomputed block sums
+    instead of gathering n rows per column, which is what makes 20,000
+    draws over a few hundred candidates affordable. The tests hold it to
+    the row-by-row resample, times `_rc_bootstrap_scale`.
+
+    THE NULL WAS TOO NARROW ON SHORT SERIES, for two reasons, and each fix
+    answers one. Measured on true nulls with 20-day blocks and 500 draws,
+    2,000 series per cell, at n = 60 / 120 / 250 / 500 against a nominal 5%:
+
+        White, best of three vs a benchmark    11.4  10.2  6.7  6.1  (%)
+          circular and scaled                   6.1   6.2  5.7  5.4
+        a strategy vs one equal alternative    12.8   9.3  7.7  6.2
+          circular and scaled                   7.8   6.6  6.2  6.0
+
+    and under AR(0.3) and GARCH returns at 120 and 250 days, 7.5 / 6.6 and
+    10.6 / 6.7 became 5.5 / 4.8 and 6.6 / 5.8 for White's, 9.8 / 5.3 and
+    10.2 / 8.1 became 6.6 / 5.5 and 6.6 / 5.6 for the pair. What is left at
+    60 days is the noise in a variance from four blocks. The price is a
+    little power: a candidate 0.08% a day better, at 250 days, was found
+    13.0% of the time against 15.3%, and a strategy that much better than
+    its alternative 20.9% against 23.6%, part of which was the excess size.
+
+    CIRCULAR BLOCKS. The null is the draws centred on the sample mean,
+    which is exact only when a draw's expected mean IS the sample mean. A
+    moving-block draw (starts in [0, n - block_size]) reaches the first and
+    last block_size - 1 rows through fewer starts, so its expectation is a
+    mean with the edges under-weighted; the circular draw wraps the series
+    and reaches every row equally (see `_resampling`).
+
+    THE SCALE. A block bootstrap's variance of a mean is the Bartlett sum of
+    the autocovariances taken about the SAMPLE mean, and with no dependence
+    at all its expectation is sigma^2 (1 - b/n) / n -- 17% short at n = 120
+    and b = 20. The draws are multiplied by sqrt(n / (n - b)), which is
+    Bessel's correction at b = 1, and the errors by the same factor, so a
+    studentised draw would be unchanged by it.
+
+    HANSEN'S SPA KEEPS THE MOVING DRAW, unscaled (`circular=False`), because
+    it was not over-rejecting: 3.8 / 4.3 / 5.4 / 4.9% on the same nulls, and
+    4.1 / 3.6 and 5.5 / 5.0 under AR(0.3) and GARCH. Its observed statistic
+    is divided by `_rc_standard_errors`, which is biased low in the same
+    way, and each draw by a standard error from a handful of blocks, which
+    gives the null heavy tails; the two errors offset. The circular draw
+    alone took it to 2.1% at 60 days and its power from 11.9% to 10.6%.
     """
     n, k = differences.shape
     centred = differences - differences.mean(axis=0)
-    running = np.vstack([np.zeros((1, k)), np.cumsum(centred, axis=0)])
-    n_starts = n - block_size + 1
+    if circular:
+        # The series bent into a circle: a block that runs past the last
+        # row continues from the first, so every row starts a whole block.
+        rows = np.vstack([centred, centred[:block_size]])
+        n_starts = n
+        scale = _rc_bootstrap_scale(n, block_size)
+    else:
+        rows = centred
+        n_starts = n - block_size + 1
+        scale = 1.0
+    running = np.vstack([np.zeros((1, k)), np.cumsum(rows, axis=0)])
     # Sum of rows s .. s+block_size-1, and of the cut last block's rows.
-    block_sums = running[block_size:] - running[:-block_size]
+    block_sums = running[block_size : block_size + n_starts] - running[:n_starts]
     n_blocks = -(-n // block_size)
     tail = n - (n_blocks - 1) * block_size
     tail_sums = running[tail : tail + n_starts] - running[:n_starts]
@@ -691,11 +741,19 @@ def _rc_bootstrap_means(
             [rng.integers(0, n_starts, n_blocks) for _ in range(high - low)]
         )
         totals = block_sums[starts[:, :-1]].sum(axis=1) + tail_sums[starts[:, -1]]
-        draws[low:high] = totals / n
+        draws[low:high] = scale * totals / n
         if errors is not None:
             means = block_sums[starts[:, :whole]] / block_size
-            errors[low:high] = np.sqrt(means.var(axis=1, ddof=1) * block_size / n)
+            errors[low:high] = scale * np.sqrt(
+                means.var(axis=1, ddof=1) * block_size / n
+            )
     return draws, errors
+
+
+def _rc_bootstrap_scale(n: int, block_size: int) -> float:
+    """sqrt(n / (n - block_size)): what a circular block bootstrap's draws
+    are widened by. See `_rc_bootstrap_means`."""
+    return math.sqrt(n / (n - block_size)) if block_size < n else 1.0
 
 
 def _rc_standard_errors(differences: np.ndarray, block_size: int) -> np.ndarray:
@@ -704,6 +762,17 @@ def _rc_standard_errors(differences: np.ndarray, block_size: int) -> np.ndarray:
     overlapping block means, var(block mean) x block_size / n -- the
     estimator the block bootstrap itself implies, so the sample and every
     draw are studentised the same way.
+
+    BIASED LOW, AND LEFT SO ON PURPOSE. Block means taken about their own
+    mean understate the variance of the mean by about (1 - b/n): on
+    independent noise E[se^2] / (sigma^2 / n) measured 0.728, 0.822, 0.922
+    and 0.962 at n = 60, 120, 250 and 500 with the reality check's blocks.
+    Hansen's statistic divides by it, and the null's heavy tails offset it
+    (see `_rc_bootstrap_means`); multiplied by sqrt(n / (n - b + 1))
+    (Meketon and Schmeiser's overlapping batch means) it made the test
+    conservative -- 2.6%, 3.3% and 4.6% false rejections at 60, 120 and 250
+    days, power at 250 from 11.9% to 9.7%. The other use, Hansen's line
+    for "far below the benchmark", is a threshold in these same units.
     """
     n = differences.shape[0]
     running = np.vstack([np.zeros((1, differences.shape[1])), differences.cumsum(0)])
@@ -765,6 +834,13 @@ def reality_check(
     the local dependence structure. The block length is a real choice: too
     short and dependence is lost, too long and there are too few distinct
     blocks to resample.
+
+    AND, FOR WHITE'S STATISTIC AND THE PAIRWISE ONE, CIRCULAR AND RESCALED,
+    because on a short series the plain moving-block null was too narrow:
+    10.2% and 9.3% false rejections at 120 days and 5% nominal. Hansen's
+    studentised statistic was not, and keeps the moving draw.
+    `bootstrap_scheme` and `bootstrap_scale` report which ran;
+    `_rc_bootstrap_means` has the measurements.
 
     THE STATIONARITY ASSUMPTION IS THE WEAK POINT and it is worth naming.
     Block bootstrap assumes the return-generating process is the same
@@ -854,12 +930,23 @@ def reality_check(
     )
 
 
-def _rc_common_warnings(block_size: int) -> List[str]:
-    return [
+def _rc_common_warnings(block_size: int, n: int, circular: bool = True) -> List[str]:
+    blocked = (
         f"Block bootstrap with blocks of {block_size} days, which preserves "
         "serial correlation. Resampling individual days would make the null "
         "too narrow and the p-value too small -- volatility clustering and "
-        "drawdowns both live in the dependence structure.",
+        "drawdowns both live in the dependence structure."
+    )
+    if circular:
+        blocked += (
+            " The blocks wrap around the sample so every day is drawn equally "
+            f"often, and the null is widened by "
+            f"{_rc_bootstrap_scale(n, block_size):.3f} (sqrt(n / (n - block))) "
+            "because a block bootstrap understates the variance of a mean by "
+            "that much."
+        )
+    return [
+        blocked,
         "Assumes the return process is STATIONARY across the sample. A "
         "strategy whose edge genuinely existed and then vanished violates "
         "that, and the bootstrap mixes both regimes into one null.",
@@ -888,8 +975,17 @@ def _best_candidate_vs_benchmark(
     block_size = max(1, min(int(block_size), n // 4))
 
     means = values.mean(axis=0)
+    # White's null is the draws themselves and takes the circular, scaled
+    # draw; Hansen's divides each draw by its own error and keeps the moving
+    # one, which was already calibrated (see `_rc_bootstrap_means`).
+    circular = method == "white"
     draws, draw_errors = _rc_bootstrap_means(
-        values, n_bootstrap, block_size, seed, studentise=method == "hansen_spa"
+        values,
+        n_bootstrap,
+        block_size,
+        seed,
+        studentise=method == "hansen_spa",
+        circular=circular,
     )
     errors = _rc_standard_errors(values, block_size)
     distinct = errors > 0
@@ -957,7 +1053,7 @@ def _best_candidate_vs_benchmark(
             "outperformance alone. The correction for a search needs every "
             "candidate the search looked at in candidate_returns."
         )
-    warnings += _rc_common_warnings(block_size)
+    warnings += _rc_common_warnings(block_size, n, circular=circular)
 
     return {
         "question": "best_candidate_vs_benchmark",
@@ -968,6 +1064,10 @@ def _best_candidate_vs_benchmark(
         "best_candidate": names[best],
         "n_bootstrap": n_bootstrap,
         "block_size": block_size,
+        # What drew the null and how far it was widened, so a p-value can
+        # be reproduced and told apart from one drawn the old way.
+        "bootstrap_scheme": "circular_block" if circular else "moving_block",
+        "bootstrap_scale": _rc_bootstrap_scale(n, block_size) if circular else 1.0,
         "observed_outperformance": float(means[best] * TRADING_DAYS),
         "observed_statistic": float(statistic * statistic_units),
         "p_value": p_value,
@@ -1016,7 +1116,7 @@ def _beats_every_alternative(
             "more than luck would produce, so it is not shown to beat every "
             "alternative."
         )
-    warnings += _rc_common_warnings(block_size)
+    warnings += _rc_common_warnings(block_size, n)
 
     return {
         "question": "beats_every_alternative",
@@ -1033,6 +1133,10 @@ def _beats_every_alternative(
         },
         "n_bootstrap": n_bootstrap,
         "block_size": block_size,
+        # What drew the null and how far it was widened, so a p-value can
+        # be reproduced and told apart from one drawn the old way.
+        "bootstrap_scheme": "circular_block",
+        "bootstrap_scale": _rc_bootstrap_scale(n, block_size),
         "observed_outperformance": float(margins[tightest] * TRADING_DAYS),
         "observed_statistic": float(margins[tightest] * TRADING_DAYS),
         "p_value": p_value,
