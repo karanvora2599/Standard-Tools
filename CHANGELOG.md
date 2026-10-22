@@ -1,5 +1,18 @@
 # Changelog
 
+## The replication basket solves on one BLAS thread, so its weights are the same bits whatever the caller's thread count
+
+- **SLSQP's weights followed the thread count on the CI runners.** On
+  12,000 observations `optimize_replication_basket` returned weights that
+  differed in their last bits between one BLAS thread and two on the
+  Linux runners' OpenBLAS, although the covariance it solves already ran
+  on one thread. The solve now runs under the same limit, and so do the
+  predicted variance, the replicated series, its tracking error and its
+  beta, the products with a term per observation.
+- **What moves.** Nothing on one thread. Where a BLAS split these
+  products across threads, the weights and every figure built on them
+  move in their last bits to the one-thread values.
+
 ## pandas 3.1 moved three things under the library: an order's lifetime counts its nanoseconds on every pandas, an evaluation's weights hash as before, and a long correlation runs on one BLAS thread
 
 - **An order-event duration is counted from its integer, not by pandas.**

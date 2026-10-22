@@ -47,7 +47,9 @@ with it, is three np.dot products with as many terms as rows, where up to
 `permutation_test_ic`, the per-entity autocorrelation of
 `feature_distribution_stats`, the correlation and persistence of
 `order_flow_imbalance`, and the correlations of `hedge_effectiveness` and
-`optimize_replication_basket`. Each correlation runs under the limit now.
+`optimize_replication_basket`. Each correlation runs under the limit now,
+and so does the basket's SLSQP solve, whose weights moved in their last
+bits between one thread and two on the CI runners.
 """
 
 from __future__ import annotations

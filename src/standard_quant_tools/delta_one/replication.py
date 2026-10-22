@@ -186,17 +186,21 @@ def optimize_replication_basket(
     # Predicted from the covariance, realized from the actual series. The
     # covariance is already annualized, so this takes a square root and
     # stops; `tracking_error` annualizes its own input, so it does not.
-    predicted_var = float(weights @ cov @ weights - 2.0 * weights @ cross + bench_var)
-    predicted_te = math.sqrt(max(predicted_var, 0.0))
-
-    replicated = pd.Series(frame.to_numpy(dtype=float) @ weights, index=frame.index)
-    realized_te = tracking_error(replicated, bench, periods_per_year=periods_per_year)
     # On one BLAS thread, as `hedge_effectiveness` reads its correlation:
-    # from pandas 3.1 it is np.dot products, which OpenBLAS splits across
-    # threads above 10,000 terms.
+    # the replicated series is a product with a term per row, and from
+    # pandas 3.1 the correlation is np.dot products too, both of which
+    # OpenBLAS splits across threads above 10,000 terms.
     with single_threaded_blas():
+        predicted_var = float(
+            weights @ cov @ weights - 2.0 * weights @ cross + bench_var
+        )
+        replicated = pd.Series(frame.to_numpy(dtype=float) @ weights, index=frame.index)
+        realized_te = tracking_error(
+            replicated, bench, periods_per_year=periods_per_year
+        )
         correlation = float(replicated.corr(bench))
-    beta = float(cross @ weights / bench_var) if bench_var > 0 else float("nan")
+        beta = float(cross @ weights / bench_var) if bench_var > 0 else float("nan")
+    predicted_te = math.sqrt(max(predicted_var, 0.0))
 
     # Verified from the returned vector rather than trusted from the solver.
     # `result.success` is the solver's opinion of its own run; these are the
@@ -304,15 +308,19 @@ def _solve(
         # other constrained solve spends 58% of its measured runtime.
         return 2.0 * (sub_cov @ w - sub_cross)
 
-    result = _scipy_minimize(
-        objective,
-        start,
-        jac=gradient,
-        method="SLSQP",
-        bounds=[(lower, float(caps[i])) for i in support],
-        constraints=[{"type": "eq", "fun": lambda w: float(np.sum(w)) - 1.0}],
-        options={"maxiter": 500, "ftol": 1e-12},
-    )
+    # On one BLAS thread: SLSQP's least-squares steps are scipy's own
+    # BLAS and LAPACK, and on the CI runners' OpenBLAS the weights moved in
+    # their last bits between one thread and two.
+    with single_threaded_blas():
+        result = _scipy_minimize(
+            objective,
+            start,
+            jac=gradient,
+            method="SLSQP",
+            bounds=[(lower, float(caps[i])) for i in support],
+            constraints=[{"type": "eq", "fun": lambda w: float(np.sum(w)) - 1.0}],
+            options={"maxiter": 500, "ftol": 1e-12},
+        )
 
     weights = np.zeros(n_assets, dtype=float)
     weights[support] = result.x
