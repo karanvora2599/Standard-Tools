@@ -815,7 +815,35 @@ class TestScanPairsMultipleTesting:
         result = scan_pairs(inp)
         assert result.multiple_testing == "none"
         assert result.n_pairs_significant_uncorrected >= 1
-        assert result.n_pairs_cointegrated == result.n_pairs_significant_uncorrected
+        assert (
+            result.n_pairs_cointegrated + result.n_pairs_half_life_not_mean_reverting
+            == result.n_pairs_significant_uncorrected
+        )
+
+    def test_a_half_life_its_own_test_rejects_is_not_returned(self, universe):
+        """
+        A half-life is a claim that the spread mean-reverts, and the range
+        screens on it. Random walks let through at a lax threshold mostly
+        have a finite half-life whose Dickey-Fuller test fails -- 49 of 69
+        returned in a measured sweep -- and were ranked on it as if it
+        measured a reversion.
+        """
+        inp = PairScannerInput(
+            tickers=self.TICKERS + ["PAIR"],
+            start_date=START,
+            end_date=END,
+            multiple_testing="none",
+            p_value_threshold=0.5,
+            min_half_life=0.01,
+            max_half_life=100_000,
+            max_pairs=100,
+        )
+        result = scan_pairs(inp)
+        assert result.n_pairs_half_life_not_mean_reverting >= 1
+        assert any("Dickey-Fuller" in w for w in result.warnings)
+        for pair in result.pairs:
+            assert pair.half_life_t_statistic < pair.half_life_critical_value
+        assert ("W00", "PAIR") in {(p.symbol_a, p.symbol_b) for p in result.pairs}
 
 
 # ── Feature 3: Walk-Forward Backtest ──────────────────────────────────────────

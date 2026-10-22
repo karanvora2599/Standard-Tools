@@ -1,5 +1,37 @@
 # Changelog
 
+## A half-life comes with its own test: `run_cointegration_test` reports it and `scan_pairs` keeps a pair only when it passes
+
+- **The test was computed and dropped.** `half_life_statistics` exists
+  because a finite half-life is what a random walk usually produces (84%
+  of 1,000 random walks landed inside a 5-126 bar screen), and
+  `cointegration_test` returns `half_life_mean_reverting` with the
+  Dickey-Fuller t-statistic and the 5% critical value it has to clear.
+  The two tools over it returned the half-life without them.
+  `run_cointegration_test` on 40 pairs of independent random walks gave
+  24 a half-life under 60 bars that its own test rejects -- one at 33
+  bars with t = -2.12 against -3.35 -- and `scan_pairs`, which screens
+  on `min_half_life` / `max_half_life` and ranks on the half-life, kept
+  them: at `multiple_testing='none'` over 30 universes of eight random
+  walks it returned 15 pairs at a 0.05 threshold, 2 of them failing the
+  test, and 69 at 0.2, 49 failing it.
+- **Now:** `run_cointegration_test` returns `half_life_mean_reverting`,
+  `half_life_t_statistic`, `half_life_critical_value` and `warnings`,
+  which say when a finite half-life is not evidence of reversion; the
+  number itself is unchanged. `scan_pairs` drops a pair whose half-life
+  fails the test, after the p-value gate and the range, counts them in
+  `n_pairs_half_life_not_mean_reverting` and says so; a returned pair
+  carries its t-statistic and critical value. On the same sweep, 13 and
+  20 pairs come back, none failing. The default Benjamini-Hochberg gate
+  returned no random-walk pair before or after, and 40 planted OU(0.95)
+  pairs that were cointegrated all passed the test.
+- Tests: a cointegrated pair's half-life passes its test with no warning,
+  a random-walk pair's 82.1-bar half-life is reported with the failed
+  test and the warning, and a lax scan returns only pairs whose half-life
+  passes while still returning the planted pair. The tool descriptions
+  and `Documentation/20_tool_index.md` say so. The mutation catalogue
+  gains two entries, both killed.
+
 ## A volatility jump is a change point: `detect_change_points` searches the variance as well as the level
 
 - **The search was on the level only.** `detect_change_points` (and the

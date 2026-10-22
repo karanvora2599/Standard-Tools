@@ -889,6 +889,42 @@ class TestRunCointegrationTest:
         assert result.symbol_a == "KO"
         assert result.symbol_b == "PEP"
 
+    def test_the_half_life_comes_with_its_own_test(self, cointegrating_pair):
+        inp = CointegrationInput(
+            symbol_a="KO", symbol_b="PEP", start_date=START, end_date=END
+        )
+        result = run_cointegration_test(inp)
+        assert result.half_life_mean_reverting is True
+        assert result.half_life_t_statistic < result.half_life_critical_value
+        assert not any("Dickey-Fuller" in w for w in result.warnings)
+
+    def test_a_random_walk_half_life_is_said_not_to_measure_reversion(
+        self, monkeypatch, sample_ohlcv
+    ):
+        """Two independent random walks: 24 of 40 such pairs came back with
+        a half-life under 60 bars, and the tool returned it without the
+        test that rejects it."""
+        n = len(sample_ohlcv)
+        frames = {}
+        for symbol, seed in (("KO", 1), ("PEP", 2)):
+            frame = sample_ohlcv.copy()
+            frame["Close"] = 200 + np.cumsum(
+                np.random.default_rng(seed).normal(0, 1, n)
+            )
+            frames[symbol] = frame
+        provider = MagicMock()
+        provider.get_ohlcv.side_effect = lambda symbol, *a, **k: frames[symbol]
+        monkeypatch.setattr(DataFactory, "get_provider", lambda *a, **kw: provider)
+        result = run_cointegration_test(
+            CointegrationInput(
+                symbol_a="KO", symbol_b="PEP", start_date=START, end_date=END
+            )
+        )
+        assert result.half_life_mean_reverting is False
+        assert result.half_life_t_statistic > result.half_life_critical_value
+        assert result.half_life_days == pytest.approx(82.1)
+        assert any("82.1 bars is not evidence" in w for w in result.warnings)
+
     def test_cointegrated_is_bool(self, cointegrating_pair):
         inp = CointegrationInput(
             symbol_a="KO",

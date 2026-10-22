@@ -98,6 +98,7 @@ from standard_quant_tools.agent.runtimes._shared import (
 from standard_quant_tools.analysis.cointegration import (
     cointegration_test,
     compute_spread,
+    half_life_statistics,
     kalman_hedge_ratio,
     spread_zscore,
 )
@@ -753,6 +754,23 @@ def run_cointegration_test(input_data: CointegrationInput) -> CointegrationResul
     hl = result["half_life_days"]
     hl_safe = round(min(hl, 9999.0), 1) if hl != float("inf") else 9999.0
 
+    # The half-life comes with the test that says whether there is one, as
+    # `half_life_statistics` documents. This tool returned the number and
+    # dropped the test: on 40 pairs of independent random walks, 24 came
+    # back with a half-life under 60 bars that its own test rejects.
+    reverting = bool(result["half_life_mean_reverting"])
+    t_stat = float(result["half_life_t_statistic"])
+    critical = float(result["half_life_critical_value"])
+    warnings: List[str] = []
+    if not reverting and math.isfinite(hl):
+        warnings.append(
+            f"half_life_days of {hl_safe:g} bars is not evidence that the "
+            "spread mean-reverts: the Dickey-Fuller t-statistic of the "
+            f"regression it comes from, {t_stat:.2f}, does not clear the 5% "
+            f"critical value, {critical:.2f}. Two independent random walks "
+            "usually produce a finite half-life like this one."
+        )
+
     return CointegrationResult(
         symbol_a=input_data.symbol_a,
         symbol_b=input_data.symbol_b,
@@ -761,6 +779,12 @@ def run_cointegration_test(input_data: CointegrationInput) -> CointegrationResul
         hedge_ratio=round(float(result["hedge_ratio"]), 4),
         adf_statistic=round(float(result["adf_statistic"]), 4),
         half_life_days=hl_safe,
+        half_life_mean_reverting=reverting,
+        half_life_t_statistic=round(t_stat, 4) if math.isfinite(t_stat) else None,
+        half_life_critical_value=(
+            round(critical, 4) if math.isfinite(critical) else None
+        ),
+        warnings=warnings,
         critical_values={
             k: round(float(v), 4) for k, v in result["critical_values"].items()
         },
@@ -1337,6 +1361,7 @@ def scan_pairs(input_data: PairScannerInput) -> PairScannerResult:
     valid_tickers = [t for t, p in prices.items() if p is not None]
     all_pairs = list(combinations(valid_tickers, 2))
     n_tested = 0
+    n_not_reverting = 0
     passing: List[PairResult] = []
     failed_pairs: List[PairFailure] = []
 
@@ -1442,6 +1467,15 @@ def scan_pairs(input_data: PairScannerInput) -> PairScannerResult:
                 continue
 
             spread = _spread(prices[a], prices[b], hedge_ratio=result["hedge_ratio"])  # type: ignore[arg-type]
+            # A half-life is a claim that the spread mean-reverts, and the
+            # range above screens on it; it is kept only with the test of
+            # that claim. Without it, at multiple_testing='none' and a
+            # threshold of 0.2, 49 of the 69 pairs of random walks
+            # returned had a half-life its own test rejects.
+            reversion = half_life_statistics(spread, fitted_residual=True)
+            if not reversion["mean_reverting"]:
+                n_not_reverting += 1
+                continue
             z = _zscore(spread, window=input_data.zscore_window).dropna()
             current_z = round(float(z.iloc[-1]), 4) if not z.empty else 0.0
 
@@ -1464,6 +1498,8 @@ def scan_pairs(input_data: PairScannerInput) -> PairScannerResult:
                     ),
                     hedge_ratio=round(float(result["hedge_ratio"]), 4),
                     half_life_days=round(float(hl), 2),
+                    half_life_t_statistic=round(reversion["t_statistic"], 4),
+                    half_life_critical_value=round(reversion["critical_value"], 4),
                     adf_statistic=round(float(result["adf_statistic"]), 4),
                     current_zscore=current_z,
                     signal=signal,
@@ -1490,6 +1526,14 @@ def scan_pairs(input_data: PairScannerInput) -> PairScannerResult:
             )
         )
 
+    if n_not_reverting:
+        warnings.append(
+            f"{n_not_reverting} pair(s) cleared the p-value gate with a "
+            "half-life inside the range and were dropped: the half-life's own "
+            "Dickey-Fuller t-statistic did not clear the 5% critical value, "
+            "so the number did not measure a reversion."
+        )
+
     passing.sort(key=lambda p: p.half_life_days)
     top = passing[: input_data.max_pairs]
     logger.debug(
@@ -1513,6 +1557,7 @@ def scan_pairs(input_data: PairScannerInput) -> PairScannerResult:
         n_pairs_significant_uncorrected=n_uncorrected,
         expected_false_positives=round(expected_false, 2),
         multiple_testing=input_data.multiple_testing,
+        n_pairs_half_life_not_mean_reverting=n_not_reverting,
         warnings=warnings,
     )
 

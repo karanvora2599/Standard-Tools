@@ -1235,12 +1235,21 @@ class CointegrationResult(BaseModel):
     hedge_ratio: float
     adf_statistic: float
     half_life_days: float
+    half_life_mean_reverting: Optional[bool] = Field(
+        None,
+        description="The half-life's own Dickey-Fuller t-statistic clears "
+        "the 5% Engle-Granger critical value. A finite half_life_days "
+        "without it is what two independent random walks usually produce.",
+    )
+    half_life_t_statistic: Stat = None
+    half_life_critical_value: Stat = None
     critical_values: Dict[str, float]
     spread_mean: float
     spread_std: float
     current_zscore: float
     signal: str  # "long_a_short_b" | "short_a_long_b" | "neutral"
     n_obs: int
+    warnings: List[str] = Field(default_factory=list)
 
 
 # ──────────────────────────────────────────────
@@ -2100,6 +2109,13 @@ class PairResult(BaseModel):
     )
     hedge_ratio: float
     half_life_days: float
+    half_life_t_statistic: Stat = Field(
+        None,
+        description="Dickey-Fuller t-statistic of the regression the "
+        "half-life comes from; a pair is returned only when it clears "
+        "half_life_critical_value.",
+    )
+    half_life_critical_value: Stat = None
     adf_statistic: float
     current_zscore: float
     signal: str  # "long_a_short_b" | "short_a_long_b" | "neutral"
@@ -2137,6 +2153,12 @@ class PairScannerResult(BaseModel):
         "cointegrated.",
     )
     multiple_testing: str = "benjamini_hochberg"
+    n_pairs_half_life_not_mean_reverting: int = Field(
+        0,
+        description="Pairs that cleared the p-value gate with a half-life "
+        "inside the range, and were dropped because that half-life failed "
+        "its own Dickey-Fuller test.",
+    )
     warnings: List[str] = Field(default_factory=list)
 
 

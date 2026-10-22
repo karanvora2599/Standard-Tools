@@ -223,6 +223,23 @@ MUTATIONS: List[Mutation] = [
         "tests/analysis/test_inference.py",
     ),
     Mutation(
+        # run_cointegration_test returning a random walk's half-life with
+        # nothing said about the test that rejects it.
+        "cointegration tool: say nothing when the half-life's test fails",
+        SRC / "agent/runtimes/research/tools.py",
+        "    if not reverting and math.isfinite(hl):\n",
+        "    if not reverting and hl < 0:\n",
+        "tests/agent/test_agent_tools.py",
+    ),
+    Mutation(
+        # scan_pairs ranking on a half-life without its test, as before.
+        "scan pairs: keep a half-life its own test rejects",
+        SRC / "agent/runtimes/research/tools.py",
+        '            if not reversion["mean_reverting"]:\n',
+        '            if reversion["n_obs"] < 0:\n',
+        "tests/agent/test_new_agent_tools.py",
+    ),
+    Mutation(
         # Change points by level only, as before: a volatility jump with no
         # change in level is no change point at all.
         "change points: skip the variance search",

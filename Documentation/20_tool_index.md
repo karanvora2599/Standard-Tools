@@ -253,7 +253,7 @@ Whether the edge DECAYED, or the full-sample Sharpe is the average of a good per
 
 #### `run_cointegration_test`
 
-Engle-Granger cointegration: hedge ratio, half-life, spread z-score signal.
+Engle-Granger cointegration: hedge ratio, half-life, spread z-score signal. The half-life comes with its own Dickey-Fuller test (half_life_mean_reverting): a finite half-life without it is what two independent random walks usually produce.
 
 **Required:** `symbol_a`, `symbol_b`, `start_date`, `end_date`  
 **Optional:** `zscore_window`
@@ -302,7 +302,7 @@ ADF, KPSS and the variance ratio, with the four-way verdict spelled out. The two
 
 #### `scan_pairs`
 
-Scan a ticker universe for cointegrated pairs, ranked by half-life. Each pair is tested in both regression orders (Engle-Granger is not symmetric) and gated on the larger p-value after a Benjamini-Hochberg adjustment across every pair tested; reports the number tested and how many would pass by chance.  
+Scan a ticker universe for cointegrated pairs, ranked by half-life. Each pair is tested in both regression orders (Engle-Granger is not symmetric) and gated on the larger p-value after a Benjamini-Hochberg adjustment across every pair tested; reports the number tested and how many would pass by chance. A pair is returned only when its half-life also passes its own Dickey-Fuller test.  
 *Long-running: served only with `--enable-long-running`.*
 
 **Required:** `tickers`, `start_date`, `end_date`  
