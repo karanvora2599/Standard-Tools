@@ -16,6 +16,13 @@ They are now `audit.canonical_frame_hash`, recorded with
 computed under pandas 2.3.3 and pandas 3.0.5 and are asserted under
 whichever one runs the suite: CI runs Python 3.10, which resolves pandas 2,
 and Python 3.11 and 3.12, which resolve pandas 3.
+
+pandas 3.1 changed what the evaluation's weights are indexed by without
+changing a weight: `.loc` with an Index of labels named the rows it
+selected after that Index up to 3.0 and after the frame's own index from
+3.1, and the hash covers the index's name. The evaluation now names the
+rows itself, and `TestTheRowsAreNamedByTheEvaluation` gives them a name
+under every pandas to show that it does.
 """
 
 from __future__ import annotations
@@ -84,13 +91,14 @@ def _predictions(unit: str) -> pd.DataFrame:
 @pytest.fixture
 def prices_at(monkeypatch) -> Dict[str, str]:
     """Serves `conftest.make_ohlcv` bars with the index at the unit the
-    returned dict names, so one process can stand in for either pandas."""
-    state = {"unit": "ns"}
+    returned dict names, so one process can stand in for either pandas,
+    and under the name it gives (none by default)."""
+    state = {"unit": "ns", "name": None}
 
     class _Provider:
         def get_ohlcv(self, symbol, start, end, interval="1d"):
             frame = make_ohlcv(symbol)
-            frame.index = frame.index.as_unit(state["unit"])
+            frame.index = frame.index.as_unit(state["unit"]).rename(state["name"])
             return frame
 
         async def get_ohlcv_async(self, symbol, start, end, interval="1d"):
@@ -100,7 +108,7 @@ def prices_at(monkeypatch) -> Dict[str, str]:
     return state
 
 
-def _evaluate(unit: str, prices_at: Dict[str, str]) -> dict:
+def _evaluate(unit: str, prices_at: Dict[str, str], frequency: str = "weekly") -> dict:
     prices_at["unit"] = unit
     return evaluate_predictions_portfolio(
         _predictions(unit),
@@ -111,7 +119,7 @@ def _evaluate(unit: str, prices_at: Dict[str, str]) -> dict:
         start="2022-01-01",
         end="2023-12-31",
         transform=PredictionTransformSpec(
-            method="cross_sectional_rank", rebalance_frequency="weekly"
+            method="cross_sectional_rank", rebalance_frequency=frequency
         ),
         run_id="portfolio_hash",
     )
@@ -166,3 +174,34 @@ class TestAnEvaluationRecordsTheCurrentForm:
         assert Path(result["equity_curve_uri"]).stem == (
             f"portfolio_equity_{provenance['equity_curve_hash']}"
         )
+
+
+class TestTheRowsAreNamedByTheEvaluation:
+    @pytest.mark.parametrize("frequency", ["weekly", "daily"])
+    def test_the_weights_are_unnamed_whatever_names_their_dates(
+        self, prices_at, frequency
+    ):
+        """Prices indexed under the predictions' own column name, `date`,
+        and the daily schedule, which is the score panel's index itself:
+        `.loc` then names the selected rows `date` under every pandas, as
+        pandas 3.1 does for any schedule. The weights written are unnamed
+        all the same, and hash as when nothing is named."""
+        plain = _evaluate("us", prices_at, frequency)
+        prices_at["name"] = "date"
+        named = _evaluate("us", prices_at, frequency)
+
+        weights = _artifacts.load_artifact(named["target_weights_uri"])
+        assert weights.index.name is None
+        assert (
+            named["provenance"]["target_weights_hash"]
+            == plain["provenance"]["target_weights_hash"]
+        )
+        assert named["target_weights_uri"] == plain["target_weights_uri"]
+        if frequency == "weekly":
+            assert named["provenance"]["target_weights_hash"] == EVALUATED_WEIGHTS
+
+    def test_a_named_index_is_a_different_frame_to_the_hash(self):
+        """Null case: the hash covers the index's name, which is why the
+        evaluation has to set it."""
+        named = _weights("us").rename_axis("when")
+        assert canonical_frame_hash(named) != WEIGHTS_CANONICAL

@@ -152,12 +152,68 @@ def _as_datetimes(stamps: pd.Series) -> pd.Series:
     return pd.to_datetime(stamps, errors="coerce")
 
 
+#: Units per second of each datetime64 resolution pandas uses.
+_PER_SECOND = {"s": 1, "ms": 1_000, "us": 1_000_000, "ns": 1_000_000_000}
+
+
+def _seconds(durations: np.ndarray, unit: str) -> Optional[np.ndarray]:
+    """
+    Durations, integers in `unit`, as seconds, or None for a unit pandas
+    does not use.
+
+    ONE DEFINITION, WHICHEVER PANDAS IS INSTALLED. A duration of n units,
+    p to the second, is its whole seconds plus the exact fraction left
+    over, added in floating point: floor(n / p) + (n mod p) / p. So
+    1.234567891 s reads 1.234567891 and 500 ns reads 5e-07. That is what
+    Timedelta.total_seconds() returns from pandas 3.1, and what it returned
+    before for any duration with no part under a microsecond; up to 3.0 it
+    dropped the nanoseconds, floored, so 500 ns read 0.0 and a lifetime on
+    a nanosecond feed read up to a microsecond short -- the same downward
+    bias as an instantaneous order. Every lifetime and span in this module
+    is formed here, from the integers, on both paths, so a session gives
+    the same seconds to the bit on pandas 2.3, 3.0 and 3.1.
+    """
+    per_second = _PER_SECOND.get(unit)
+    if per_second is None:
+        return None
+    # divmod floors, so the fraction is in [0, 1) for a negative duration
+    # too, and neither part needs an int64 product that could wrap.
+    whole, fraction = np.divmod(np.asarray(durations, dtype=np.int64), per_second)
+    return whole.astype(np.float64) + fraction / per_second
+
+
+def _timedelta_seconds(delta: Any) -> float:
+    """
+    One duration -- a Timedelta, as subtracting two Timestamps gives it --
+    as `_seconds` counts it; NaN for NaT, as total_seconds() gives.
+
+    It is read as its nanoseconds whatever its unit: n units of 1/p second
+    are n * 10**9 / p nanoseconds, the same whole seconds and the same
+    fraction, so the same bits. Python's int-to-float conversion and
+    integer division round correctly, as numpy's do, so this is `_seconds`
+    to the bit, at a tenth of the cost of reading the integer in its own
+    unit, which only a span past 292 years in a coarser unit needs.
+    """
+    if not isinstance(delta, pd.Timedelta):
+        delta = pd.Timedelta(delta)
+        if delta is pd.NaT:
+            return float("nan")
+    try:
+        count, per_second = delta.value, 1_000_000_000
+    except OverflowError:
+        value = delta.to_timedelta64()
+        count = int(value.astype(np.int64))
+        per_second = _PER_SECOND[np.datetime_data(value.dtype)[0]]
+    whole, fraction = divmod(count, per_second)
+    return float(whole) + fraction / per_second
+
+
 def _elapsed_seconds(stamps: pd.Series) -> Optional[float]:
     valid = _as_datetimes(stamps).dropna()
     if len(valid) < 2:
         return None
-    span = (valid.max() - valid.min()).total_seconds()
-    return float(span) if span > 0 else None
+    span = _timedelta_seconds(valid.max() - valid.min())
+    return span if span > 0 else None
 
 
 def queue_positions(events: pd.DataFrame) -> Dict[str, Any]:
@@ -344,11 +400,13 @@ def order_lifetimes(events: pd.DataFrame) -> Dict[str, Any]:
     worst for exactly the long-resting orders a queue study cares about.
 
     THE PASS IS NATIVE when the extension carries it and the frame holds
-    64 events or more, with each lifetime turned into seconds as
-    Timedelta.total_seconds() turns it -- whole microseconds, so a lifetime
-    under one reads 0.0 -- and the same numbers (see the CHANGELOG entry of
-    2026-10-04). A frame the codes cannot represent, or whose timestamps do
-    not parse to one datetime column, runs the loop.
+    64 events or more, and gives the loop's numbers (see the CHANGELOG
+    entry of 2026-10-04). Both turn each lifetime into seconds from its
+    integer, nanoseconds and all, the same way on every pandas (`_seconds`);
+    neither asks Timedelta.total_seconds(), which kept only whole
+    microseconds up to pandas 3.0 and keeps nanoseconds from 3.1. A frame
+    the codes cannot represent, or whose timestamps do not parse to one
+    datetime column, runs the loop.
     """
     codes = _native_codes(events, stamps=True) if _sized_for_native(events) else None
     return _order_lifetimes(events, codes)
@@ -403,15 +461,15 @@ def _lifetime_pass_python(events: pd.DataFrame):
                 else:
                     censored += 1
                 continue
-            seconds = (when - start).total_seconds()
-            (cancelled if action == CANCEL else filled).append(float(seconds))
+            seconds = _timedelta_seconds(when - start)
+            (cancelled if action == CANCEL else filled).append(seconds)
     return filled, cancelled, len(added), censored, from_snapshot, len(known_at_open)
 
 
 def _lifetime_pass_native(codes: Dict[str, Any]):
     """The lifetime pass in `_sqt_core.order_lifetimes`, or None when a
-    lifetime cannot be held exactly (the loop then runs, and raises where
-    pandas does)."""
+    lifetime leaves int64 (the loop then runs, and raises where pandas
+    does)."""
     stamps, unit = codes["stamps"]
     filled, cancelled, still_resting, censored, from_snapshot, known_at_open, over = (
         _cpp_core.order_lifetimes(
@@ -424,8 +482,8 @@ def _lifetime_pass_native(codes: Dict[str, Any]):
     )
     if over:
         return None
-    filled_seconds = _total_seconds(filled, unit)
-    cancelled_seconds = _total_seconds(cancelled, unit)
+    filled_seconds = _seconds(filled, unit)
+    cancelled_seconds = _seconds(cancelled, unit)
     if filled_seconds is None or cancelled_seconds is None:
         return None
     return (
@@ -436,43 +494,6 @@ def _lifetime_pass_native(codes: Dict[str, Any]):
         int(from_snapshot),
         int(known_at_open),
     )
-
-
-#: Microseconds per unit of each datetime64 resolution pandas uses, as a
-#: (multiplier, divisor) pair: whole microseconds are value * m // d.
-_MICROSECONDS = {"s": (1_000_000, 1), "ms": (1_000, 1), "us": (1, 1), "ns": (1, 1_000)}
-
-#: Past this many microseconds an int64 product or a float64 conversion is
-#: no longer exact; such a lifetime (more than 285 years) runs the loop.
-_EXACT_MICROSECONDS = 2**53
-
-
-def _total_seconds(durations: np.ndarray, unit: str) -> Optional[np.ndarray]:
-    """
-    Durations in `unit` as Timedelta.total_seconds() returns them, or None.
-
-    pandas computes total_seconds() from the timedelta's components:
-    days * 86400 + seconds, an integer, plus microseconds / 1e6 -- with the
-    nanoseconds dropped (floored, so -1 ns is -1 us) and the integer part
-    added to the fraction in floating point. So 1.234567891 s is 1.234567,
-    and 21.472982 s is 21.472982000000002 where a single division gives
-    21.472982. This forms the same three numbers and the same sum.
-    """
-    if unit not in _MICROSECONDS:
-        return None
-    durations = np.asarray(durations, dtype=np.int64)
-    multiplier, divisor = _MICROSECONDS[unit]
-    # Compared from both sides rather than through abs(), which wraps at
-    # INT64_MIN.
-    limit = _EXACT_MICROSECONDS // multiplier
-    if multiplier > 1 and ((durations > limit) | (durations < -limit)).any():
-        return None
-    micro = np.floor_divide(durations, divisor) * multiplier
-    whole = np.floor_divide(micro, 1_000_000)
-    if ((whole > _EXACT_MICROSECONDS) | (whole < -_EXACT_MICROSECONDS)).any():
-        return None
-    fraction = micro - whole * 1_000_000
-    return whole.astype(np.float64) + fraction / 1_000_000
 
 
 def _lifetime_summary(
@@ -656,8 +677,8 @@ def _counted_seconds(stamps: pd.Series, keep: Optional[np.ndarray]) -> Optional[
     kept = as_integers[positions]
     first = values[int(positions[kept.argmin()])]
     last = values[int(positions[kept.argmax()])]
-    span = (last - first).total_seconds()
-    return float(span) if span > 0 else None
+    span = _timedelta_seconds(last - first)
+    return span if span > 0 else None
 
 
 def _action_counts(actions: pd.Series, keep: Optional[np.ndarray]) -> Dict[Any, Any]:

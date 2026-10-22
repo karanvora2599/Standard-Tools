@@ -38,6 +38,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools._blas import single_threaded_blas
 from standard_quant_tools.analysis.regression import calculate_beta, rolling_beta
 from standard_quant_tools.constants import TRADING_DAYS_PER_YEAR
 from standard_quant_tools.error import ValidationError
@@ -300,7 +301,11 @@ def hedge_effectiveness(
     # the hedged series' own sigma, which is `volatility_after` under a
     # second name.
     te = tracking_error(unhedged, hedge, periods_per_year=periods_per_year)
-    correlation = float(unhedged.corr(hedge))
+    # On one BLAS thread: from pandas 3.1 a correlation is np.dot products,
+    # which OpenBLAS splits across threads above 10,000 terms, and 12,000
+    # days took other last bits at two threads than at one.
+    with single_threaded_blas():
+        correlation = float(unhedged.corr(hedge))
     vol_reduction = (
         (1.0 - vol_after / vol_before) * 100.0 if vol_before else float("nan")
     )

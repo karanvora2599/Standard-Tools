@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import accuracy_score, mean_absolute_error, r2_score, roc_auc_score
 
+from standard_quant_tools._blas import single_threaded_blas
 from standard_quant_tools.error import ValidationError
 
 # Optional native fast path. The Python below stays the reference and the
@@ -93,7 +94,13 @@ def _safe_corr(true_s: pd.Series, pred_s: pd.Series, method: str) -> float:
                 ]
             )
 
-    value = float(true_s.corr(pred_s, method=method))
+    # One BLAS thread: from pandas 3.1 a Pearson Series.corr is three
+    # np.dot calls, which OpenBLAS splits across threads above 10,000 terms,
+    # and the pooled IC of 36,000 rows took other last bits at two threads
+    # than at one. Up to 3.0 it was np.corrcoef, whose product of two rows
+    # gave the same bits at every thread count measured.
+    with single_threaded_blas():
+        value = float(true_s.corr(pred_s, method=method))
     return 0.0 if np.isnan(value) else value
 
 

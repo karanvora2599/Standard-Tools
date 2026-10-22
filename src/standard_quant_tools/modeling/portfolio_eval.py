@@ -1098,8 +1098,16 @@ def _simulate_predictions_portfolio(
             {e: price_data[e]["Close"].pct_change(fill_method=None) for e in entities}
         )
 
+    # THE ROWS ARE NAMED HERE, NOT BY PANDAS. `.loc` with an Index of
+    # labels named its rows after that Index up to pandas 3.0 -- here the
+    # schedule, which carries no name -- and pandas 3.1 names them after
+    # the panel's own index, `date`. The weights keep these rows, and
+    # `canonical_frame_hash` covers the index's name, so identical weights
+    # were hashed and their artifact named differently under 3.1. The
+    # index is left unnamed, as every earlier pandas left it.
+    rebalance_scores = score_panel.loc[rebalance_dates].rename_axis(index=None)
     weights, transform_diagnostics = transform_predictions_to_weights(
-        score_panel.loc[rebalance_dates], transform, returns_df
+        rebalance_scores, transform, returns_df
     )
 
     if transform_diagnostics["n_dates_below_target_gross"]:

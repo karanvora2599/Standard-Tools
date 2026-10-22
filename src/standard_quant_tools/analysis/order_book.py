@@ -42,6 +42,7 @@ import numpy as np
 import pandas as pd
 
 from standard_quant_tools._blas import single_threaded_blas
+from standard_quant_tools.analysis.order_events import _timedelta_seconds
 from standard_quant_tools.error import ValidationError
 
 __all__ = ["book_dynamics", "book_metrics", "depth_profile", "microprice"]
@@ -448,8 +449,11 @@ def book_dynamics(book: pd.DataFrame) -> Dict[str, Any]:
     if "timestamp" in book.columns:
         stamps = pd.to_datetime(book["timestamp"], errors="coerce").dropna()
         if len(stamps) > 1:
-            span = (stamps.max() - stamps.min()).total_seconds()
-            seconds = float(span) if span > 0 else None
+            # From the stamps' integers, nanoseconds and all, as the order
+            # feed's clock is read: total_seconds() dropped them up to
+            # pandas 3.0 and keeps them from 3.1.
+            span = _timedelta_seconds(stamps.max() - stamps.min())
+            seconds = span if span > 0 else None
     if seconds is None:
         warnings.append(
             "NOTE: no usable timestamp span, so the per-second rates are "

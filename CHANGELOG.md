@@ -1,5 +1,76 @@
 # Changelog
 
+## pandas 3.1 moved three things under the library: an order's lifetime counts its nanoseconds on every pandas, an evaluation's weights hash as before, and a long correlation runs on one BLAS thread
+
+- **An order-event duration is counted from its integer, not by pandas.**
+  `Timedelta.total_seconds()` dropped a duration's nanoseconds up to
+  pandas 3.0, flooring it to whole microseconds, and keeps them from 3.1.
+  The lifetime loop of `order_event_metrics` called it, and the native
+  pass reproduced the old rule from the integers, so under pandas 3.1 the
+  two paths disagreed by about half a microsecond in every lifetime
+  figure and 25 tests failed. Both now form a duration's seconds from its
+  integer: the whole seconds plus the exact fraction left over, added in
+  floating point. That is what pandas 3.1's `total_seconds()` returns,
+  and what every pandas returned for a duration with no part under a
+  microsecond. `event_rates`' span and `book_dynamics`' clock are formed
+  the same way. The loop reads each Timedelta as its nanoseconds (191 ns
+  a call, against 67 ns for `total_seconds()`), and the lifetime loop over
+  200,000 events took 0.84-1.12x its former time, medians of five.
+- **The microsecond rule is not kept, because it was a bias.** A lifetime
+  of 500 ns read 0.0, the instantaneous order the module already refuses
+  to fold in for a left-censored one, and every lifetime on a nanosecond
+  feed read up to a microsecond short. A lifetime of 500 ns now reads
+  5e-07, and a window shorter than a microsecond has a rate.
+- **What moves.** Stamps in s, ms or us: nothing, on any pandas, to the
+  bit, on both paths. Nanosecond stamps on pandas 2.3 and 3.0: each
+  lifetime rises by its part under a microsecond, 0 to 0.999 us; on a
+  200,000-event session the cancelled mean rises 0.50 us, the median
+  0.79 us and p99 0.78 us, the filled mean 0.49 us, and the span 0.84 us
+  of 199.77 s. On pandas 3.1 the loop's numbers do not change, and the
+  native pass's, from 64 events, move by the same amounts to meet them.
+  The same session now gives the same bits on pandas 2.3, 3.0 and 3.1.
+- **An evaluation's weights hash as before under pandas 3.1.** `.loc`
+  with an Index of dates named the rows it selected after that Index up
+  to pandas 3.0 -- here the rebalance schedule, which has no name -- and
+  after the frame's own index, `date`, from 3.1. Every weight was the
+  same to the bit, but `canonical_frame_hash` covers the index's name, so
+  `target_weights_hash` and the weights' artifact name changed
+  (660227a02d7b3ab8 became 33f6a269cdcbc403). The evaluation now leaves
+  the rows unnamed, as every earlier pandas did, and the pinned hash
+  holds on 2.3, 3.0 and 3.1. One case changes on 2.3 and 3.0: a daily
+  schedule over prices whose index is itself named `date` gave a
+  `date`-named weights index, and now gives the unnamed one, with its
+  hash and artifact name.
+- **A correlation over a long history runs on one BLAS thread.** pandas
+  3.1 forms a Pearson `Series.corr`, and so `Series.autocorr`, from three
+  `np.dot` products, where up to 3.0 it called `np.corrcoef`. OpenBLAS
+  splits a dot product of more than 10,000 terms across threads, so the
+  pooled IC of `score_predictions` over 36,000 rows took other last bits
+  at two threads than at one. It runs under `single_threaded_blas()`, and
+  so do the IC autocorrelation of `permutation_test_ic`, the per-entity
+  autocorrelation of `feature_distribution_stats`, the correlation and
+  persistence of `order_flow_imbalance`, and the correlations of
+  `hedge_effectiveness` and `optimize_replication_basket`: each followed
+  the thread count on 12,000 dates under pandas 3.1 before. A value can
+  still differ in its last bits from one pandas to another, since their
+  formulas differ: the hedge correlation of those 12,000 days is
+  0.8451298330216213 on 2.3 and 3.0 and 0.8451298330216211 on 3.1, where
+  the pooled IC happens to agree.
+- The tests that held the order-event seconds to `total_seconds()` now
+  hold them to the integers, on every unit, past 292 years, and with
+  `Timedelta.total_seconds` replaced by the old rule, by one division,
+  or by a function that raises: the report is the same on both paths
+  whichever. The thread test covers the five new long calls, each of
+  which fails it without the limit under pandas 3.1. A new hash test
+  names the price index `date` under every pandas, so the row-naming
+  fault shows without pandas 3.1.
+- The suite passes with the extension required, excluding the slow and
+  benchmark tests: 15,108 passed on pandas 2.3.3 and numpy 2.0.2,
+  14,927 on pandas 3.0.5 and numpy 2.4.6, and 14,513 on pandas 3.1.0 and
+  numpy 2.5.4, where the 22 that import the MCP SDK or anthropic, which
+  that environment lacks, could not run. No other test changed its
+  answer under pandas 3.1.
+
 ## Two import blocks joined, as the pinned isort writes them
 
 - The previous entry's lint pass was checked with an isort that was not

@@ -257,36 +257,86 @@ class TestWhatTheCodesCannotRepresentRunsTheLoop:
         _same(*_both(frame))
 
 
-class TestSecondsAsPandasCountsThem:
+def _durations(unit):
+    """Sub-microsecond, negative, multi-day and 280-year durations in
+    `unit`, with 0, 1 and -1."""
+    rng = np.random.default_rng(1)
+    per_second = {"s": 1, "ms": 10**3, "us": 10**6, "ns": 10**9}[unit]
+    scales = [
+        1,
+        999,
+        10**6,
+        10**9,
+        86_400 * per_second,
+        280 * 365 * 86_400 * per_second,
+    ]
+    return np.concatenate(
+        [rng.integers(-s, s, 400) for s in scales if s < 2**62] + [np.array([0, 1, -1])]
+    )
+
+
+class TestSecondsFromTheIntegers:
+    """
+    A lifetime's seconds are formed from its integer, the same way on
+    both paths and on every pandas: the whole seconds plus the exact
+    fraction, added in floating point. Timedelta.total_seconds() is not
+    that definition on every pandas -- up to 3.0 it drops the nanoseconds,
+    from 3.1 it keeps them -- so neither path asks it.
+    """
+
     @pytest.mark.parametrize("unit", ["s", "ms", "us", "ns"])
-    def test_total_seconds_matches_the_scalar(self, unit):
-        """Timedelta.total_seconds() is days * 86400 + seconds plus
-        microseconds / 1e6 in floating point, nanoseconds dropped by
-        flooring -- not a division of the duration. Held to the scalar on
-        sub-microsecond, negative, multi-day and 280-year durations."""
-        rng = np.random.default_rng(1)
-        per_second = {"s": 1, "ms": 10**3, "us": 10**6, "ns": 10**9}[unit]
-        scales = [
-            1,
-            999,
-            10**6,
-            10**9,
-            86_400 * per_second,
-            280 * 365 * 86_400 * per_second,
-        ]
-        values = np.concatenate(
-            [rng.integers(-s, s, 400) for s in scales if s < 2**62]
-            + [np.array([0, 1, -1])]
+    def test_the_whole_seconds_plus_the_exact_fraction(self, unit):
+        """Held to Python's integers, which floor as numpy's divmod does
+        and convert and divide with the same rounding; and the one
+        Timedelta at a time the loop forms, read as nanoseconds, to the
+        array the kernel's integers in their own unit are turned into --
+        past 292 years too, where a coarser unit has no int64
+        nanoseconds."""
+        values = _durations(unit)
+        per_second = oe._PER_SECOND[unit]
+        if unit != "ns":
+            far = 1_000 * 365 * 86_400 * per_second
+            values = np.concatenate([values, [far, -far, far + 1, -far - 1]])
+        want = np.array(
+            [
+                float(w) + f / per_second
+                for w, f in (divmod(int(v), per_second) for v in values)
+            ]
         )
-        got = oe._total_seconds(values, unit)
+        got = oe._seconds(values, unit)
+        assert got is not None and got.tobytes() == want.tobytes()
+        one_at_a_time = np.array(
+            [
+                oe._timedelta_seconds(pd.Timedelta(np.timedelta64(v, unit)))
+                for v in values
+            ]
+        )
+        assert one_at_a_time.tobytes() == want.tobytes()
+
+    def test_nat_is_nan_as_total_seconds_gives(self):
+        assert np.isnan(oe._timedelta_seconds(pd.NaT))
+
+    @pytest.mark.parametrize("unit", ["s", "ms", "us", "ns"])
+    def test_it_is_total_seconds_wherever_every_pandas_agrees(self, unit):
+        """With no part under a microsecond, every pandas' total_seconds()
+        gives these bits, so the seconds of a session stamped in s, ms or
+        us are what they always were; pandas 3.1 gives them for every
+        duration."""
+        values = _durations(unit)
+        if unit == "ns":
+            values = values - values % 1_000
+        got = oe._seconds(values, unit)
         want = np.array(
             [pd.Timedelta(int(v), unit=unit).total_seconds() for v in values]
         )
-        assert got is not None
         assert got.tobytes() == want.tobytes()
 
-    def test_a_sub_microsecond_lifetime_reads_zero_on_both(self):
-        """500 ns is 0.0 seconds to total_seconds(), and 1,500 ns is 1e-06."""
+    def test_a_unit_pandas_does_not_use_runs_the_loop(self):
+        assert oe._seconds(np.array([1, 2]), "D") is None
+
+    def test_a_sub_microsecond_lifetime_is_measured_on_both(self):
+        """500 ns is 5e-07 seconds and 1,500 ns is 1.5e-06 on both paths,
+        where total_seconds() up to pandas 3.0 read 0.0 and 1e-06."""
         t0 = pd.Timestamp("2026-03-02 14:30", tz="UTC")
         frame = pd.DataFrame(
             {
@@ -306,7 +356,7 @@ class TestSecondsAsPandasCountsThem:
         codes = oe._native_codes(frame, stamps=True)
         native = oe._lifetime_pass_native(codes)
         _same(native, oe._lifetime_pass_python(frame))
-        assert list(native[1]) == [0.0] and list(native[0]) == [1e-06]
+        assert list(native[1]) == [5e-07] and list(native[0]) == [1.5e-06]
 
 
 class TestTheBindings:

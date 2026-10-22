@@ -36,7 +36,10 @@ and under 0.3.27 a matrix-vector product reducing 100,000 rows at four
 threads and more. So the half-life statistics' sums of squares and the
 depth slope's run under the limit too, with the rest of the linear algebra
 on the library's own paths: `pca_whiten`'s decomposition and projection,
-the feature VIFs, and the factor, ADF and Engle-Granger regressions.
+the feature VIFs, and the factor, ADF and Engle-Granger regressions. From
+pandas 3.1 a Pearson `Series.corr` (and `Series.autocorr`) is such a dot
+product too, so the library's correlations over a whole history -- a pooled
+IC, an IC series' autocorrelation, a hedge's correlation -- run under it.
 
 A BLAS library has one thread setting for the whole process, so the limit is
 reference-counted: every concurrent user runs on one thread, and the setting

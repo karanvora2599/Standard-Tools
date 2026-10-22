@@ -427,3 +427,105 @@ class TestBothPathsGiveTheSameReport:
         assert queue_positions(events) == order_events_module._queue_positions(
             events, None
         )
+
+
+def _refuse_total_seconds(self):
+    raise AssertionError("Timedelta.total_seconds() was called")
+
+
+class TestTheSecondsDoNotDependOnPandas:
+    """
+    Lifetimes and spans are formed from the timestamps' integers: the whole
+    seconds plus the exact fraction. Timedelta.total_seconds() kept only
+    whole microseconds up to pandas 3.0 and keeps nanoseconds from 3.1, so
+    a report that asked it gave one session two answers, and the native
+    pass, which never asked it, disagreed with the loop on pandas 3.1.
+    """
+
+    @staticmethod
+    def _jittered(seed):
+        """The two-path session with a part under a microsecond on every
+        stamp, as a nanosecond feed has."""
+        events = TestBothPathsGiveTheSameReport._session(seed)
+        rng = np.random.default_rng(seed)
+        events["timestamp"] = events["timestamp"] + pd.to_timedelta(
+            rng.integers(1, 1_000, len(events)), unit="ns"
+        )
+        return events
+
+    @staticmethod
+    def _reports(events):
+        """The report on the loops and, when the extension is built, on the
+        kernels."""
+        reports = []
+        if order_events_module.HAS_CPP:
+            reports.append(order_event_metrics(events))
+        order_events_module.HAS_CPP, built = False, order_events_module.HAS_CPP
+        try:
+            reports.append(order_event_metrics(events))
+        finally:
+            order_events_module.HAS_CPP = built
+        return reports
+
+    @staticmethod
+    def _floats(report):
+        """Every lifetime and rate figure as its bytes."""
+        figures = dict(report["lifetimes"]["filled"])
+        figures.update(
+            {f"c_{k}": v for k, v in report["lifetimes"]["cancelled"].items()}
+        )
+        figures.update(report["rates"])
+        return {
+            key: np.float64(value).tobytes()
+            for key, value in figures.items()
+            if isinstance(value, float)
+        }
+
+    @staticmethod
+    def _later(events, nanoseconds):
+        """The events with the second stamp moved on by `nanoseconds`."""
+        events["timestamp"] = events["timestamp"].astype(
+            "datetime64[ns, UTC]"
+        ) + pd.to_timedelta([0, nanoseconds], unit="ns")
+        return events
+
+    def test_an_order_resting_a_fraction_of_a_microsecond_more_reads_it(self) -> None:
+        events = self._later(
+            _events([(0, 1, "A", "B", 100.0, 10), (1, 1, "C", "B", 100.0, 10)]), 500
+        )
+        assert order_lifetimes(events)["cancelled"]["mean_seconds"] == 1.0000005
+        assert event_rates(events)["elapsed_seconds"] == 1.0000005
+
+    def test_a_window_shorter_than_a_microsecond_has_a_rate(self) -> None:
+        """Up to pandas 3.0, total_seconds() read 500 ns as 0.0 and the
+        rate as undefined."""
+        events = self._later(
+            _events([(0, 1, "A", "B", 100.0, 10), (0, 2, "A", "B", 100.0, 10)]), 500
+        )
+        rates = event_rates(events)
+        assert rates["elapsed_seconds"] == 5e-07
+        assert rates["events_per_second"] == 2 / 5e-07
+
+    @pytest.mark.parametrize(
+        "total_seconds",
+        [
+            # Whole microseconds, as pandas counted them up to 3.0.
+            lambda self: int(self.value) // 1_000 / 1e6,
+            # One division of the nanoseconds.
+            lambda self: int(self.value) / 1e9,
+            _refuse_total_seconds,
+        ],
+        ids=["microseconds", "nanoseconds", "not_called"],
+    )
+    def test_whatever_total_seconds_does(self, monkeypatch, total_seconds) -> None:
+        """The same report, both paths, to the bit, whichever way the
+        installed pandas counts a Timedelta's seconds -- or if it were
+        never asked."""
+        events = self._jittered(0)
+        want = self._reports(events)
+        assert want[0] == want[-1]
+        monkeypatch.setattr(pd.Timedelta, "total_seconds", total_seconds)
+        got = self._reports(events)
+        for g, w in zip(got, want):
+            assert g == w
+            assert self._floats(g) == self._floats(w)

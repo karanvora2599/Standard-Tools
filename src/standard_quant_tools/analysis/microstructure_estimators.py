@@ -62,6 +62,7 @@ from typing import Any, Dict, List, Optional, Sequence
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools._blas import single_threaded_blas
 from standard_quant_tools.error import ValidationError
 
 logger = logging.getLogger(__name__)
@@ -879,7 +880,12 @@ def order_flow_imbalance(
     # frame is in time order by the time it gets here.)
     forward = returns.shift(-1).to_numpy()[complete]
     pair = pd.DataFrame({"imb": imbalance.to_numpy(), "fwd": forward}).dropna()
-    predictive = float(pair["imb"].corr(pair["fwd"])) if len(pair) > 10 else None
+    # This correlation and the two autocorrelations below run on one BLAS
+    # thread: from pandas 3.1 each is np.dot products, which OpenBLAS splits
+    # across threads above 10,000 terms, and 12,000 daily bars took other
+    # last bits at two threads than at one.
+    with single_threaded_blas():
+        predictive = float(pair["imb"].corr(pair["fwd"])) if len(pair) > 10 else None
 
     # PERSISTENCE IS MEASURED ON NON-OVERLAPPING WINDOWS. The rolling series
     # at window=5 shares four of its five observations with the previous
@@ -888,12 +894,15 @@ def order_flow_imbalance(
     # window, not the flow. Stepping by `window` removes the overlap and
     # leaves an autocorrelation that means something.
     non_overlapping = imbalance.iloc[::window]
-    persistence = (
-        float(non_overlapping.autocorr(lag=1)) if len(non_overlapping) > 10 else None
-    )
-    overlapping_persistence = (
-        float(imbalance.autocorr(lag=1)) if len(imbalance) > 10 else None
-    )
+    with single_threaded_blas():
+        persistence = (
+            float(non_overlapping.autocorr(lag=1))
+            if len(non_overlapping) > 10
+            else None
+        )
+        overlapping_persistence = (
+            float(imbalance.autocorr(lag=1)) if len(imbalance) > 10 else None
+        )
 
     warnings = [order_note] if order_note else []
     warnings.append(

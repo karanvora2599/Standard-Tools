@@ -38,6 +38,16 @@ as many terms as there are dates, so their last bits followed the thread
 count above 10,000 dates under OpenBLAS 0.3.27 and 0.3.31 alike; and the Cox
 model's own fit, whose solve of a 100-feature Hessian gave other bits at
 two and four threads than at one under 0.3.31.
+
+pandas 3.1 added more. Its Pearson `Series.corr`, and `Series.autocorr`
+with it, is three np.dot products with as many terms as rows, where up to
+3.0 it was np.corrcoef, whose product of two rows kept its bits. Above
+10,000 rows these outputs then followed the thread count under OpenBLAS
+0.3.34: the pooled IC of `score_predictions`, the IC autocorrelation of
+`permutation_test_ic`, the per-entity autocorrelation of
+`feature_distribution_stats`, the correlation and persistence of
+`order_flow_imbalance`, and the correlations of `hedge_effectiveness` and
+`optimize_replication_basket`. Each correlation runs under the limit now.
 """
 
 from __future__ import annotations
@@ -60,17 +70,28 @@ from standard_quant_tools.analysis.cointegration import (
 )
 from standard_quant_tools.analysis.correlation import diversification_ratio
 from standard_quant_tools.analysis.diagnostics import lead_lag_matrix
+from standard_quant_tools.analysis.microstructure_estimators import (
+    order_flow_imbalance,
+)
 from standard_quant_tools.analysis.multi_factor import multi_factor_regression
 from standard_quant_tools.analysis.order_book import book_metrics
 from standard_quant_tools.analysis.pca import factor_contributions, pca_returns
 from standard_quant_tools.analysis.stationarity import run_stationarity_tests
+from standard_quant_tools.delta_one.hedging import hedge_effectiveness
+from standard_quant_tools.delta_one.replication import optimize_replication_basket
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.modeling.adapters import RegressionAdapter
 from standard_quant_tools.modeling.agent.models import ScorePredictionsInput
 from standard_quant_tools.modeling.agent.statistics_models import CompareSignalsInput
 from standard_quant_tools.modeling.agent.statistics_tools import compare_signals
 from standard_quant_tools.modeling.agent.tools import score_predictions
-from standard_quant_tools.modeling.analysis.feature_report import redundancy_report
+from standard_quant_tools.modeling.analysis.feature_report import (
+    feature_distribution_stats,
+    redundancy_report,
+)
+from standard_quant_tools.modeling.analysis.feature_stability import (
+    permutation_test_ic,
+)
 from standard_quant_tools.modeling.engine import _headline_report
 from standard_quant_tools.modeling.estimators.survival import CoxPHRegressor
 from standard_quant_tools.modeling.features import network
@@ -494,6 +515,47 @@ def _score_predictions():
     ).model_dump()
 
 
+#: Three names over the 12,000 dates, each name's target partly its
+#: feature.
+_FEATURE = np.random.default_rng(139).normal(size=3 * LONG_DATES.size)
+LONG_PANEL = pd.DataFrame(
+    {
+        "date": np.repeat(LONG_DATES, 3),
+        "entity": np.tile(["A", "B", "C"], LONG_DATES.size),
+        "feature": _FEATURE,
+        "target": 0.1 * _FEATURE
+        + np.random.default_rng(149).normal(size=_FEATURE.size),
+    }
+)
+
+#: 12,000 daily bars, and a portfolio and its hedge over the same days.
+LONG_BARS = pd.DataFrame(
+    {
+        "close": 100.0
+        * np.exp(
+            np.cumsum(np.random.default_rng(151).normal(0, 0.01, LONG_DATES.size))
+        ),
+        "volume": np.random.default_rng(157)
+        .integers(100, 10_000, LONG_DATES.size)
+        .astype(float),
+    },
+    index=LONG_DATES,
+)
+LONG_HEDGE = np.random.default_rng(163).normal(0, 0.01, LONG_DATES.size)
+LONG_PORTFOLIO = 0.8 * LONG_HEDGE + np.random.default_rng(167).normal(
+    0, 0.005, LONG_DATES.size
+)
+LONG_NAMES = pd.DataFrame(
+    np.random.default_rng(173).normal(0, 0.01, (LONG_DATES.size, 4)),
+    index=LONG_DATES,
+    columns=["W", "X", "Y", "Z"],
+)
+#: A benchmark the four names track closely but not exactly.
+LONG_BENCHMARK = LONG_NAMES.mean(axis=1) + np.random.default_rng(179).normal(
+    0, 0.005, LONG_DATES.size
+)
+
+
 def _cox_wide():
     """Two Newton steps of the Cox fit over 100 features: where, under
     OpenBLAS 0.3.31, the solve of the Hessian gave other last bits at two
@@ -597,6 +659,22 @@ CALLS = {
     "compare_signals_long_named_lag": lambda: _compare_signals(hac_lag=10),
     "cox_ph_wide": _cox_wide,
     "cox_ph_predict_wide": _cox_predict_wide,
+    # From pandas 3.1 a Pearson Series.corr, and so Series.autocorr, is
+    # np.dot products with as many terms as rows: the correlations and
+    # autocorrelations of a long history.
+    "permutation_test_ic_long": lambda: permutation_test_ic(
+        LONG_PANEL, "feature", n_permutations=20, method="pearson"
+    ),
+    "feature_distribution_stats_long": lambda: feature_distribution_stats(
+        LONG_PANEL, ["feature"]
+    ),
+    "order_flow_imbalance_long": lambda: order_flow_imbalance(LONG_BARS),
+    "hedge_effectiveness_long": lambda: hedge_effectiveness(
+        portfolio_returns=LONG_PORTFOLIO, hedge_returns=LONG_HEDGE, hedge_ratio=-0.8
+    ),
+    "optimize_replication_basket_long": lambda: optimize_replication_basket(
+        returns=LONG_NAMES, benchmark_returns=LONG_BENCHMARK
+    ),
 }
 
 

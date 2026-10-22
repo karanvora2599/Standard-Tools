@@ -140,6 +140,19 @@ class TestRates:
         assert report["updates_per_second"] == pytest.approx(1.1)
         assert report["mid_changes"] == 0
 
+    def test_the_clock_keeps_its_nanoseconds_on_every_pandas(self) -> None:
+        """The span is formed from the stamps' integers: 1.0000005 s on
+        every pandas, where total_seconds() read 1.0 up to 3.0."""
+        book = _pair(
+            ((100.0, 300.0), (100.0, 300.0)),
+            STEADY_ASK,
+            stamps=("2026-03-02T14:30:00.000000000Z", "2026-03-02T14:30:01.000000500Z"),
+        )
+        assert book["timestamp"].dt.unit == "ns"
+        report = book_dynamics(book)
+        assert report["elapsed_seconds"] == 1.0000005
+        assert report["updates_per_second"] == 2 / 1.0000005
+
     def test_a_timestampless_book_reports_null_rates(self) -> None:
         """Zero would read as a still book."""
         book = _pair(((100.0, 300.0), (100.0, 300.0)), STEADY_ASK).drop(

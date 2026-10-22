@@ -264,7 +264,12 @@ def feature_distribution_stats(
             # outlier in it. 0.0 is the answer, not "undefined".
             outlier_rate = 0.0
 
-        autocorr = grouped[feature].apply(lambda s: s.autocorr(lag=1))
+        # On one BLAS thread: from pandas 3.1 an autocorrelation is np.dot
+        # products, which OpenBLAS splits across threads above 10,000
+        # terms, and one entity's 12,000 dates took other last bits at two
+        # threads than at one.
+        with single_threaded_blas():
+            autocorr = grouped[feature].apply(lambda s: s.autocorr(lag=1))
         out[feature] = {
             "coverage": _safe(n_present / n_rows) if n_rows else 0.0,
             "n_missing": float(n_rows - n_present),

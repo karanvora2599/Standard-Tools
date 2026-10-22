@@ -30,6 +30,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools._blas import single_threaded_blas
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.modeling.features.transforms import (
     HAS_CPP,
@@ -819,11 +820,16 @@ def permutation_test_ic(
             method,
             random_seed,
         )
-    ic_autocorrelation = (
-        float(observed_series.autocorr(1))
-        if len(observed_series) >= 3
-        else float("nan")
-    )
+    # On one BLAS thread: from pandas 3.1 an autocorrelation is np.dot
+    # products, which OpenBLAS splits across threads above 10,000 terms,
+    # and a per-date IC series of 12,000 dates took other last bits at two
+    # threads than at one.
+    with single_threaded_blas():
+        ic_autocorrelation = (
+            float(observed_series.autocorr(1))
+            if len(observed_series) >= 3
+            else float("nan")
+        )
 
     usable = _finite(draws)
     at_least_as_extreme = int(np.sum(np.abs(usable) >= abs(reference)))

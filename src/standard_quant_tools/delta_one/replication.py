@@ -50,6 +50,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools._blas import single_threaded_blas
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.portfolio.covariance import estimate_covariance
 
@@ -190,7 +191,11 @@ def optimize_replication_basket(
 
     replicated = pd.Series(frame.to_numpy(dtype=float) @ weights, index=frame.index)
     realized_te = tracking_error(replicated, bench, periods_per_year=periods_per_year)
-    correlation = float(replicated.corr(bench))
+    # On one BLAS thread, as `hedge_effectiveness` reads its correlation:
+    # from pandas 3.1 it is np.dot products, which OpenBLAS splits across
+    # threads above 10,000 terms.
+    with single_threaded_blas():
+        correlation = float(replicated.corr(bench))
     beta = float(cross @ weights / bench_var) if bench_var > 0 else float("nan")
 
     # Verified from the returned vector rather than trusted from the solver.
