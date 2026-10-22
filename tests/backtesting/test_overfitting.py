@@ -294,6 +294,42 @@ class TestCombinatorialPurgedCV:
                     leaks += 1
         assert leaks == 0, f"{leaks} training observations leak into their test set"
 
+    @pytest.mark.parametrize("horizon,embargo_pct", [(5, 0.0), (20, 0.01)])
+    def test_no_training_row_sits_inside_a_test_label_window(
+        self, horizon, embargo_pct
+    ):
+        """
+        THE OTHER SIDE OF THE PURGE. The test's labels reach `horizon` bars
+        past each test block, so a training row inside that reach has a
+        label built from the same bars as a test label -- Lopez de Prado
+        purges training observations whose label interval overlaps a test
+        label interval on EITHER side. Only the rows before a block were
+        purged. Measured on 1,000 observations, six groups, two held out:
+        with a 5-bar label and no embargo, 100 training rows across the 15
+        paths sat inside a test label's window, five after every block with
+        training data after it; with a 20-bar label the default 1% embargo
+        (10 rows) covered half the reach and 200 rows still leaked. The
+        embargo masked it only where it happened to be at least the
+        horizon.
+        """
+        result = combinatorial_purged_cv(
+            1000,
+            n_splits=6,
+            n_test_splits=2,
+            embargo_pct=embargo_pct,
+            label_horizon=horizon,
+        )
+        leaks = 0
+        for path in result["paths"]:
+            test = set(path["test_index"])
+            for i in path["train_index"]:
+                if any(i - k in test for k in range(1, horizon + 1)):
+                    leaks += 1
+        assert leaks == 0, (
+            f"{leaks} training rows sit inside the label window of a test "
+            "observation before them"
+        )
+
     def test_the_embargo_leaves_a_gap_after_every_test_block(self):
         result = combinatorial_purged_cv(
             1000, n_splits=6, n_test_splits=2, embargo_pct=0.01, label_horizon=1
@@ -357,8 +393,10 @@ def _rule_by_rule_splits(
     """
     The purge and embargo rules applied one observation at a time, exactly
     as the docstring states them: drop a training observation whose label
-    window [i, i + horizon] holds a test observation, or which sits within
-    `embargo` observations after the end of any test block.
+    window [i, i + horizon] holds a test observation, which sits inside a
+    test observation's label window -- a test observation in
+    [i - horizon, i) -- or which sits within `embargo` observations after
+    the end of any test block.
 
     Quadratic and obviously correct, which is its job: the splitter answers
     every observation of a path at once, and this is what it must agree
@@ -385,8 +423,9 @@ def _rule_by_rule_splits(
                 continue
             window = range(i, min(i + horizon + 1, n_observations))
             touches = any(j in test for j in window)
+            inside = any(j in test for j in range(max(0, i - horizon), i))
             after_block = embargo > 0 and any(0 < i - t <= embargo for t in block_ends)
-            if touches or after_block:
+            if touches or inside or after_block:
                 purged += 1
             else:
                 train.append(i)

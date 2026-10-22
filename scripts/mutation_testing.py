@@ -90,10 +90,22 @@ MUTATIONS: List[Mutation] = [
         "tests/analysis/test_diagnostics.py",
     ),
     Mutation(
-        "cpcv: skip purging entirely",
+        # Named "skip purging entirely" while the purge had one side; the
+        # side after a test block now has its own line and mutation below.
+        "cpcv: skip the purge before a test block",
         SRC / "backtesting/overfitting.py",
         "        dropped = seen[window_end] > seen\n",
         "        dropped = np.zeros(n_observations, dtype=bool)\n",
+        "tests/backtesting/test_overfitting.py",
+    ),
+    Mutation(
+        # The one-sided purge this splitter shipped with: rows inside a
+        # test block's label reach after it are kept unless the embargo
+        # happens to cover them.
+        "cpcv: skip the purge after a test block",
+        SRC / "backtesting/overfitting.py",
+        "        dropped |= prior > prior[window_start]\n",
+        "        dropped |= np.zeros(n_observations, dtype=bool)\n",
         "tests/backtesting/test_overfitting.py",
     ),
     Mutation(

@@ -148,7 +148,10 @@ class PurgedCVInput(BaseModel):
         ge=1,
         le=_MAX_CV_OBSERVATIONS,
         description="How many observations forward the label looks. A 5-day "
-        "forward return is 5. This is what purging needs to know.",
+        "forward return is 5. This is what purging needs to know: training "
+        "rows this close to a test block are purged on BOTH sides -- before "
+        "it, because their labels reach into it, and after it, because they "
+        "sit inside its labels' reach.",
     )
 
     @model_validator(mode="after")

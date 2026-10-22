@@ -26,8 +26,9 @@ observations are independent, and financial observations are not: a label
 built from a five-day forward return overlaps the next four observations, so
 a training set drawn from immediately before a test set contains the answer.
 `combinatorial_purged_cv` implements Lopez de Prado's purging (drop training
-observations whose label window overlaps the test set) and embargo (drop a
-further window after it, because serial correlation leaks backwards too).
+observations whose label window overlaps the test set's, before it or after
+it) and embargo (drop a further window after it, because serial correlation
+leaks backwards too).
 
 WHAT NONE OF THIS FIXES. These tools measure the multiple-testing cost of
 the trials you TELL them about. The trials nobody counted -- the parameter
@@ -441,7 +442,10 @@ def combinatorial_purged_cv(
     0.5 in production.
 
     TWO CORRECTIONS. PURGING removes training observations whose label window
-    overlaps the test set at all. EMBARGO removes a further stretch
+    overlaps the test set at all, on both sides: before a test block, the
+    rows whose labels reach into it; after it, the rows inside the reach of
+    its own labels, whose labels share bars with the test labels. EMBARGO
+    removes a further stretch
     immediately after the test set, because serial correlation in features
     means an observation shortly after the test period is still nearly the
     same observation -- purging alone handles the label overlap, and the
@@ -543,9 +547,24 @@ def _purged_paths(
     either rule reaches it, and counted once:
 
     - PURGE: a test observation lies in (i, i + label_horizon] -- its label
-      window touches the test set;
+      window touches the test set -- or in [i - label_horizon, i) -- it
+      sits inside a test observation's label window, so its own label is
+      built from bars the test labels are still resolving over;
     - EMBARGO: the end of a test block lies in [i - embargo, i) -- it sits
       just after a block. Every block's end counts, including the last one.
+
+    THE PURGE USED TO HAVE ONE SIDE. Only the rows before a block were
+    purged, and the rows inside the block's label reach after it were kept
+    unless the embargo happened to cover them. Measured on 1,000
+    observations, six groups and two held out: with a 5-bar label and no
+    embargo, 100 training rows across the 15 paths sat inside a test
+    label's window; with a 20-bar label the default 1% embargo covered ten
+    of the twenty bars and 200 rows leaked. Lopez de Prado purges a
+    training observation whose label interval overlaps a test label's on
+    either side, and `modeling.validation.label_overlap_mask` already did.
+    The embargo stays measured from the block's last observation, as the
+    modeling splitters measure it: it is the gap for feature lookback, a
+    different leak from the label overlap the purge now covers.
 
     Both are answered for all observations at once, which is what keeps a
     path linear in the length of the series. Written as a loop over the
@@ -559,9 +578,10 @@ def _purged_paths(
     # A label window never reaches past the last observation, and a gap
     # between two positions is never longer than the series: clipping both
     # here changes no answer and keeps the arithmetic inside int64.
-    window_end = np.minimum(
-        positions + min(label_horizon, n_observations), n_observations - 1
-    )
+    horizon = min(label_horizon, n_observations)
+    window_end = np.minimum(positions + horizon, n_observations - 1)
+    # The earliest observation whose label window can reach each position.
+    window_start = np.maximum(positions - horizon, 0)
     reach = min(embargo, n_observations)
     groups = np.array_split(positions, n_splits)
     for combination in itertools.combinations(range(n_splits), n_test_splits):
@@ -572,6 +592,10 @@ def _purged_paths(
         # count strictly after i and up to its window's end is a difference.
         seen = np.cumsum(in_test)
         dropped = seen[window_end] > seen
+        # The other side: test observations strictly before each position,
+        # so the count in [i - horizon, i) is a difference too.
+        prior = seen - in_test
+        dropped |= prior > prior[window_start]
         if reach > 0:
             block_ends = np.flatnonzero(in_test & ~np.append(in_test[1:], False))
             if block_ends.size:

@@ -1,5 +1,41 @@
 # Changelog
 
+## The purged splitter purges both sides of a test block, so no training row sits inside a test label's window
+
+- **The purge had one side.** `combinatorial_purged_cv` (and the
+  `build_purged_cv_splits` tool over it) dropped a training row whose
+  label window held a test observation -- the rows just BEFORE a test
+  block -- and kept the rows just after it, inside the reach of the
+  block's own labels, whose labels are built from the same bars as the
+  test labels. Lopez de Prado purges a training observation whose label
+  interval overlaps a test label's on either side. Only the embargo
+  stood in the way, and only where it happened to be at least the label
+  horizon.
+- **Measured** on 1,000 observations, six groups, two held out: with a
+  5-bar label and no embargo, 100 training rows across the 15 paths sat
+  inside a test label's window, five after every block with training
+  after it; with a 20-bar label the default 1% embargo (10 rows) covered
+  half the reach and 200 rows leaked. A 5-bar label under the default
+  embargo was already clean, and gives the same splits as before.
+- **The rule now reads** "a test observation in (i, i + horizon] or in
+  [i - horizon, i)", answered with the same linear prefix counts. It is
+  the rule `modeling.validation.label_overlap_mask` already applied for
+  purged k-fold and cpcv there. The embargo is unchanged and still counts
+  from the block's last observation: it is the gap for feature lookback,
+  a different leak.
+- **What moves:** wherever the label horizon exceeds the embargo, each
+  block with training after it loses up to `horizon - embargo` more
+  training rows. The mean training size at 1,000 observations goes from
+  660.0 to 653.3 (5-bar label, no embargo) and from 626.7 to 613.3
+  (20-bar label, 1% embargo).
+- Tests: no training row sits inside a test label's window, at both
+  settings above and through the tool's ranges; the rule-by-rule
+  reference the splitter is held to gains the second side. The mutation
+  catalogue names its old "skip purging entirely" for the side it skips
+  and gains one for the side after a block. Four unused names in
+  `tests/agent/test_new_agent_tools.py` are gone, so the file is clean
+  under pyflakes.
+
 ## White's reality check and the pairwise test draw their null in circular blocks widened by the block bootstrap's own bias, so a short series rejects a true null near 5%
 
 - **The null was too narrow on short series**, in the rewritten reality

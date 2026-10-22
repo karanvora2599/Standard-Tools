@@ -486,8 +486,6 @@ class TestRegimeAdaptiveWalkForwardBacktest:
         """Same continuity guarantee as run_walk_forward_backtest's version:
         the stitched OOS aggregate comes from one continuous run_strategy
         call spanning the whole OOS region, not a per-window reset."""
-        import standard_quant_tools.agent.tools as tools_mod
-
         train_bars, test_bars = 252, 63
         call_lengths: list = []
         real_run_strategy = backtest_tools.run_strategy
@@ -718,8 +716,6 @@ class TestScanPairs:
         indexes differ, so scan_pairs is required to take the loop instead of
         quietly re-testing every pair on a shorter sample.
         """
-        import standard_quant_tools.agent.tools as tools_module
-
         provider = research_tools.DataFactory.get_provider()
         original = provider.get_ohlcv
         calls = {"n": 0}
@@ -1195,8 +1191,6 @@ class TestWalkForwardBacktest:
         call at length n_windows * test_bars (the single continuous
         backtest the stitched_oos_* fields are computed from).
         """
-        import standard_quant_tools.agent.tools as tools_mod
-
         train_bars, test_bars = 252, 63
         call_lengths: list = []
         real_run_strategy = backtest_tools.run_strategy
@@ -2027,7 +2021,7 @@ class TestModelValidators:
             )
 
     def test_position_sizer_valid_risk_pct_accepted(self):
-        inp = PositionSizerInput(
+        PositionSizerInput(
             symbol="AAPL",
             start_date=START,
             end_date=END,
@@ -3411,3 +3405,18 @@ class TestPurgedSplitsAreBoundedBeforeTheyRun:
                     for i in range(start, end)
                 ]
                 assert expanded == sorted(path[f"{key}_index"])
+
+    def test_a_test_block_s_labels_are_purged_from_the_training_after_it(self):
+        """A test block's labels reach `label_horizon` bars past its last
+        observation, so a training range may start no sooner than that --
+        however short the embargo. Before the fix, a 20-bar label over the
+        default 1% embargo left every training range after a block starting
+        11 bars past it, inside the block's labels."""
+        horizon = 20
+        result = self._splits(n_observations=1_000, label_horizon=horizon)
+        for path in result["paths"]:
+            test_ends = [end for _, end in path["test_ranges"]]
+            for start, _ in path["train_ranges"]:
+                for end in test_ends:
+                    # `end` is one past the block's last observation
+                    assert not 0 < start - (end - 1) <= horizon, (start, end)
