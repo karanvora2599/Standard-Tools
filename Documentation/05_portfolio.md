@@ -169,7 +169,7 @@ print(result["converged"])
 
 - **`min_volatility`, `target_return`, and long-only `max_sharpe` with no binding cap** are convex quadratic programmes; `max_sharpe` becomes one after y = w / ((μ − rf)'w): minimize y'Σy subject to (μ − rf)'y = 1 and y ≥ 0, then w = y / 1'y. They are solved **exactly** by a primal-dual active-set method. Each pass fixes the weights it judges to be at a bound and solves the KKT system on the rest with one linear solve; when a pass changes nothing, the KKT conditions hold to rounding, which for a convex problem makes the answer the optimum. At 235 assets this takes 2–6 ms, where SLSQP took 0.9–14 s and stopped up to 1.6e-5 short of the optimum in the weights (on 235 zero-drift noise series, `max_sharpe` ran 9 s and ended with status 8, 2e-9 from it). Measured on 240 random problems, every answer certified, and once SLSQP's own constraint residuals are charged at the shadow prices no objective got worse by more than 4e-15 relative.
 - **Capped or shorting `max_sharpe`** runs SLSQP, then is solved exactly on SLSQP's active set (150 of 150 random problems certified).
-- **`target_volatility`** is SLSQP's alone.
+- **`target_volatility`** is SLSQP's alone, and every bounded solve comes back with `certified=False` and a warning. It maximizes return subject to w'Σw = σ², a quadratic *equality*, which is not convex: the fully-invested portfolios inside the bounds at exactly one volatility can include several local maxima of expected return, one on the inefficient branch, and SLSQP stops at whichever it reaches. Over 60 random long-only problems of six assets, 6 came back up to 16 percentage points of return below the frontier at the requested volatility; two assets at 25% and 20% volatility correlated −0.5, long-only at a 13% target, return 5.20% where 7.98% is attainable. For a certified answer use `target_return`, which is solved exactly: the efficient portfolio at a volatility is the `target_return` portfolio whose volatility equals it. The closed form (`allow_short=True`, `max_weight=None`) takes the efficient root.
 
 A request that's actually infeasible (e.g. a `target_return` no long-only portfolio can reach) comes back with `converged=False` rather than a silently wrong answer, with the attainable range named in the warning.
 
@@ -182,7 +182,7 @@ A request that's actually infeasible (e.g. a `target_return` no long-only portfo
 - `method` (`"closed_form"`, `"active_set"` or `"SLSQP"`) and `iterations` (for the active-set method, passes of one linear solve each; none on the closed-form path).
 - `status`, `message`, `objective`, `n_function_evals` and the equality `multipliers`.
 - `certificate`: the KKT residuals of the returned weights, estimated from the weights alone — `stationarity`, `dual_infeasibility`, `equality_residual` and `bound_violation`, each relative to the size of its terms, and the `tolerance` (1e-12).
-- `certified`: `True` when all four are within the tolerance; `False` for an SLSQP answer the exact solve could not certify; `None` where no certificate applies (the closed form, `target_volatility`, an infeasible target).
+- `certified`: `True` when all four are within the tolerance; `False` for an SLSQP answer the exact solve could not certify, and for every bounded `target_volatility` answer (not convex, see above); `None` where no certificate applies (the closed form, an infeasible target).
 - `fallback`: why the fast method's cold start did not produce the answer, when it did not.
 
 The agent tool's `SolverReport` carries `certificate`, `certified` and `fallback` too.
@@ -319,6 +319,21 @@ print(result["implied_weights"])     # sums to 1
 
 The market-equilibrium prior (`pi = risk_aversion * cov @ market_weights`) is blended with your views via the standard He & Litterman (1999) formula. `confidence` in `build_bl_views` (default `1.0`, the standard He-Litterman uncertainty) is a **documented simplification** of Idzorek's (2005) full confidence-scaling method, not a reimplementation of it — lower values widen that view's uncertainty proportionally, letting it move the posterior less.
 
+**A net-short holding is refused, not flipped.** The weights are the
+posterior's unconstrained optimal holding (δ Σ_post)⁻¹ μ_post rescaled to
+sum to 1. That holding's posterior expected return is a positive quadratic
+form, so when its sum is negative the rescaling flips every position and
+the sign of the return with it: bearish views on all three assets of a
+universe came back as a 100%-long book at a posterior Sharpe of −1.16 with
+`converged=True`. `black_litterman` now raises `ValidationError` naming the
+sum, the return the flip would have turned negative and the posterior
+returns — as `max_sharpe` refuses a tangency portfolio with a negative
+normalizing sum. State a bearish view as a relative one (one asset against
+another), lower its confidence, or act on the posterior returns directly.
+The portfolio optimization tool's `converged` for Black-Litterman, which
+was the literal `True`, is now checked from the weights (finite, summing
+to 1).
+
 ## The whole frontier, not one point of it
 
 `get_efficient_frontier` returns the curve itself: the trade-off between
@@ -384,6 +399,13 @@ print(result.weights, result.risk_contributions)
 
 `method` selects among all six: `"max_sharpe"`, `"min_volatility"`, `"target_return"`, `"target_volatility"`, `"risk_parity"`, `"black_litterman"` — see [09_advanced_agent_tools.md](09_advanced_agent_tools.md) and [07_agent_tools.md](07_agent_tools.md) for the full input/output model reference, including `black_litterman`'s `views`/`market_weights` fields.
 
+`max_weight` and `allow_short` apply to the four mean-variance methods
+only, and are refused with `risk_parity` and `black_litterman`, naming the
+method: neither reads them, and Black-Litterman with `max_weight=0.2` and
+`allow_short=False` used to return weights of 1.787 and −1.120.
+`allow_short` is refused whenever it is given with those methods, `False`
+included — Black-Litterman's holding can short whatever it says.
+
 ---
 
 ## Async Fetching (Advanced)
@@ -422,6 +444,26 @@ align.
 
 Three tools avoid the noisiest input entirely.
 
+**A covariance is accepted in either form this library writes it.** The
+tools that take a covariance — `optimize_risk_parity`,
+`optimize_max_diversification`, `get_marginal_risk_contribution` and the
+optional sigmas of `run_portfolio_scenarios` — take `covariance` as rows
+parallel to `assets`, or as the map of asset → {asset: covariance} that
+`estimate_covariance` returns as `matrix`. Pass that tool's `assets` and
+`matrix` on unchanged. The map is read by **name** and laid out in `assets`
+order; names that are not exactly `assets`, or a row that lacks a column,
+are refused naming them (a missing covariance is not zero), and symmetry and
+finiteness are checked by the numeric contract exactly as for rows. The map
+used to be refused as `list_type`, and the rows had to be rebuilt by hand,
+in an order the caller had to get right.
+
+**A null number says why.** Every construction tool's result writes one
+line into its `warnings` for each null number, naming the field and the
+reason: a factor variance with no factor covariance, a `top_10_share` of
+a book of four names, a scenario's `sigma_move` with no covariance to size
+it, a liquidity-VaR `adjustment_multiple` of a zero position. A weight map
+carries a number or a null, never a NaN.
+
 ### `optimize_risk_parity`
 
 Weights at which every asset contributes the **same amount of risk** — not
@@ -446,7 +488,11 @@ answer is exactly inverse-volatility, and the risk shares equalize to within
 
 `budget` allows an unequal **risk** budget — `[0.5, 0.3, 0.2]` gives the
 first asset half the portfolio's risk. Most real mandates are written that
-way rather than as equal contributions.
+way rather than as equal contributions. Each entry must be finite and
+positive: a NaN passed the positivity check (it compares False against
+every bound) and an infinity survived it, and both came back as NaN
+weights. `tolerance` must be finite too — an infinite one is met by the
+first sweep, which reported the inverse-volatility start as converged.
 
 **What it assumes:** equal risk contribution implicitly bets that Sharpe
 ratios are similar across assets. Where they are not, it over-weights the
@@ -473,6 +519,20 @@ It does not maximize anything. It is more robust out of sample than
 mean-variance in most published comparisons and it is not the highest-Sharpe
 portfolio under any model. It buys stability by giving up the claim to be
 optimal.
+
+**The returns carry their dates.** Each series in `returns` may be a
+date-keyed map {ISO date: return} or an undated list. Undated lists were the
+only form, and two series of equal length from different calendars — one a
+fortnight later, one with another market's holidays — were accepted as
+aligned and correlated each day against some other day. Dated series are
+checked: under the default `alignment="exact"` they must carry the same
+dates, and a mismatch is refused with what each series lacks (the
+equal-length case named as such); `alignment="intersect"` uses the dates
+every series shares, and `alignment` on the result gives the shared span and,
+per series, how many returns were supplied and dropped. The two forms cannot
+be mixed. Undated lists still work — `alignment` is null and a warning says
+their alignment could not be checked — but have no dates to intersect, so
+they refuse `alignment="intersect"`.
 
 **The weights do not depend on the order you listed the assets in.** The
 clustering's tie-breaks follow column position, and forty permutations of
@@ -520,6 +580,19 @@ being *uncorrelated* rather than for being quiet.
 
 It does invert the correlation matrix, and reports the condition number for
 exactly that reason.
+
+**A holding with a negative sum is refused.** The maximum is the
+direction Σ⁻¹σ, rescaled to sum to 1, and that sum can be negative — when
+a low-volatility asset is strongly correlated with a combination of the
+others and the holding shorts it heavily. Dividing by it flips every
+position and turns the maximum ratio √(σ'Σ⁻¹σ) into its negative: three
+assets at volatilities 3.17, 4.59 and 0.80 with correlations −0.474,
+0.792 and 0.144 (condition number 204) came back at a diversification
+ratio of −5.32. No fully-invested portfolio attains the maximum then — the
+ratio only approaches it as the positions grow without bound — so the
+request is refused, naming the holding (scaled to a gross of 1) and the
+ratio it would have flipped. The guard that existed tested a different sum,
+and only for exactly zero.
 
 ### An indefinite covariance is repaired, and the repair is named
 
@@ -570,15 +643,32 @@ is one position with extra transaction costs.
 
 Risk is decomposed, not just exposure. A large loading on a low-variance
 factor is not a large risk, and a small loading on a volatile one can be.
-With `factor_covariance` supplied, the result reports each factor's share of
-total portfolio **variance** — the number that answers "what am I actually
-taking risk on". Without it, only exposures can be reported, and the result
-says so rather than implying they are the risk.
+With `factor_covariance` supplied, the result reports the **factor**
+variance x'Fx of the exposures x and each factor's share of it
+(`factor_variance_shares`, summing to 1). Without it, only exposures can
+be reported, and the result says so rather than implying they are the
+risk.
 
-The **residual** matters as much as the factors. A portfolio whose variance
-is 90% explained by three factors is a factor bet; one where the factors
-explain 20% is a stock-picking portfolio, and its risk lives somewhere this
-decomposition cannot see.
+**The specific risk matters as much as the factors, and it is not in the
+factor variance.** A portfolio whose variance is 90% factor is a factor
+bet; one where the factors carry 20% is a stock-picking portfolio. Shares
+of the factor variance cannot tell the two apart — they sum to 1 either
+way — and they used to be described as shares of portfolio variance: two
+names with a beta of 1 to a market factor at 1% volatility and 40%
+specific volatility each read "100% ... it is one bet" when the market
+carries 0.12% of their variance. Pass `specific_variance` — each held
+asset's idiosyncratic return variance, in the units of
+`factor_covariance`, taken as uncorrelated across names — and the result
+also reports the portfolio's `specific_variance` Σ w_i² s_i, the
+`total_variance`, each factor's share of the **total**
+(`total_variance_shares`) and the `specific_variance_share`, which
+together sum to 1. "One bet" is said only of a factor that carries more
+than 60% of the total. Without `specific_variance` those fields are null
+and a warning says the factor shares are not the portfolio's total risk.
+A name at zero weight may be left out of `specific_variance`; a held name
+may not, and a negative or non-finite variance is refused.
+`specific_variance` without `factor_covariance` is refused too: there is
+no factor variance to add it to.
 
 Weights and loadings must be finite, and every held asset needs a loading
 on every factor: a gap is refused by name (`C/size`) rather than read as
@@ -809,3 +899,24 @@ transition rather than a free one. A NaN or infinite entry in
 `current_weights`, `target_weights` or `adv` is refused by key: a holding
 has no gap to skip, and it used to come back as a schedule of nulls. A plan
 already at target reports a `residual_distance` of 0.0.
+
+`portfolio_value` must be a finite positive number, at the tool and in
+`portfolio.rebalance.plan_rebalance`: NaN passed the `<= 0` check and the
+plan came back with a NaN cost and `converged=True`, and an infinite value
+— which the tool's `gt=0` admitted — gave a NaN cost. The library also
+refuses, by key, a NaN or infinite holding or ADV (the tool's schema
+already did), and a non-finite or negative `impact_coefficient`.
+
+## The cost of one trade
+
+`estimate_trade_cost` prices one hypothetical trade under a composed cost
+model — commission, spread, square-root impact and, on a short, borrow —
+itemized leg by leg from the same functions a backtest applies per fill.
+
+`breakeven_move_bps` is `2 x execution_bps + holding_bps`: commission,
+spread and impact are paid on the way in and again on the way out, while a
+short's borrow accrues once over `holding_days`. A 90-day short at 7 bps of
+execution and 300 bps of borrow needs 87.97 bps (it reported 161.95). Borrow
+is charged on `side="sell"` only. Margin interest on a negative
+`margin_cash` is the account's, reported as `account_margin_interest` in
+currency and kept out of both totals.

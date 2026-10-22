@@ -43,14 +43,19 @@ from standard_quant_tools.data.factory import DataFactory
 provider = DataFactory.get_provider()
 meta = provider.get_metadata("AAPL")
 print(meta)
-# DataSetMetadata(provider='yfinance', adjusted=True, survivorship_free=False,
-#                  point_in_time=False, frequency='1d', timezone='America/New_York',
-#                  retrieved_at='2026-07-23T...')
+# DataSetMetadata(provider='yfinance', split_adjusted=True, dividend_adjusted=True,
+#                  adjusted=True, adjustment_note='Requested with auto_adjust=True: ...',
+#                  survivorship_free=False, point_in_time=False, frequency='1d',
+#                  timezone='America/New_York', retrieved_at='2026-10-22T...',
+#                  return_basis='total_return')
 ```
 
 | Field | YFinanceProvider value | Why |
 |---|---|---|
-| `adjusted` | `True` | yfinance auto-adjusts for splits/dividends by default |
+| `split_adjusted` | `True` | Yahoo's Close is split-adjusted at every interval |
+| `dividend_adjusted` | `True` (daily and coarser), `None` (intraday) | `auto_adjust=True` rescales OHLC by Yahoo's dividend-adjusted close, which Yahoo sends only with daily and coarser bars; for intraday bars yfinance substitutes Close when it is absent, so whether an answer carried dividends is not in the request |
+| `adjusted` | `True` daily, `None` intraday | The AND of the two flags above, kept for callers that read one flag |
+| `return_basis` | `total_return` daily, `unknown` intraday | What a return computed from the bars is: `total_return`, `price_return` or `unknown`, read off `dividend_adjusted` |
 | `survivorship_free` | `False` | Not a yfinance guarantee — delisted tickers may become unqueryable |
 | `point_in_time` | `False` | Not a yfinance guarantee — historical values can be silently revised |
 | `frequency` | echoes the requested `interval` | — |
@@ -62,12 +67,31 @@ A provider that could make stronger guarantees (a real point-in-time
 vendor) would report `True` for the relevant fields — the model exists
 precisely so that claim becomes visible and checkable, not implicit.
 
-**The one value here that surprises people is Databento's
-`adjusted=False`.** It serves what the venue published, so a split is a
-real -50% bar; every other provider reports `True`. Read it before running
-`detect_price_jumps` over a Databento frame, where an unadjusted corporate
-action is a finding rather than a false positive. The dataset build reads
-it: see [15_modeling.md, *Splits in unadjusted bars*](15_modeling.md#splits-in-unadjusted-bars).
+**Adjustment is two questions, and the providers answer them differently.**
+Each states what the request it sends takes out, in `adjustment_note`:
+
+| Provider | `split_adjusted` | `dividend_adjusted` | `return_basis` | What it rests on |
+|---|---|---|---|---|
+| yfinance | `True` | `True` daily and coarser, `None` intraday | `total_return` / `unknown` | `auto_adjust=True` |
+| Polygon | `True` | `False` | `price_return` | the aggregates `adjusted=true`, documented as split adjustment only |
+| Bloomberg | `True` | `True` | `total_return` | `adjustmentSplit`, `adjustmentNormal`, `adjustmentAbnormal` all True and `adjustmentFollowDPDF` False on every request |
+| Databento | `False` | `False` | `price_return` | venue prices; no adjusted series exists |
+
+One `adjusted=True` used to cover the first three, and a return computed
+from one is not a return computed from another: the gap is the dividend
+yield, every year. `adjusted` is now the AND of the two flags, so Polygon
+reports `adjusted=False` with its splits already out — anything asking
+about splits reads `split_adjusted`. A `DataSetMetadata` built with
+`adjusted` alone is read at that field's documented word, both or neither.
+Every OHLCV frame yfinance, Polygon and Bloomberg serve carries the same
+statement in `attrs` (`split_adjusted`, `dividend_adjusted`,
+`return_basis`), which pandas keeps through slicing and Parquet;
+Databento's frames carry the older `adjusted = False`, which is read as
+both flags False. Databento's surprise is still `split_adjusted=False`: a
+split is a real -50% bar. Read it before running `detect_price_jumps` over
+a Databento frame, where an unadjusted corporate action is a finding rather
+than a false positive. The dataset build reads it: see
+[15_modeling.md, *Splits in unadjusted bars*](15_modeling.md#splits-in-unadjusted-bars).
 
 ---
 

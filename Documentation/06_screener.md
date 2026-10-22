@@ -73,13 +73,21 @@ print(result)
 
 | Key | Description | Example |
 |---|---|---|
-| `pe_ratio_max` | Forward P/E upper bound | `25` |
+| `pe_ratio_max` | P/E upper bound: forward P/E, else trailing P/E where the provider has no forward figure (Polygon never does). Each passing row carries `pe_basis` and `trailing_pe`; `attrs["pe_basis"]` covers every ticker compared, and a warning says when the screen compared forward for some and trailing for others | `25` |
 | `pb_ratio_max` | Price-to-Book upper bound | `5.0` |
 | `debt_equity_max` | Debt-to-Equity upper bound | `150` |
 | `roe_min` | Return on Equity lower bound (decimal) | `0.15` = 15% |
 | `profit_margin_min` | Net profit margin lower bound (decimal) | `0.10` = 10% |
 | `div_yield_min` | Dividend yield lower bound (decimal) | `0.02` = 2% |
 | `market_cap_min` | Market cap lower bound (USD) | `10_000_000_000` = $10B |
+
+**Fundamental filters read today's ratios.** No provider serves a ratio as
+of a past date, so a screen whose window ends in the past still admits
+names on today's P/E, ROE and margins. `attrs["warnings"]` (and
+`run_screener`'s `warnings`) says so whenever a fundamental filter meets an
+`end_date` before today. Screen a historical window on technical filters
+alone, or build point-in-time features from filings
+(`PolygonProvider.get_point_in_time_records`).
 
 ### Technical Filters
 

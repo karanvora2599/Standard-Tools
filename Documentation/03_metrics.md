@@ -1,16 +1,18 @@
 # Metrics
 
-All metric functions accept `pd.Series`. Most return a single `float`; two do not — `drawdown_series` returns a full `pd.Series` (one drawdown value per bar) and `evt_tail_risk` returns a dict describing one fitted tail. The `risk_metrics` functions (`sharpe_ratio`, `sortino_ratio`, `max_drawdown`, `calmar_ratio`, `var_historical`, `var_parametric`, `cvar`, `information_ratio`, `treynor_ratio`, `evt_tail_risk`) are decorated with `@validate_series`, which raises `ValidationError` on empty input. The `return_metrics` functions (`cumulative_return`, `cagr`, `annualized_volatility`) and `drawdown_series` are **not** decorated: `cumulative_return`/`cagr` return `0.0` on an empty series, while `annualized_volatility` and `drawdown_series` now RAISE `ValidationError` on an empty series rather than returning `nan` or an empty `Series`; `drawdown_series` also refuses a non-positive opening level.
+All metric functions accept `pd.Series`. Most return a single `float`; two do not — `drawdown_series` returns a full `pd.Series` (one drawdown value per bar) and `evt_tail_risk` returns a dict describing one fitted tail. The `risk_metrics` functions (`sharpe_ratio`, `sortino_ratio`, `max_drawdown`, `calmar_ratio`, `var_historical`, `var_parametric`, `cvar`, `cvar_tail_observations`, `information_ratio`, `treynor_ratio`, `evt_tail_risk`) are decorated with `@validate_series`, which raises `ValidationError` on empty input. The `return_metrics` functions (`cumulative_return`, `cagr`, `annualized_volatility`, `equity_from_returns`) and `drawdown_series` are **not** decorated: `cumulative_return`/`cagr` return `0.0` on an empty series, while `annualized_volatility` and `drawdown_series` now RAISE `ValidationError` on an empty series rather than returning `nan` or an empty `Series`; `drawdown_series` also refuses a non-positive opening level.
 
 ---
 
 ## Return Metrics
 
 ```python
-from standard_quant_tools.metrics import cumulative_return, cagr, annualized_volatility
+from standard_quant_tools.metrics import (
+    annualized_volatility, cagr, cumulative_return, equity_from_returns,
+)
 
 returns = df['Close'].pct_change().dropna()
-equity  = (1 + returns).cumprod() * 10_000
+equity  = equity_from_returns(returns, start=10_000)   # len(returns) + 1 levels
 
 total  = cumulative_return(equity)   # e.g. 0.42 = +42%
 annual = cagr(equity)                # e.g. 0.18 = 18% per year
@@ -20,6 +22,24 @@ print(f"Total Return : {total:.1%}")
 print(f"CAGR         : {annual:.1%}")
 print(f"Annual Vol   : {vol:.1%}")
 ```
+
+**Build a curve from returns with `equity_from_returns`, not
+`(1 + returns).cumprod()`.** The cumulative product is the curve *after* the
+first return: it never contains the level that return was earned on.
+`cumulative_return` and `cagr` divide by a curve's first point and
+`max_drawdown`, `calmar_ratio` and `drawdown_series` seed their running peak
+there, so on that curve every one of them drops the first period. On
+r = [-0.20, 0 × 40, +0.30, +0.001 × 40] the truth is +8.24% total, 27.6% a
+year (82 daily returns at 252 a year) and a -20% maximum drawdown; the
+cumulative product reports a CAGR of 156% a year, no drawdown at all and a
+Calmar ratio of infinity. `equity_from_returns(returns, start=1.0)`
+prepends `start`, so n returns give n + 1 levels and the elapsed time `cagr`
+reads off the curve is n periods. A Series keeps its labels, with the start
+one bar before the first (a business-day series beginning on a Monday starts
+on the Friday); a 2-D array gets one start per row. A missing return is
+refused rather than carried forward, and `start` must be positive. A curve a
+backtest engine already returns — `run_strategy`'s `equity_curve` starts at
+`initial_capital` — is a level series already and needs none of this.
 
 ---
 
@@ -105,6 +125,25 @@ print(f"CVaR/ES(95%)        : {cvar95:.4f}")  # always >= VaR
 
 **Use historical VaR** unless you have a specific reason to assume normality — most financial return distributions have fat tails.
 
+**An expected shortfall rests on very few days.** `cvar` is the mean of the
+returns at or below the empirical VaR quantile, and on a short sample that
+is a handful of points: 252 daily returns leave 13 at 95% and 3 at 99%, so
+`cvar(returns, 0.99)` over a year is the mean of the three worst days and
+moves with any one of them. `cvar_tail_observations(returns, confidence)`
+counts the points `cvar` averaged, from the same tail. The analysis tools
+that report an expected shortfall — `analyze_stock_risk`,
+`get_portfolio_analysis`, `get_extended_risk_metrics`,
+`get_portfolio_risk_attribution` and `calculate_series_metrics` — report
+this count beside it and warn below `CVAR_MIN_TAIL_OBSERVATIONS` (10).
+
+```python
+from standard_quant_tools.metrics import cvar, cvar_tail_observations
+
+es  = cvar(returns, confidence=0.99)
+n   = cvar_tail_observations(returns, confidence=0.99)
+print(f"CVaR/ES(99%) : {es:.4f}  (mean of the worst {n} days)")
+```
+
 > **Confidence validation:** all three functions raise `ValidationError` unless `0.0 < confidence < 1.0`. Passing `confidence=1.5` or `confidence=-0.2` (or `0.0`/`1.0` themselves) raises rather than silently producing a nonsensical result.
 
 > **`var_parametric` without scipy:** when scipy is not installed, `var_parametric` uses a precomputed z-table covering exactly four confidence levels — `0.90`, `0.95`, `0.99`, `0.999`. Calling it with any other confidence level (e.g. `0.975`) and no scipy available raises `ValidationError` rather than silently substituting the 95% z-score. Install scipy to support arbitrary confidence levels.
@@ -144,7 +183,7 @@ import pandas as pd
 import numpy as np
 from standard_quant_tools.data.factory import DataFactory
 from standard_quant_tools.metrics import (
-    cumulative_return, cagr, annualized_volatility,
+    cumulative_return, cagr, annualized_volatility, equity_from_returns,
     sharpe_ratio, sortino_ratio, max_drawdown, calmar_ratio,
     var_historical, cvar, information_ratio,
 )
@@ -155,7 +194,7 @@ bench_df = provider.get_ohlcv("SPY",  "2022-01-01", "2024-01-01")
 
 asset_ret = asset_df['Close'].pct_change().dropna()
 bench_ret = bench_df['Close'].pct_change().dropna()
-equity    = (1 + asset_ret).cumprod() * 10_000
+equity    = equity_from_returns(asset_ret, start=10_000)
 
 report = {
     "Total Return"      : f"{cumulative_return(equity):.1%}",
@@ -181,12 +220,18 @@ agent surface did not, until `calculate_series_metrics`: it takes a
 `DataSource` — exactly one of a symbol, an `sqt://` reference, or values
 passed inline — so a model's out-of-sample returns, an external fund's
 monthly series, or a panel another agent published all reach the same
-arithmetic.
+arithmetic. A symbol takes its window and provider (`start_date` and
+`end_date` are required with it, `source` is optional); it was fetched
+over 1900–2100 from the default provider whatever was asked. A reference
+must be a one-column `returns_panel`: another kind is refused by name, and
+an `equity_curve` is refused with the `convert_reference` call that turns
+it into one.
 
 ```python
 calculate_series_metrics(
-    series={"ref": "sqt://returns_panel/study7/rets"},   # or {"symbol": ...}
-    benchmark={"symbol": "SPY"},                          # same three shapes
+    series={"ref": "sqt://returns_panel/study7/rets"},
+    benchmark={"symbol": "SPY", "start_date": "2024-01-02",
+               "end_date": "2025-12-31", "source": "polygon"},
     metrics=["sharpe_ratio", "information_ratio", "drawdown_series",
              "evt_tail_risk"],
     risk_free_rate=0.04,
@@ -207,6 +252,17 @@ so in its own field** rather than being flattened into `values`:
 | `information_ratio`, `treynor_ratio` | `benchmark` | `values`, with `benchmark_observations` |
 | `drawdown_series` | `run_id` + `name` | `drawdown_ref`, an `sqt://analytic_series/...` |
 | `evt_tail_risk` | — | the `evt` block: threshold, exceedances, `shape_xi`, `scale_beta`, `var_evt`, `cvar_evt` |
+
+The level metrics (`cumulative_return`, `cagr`, `calmar_ratio`,
+`max_drawdown`, `drawdown_series`) are computed on the curve the returns
+compound into, starting at 1.0 *before* the first return, so the first
+period counts: `cumulative_return` of [0.01, 0, 0.02] is 0.0302, and a first
+return of -20% is a 20% drawdown. `cagr` and `calmar_ratio` annualize at the
+`periods_per_year` given (twelve monthly returns at `periods_per_year=12`
+span one year). `drawdown_ref` is on the returns' own bars, its first value
+the first return's drawdown. Asking for `cvar` also returns
+`cvar_tail_observations`, the number of returns that 95% shortfall is the
+mean of, with a warning below 10.
 
 A benchmark is refused rather than guessed: which index is *the* benchmark
 is the caller's decision, and defaulting it would answer a different

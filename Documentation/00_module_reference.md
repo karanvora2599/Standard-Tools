@@ -321,7 +321,7 @@ print(result['final_equity'], result['leverage_curve'].mean)
 Pluggable building blocks compose into `run_portfolio_simulation` (or can be used standalone):
 
 - `standard_quant_tools.backtest.costs` — `percentage_commission`, `per_share_commission`, `fixed_bps_spread`, `pct_of_range_spread`, `sqrt_impact_bps`, `impact_cost`, `short_borrow_cost`, `margin_interest`
-- `standard_quant_tools.backtest.constraints` — `adv_participation`, `days_to_liquidate`, `sector_exposure`, `capacity_report`
+- `standard_quant_tools.backtest.constraints` — `adv_participation`, `days_to_liquidate`, `liquidation_days`, `sector_exposure`, `capacity_report`
 - `standard_quant_tools.backtest.sizing` — `rank_weighted`, `equal_weight_top_bottom`, `zscore_normalized`, `vol_scaled`, `dollar_neutral` — turns a SCORE signal panel into a target-weight panel
 - `standard_quant_tools.backtest.pairs` — `run_pair_backtest`, a two-leg pair trade as one dollar-neutral portfolio (reuses `run_portfolio_simulation`)
 - `standard_quant_tools.backtest.artifacts` — `save_artifact` / `load_artifact`, a local Parquet store for equity curves/trade logs too large to embed inline in an agent-tool response
@@ -627,7 +627,7 @@ How much of a backtest is real.
 | `deflated_sharpe_ratio(...)` | `overfitting` | Sharpe deflated for the number of trials |
 | `probability_of_backtest_overfitting(...)` | `overfitting` | PBO across every equal split |
 | `combinatorial_purged_cv(...)` | `overfitting` | Purged and embargoed train/test paths |
-| `reality_check(...)` | `overfitting` | White's Reality Check, block bootstrapped |
+| `reality_check(*, question, ...)` | `overfitting` | White's Reality Check (or Hansen's SPA) of the best candidate against one benchmark, or an intersection-union test that one strategy beats every alternative; block bootstrapped, series by keyword |
 | `regime_stratified_performance(...)` | `overfitting` | P&L concentration by regime |
 | `parameter_decay(...)` | `overfitting` | Plateau or spike |
 | `monte_carlo_trade_paths(...)` | `trade_analysis` | Drawdown distribution from reshuffled trades |
@@ -656,6 +656,6 @@ actually exposed to.
 | `liquidity_adjusted_var(...)` | VaR that admits you cannot exit at the mark |
 | `portfolio_scenarios(...)` | Named shocks rather than a distribution |
 
-`standard_quant_tools.portfolio.position_sizing.size_position(account_equity, last_close, last_atr, ...)` sizes one position behind an ATR stop, with half-Kelly when the win statistics are given; it is the arithmetic `get_position_size` calls, and refuses a stop, share count or position value past the float range by name.
+`standard_quant_tools.portfolio.position_sizing.size_position(account_equity, last_close, last_atr, ...)` sizes one position behind an ATR stop and, when the win statistics are given, at half the growth-optimal Kelly position f* = p/L − q/W, capped at `max_leverage` times equity (1 by default); it reports f* and the risk fraction f* × L, and sizes zero shares without an edge. It is the arithmetic `get_position_size` calls, and refuses a stop, share count or position value past the float range by name. `kelly_notional_fraction(p, W, L)` and `kelly_log_growth(f, p, W, L)` are the two formulas.
 
 Deep guide: [05_portfolio.md](05_portfolio.md#allocation-without-expected-returns)

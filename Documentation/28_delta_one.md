@@ -64,11 +64,11 @@ nothing says which, so `daycount` refuses it and names the string to pass.
 | `analyze_hedge_effectiveness` | Did that hedge actually work *(the two return lists are paired by position and must be the same length; unequal ones used to be truncated to the shorter, silently. `tracking_error` in the library refuses the same, and still joins two dated Series on their shared dates)* |
 | `analyze_index_basket` | Is this basket rich to its index, and which name explains it |
 | `compare_delta_one_expressions` | Which of these six ways of holding it is cheapest |
-| `optimize_replication_basket` | What is the smallest basket that tracks this |
+| `optimize_replication_basket` | What is the smallest basket that tracks this *(`converged` is False, with a warning carrying SLSQP's status and message, when the solver did not confirm a minimum of tracking error -- it used to return its last iterate as the basket without reading the status -- or when the weights miss the fully-invested or long-only constraint)* |
 | `analyze_etf_fair_value` | Is this ETF premium real after costs *(priced against the BASKET when one is supplied -- that is what a creation actually buys -- and against NAV otherwise; `priced_against` says which. `cash_component` and `tolerance_bps` must be finite -- an infinite cash component recommended a redemption with a 10,000 bp edge)* |
 | `price_total_return_swap` | What is this swap worth, leg by leg *(`financing_rate` is a decimal, bounded at ±100% on the tool because a larger value is a percent given for a fraction far more often than a real rate -- 4.5 financed $100m at 450% a year. The library bounds it and `spread_bps` as it bounds every rate, and warns above 100%)* |
 | `analyze_total_return_future` | What financing spread does this TRF embed *(`dividend_yield` and `comparison_spread_bps` are bounded like the reference rate and the quote)* |
-| `analyze_dividend_points` | How many index points of dividend before expiry |
+| `analyze_dividend_points` | How many index points of dividend before expiry, nominal (`total_index_points`) and discounted to `as_of` at `financing_rate` (`forecast_pv_points`). What a quoted future implies, S − F·e^(−rT), is a present value, so `forecast_minus_implied` compares the present values: a future priced exactly off the forecast reports 0, where comparing the nominal sum reported 0.74 points on a 60-point dividend 91 days out at 5% and called it a position. Each dividend is discounted from its `pay_date` when one is given — the cash arrives then — else its ex-date, which overstates its present value by about rate × the lag and is counted in `n_discounted_to_ex_date`. Year fractions use `day_count` (default `ACT/365F`); a `time_to_expiry` that disagrees with the dates under it is named |
 | `analyze_index_rebalance` | What will this index change force people to trade *(weights are fractions summing to about 1; a set summing above 1.5 is refused as percent- or bps-scaled -- percent weights on $800bn forced $40 trillion of buying -- and one more than 1% off 1 is flagged as not a whole index)* |
 | `detect_basis_dislocation` | Has this basis *structurally shifted*, or just moved |
 | `monitor_spread_stream` | Watch any spread on a live feed, one stateful call at a time; a resumed call that changes the channel, label, warm-up, threshold or slack is refused by name (open a new monitor — the accumulators were learned under the old values), a resumed `state` whose settings or accumulators fail the checks a new monitor passes is refused as edited, and the default threshold is the streaming calibration of 15.0, not the batch detector's 9.0, which on pure noise fires on nothing 45% of the time by 5,000 observations against 7% at 15.0 |
@@ -285,6 +285,21 @@ contracts against the book's current dollar beta, computed bar by bar and
 reset at each re-hedge, and every schedule reports
 `held_residual_fraction_max` and `held_residual_fraction_mean` so a
 calendar rule's staleness is visible too.
+
+**A hedge earns no interest on money it never had.**
+`run_futures_hedge_backtest` funds its futures account with twice the peak
+hedge notional so margin never binds, and the collateral rate used to be
+paid on all of that synthetic cash and booked as hedge P&L — a perfect hedge
+of a flat $100m book at 5% reported +$9,936,337. The account now runs at a
+zero rate; what the margin actually posted would earn at `collateral_rate`
+is reported apart as `collateral_interest_on_posted_margin`, with
+`collateral_interest_base` and `collateral_day_count`, and is in neither
+`hedge_pnl` nor `combined_pnl`. The hedge's P&L now also includes what it
+cost to put on: a flat market returns exactly minus the commission and
+slippage. `run_futures_backtest` accrues its collateral rate on cash not
+posted as margin, on `collateral_day_count` (`ACT/365F` by default, or
+`ACT/360`), says so on its result, and refuses a NaN or infinite rate,
+which used to run and turn every equity figure NaN.
 
 ---
 

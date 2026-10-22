@@ -269,8 +269,9 @@ ADVANCED TOOLS (5)
       Use when the user asks "what's driving my portfolio's risk?"
 
 16. get_position_size
-    — ATR-based stop-loss sizing. Optional Kelly criterion when win_rate/avg_win/
-      avg_loss are known from a backtest. Always use this before sizing a real trade.
+    — ATR-based stop-loss sizing. Optional half-Kelly position, capped at
+      max_leverage × equity, when win_rate/avg_win_pct/avg_loss_pct are known
+      from a backtest. Always use this before sizing a real trade.
 
 SUPPLEMENTARY TOOLS (5)
 17. get_stock_fundamentals
@@ -825,7 +826,11 @@ print(f"Information Ratio: {result.information_ratio:.2f}")
 | `sortino_ratio` | Like Sharpe but only penalizes downside | Always ≥ Sharpe |
 | `var_95` | Largest expected daily loss, 95% confidence | 0.01–0.05 (1%–5%) |
 | `cvar_95` | Average loss on the 5% worst days | Always ≥ VaR |
+| `cvar_95_tail_observations` | How many daily returns `cvar_95` is the mean of; below 10 `warnings` says the shortfall describes those few days rather than the tail | 13 on a year of daily data |
 | `information_ratio` | Active return vs benchmark / tracking error | > 0.5 strong |
+
+`max_drawdown` is measured from the close before the first return, so a
+loss on the first day of the window counts.
 
 **Comparing multiple stocks:**
 

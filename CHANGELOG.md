@@ -1,5 +1,28 @@
 # Changelog
 
+## The documentation says what the six changes below do, and its generated pages and measured sizes follow the code
+
+- **Each change is described where its tools are.** Metrics (03) build
+  curves with `equity_from_returns` and report expected shortfall's tail
+  count; backtesting (04) has cash earning the rate, financing, the
+  return basis and days to liquidate; portfolio (05) has the refusals,
+  factor and PC shares of total variance, HRP's dates and the cost of
+  one trade; data (01, 11) has split and dividend adjustment as two
+  flags and the provider table; overfitting (24) has the reality check's
+  two questions and PBO's median ties; the agent-tool pages (07, 09)
+  have the Kelly sizing, capacity, stress coverage and null reasons;
+  delta one (28) has the hedge's collateral interest and dividend
+  present values.
+- **Two examples that the new refusals would have broken are fixed.**
+  The walk-forward example sized by Kelly from a share of profitable
+  windows, which is not a per-trade win rate, and now sizes by fixed
+  risk; the liquidity example prints `n/a` for a proxy that is null.
+- **Generated and measured figures are current.** The tool index and
+  the modeling reference are regenerated, the MCP page's
+  `--print-budget` output and its per-runtime table are measured again
+  (`backtest` serves 43 KB under `auto` against 104 KB in full), and the
+  README and testing page count 17,152 tests.
+
 ## Idle cash earns the rate the Sharpe subtracts, borrowing pays for itself, and a hedge books no interest on money it never had
 
 - **The engines credit cash and charge financing.** Every Sharpe here

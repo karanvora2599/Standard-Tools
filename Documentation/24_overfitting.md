@@ -73,7 +73,11 @@ After Bailey, Borwein, Lopez de Prado and Zhu (2015). Cut the period into S
 chunks; for every way of splitting them into equal halves, pick the
 configuration that ranked best in-sample and look up where it ranked
 out-of-sample. PBO is the fraction of splits where the winner landed in the
-bottom half.
+bottom half; a split that puts it exactly on the out-of-sample median —
+possible only with an odd number of configurations — counts as half. Before
+the CHANGELOG entry of 2026-10-22 it counted as not below, so a no-skill
+grid of three configurations read 0.337 and one of five 0.380, rather than
+0.5.
 
 **It is a property of your selection procedure, not of the strategy.** A PBO
 of 0.5 means picking the in-sample best is no better than picking at random.
@@ -99,19 +103,51 @@ PBO is the thing it invalidates.
 
 ### `run_reality_check`
 
-White's Reality Check. Subtly different from a t-test on the strategy's
-returns: a t-test asks "is this mean positive", while this asks "is this
-outperformance larger than the largest you would expect from the best of
-this many candidates under the null that none of them has an edge". The
-second is the question that matters after a search.
+Is a result better than luck after a search? The tool asks one of two
+questions, named in `question`, and they are different tests.
+
+**`best_candidate_vs_benchmark`** (the default) is White's (2000) Reality
+Check. `candidate_returns` holds every candidate the search considered — the
+one it kept among them — and `benchmark_returns` the one series they must
+beat (zero when omitted). The statistic is the largest mean outperformance,
+max_k mean(c_k − b), and the block bootstrap gives its distribution under
+the null that no candidate beats the benchmark, so the p-value pays for
+having kept the best of K. `method="hansen_spa"` is Hansen's (2005) test for
+superior predictive ability: each candidate's outperformance is studentised,
+and candidates far below the benchmark are not allowed to widen the null.
+White's form is conservative when the search held poor candidates; one good
+candidate beside twenty poor ones reads p = 0.036 under White's form and
+0.001 under Hansen's. Each bootstrap draw is divided by its own block-based
+standard error; dividing every draw by the sample's error rejected 9% of
+no-edge best-of-tens at 500 days.
+
+**`beats_every_alternative`** asks whether one strategy (`strategy_returns`)
+beats EVERY series in `alternative_returns`. Each pair gets a one-sided
+block-bootstrap test of mean(s − a_k) > 0; the statistic is the smallest
+margin and the p-value the largest pairwise one (an intersection-union
+test), with each pair's margin and p-value in `per_alternative` and the
+hardest in `binding_alternative`.
+
+**Why there are two.** Until the CHANGELOG entry of 2026-10-22 the tool took
+a strategy and a map of alternatives and tested max_k mean(s − a_k) — the
+strategy's margin over its WEAKEST alternative — while saying "better than
+the best". A strategy earning 5% a year against alternatives at −20% and
++30% came back significant at p = 0.018. Under `beats_every_alternative` it
+reads p = 1.000; asked whether the best of the three beats zero, the answer
+is yes, and the best is the +30% one. The old map form of
+`benchmark_returns` is refused, naming the inputs of both questions.
 
 **The bootstrap is blocked**, and it has to be. Resampling individual days
 destroys the serial correlation that drives drawdowns and volatility
 clustering, which makes the null far too narrow and the p-value far too
 small.
 
-Measured false-positive rate on no-edge strategies: **1 of 40 (2.5%)**
-against a nominal 5%.
+Measured over 200 no-edge draws of three years each, against 5% plus two
+standard errors (8.1%): the best of ten candidates is significant **4.5%**
+of the time under White's form and **4.5%** under Hansen's, and a strategy
+equal to its one alternative **6.0%**. A strategy 10% a year better than
+five alternatives and the benchmark, at 4% tracking error, is found in 85,
+85 and 92 of 100 four-year draws.
 
 The stationarity assumption is the weak point and is named in every result:
 block bootstrap assumes the return-generating process is the same
@@ -290,7 +326,7 @@ survive and nowhere near sufficient.
 | `get_deflated_sharpe_ratio` | Is this Sharpe real, given how many were tried |
 | `estimate_backtest_overfitting` | Does my selection procedure have any skill |
 | `build_purged_cv_splits` | Train/test indices that do not leak a forward-looking label |
-| `run_reality_check` | Is this better than the best of the alternatives, or the luckiest |
+| `run_reality_check` | Does the best of my search beat the benchmark by more than luck — or does this strategy beat every alternative |
 | `run_monte_carlo_trade_paths` | What drawdown could this same edge have produced |
 | `analyze_trade_clustering` | Do the losses arrive in runs I could not sit through |
 | `compare_against_random` | Do the entry decisions beat a coin |

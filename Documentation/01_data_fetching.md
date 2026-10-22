@@ -520,6 +520,15 @@ uses:
 | `SQT_BLOOMBERG_HOST` | `localhost` | DAPI server host |
 | `SQT_BLOOMBERG_PORT` | `8194` | DAPI server port (an integer 1-65535; anything else is refused by name) |
 
+**Adjustment is requested, not inherited.** Every `HistoricalDataRequest`
+sets `adjustmentSplit`, `adjustmentNormal` (regular cash dividends) and
+`adjustmentAbnormal` (special cash, return of capital and the other
+distributions) to True and `adjustmentFollowDPDF` to False. The provider
+used to set `adjustmentSplit` alone, which left dividends to the answering
+terminal's DPDF<GO> settings, so the same call returned different series on
+different desks. The bars are total-return bars on every terminal, and
+`get_metadata` says so (`split_adjusted=True`, `dividend_adjusted=True`).
+
 An empty or whitespace-only value is unset and means the default, like every
 setting the library reads: an empty host used to be the host `""`, and an
 empty port a refusal.
@@ -612,12 +621,21 @@ than silently guessing a mapping.
   rather than silent, but the remaining pages aren't fetched.
 - `get_financial_ratios` has no direct analogue to yfinance's `.info`
   ratios in Polygon's reference data. `market_cap` comes straight from
-  Ticker Details v3. `trailing_pe`, `price_to_book`, `debt_to_equity`,
-  `return_on_equity`, and `profit_margins` are derived from the most recent
-  filing on the Financials vX endpoint combined with `market_cap` (e.g.
-  `trailing_pe ~= market_cap / net_income`). `forward_pe` (no forward
-  estimates in this data) and `dividend_yield` (would need a separate
-  dividends-history aggregation) are always `None` — missing, not wrong.
+  Ticker Details v3. `trailing_pe`, `return_on_equity` and
+  `profit_margins` divide by or are a FLOW, which is read from the
+  Financials vX record for the trailing twelve months (`timeframe=ttm`),
+  else the latest annual one, never from one quarter: after a 10-Q the
+  newest filing is a quarter, and a P/E on a quarter's net income is four
+  times too high (40 where the TTM figure is 10). An annual figure says so
+  in `definition_notes`, and a name with neither gets those three as `None`
+  with the reason there. `price_to_book` and `debt_to_equity` read the
+  newest balance sheet. `forward_pe` (no forward estimates in this data)
+  and `dividend_yield` (would need a separate dividends-history
+  aggregation) are always `None` — missing, not wrong.
+- `get_metadata()` reports `split_adjusted=True` and
+  `dividend_adjusted=False` (the aggregates `adjusted=true` is split
+  adjustment only), so `adjusted` is `False` and `return_basis` is
+  `price_return`.
 - `get_ticker_info`'s `sector`/`industry` both fall back to Polygon's single
   `sic_description` classification field — a coarser taxonomy than
   yfinance's separate sector/industry fields.
@@ -960,8 +978,8 @@ wearing a measurement's clothes.
 
 ## Point-in-time records (`get_point_in_time_records`)
 
-`get_financial_ratios` returns the latest filing with no `as_of`: a fact
-about the present. A model trained on history needs the fact **as it was
+`get_financial_ratios` returns today's trailing-twelve-month (or latest
+annual) figures with no `as_of`: a fact about the present. A model trained on history needs the fact **as it was
 known on each date**, and the difference is the leak that makes a backtest
 look prescient — a quarterly figure describes 30 June, is filed on 29 July
 and may be restated in August, and a join on the quarter end reads it a

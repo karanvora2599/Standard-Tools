@@ -29,7 +29,7 @@ and why; see [07_agent_tools.md](07_agent_tools.md#backtestinput--backtestresult
 | `run_walk_forward_backtest` | Optimise in-sample, validate out-of-sample across rolling windows | `stitched_oos_sharpe`, `pct_windows_profitable`, `param_stability` |
 | `get_portfolio_risk_attribution` | Deep risk decomposition: MCR, PCA, optional factor model | `asset_risk_contributions`, `pca_variance_explained` |
 | `run_portfolio_optimization` | Produce weights — Markowitz mean-variance (max_sharpe/min_volatility/target_return/target_volatility), risk parity, or Black-Litterman — unlike `get_portfolio_risk_attribution`, which only decomposes weights already chosen | `weights`, `expected_return`, `expected_volatility`, `sharpe_ratio`, `converged`, `solver` (iterations/status/objective/multipliers), `condition_number`, `risk_contributions` (risk_parity only), and for Black-Litterman `implied_equilibrium_returns`, `posterior_returns`, `posterior_volatilities`, `view_absorption` |
-| `get_position_size` | ATR stop-loss sizing with optional Kelly criterion | `shares_fixed_risk`, `kelly_fraction`, `recommended_shares` |
+| `get_position_size` | ATR stop-loss sizing, with an optional half-Kelly position capped at `max_leverage` | `shares_fixed_risk`, `kelly_notional_fraction`, `kelly_risk_fraction`, `recommended_shares` |
 | `run_portfolio_simulation` | True shared-cash portfolio: rebalancing, position sizing vs. current equity, weight drift between rebalances | `rebalance_log`, `avg_gross_leverage`, `final_equity`, `final_cash` |
 
 **Supplementary tools (6)**
@@ -56,7 +56,7 @@ and why; see [07_agent_tools.md](07_agent_tools.md#backtestinput--backtestresult
 |---|---|---|
 | `run_pair_trade_backtest` | Backtest a cointegrated pair as one synchronized two-leg trade (reuses `run_portfolio_simulation`) | `n_round_trips`, `entry_spread`, `current_spread`, `sharpe_ratio` |
 | `get_robustness_diagnostics` | Same-sample confidence checks on a grid search's winning combination: parameter sensitivity, Deflated Sharpe Ratio, block-bootstrap CI | `expected_max_sharpe`, `deflated_sharpe_ratio`, `bootstrap_ci_lower`, `bootstrap_ci_upper` |
-| `get_capacity_report` | Max account size a target-weight portfolio can support before positions move their own market | `max_account_size`, `binding_ticker`, `days_to_liquidate_at_capacity` |
+| `get_capacity_report` | Max account size a target-weight portfolio can support before positions move their own market | `max_account_size`, `binding_ticker`, `days_to_liquidate` (given an `account_size`) |
 | `get_data_quality_report` | Dataset provenance (including the dataset that answered and whether it is a sample feed) plus missing-bar/stale-price/price-jump/volume-anomaly detection and duplicate-timestamp, out-of-order and OHLC-consistency checks on fetched OHLCV, against a named exchange calendar | `metadata`, `missing_bars`, `stale_price_runs`, `price_jumps`, `volume_anomalies`, `served_dataset`, `sample_feed`, `duplicate_timestamps`, `out_of_order_timestamps`, `ohlc_inconsistencies` |
 | `run_backtest_compact` | Any of the eight built-in strategies, as `run_sma_backtest` runs them, but returning a compact summary/risk/exposure/cost result with artifact URIs and references instead of the inline equity curve/trade log | `summary`, `risk`, `exposure`, `costs`, `equity_curve_uri`, `equity_curve_ref` |
 
@@ -675,7 +675,7 @@ print(f"\nRecommended strategy: {winner}")
 
 `get_portfolio_risk_attribution` goes beyond basic portfolio metrics to provide a complete risk decomposition:
 - **Marginal Risk Contribution (MCR):** how much each asset contributes to total portfolio volatility (values sum to 1.0).
-- **PCA variance decomposition:** what fraction of the asset universe's variance is captured by each latent factor, and how much the portfolio loads onto each factor.
+- **PCA variance decomposition:** what fraction of the asset universe's variance is captured by each latent factor, and what share of the portfolio's own variance each one carries.
 - **Factor regression** (optional): multi-factor OLS on the aggregate portfolio returns.
 
 ```python
@@ -707,11 +707,11 @@ for ticker, mcr in sorted(result.asset_risk_contributions.items(),
                            key=lambda x: -x[1]):
     print(f"  {ticker}: {mcr:.1%}")
 
-# How much of portfolio variance comes from each latent factor?
+# How much of the universe, and how much of THIS portfolio, each PC explains
 print("\nPCA variance explained:")
 for pc, evr in result.pca_variance_explained.items():
-    exp = result.portfolio_pc_exposures[pc]
-    print(f"  {pc}: EVR={evr:.1%}  portfolio loading={exp:+.3f}")
+    share = result.portfolio_pc_exposures[pc]
+    print(f"  {pc}: universe EVR={evr:.1%}  share of portfolio variance={share:.1%}")
 
 # Factor model (if factor_tickers was provided)
 if result.factor_loadings:
@@ -739,10 +739,14 @@ MCR values sum to exactly 1.0 and represent each asset's fractional contribution
 |---|---|---|
 | `asset_risk_contributions` | `dict[str, float]` | Fractional MCR per asset (sums to 1.0) |
 | `pca_variance_explained` | `dict[str, float]` | EVR per PC across the asset universe |
-| `portfolio_pc_exposures` | `dict[str, float]` | Portfolio's weighted loading on each PC |
+| `portfolio_pc_exposures` | `dict[str, float \| None]` | Each PC's share of the portfolio's variance, (x'v_k)²λ_k / w'Σw on the components of `pca_variance_explained`, x the weights times the asset volatilities; over every component the shares sum to 1. Null when the portfolio's returns have no variance |
 | `factor_loadings` | `dict[str, float]` | Factor OLS loadings (optional) |
 | `factor_r_squared` | `float` | Factor model R² (optional) |
 | `factor_alpha` | `float` | Factor model alpha, daily (optional) |
+
+**`portfolio_pc_exposures` is a share of variance, not a loading.** It was w'v_k — raw weights against eigenvectors of the correlation matrix, a number in no unit. Fifty-fifty in two names at 1% and 10% volatility correlated 0.5 reported PC2 at 0.0 (and PC1 at 0.7071) when PC2 carries 18.24% of the portfolio's variance; it now reports 0.8176 and 0.1824. A component that explains much of the universe can carry little of one portfolio, which is why both are reported.
+
+`cvar_95_tail_observations` is the number of daily returns `cvar_95` is the mean of; below 10, `warnings` says so. `annualized_return` and `max_drawdown` are measured from the level before the first return.
 
 **Identifying and fixing concentration risk:**
 
@@ -897,14 +901,19 @@ stop_distance  = ATR × atr_multiplier
 shares         = floor(dollar_risk / stop_distance)
 ```
 
-**Kelly criterion:**
+**Kelly criterion.** `avg_win_pct` (W) and `avg_loss_pct` (L) are a winning and a losing trade's returns ON THE POSITION. Holding a fraction f of equity in the position grows equity by g(f) = p ln(1 + f W) + q ln(1 − f L) per trade, which is greatest at
 
 ```
-b = avg_win_pct / avg_loss_pct     (win/loss ratio)
-f = (b × win_rate − (1 − win_rate)) / b
+f*            = win_rate / avg_loss_pct − (1 − win_rate) / avg_win_pct   (kelly_notional_fraction)
+risk fraction = f* × avg_loss_pct                                         (kelly_risk_fraction)
+half-Kelly    = min(f* / 2, max_leverage) × account_equity / last_close  shares
 ```
 
-Half-Kelly is recommended (`f × 0.5`) — full Kelly is theoretically optimal but has severe drawdown consequences in practice.
+f* is a POSITION — a multiple of equity, 10.8 at p = 0.55, W = 6%, L = 3%, because a trade that loses 3% of the position risks only 3% of it. The risk fraction, f* × L = 0.325, is the fraction of equity an average losing trade costs at full Kelly. Until the CHANGELOG entry of 2026-10-22 the tool reported the risk fraction as `kelly_fraction` and bought half of it as a position: 162 shares of a $100 stock on $100,000, a thirty-third of half-Kelly. Both fractions are reported now, and the position is half of f*, capped at `max_leverage` times equity (1, no leverage, by default); a warning names the cap whenever it binds, which for an ordinary edge is usually. Half-Kelly keeps about three quarters of full Kelly's growth at half the position — full Kelly is growth-optimal and produces drawdowns almost nobody holds through. `log_growth_per_trade_full_kelly`, `_half_kelly` and `_recommended` report g at f*, f*/2 and the position held.
+
+With `n_trades` — how many trades the win rate was measured on — the result adds the win rate's 95% Wilson interval and f* at its two ends, holding W and L fixed (so the true range is wider), and a warning when the interval's low end has no edge at all.
+
+When f* ≤ 0 the statistics say the trade loses money (p W − q L ≤ 0): Kelly sizes 0 shares and a warning says so. The fixed-risk figures are still reported — what the risk budget buys behind the stop — but they are not the recommendation for a trade without an edge. A win rate of 1 (no losing trade in the sample) leaves f* unbounded: it is null with a warning and the position is sized at the cap. `win_rate`, `avg_win_pct` and `avg_loss_pct` are given together or not at all, and `n_trades` needs them.
 
 `account_equity` and `atr_multiplier` must be positive: at zero or below every position sized at zero shares and came back as a recommendation. A stop distance or a share count past the float range is refused naming the input, where it used to escape from `int()` as an `OverflowError`, and so is a position value past it, which used to come back as an infinity.
 
@@ -945,18 +954,22 @@ result = get_position_size(PositionSizerInput(
     win_rate=0.55,
     avg_win_pct=0.05,    # average winning trade = +5%
     avg_loss_pct=0.025,  # average losing trade  = −2.5%
+    max_leverage=1.0,  # the default: no leverage
 ))
 
-print(f"Kelly fraction    : {result.kelly_fraction:.3f}")
-print(f"Half-Kelly shares : {result.shares_half_kelly}")
+print(f"Kelly (position)  : {result.kelly_notional_fraction:.2f}x equity")
+print(f"Kelly (risk)      : {result.kelly_risk_fraction:.3f} of equity per average loss")
+print(f"Half-Kelly shares : {result.shares_half_kelly}  (capped: {result.kelly_capped_by_max_leverage})")
 print(f"Recommended       : {result.recommended_sizing}")
 print(f"Recommended shares: {result.recommended_shares}")
 print(f"Recommended value : ${result.recommended_position_value:,.0f}")
 ```
 
 **Recommendation logic:**
-- `"fixed_risk"`: default, or when Kelly fraction ≤ 0 (negative edge).
-- `"half_kelly"`: when Kelly > 0 and half-Kelly shares > 0 (positive expected value strategy).
+- `"fixed_risk"`: when no Kelly statistics are given.
+- `"half_kelly"`: whenever `win_rate`, `avg_win_pct` and `avg_loss_pct` are
+  given — f*/2 of equity capped at `max_leverage`, and 0 shares when f* ≤ 0
+  (no edge), with a warning.
 
 **Sizing multiple positions across a portfolio — enforcing total exposure limits:**
 
@@ -1004,7 +1017,7 @@ for c in candidates:
     print(f"{c['symbol']:<8} {pos.recommended_shares:>5} shares  "
           f"${pos.recommended_position_value:>8,.0f}  "
           f"risk={position_risk_pct:.2%}  "
-          f"({pos.recommended_sizing}  kelly={pos.kelly_fraction:.3f})")
+          f"({pos.recommended_sizing}  f*={pos.kelly_notional_fraction:.2f})")
 
 print(f"\nTotal risk committed: {total_risk_used:.2%} of ${account_equity:,.0f}")
 ```
@@ -1042,11 +1055,13 @@ pos = get_position_size(PositionSizerInput(
     win_rate=bt.win_rate,
     avg_win_pct=avg_win_pct,
     avg_loss_pct=avg_loss_pct,
+    n_trades=bt.num_trades,
     atr_period=14,
     atr_multiplier=2.0,
 ))
 
-print(f"\nKelly fraction : {pos.kelly_fraction:.3f}")
+print(f"\nKelly position : {pos.kelly_notional_fraction:.2f}x equity "
+      f"(risk {pos.kelly_risk_fraction:.3f})")
 print(f"Half-Kelly     : {pos.shares_half_kelly} shares")
 print(f"Fixed-risk     : {pos.shares_fixed_risk} shares")
 print(f"Recommended    : {pos.recommended_shares} shares ({pos.recommended_sizing})")
@@ -1109,11 +1124,19 @@ for label, mult in scenarios:
 | `position_value_fixed_risk` | `float` | Position dollar value (fixed-risk) |
 | `portfolio_pct_fixed_risk` | `float` | Position as % of account |
 | `max_loss_fixed_risk` | `float` | Max dollar loss if stop is hit |
-| `kelly_fraction` | `float?` | Full Kelly fraction (0 if negative edge) |
-| `shares_half_kelly` | `int?` | Half-Kelly position in shares |
+| `kelly_notional_fraction` | `float?` | Full Kelly as a position, f* = p/L − q/W times equity; negative without an edge, null when unbounded (a win rate of 1) |
+| `kelly_risk_fraction` | `float?` | f* × avg_loss_pct — what `kelly_fraction` reported before 2026-10-22 |
+| `half_kelly_notional_fraction` | `float?` | f*/2, before the cap |
+| `kelly_position_fraction` | `float?` | The fraction of equity sized: f*/2 capped at `max_leverage`, 0 without an edge |
+| `kelly_capped_by_max_leverage` | `bool?` | Whether the cap bound |
+| `shares_half_kelly` | `int?` | Half-Kelly position in shares, capped |
+| `log_growth_per_trade_full_kelly`, `_half_kelly`, `_recommended` | `float?` | Expected log growth of equity per trade at f*, f*/2 and the position held |
+| `win_rate_interval_95`, `kelly_notional_fraction_interval_95` | `List[float]?` | Given `n_trades`: the win rate's 95% Wilson interval and f* at its ends |
+| `max_leverage` | `float` | The cap, echoed |
 | `recommended_sizing` | `str` | `"fixed_risk"` or `"half_kelly"` |
 | `recommended_shares` | `int` | Final recommended position size |
 | `recommended_position_value` | `float` | Final recommended dollar value |
+| `warnings` | `List[str]` | The cap binding, no edge, an unbounded f*, an edge the sample does not establish |
 
 ---
 
@@ -1172,11 +1195,14 @@ wf = run_walk_forward_backtest(WalkForwardInput(
 
 if wf.avg_oos_sharpe > 0.5 and wf.pct_windows_profitable > 0.6:
     best_p = wf.windows[-1].best_params  # most recent window's params
+    # pct_windows_profitable is a share of WINDOWS, not a per-trade win rate,
+    # and Kelly needs win_rate, avg_win_pct and avg_loss_pct together -- so
+    # size this one by fixed risk behind the ATR stop.
     pos = get_position_size(PositionSizerInput(
         symbol="SPY",
         start_date="2023-06-01", end_date="2024-01-01",
         account_equity=500_000,
-        win_rate=wf.pct_windows_profitable,
+        risk_per_trade_pct=0.01,
     ))
     print(f"Strategy validated (avg OOS Sharpe={wf.avg_oos_sharpe:.2f})")
     print(f"Position: {pos.recommended_shares} shares ({pos.recommended_sizing})")
@@ -1214,6 +1240,7 @@ print(f"Div yield  : {result.dividend_yield}")
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `symbol` | str | yes | Ticker symbol |
+| `source` | str | no | `yfinance`, `polygon` or `bloomberg`; None uses the default (`databento` is refused: it publishes no fundamentals) |
 
 **Output reference:**
 
@@ -1229,10 +1256,14 @@ print(f"Div yield  : {result.dividend_yield}")
 | `trailing_pe` | `float?` | Trailing twelve-month P/E |
 | `forward_pe` | `float?` | Forward P/E (consensus estimate) |
 | `price_to_book` | `float?` | Price-to-book ratio |
-| `debt_to_equity` | `float?` | Total debt / equity |
+| `debt_to_equity` | `float?` | Debt / equity (see `definition_notes`: Polygon's is liabilities / equity) |
 | `return_on_equity` | `float?` | ROE as a decimal (e.g. 0.25 = 25%) |
 | `profit_margins` | `float?` | Net profit margin as decimal |
 | `dividend_yield` | `float?` | Dividend yield as decimal |
+| `source` | `str?` | The provider that answered |
+| `definition_notes` | `Dict[str, str]` | Field → how this provider's definition departs from the canonical one, or why it is null (Polygon's liabilities-based debt to equity; a trailing ratio from an annual filing, or refused for want of a full year) |
+| `implausible` | `List[str]` | Values that fail a plausibility check on their face (an unconverted percentage) |
+| `warnings` | `List[str]` | Always includes that these are TODAY's ratios, not point-in-time values |
 
 All ratio fields may be `None` when the data provider does not report them (e.g. pre-revenue companies, REITs without standard PE).
 
@@ -1583,13 +1614,15 @@ print(f"CVaR 99%            : {result.cvar_99:.2%}")
 |---|---|---|
 | `symbol` | `str` | Ticker |
 | `benchmark` | `str` | Benchmark ticker |
-| `annualized_return` | `float` | CAGR of the asset's equity curve, as a decimal |
+| `annualized_return` | `float` | CAGR of the asset's equity curve from the close before the first return, as a decimal |
 | `calmar_ratio` | `float` | CAGR / |max drawdown| — higher is better |
 | `treynor_ratio` | `float` | (Return − Risk-free) / Beta — excess return per unit of market risk |
 | `var_parametric_95` | `float` | 1-day parametric VaR at 95% confidence (negative = loss) |
 | `var_parametric_99` | `float` | 1-day parametric VaR at 99% confidence |
 | `var_historical_99` | `float` | 1-day historical VaR at 99% (5th-worst percentile of daily returns) |
 | `cvar_99` | `float` | 1-day CVaR at 99% — expected loss in the worst 1% of days |
+| `cvar_99_tail_observations` | `int` | How many daily returns `cvar_99` is the mean of — 3 on a year of daily data |
+| `warnings` | `List[str]` | An expected shortfall resting on fewer than 10 returns |
 | `beta` | `float` | OLS beta vs `benchmark` (same computation as `analyze_stock_risk`) |
 
 **Interpreting the metrics:**
@@ -2055,19 +2088,24 @@ section has the full reference):** `commission_model` (`"pct"` default or
 (a separate rate for sales — `None`, the default, charges `commission_pct`
 on both sides, but real venues are frequently asymmetric because regulatory
 fees in several markets are sell-side only), `use_impact_model`
-(+ `impact_coefficient`/`impact_lookback`), `borrow_fee_bps`,
-`margin_interest_rate`, and `max_adv_participation` — all optional,
-each defaulting off, to a flat cost model with no constraint.
+(+ `impact_coefficient`/`impact_lookback`), `borrow_fee_bps`, and
+`max_adv_participation` — all optional, each defaulting off, to a flat cost
+model with no constraint. Financing follows the risk-free rate: `cash_rate`
+(credited on positive cash) defaults to `risk_free_rate`, and
+`margin_interest_rate` to it plus `margin_spread_bps`, so at the defaults
+(`risk_free_rate=0.0`, no spread) nothing accrues; `short_proceeds`,
+`short_rebate_rate` and `day_count` are as in
+[04_backtesting.md](04_backtesting.md#true-portfolio-simulation-shared-cash),
+and the result echoes the rates and totals in `financing`.
 `max_adv_participation` is a **cap**: a trade over it is sized down to the
 cap and the shortfall recorded per rebalance (`n_capped`, `capped_notional`
 on the `RebalanceEvent`, and a warning with the run's total). It used to
 refuse the whole simulation, so its two states were "no effect" and "no
 result" and a capacity study could not be expressed; a participation that
 cannot be *estimated* (no usable volume baseline) is still refused by name.
-`borrow_fee_bps`/`margin_interest_rate` accrue using the actual elapsed
-**calendar** days since the previous bar (e.g. 3 days over a Friday →
-Monday gap), not a hardcoded 1 — so financing cost is not under-accrued
-across weekends/holidays. `margin_interest_rate` is a decimal of at most 10
+Every financing accrual uses the actual elapsed **calendar** days since the
+previous bar (e.g. 3 days over a Friday → Monday gap) on `day_count`, not a
+hardcoded 1 — so financing is not under-accrued across weekends/holidays. `margin_interest_rate` is a decimal of at most 10
 (1,000% a year), the bound every rate on the surface carries: a larger
 value is a unit error and is refused rather than run into an account that
 overflows.
@@ -2080,9 +2118,9 @@ result = run_portfolio_simulation(PortfolioSimulationInput(
 ))
 ```
 
-**Scope, stated explicitly:** short-sale proceeds are credited to cash in
-full with no margin haircut beyond the flat `margin_interest_rate` accrual;
-sector-exposure limits (as opposed to reporting — see §18) aren't enforced
+**Scope, stated explicitly:** short-sale proceeds are either cash
+(`"net_cash"`) or held by the lender at a rebate (`"segregated"`), with no
+margin haircut beyond the financing above; sector-exposure limits (as opposed to reporting — see §18) aren't enforced
 by this tool. Neither is required for the shared-cash accounting itself to
 be correct — natural follow-on work.
 
@@ -2247,7 +2285,7 @@ tool computes it.
 `get_capacity_report` answers "how much account size can this target-weight
 portfolio actually support?" — a strategy that works with $10,000 may be
 unusable at $10 million once positions start moving their own market.
-Reuses `backtest/constraints.py`'s `capacity_report`/`days_to_liquidate` —
+Reuses `backtest/constraints.py`'s `capacity_report`/`liquidation_days` —
 no new math, just data fetching (`Volume`-derived average dollar/share
 volume) and formatting for JSON tool-calling.
 
@@ -2260,6 +2298,7 @@ result = get_capacity_report(CapacityReportInput(
     start_date="2023-01-01", end_date="2024-01-01",
     target_weights={"AAPL": 0.5, "MSFT": 0.3, "GOOGL": 0.2},
     max_participation=0.1,   # max 10% of a ticker's own ADV per position
+    account_size=25_000_000,   # days to unwind at $25m
 ))
 
 print(f"Binding ticker    : {result.binding_ticker}")
@@ -2267,6 +2306,7 @@ print(f"Max account size  : ${result.max_account_size:,.0f}" if result.max_accou
 for t, size in result.per_ticker_max_account_size.items():
     print(f"  {t}: {'unbounded' if size is None else f'${size:,.0f}'}")
 print(f"Sector exposure   : {result.sector_exposure}")
+print(f"Days to liquidate : {result.days_to_liquidate}")
 ```
 
 `max_participation` defaults to `0.1`, `adv_lookback` to `20` bars (trailing
@@ -2280,9 +2320,20 @@ to come back as a NaN capacity, reported as a number.
 avg_dollar_volume) / target_weight` — a name with a large target weight and
 thin volume caps the *whole portfolio's* capacity, not just its own
 position; the overall `max_account_size` is the smallest (binding) of these
-across the universe. `days_to_liquidate_at_capacity` then estimates how
-many trading days it would take to unwind each position if the account
-were run at exactly that capacity.
+across the universe.
+
+Given an `account_size`, `days_to_liquidate` is the number of trading days
+each position of an account that size takes to unwind at
+`max_participation` of its ticker's average daily share volume:
+|weight| × account_size / price / (volume × max_participation). It is 0 for
+a zero weight, and null — with the reason — for a ticker that traded no
+volume over the window; without `account_size` no days are reported. The
+report used to give `days_to_liquidate_at_capacity`, measured at
+`max_account_size` itself, which is one day for the binding name by
+construction (capacity IS one day of `max_participation` there) and the
+capacity's ratio to each other name's own maximum: it carried no
+information the capacity did not. A warning says when `account_size` is
+above the capacity.
 
 **Output reference:**
 
@@ -2291,7 +2342,8 @@ were run at exactly that capacity.
 | `per_ticker_max_account_size` | `Dict[str, float?]` | Max account size per ticker; `None` = unbounded (zero target weight for that name) |
 | `binding_ticker` | `str?` | The name imposing the tightest capacity constraint; `None` if every weight is 0 |
 | `max_account_size` | `float?` | Overall capacity — the smallest per-ticker max; `None` if unbounded |
-| `days_to_liquidate_at_capacity` | `Dict[str, float]` | Trading days to unwind each position at `max_participation`, assuming the account were sized at `max_account_size` |
+| `account_size` | `float?` | The account size the days are measured at, echoed |
+| `days_to_liquidate` | `Dict[str, float?]?` | Trading days to unwind each position at `account_size`; `None` when no `account_size` was given |
 | `sector_exposure` | `Dict[str, float]?` | Weight aggregated by sector (via the data provider's `get_ticker_info` call directly — **not** `get_stock_fundamentals`), `None` when `include_sector_exposure=False` |
 | `warnings` | `List[str]` | E.g. a per-ticker sector lookup failure (falls back to `"Unknown"`, doesn't fail the call) |
 
@@ -2326,8 +2378,10 @@ result = get_data_quality_report(DataQualityReportInput(
     calendar="XNYS",   # default; the sessions that SHOULD have a bar
 ))
 
-print(result.metadata)  # {'provider': 'yfinance', 'adjusted': True,
-                         #  'survivorship_free': False, 'point_in_time': False, ...}
+print(result.metadata)  # {'provider': 'yfinance', 'split_adjusted': True,
+                         #  'dividend_adjusted': True, 'adjusted': True,
+                         #  'adjustment_note': 'Requested with auto_adjust=True: ...',
+                         #  ..., 'return_basis': 'total_return'}
 for gap in result.missing_bars:
     print(f"Missing bar: {gap.date} ({gap.weekday}, judged by {gap.basis})")
 for run in result.stale_price_runs:
@@ -2342,7 +2396,7 @@ for thin in result.volume_anomalies:
 
 | Field | Type | Description |
 |---|---|---|
-| `metadata` | `Dict[str, Any]` | `DataSetMetadata` as a dict — `provider`, `adjusted`, `survivorship_free`, `point_in_time`, `frequency`, `timezone`, `retrieved_at`, and the vendor dataset the bars actually came from |
+| `metadata` | `Dict[str, Any]` | `DataSetMetadata` as a dict — `provider`, `split_adjusted`, `dividend_adjusted`, `adjusted` (their AND), `adjustment_note`, `return_basis`, `survivorship_free`, `point_in_time`, `frequency`, `timezone`, `retrieved_at`, and the vendor dataset the bars actually came from |
 | `missing_bars` | `List[MissingBar]` | `date`, `weekday`, `basis`. Sessions with no bar, judged against the exchange calendar when `exchange_calendars` is installed; `basis` says which rule judged it, and under the `weekday` fallback every market holiday in the range appears as a false positive |
 | `stale_price_runs` | `List[StalePriceRun]` | `start`, `end`, `price`, `run_length` — runs of `stale_run_length`+ consecutive identical `Close` values |
 | `price_jumps` | `List[PriceJump]` | `date`, `pct_change` — single-bar moves exceeding `jump_threshold` |
@@ -2641,7 +2695,7 @@ Six built-in named scenarios are available (`list_stress_scenarios()` in `backte
 
 These are well-known, widely-cited approximate peak/trough windows, not academically precise event-study boundaries.
 
-A ticker with no data that far back (it hadn't listed yet, or the provider has no history for it) is reported in `tickers_missing_data` rather than failing the whole call — the replay proceeds on the remaining tickers, with their weights re-normalized to preserve relative proportions (a missing ticker is excluded, not silently treated as if it had earned a 0% return).
+A ticker with no data that far back (it hadn't listed yet, or the provider has no history for it) is reported in `tickers_missing_data` rather than failing the whole call — the replay proceeds on the remaining tickers, with their weights re-normalized to preserve relative proportions (a missing ticker is excluded, not silently treated as if it had earned a 0% return). That replays a different portfolio from the one asked about, so the result says how different: `weight_coverage` is the share of the portfolio's gross weight the replay held, and a warning names each missing ticker with its weight. A ticker that lists partway through the window shortens the replay to the days every ticker has a return, and a second warning counts the days dropped.
 
 ```python
 from standard_quant_tools.agent.tools import run_stress_test
@@ -2686,11 +2740,13 @@ custom = run_stress_test(StressTestInput(
 | `scenario_start_date` / `scenario_end_date` | `str` | Resolved window dates |
 | `tickers_used` | `List[str]` | Tickers that had data for this window and were included in the replay |
 | `tickers_missing_data` | `List[str]` | Tickers with no data for this window — not an error, just excluded |
+| `weight_coverage` | `float` | Share of the portfolio's gross weight held by `tickers_used`; below 1.0 the replay is of a different portfolio |
 | `portfolio_return_pct` | `float` | Total portfolio return over the scenario window |
 | `max_drawdown_pct` | `float` | Worst peak-to-trough decline within the window |
 | `worst_day_return_pct` / `worst_day_date` | `float` / `str` | Single worst trading day and its return |
 | `best_day_return_pct` / `best_day_date` | `float` / `str` | Single best trading day and its return |
 | `n_trading_days` | `int` | Number of overlapping trading days actually used |
+| `warnings` | `List[str]` | Missing tickers with their weight, and days dropped because a ticker in the replay had no return on them |
 
 **Interpreting the results:**
 
@@ -2716,13 +2772,19 @@ result = get_liquidity_metrics(LiquidityAnalysisInput(
     window=20,
 ))
 
-for ticker, metrics in result.per_ticker.items():
-    print(f"{ticker}: ADV=${metrics['avg_dollar_volume']:,.0f}  "
-          f"Amihud={metrics['amihud_illiquidity']:.4f}  "
-          f"CS spread={metrics['corwin_schultz_spread_bps']:.1f}bps")
+def fmt(value, spec):
+    # A proxy that cannot be estimated is None; `warnings` says why.
+    return "n/a" if value is None else format(value, spec)
 
-print(f"Least liquid : {result.least_liquid_ticker}")
+for ticker, metrics in result.per_ticker.items():
+    print(f"{ticker}: ADV=${fmt(metrics['avg_dollar_volume'], ',.0f')}  "
+          f"Amihud={fmt(metrics['amihud_illiquidity'], '.4f')}  "
+          f"CS spread={fmt(metrics['corwin_schultz_spread_bps'], '.1f')}bps")
+
+print(f"Least liquid : {result.least_liquid_ticker}")   # None when no ticker has an Amihud ratio
 print(f"Most liquid  : {result.most_liquid_ticker}")
+for note in result.warnings:
+    print(note)
 ```
 
 **LiquidityAnalysisInput fields:**
@@ -2739,9 +2801,12 @@ print(f"Most liquid  : {result.most_liquid_ticker}")
 | Field | Type | Description |
 |---|---|---|
 | `tickers` | `List[str]` | Universe, in input order |
-| `per_ticker` | `Dict[str, Dict[str, float]]` | Per ticker: `avg_dollar_volume`, `amihud_illiquidity`, `corwin_schultz_spread_bps` |
-| `least_liquid_ticker` | `str` | Highest Amihud illiquidity in the universe |
-| `most_liquid_ticker` | `str` | Lowest Amihud illiquidity in the universe |
+| `per_ticker` | `Dict[str, Dict[str, float \| None]]` | Per ticker: `avg_dollar_volume`, `amihud_illiquidity`, `corwin_schultz_spread_bps`; a proxy that cannot be estimated is null, with the reason in `warnings` |
+| `least_liquid_ticker` | `str \| None` | Highest Amihud illiquidity among the tickers that have one; null when none does |
+| `most_liquid_ticker` | `str \| None` | Lowest Amihud illiquidity among the tickers that have one; null when none does |
+| `warnings` | `list[str]` | Why a proxy is null, and which tickers the ranking left out |
+
+**An estimate that cannot be made is null, not 0.0.** Zero is the most liquid reading either proxy gives, so a ticker with fewer bars than the window — or a zero-volume day in every window — used to read as perfectly liquid and could be named `most_liquid_ticker`. The ranking now skips it and says so.
 
 **Interpreting the results:**
 

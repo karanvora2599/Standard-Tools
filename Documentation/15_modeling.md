@@ -60,7 +60,7 @@ because the order is the point.
 | `build_model_ensemble` | several `model_id`s → one combined `sqt://predictions` reference, from their OUT-OF-SAMPLE series only. Reports the pairwise correlation that says whether it was worth building, and `correlation_basis` saying whether that correlation was taken on ranks or on levels. The reference carries no realized outcome, so `score_predictions` refuses it directly — run it through `attach_model_outcomes` first, which the description and a run-time warning both say |
 | `analyze_model_errors` | a `model_id` → where its errors are, by entity, period, prediction decile and any feature's decile, plus whether its SCALE is right. The question an R2 cannot answer |
 | `list_datasets` | → every built panel, newest first, with row/entity/feature counts and date span |
-| `inspect_dataset` | `dataset_id` → what one dataset holds, the counterpart of `inspect_model`: each column's FeatureSpec (catalog id, parameter overrides, alias, lags and the lag columns they added), the target and its horizon, the requested universe beside the entities the panel holds and the feed that answered for each, the requested and realised span, rows, dates, provider, interval, calendar, missing-data policy, `drop_attribution`, the warnings recorded at build, and `price_jumps`, `bars_adjusted`, `data_hash_version` and `built_with` where the build recorded them. Reads `dataset_meta.json` and `dataset_spec.json`, the spec checked against its recorded hash; the panel is not read or hashed (1.9 ms on a 31,680-row dataset whose panel takes 16 ms to read and hash). An external panel reports `storage: "external"` and the file it reads |
+| `inspect_dataset` | `dataset_id` → what one dataset holds, the counterpart of `inspect_model`: each column's FeatureSpec (catalog id, parameter overrides, alias, lags and the lag columns they added), the target and its horizon, the requested universe beside the entities the panel holds and the feed that answered for each, the requested and realised span, rows, dates, provider, interval, calendar, missing-data policy, `drop_attribution`, the warnings recorded at build, and `price_jumps`, `bars_adjusted` (the provider's `split_adjusted`), `return_basis` (whether the returns the labels and features were computed from include dividends: `total_return`, `price_return`, `mixed` or `unknown`), `data_hash_version` and `built_with` where the build recorded them. Reads `dataset_meta.json` and `dataset_spec.json`, the spec checked against its recorded hash; the panel is not read or hashed (1.9 ms on a 31,680-row dataset whose panel takes 16 ms to read and hash). An external panel reports `storage: "external"` and the file it reads |
 | `analyze_features` | `dataset_id` → per-feature coverage, turnover, IC/ICIR, decile spread and monotonicity, redundancy clusters, and a lead-lag causality screen. The overview, as one nested report |
 | `explain_dataset_row_loss` | `dataset_id` → which column cost which rows, with `n_sole_missing` beside `n_missing`. The second is the actionable one: a 252-day feature behind a 500-day one has `n_missing` in the hundreds of thousands and `n_sole_missing` of zero, so removing it gives back nothing. `per_entity_rows_dropped` answers the other half — a warning fires when one name carries most of the loss, which is a universe problem rather than a feature one |
 | `validate_pit_records` | point-in-time records → whether they are joinable, checked before anything is joined |
@@ -714,8 +714,8 @@ to build the dataset:
 |---|---|
 | `point_in_time=False` | The provider does not guarantee historical values are never revised, so a feature computed today may differ from what was observable on its label date. The per-feature PIT gate checks the FORMULA; it cannot see revisions in the underlying series. |
 | `survivorship_free=False` | Delisted securities are not queryable, so any universe of currently-listed symbols is a survivors-only sample. Backtested returns are biased upward and walk-forward validation does not correct for it. |
-| `adjusted=False` | The provider serves unadjusted bars (Databento). A dividend is a price drop on its ex-date, so return targets are price returns, not the total returns an adjusting provider gives; a split is a price fall, which the price-jump screen names. |
-| `PRICE JUMPS` | A close-to-close move beyond 35%, or a fall of 26% to 35% the size of a 3:2 split, in the bars the dataset was built from, named after the split ratio it is within 10% of, with the labels that span it and the rows carrying a feature computed across it; worded by the provider's `adjusted` flag. See [Splits in unadjusted bars](#splits-in-unadjusted-bars). |
+| `dividend_adjusted=False` / `split_adjusted=False` | The provider's bars leave dividends in (Polygon, Databento) or splits too (Databento). A dividend is a price drop on its ex-date, so return targets are price returns, not the total returns a dividend-adjusting provider gives; a split is a price fall, which the price-jump screen names. |
+| `PRICE JUMPS` | A close-to-close move beyond 35%, or a fall of 26% to 35% the size of a 3:2 split, in the bars the dataset was built from, named after the split ratio it is within 10% of, with the labels that span it and the rows carrying a feature computed across it; worded by the provider's `split_adjusted` flag. See [Splits in unadjusted bars](#splits-in-unadjusted-bars). |
 | `DECLARED SPLITS` / `DECLARED SPLIT NOT SEEN` / `DECLARED SPLIT OUTSIDE THE BARS` | What `DatasetSpec.corporate_actions` did: the splits adjusted; a declared split whose ex-date bar does not move by about its ratio (applied as declared); one outside the fetched bars (changed nothing). |
 | partial history | A symbol covers materially less than the universe's date range — it listed inside the window, or stopped early. It is weighted far less than its presence in `universe` suggests. |
 | requested start/end unavailable | The window that came back is shorter than the one asked for, before any feature lookback is consumed. |
@@ -733,8 +733,8 @@ aligned daily histories, so a non-empty one means something.
 ### Splits in unadjusted bars
 
 Databento serves the prices the venue published and says so
-(`get_metadata().adjusted` is `False`); every other shipped provider
-adjusts. Every label and feature here is computed from raw Close, so on
+(`get_metadata().split_adjusted` is `False`); every other shipped provider
+takes splits out. Every label and feature here is computed from raw Close, so on
 unadjusted bars a 10:1 split is a −90% bar: a label whose horizon spans it
 and every feature whose window or smoother reaches back across it read it
 as a return. A live 2022–2026 panel of 30 names spanned six splits (AMZN
@@ -777,9 +777,9 @@ so one entity's move counts every entity's rows; a benchmark move counts
 every entity's rows for the features that read the benchmark. One
 `PRICE JUMPS` warning names the first six and counts the rest.
 `dataset_meta.json` records each move under `price_jumps`, and records
-`bars_adjusted`: the flag as resolved — the provider's metadata, else the
-frames' `attrs["adjusted"]` when every frame carries one and they agree,
-else `null`. Both keys are written on every build, and an empty
+`bars_adjusted`: the split flag as resolved — the provider's
+`split_adjusted`, else the frames' `split_adjusted` (or older `adjusted`)
+stamps when every frame carries one and they agree, else `null`. Both keys are written on every build, and an empty
 `price_jumps` means screened and clean.
 
 The screen reads the bars and the finished panel and writes neither, so
@@ -788,8 +788,9 @@ live panel (30 names over 1,191 sessions, its eight features, the six
 splits written in) it took 20–25 ms of a 0.95–1.2 s build, 2.1% of it
 (medians of 15 builds in each of three processes, on a shared
 16-logical-core Windows machine); over 2,100 sessions, 24–28 ms of
-1.0–1.2 s. Under `adjusted=True` the warning calls each move a genuine move
-or a bad print. A genuine −90% day reads exactly like a 10:1 split, so a
+1.0–1.2 s. Under `split_adjusted=True` the warning calls each move a
+genuine move or a bad print. A genuine −90% day reads exactly like a 10:1
+split, so a
 named ratio is consistency, not proof, and a genuine −30% day reads like a
 3:2 split: on GARCH-t(4) series at 2%, 3% and 4% daily volatility the 3:2
 band named an ordinary fall once per 75, 22 and 9 name-years.
@@ -817,7 +818,7 @@ not adjusted.
   and not 1. The ex-date must be a date. One split per entity and ex-date.
   The list is kept in (entity, ex_date) order.
 - Refused, naming each entity and date, when the provider reports
-  `adjusted=True` (before the fetch when `get_metadata` says so).
+  `split_adjusted=True` (before the fetch when `get_metadata` says so).
 - A declared split whose ex-date bar does not move within 10% of its ratio
   is applied as declared and named (`DECLARED SPLIT NOT SEEN`). Declared
   one session late, the real −90% stays in the bars, a move of about +900%
@@ -835,7 +836,7 @@ being scored); a split declared after the training window is applied once a
 scoring window contains it. A move the scored rows read is a warning:
 "NVDA: a -90% close-to-close move on 2024-06-10 (within 4% of a 10:1 split)
 is inside the 188 bars this score's features read, and the provider reports
-adjusted=False, so the score reads the split as a return." A move only
+split_adjusted=False, so the score reads the split as a return." A move only
 earlier rows read is not mentioned. On the live-shaped bars, a model
 trained through 2024-03-28 and scored on 2024-07-31 gave three such
 warnings (WMT, NVDA, AVGO); the same model with the six splits declared
@@ -4464,11 +4465,18 @@ result = evaluate_model_portfolio(EvaluateModelPortfolioInput(
         commission_pct=0.001,
         slippage_pct=0.0005,
         borrow_fee_bps=50.0,             # a long/short book shorts for free at 0.0
+        risk_free_rate=0.045,            # earned by cash, paid on margin, subtracted in the Sharpe
     ),
 ))
 print(result.metrics["sharpe_ratio"], result.metrics["annualized_turnover"])
 print(result.target_weights_uri)
 ```
+
+`risk_free_rate` is no longer only a scoring convention: it is the default
+`cash_rate` and, with `margin_spread_bps`, the default
+`margin_interest_rate`, and the Sharpe is the excess over it as cash accrued
+it on `day_count`. The resolved rates and what they came to are in
+`provenance["financing"]`.
 
 ### Same leakage discipline as the bridge
 
@@ -4889,4 +4897,5 @@ version is exactly what gets carried over to filings, where it is false.
 
 Adjustment is a separate question: a split-adjusted history is revised every
 time a split happens, and the adjusted close for 2019 is not the number
-anybody saw in 2019. That is `DataSetMetadata.adjusted`, not this contract.
+anybody saw in 2019. That is `DataSetMetadata.split_adjusted` and
+`dividend_adjusted`, not this contract.

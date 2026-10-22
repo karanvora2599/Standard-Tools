@@ -34,13 +34,13 @@ scoped to four categories rather than all of them, so it advertises 58 of the
 
 | Runtime | Tools | Schema cost | Categories | Deep documentation |
 |---|---:|---:|---|---|
-| `research` | 42 | 63 KB | `screener`, `analysis`, `quant_research` | [08_analysis.md](08_analysis.md), [23_inference.md](23_inference.md) |
-| `modeling` | 38 | 197 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
-| `backtest` | 35 | 86 KB | `backtest_execution`, `backtest_validation`, `custom_signal` | [04_backtesting.md](04_backtesting.md), [24_overfitting.md](24_overfitting.md) |
+| `research` | 42 | 64 KB | `screener`, `analysis`, `quant_research` | [08_analysis.md](08_analysis.md), [23_inference.md](23_inference.md) |
+| `modeling` | 38 | 200 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
+| `backtest` | 35 | 96 KB | `backtest_execution`, `backtest_validation`, `custom_signal` | [04_backtesting.md](04_backtesting.md), [24_overfitting.md](24_overfitting.md) |
 | `meta` | 25 | 25 KB | `discovery`, `provenance` | [27_meta.md](27_meta.md), [10_auditability.md](10_auditability.md) |
 | `data` | 21 | 36 KB | *(one surface)* | [26_data.md](26_data.md) |
-| `portfolio` | 19 | 37 KB | `portfolio_risk` | [05_portfolio.md](05_portfolio.md) |
-| `delta_one` | 18 | 44 KB | *(one surface)* | [28_delta_one.md](28_delta_one.md) |
+| `portfolio` | 19 | 42 KB | `portfolio_risk` | [05_portfolio.md](05_portfolio.md) |
+| `delta_one` | 18 | 45 KB | *(one surface)* | [28_delta_one.md](28_delta_one.md) |
 | `microstructure` | 17 | 31 KB | *(one surface)* | [22_microstructure.md](22_microstructure.md) |
 | `derivatives` | 12 | 23 KB | *(one surface)* | [21_derivatives.md](21_derivatives.md) |
 | `feature_lab` | 11 | 50 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
@@ -84,7 +84,7 @@ Compute Parabolic SAR (trend), Wilder ATR (volatility), and MFI (volume-flow osc
 
 #### `get_data_quality_report`
 
-Dataset provenance (adjusted/survivorship-free/point-in-time guarantees, the dataset that answered, and whether it is a sample feed) plus missing-bar/stale-price/price-jump/thin-volume detection and duplicate-timestamp, out-of-order and OHLC-consistency checks on a symbol's OHLCV.
+Dataset provenance plus missing-bar/stale-price/price-jump/thin-volume detection and duplicate-timestamp, out-of-order and OHLC-consistency checks on a symbol's OHLCV. Provenance is the adjusted/survivorship-free/point-in-time guarantees, the dataset that answered, and whether it is a sample feed.
 
 **Required:** `symbol`, `start_date`, `end_date`  
 **Optional:** `source`, `calendar`, `stale_run_length`, `jump_threshold`, `volume_window`, `thin_fraction`
@@ -267,7 +267,7 @@ Multi-factor OLS regression: alpha, loadings, t-stats, p-values, R². One unique
 
 #### `run_hurst_analysis`
 
-Hurst exponent (DFA, or R/S corrected for its small-sample upward bias): regime classification against a random-walk band that widens for short series (regime_band), and optional rolling breakdown. hurst is null when the series is too short for the window range.
+Hurst exponent (DFA, or R/S corrected for its small-sample upward bias), with regime classification against a random-walk band that widens for short series (regime_band). A rolling breakdown is optional. hurst is null when the series is too short for the window range.
 
 **Required:** `symbol`, `start_date`, `end_date`  
 **Optional:** `min_window`, `max_window`, `method`, `rolling_window`
@@ -341,7 +341,8 @@ A Chow test for a break at a KNOWN date. The 'known' is load-bearing: a test at 
 
 Fetch company metadata and key financial ratios (PE, P/B, debt/equity, ROE, market cap).
 
-**Required:** `symbol`
+**Required:** `symbol`  
+**Optional:** `source`
 
 #### `run_screener`
 
@@ -358,7 +359,7 @@ Build, validate and score a statistical model from this library's own features: 
 
 #### `analyze_features`
 
-Score a built dataset's FEATURES before fitting anything: coverage, turnover, cross-sectional IC and ICIR, decile spread and monotonicity, which features are near-duplicates of one another, and a lead-lag causality screen for features whose information arrives too early. Use this to choose features; use inspect_model(view='feature_importance') to see what one fitted model then leaned on.
+Score a built dataset's FEATURES before fitting anything: coverage, turnover, cross-sectional IC and ICIR, decile spread and monotonicity, and near-duplicate features. A lead-lag causality screen flags features whose information arrives too early. Use this to choose features; use inspect_model(view='feature_importance') to see what one fitted model then leaned on.
 
 **Required:** `dataset_id`  
 **Optional:** `features`, `n_quantiles`, `cluster_threshold`, `include_leakage`, `leakage_max_shift`
@@ -386,7 +387,7 @@ Is a registered package still the one that was registered, and did a key anybody
 
 #### `backtest_model_signal`
 
-Turn a registered model's out-of-sample predictions into a tradeable signal panel and publish it, then price it with run_signal_panel_backtest(signal_panel_ref=..., signal_type='direction', fill_price='next_open'). THE VERIFIED ROUTE from a model to a backtest, and the reason to prefer it over publishing the predictions and calling convert_reference: the task is read from the model's own manifest -- there is no `task` argument to get wrong -- and the predictions file is checked against the digest recorded when the model was registered. The other route reads a COPY with no manifest behind it, so a regression model's predictions handed to classification handling produce an all-zero panel that backtests to sharpe nan with no error anywhere, and a copy with every prediction's sign flipped is accepted without complaint. Refuses by name: a combinatorial-CV model (several predictions per date, so no single trading path -- retrain with validation.method='walk_forward'), entities carrying a venue or asset class (the backtest runtime addresses prices by bare symbol -- use evaluate_model_portfolio), a predictions file that has changed since it was registered, and an out-of-sample calendar with a hole in it. Runs no backtest itself: the fill price, the costs, the tickers and the date range are backtest decisions. Note that the target horizon and the holding period are different objects -- a 20-day forecast turned into a daily direction signal is re-evaluated every bar, which is a valid strategy but not the same thing as holding for 20 days.
+Turn a registered model's out-of-sample predictions into a tradeable signal panel and publish it. Price it with run_signal_panel_backtest(signal_panel_ref=..., signal_type='direction', fill_price='next_open'). THE VERIFIED ROUTE from a model to a backtest, and the reason to prefer it over publishing the predictions and calling convert_reference: the task is read from the model's own manifest -- there is no `task` argument to get wrong -- and the predictions file is checked against the digest recorded when the model was registered. The other route reads a COPY with no manifest behind it, so a regression model's predictions handed to classification handling produce an all-zero panel that backtests to sharpe nan with no error anywhere, and a copy with every prediction's sign flipped is accepted without complaint. Refuses by name: a combinatorial-CV model (several predictions per date, so no single trading path -- retrain with validation.method='walk_forward'), entities carrying a venue or asset class (the backtest runtime addresses prices by bare symbol -- use evaluate_model_portfolio), a predictions file that has changed since it was registered, and an out-of-sample calendar with a hole in it. Runs no backtest itself: the fill price, the costs, the tickers and the date range are backtest decisions. Note that the target horizon and the holding period are different objects -- a 20-day forecast turned into a daily direction signal is re-evaluated every bar, which is a valid strategy but not the same thing as holding for 20 days.
 
 **Required:** `model_id`, `run_id`, `name`  
 **Optional:** `deadband`, `proba_threshold`, `long_only`
@@ -427,14 +428,14 @@ Decide whether one signal actually beat another, and correct a family of p-value
 
 #### `describe_estimator`
 
-What an estimator's params actually accept: every parameter name, its type, its range, its exact choices and the reason behind each bound, plus the rules BETWEEN parameters that no single bound can express. All of it is enforced on every fit and none of it was readable, so the bounds could only be discovered by tripping them -- n_estimators caps at 2000 and num_leaves at 4096; logistic's penalty='l1' needs solver='liblinear' or 'saga' and 'elasticnet' needs 'saga' AND an explicit l1_ratio; sgd accepts a DIFFERENT set of losses per task, because a classifier here is asked for probabilities unconditionally and hinge has none; mlp takes n_hidden_units and n_hidden_layers, not scikit-learn's hidden_layer_sizes tuple, so knowing scikit-learn is what makes the first call wrong. Also reports `calibration`, which the capability report omits entirely and which decides outcomes: a raw random forest's probabilities are compressed by averaging and rarely exceed 0.9, so at proba_threshold=0.9 one selected ZERO rows where the isotonic-calibrated model selected 194. Filter with task and/or name; unfiltered it describes every registered entry and says how large that is. include_unavailable=True adds the estimators whose optional library is not installed here -- declared statically, so their names and bounds are the same on every machine, which is how you learn what a missing library costs and what a ranking model would be called. An unknown name is refused with the same message a spec naming it gets. Fits nothing.
+What an estimator's params actually accept: every parameter name, its type, its range, its exact choices and the reason behind each bound. It also gives the rules BETWEEN parameters that no single bound can express. All of it is enforced on every fit and none of it was readable, so the bounds could only be discovered by tripping them -- n_estimators caps at 2000 and num_leaves at 4096; logistic's penalty='l1' needs solver='liblinear' or 'saga' and 'elasticnet' needs 'saga' AND an explicit l1_ratio; sgd accepts a DIFFERENT set of losses per task, because a classifier here is asked for probabilities unconditionally and hinge has none; mlp takes n_hidden_units and n_hidden_layers, not scikit-learn's hidden_layer_sizes tuple, so knowing scikit-learn is what makes the first call wrong. Also reports `calibration`, which the capability report omits entirely and which decides outcomes: a raw random forest's probabilities are compressed by averaging and rarely exceed 0.9, so at proba_threshold=0.9 one selected ZERO rows where the isotonic-calibrated model selected 194. Filter with task and/or name; unfiltered it describes every registered entry and says how large that is. include_unavailable=True adds the estimators whose optional library is not installed here -- declared statically, so their names and bounds are the same on every machine, which is how you learn what a missing library costs and what a ranking model would be called. An unknown name is refused with the same message a spec naming it gets. Fits nothing.
 
 *No required arguments.*  
 **Optional:** `task`, `name`, `include_unavailable`
 
 #### `describe_exchange_calendar`
 
-List the exchange calendars this installation knows, and resolve one into the numbers that annualize an intraday model: sessions per year (counted over the calendar's complete years, so holidays are in it -- NYSE is 251.6, not 252), session length in minutes (390 for NYSE, 510 for London, 1440 for a crypto venue), bars per session at a given interval (a 6.5-hour session at '1h' is SEVEN bars, the stub counted, because the provider emits it) and bars per year. This is the value DatasetSpec.calendar takes, and without this tool the only ways to find a valid code were to guess one or to read the handful of names that fit inside a refusal. An unrecognised code is refused with the identical message DatasetSpec gives, so a code that passes here passes there. A daily-or-coarser interval is NOT refused: it reports bars_per_session=None and says in warnings why a venue is not needed for it -- daily, weekly and monthly bars annualize by calendar arithmetic, and only an intraday interval depends on how long the venue is open. Where the optional calendar package is not installed, listing returns an empty catalog with a warning rather than failing, and resolving a named calendar is refused by name. Fetches nothing.
+List the exchange calendars this installation knows, and resolve one into the numbers that annualize an intraday model. Those are sessions per year, session length, bars per session at a given interval and bars per year. Sessions per year are counted over the calendar's complete years, so holidays are in it -- NYSE is 251.6, not 252. Session length is in minutes (390 for NYSE, 510 for London, 1440 for a crypto venue). A 6.5-hour session at '1h' is SEVEN bars, the stub counted, because the provider emits it. This is the value DatasetSpec.calendar takes, and without this tool the only ways to find a valid code were to guess one or to read the handful of names that fit inside a refusal. An unrecognised code is refused with the identical message DatasetSpec gives, so a code that passes here passes there. A daily-or-coarser interval is NOT refused: it reports bars_per_session=None and says in warnings why a venue is not needed for it -- daily, weekly and monthly bars annualize by calendar arithmetic, and only an intraday interval depends on how long the venue is open. Where the optional calendar package is not installed, listing returns an empty catalog with a warning rather than failing, and resolving a named calendar is refused by name. Fetches nothing.
 
 *No required arguments.*  
 **Optional:** `calendar`, `interval`, `name_contains`
@@ -448,14 +449,14 @@ How many bars of history a feature spec burns before its first usable row, at th
 
 #### `evaluate_model_portfolio`
 
-Evaluate a model's out-of-sample predictions as a shared-cash portfolio: transform predictions into target weights and simulate them with costs, returning Sharpe, drawdown, turnover and exposure.
+Evaluate a model's out-of-sample predictions as a shared-cash portfolio: predictions become target weights, simulated with costs. Returns Sharpe, drawdown, turnover and exposure.
 
 **Required:** `model_id`  
 **Optional:** `transform`, `portfolio`
 
 #### `evaluate_predictions_portfolio`
 
-Evaluate ANY published predictions reference as a shared-cash portfolio: transform them into target weights and simulate them with costs, returning Sharpe, drawdown, turnover and exposure. The same simulator evaluate_model_portfolio runs, reached by reference instead of by model_id -- which is what makes an ensemble from build_model_ensemble, an externally computed alpha, or a converted panel tradeable rather than only describable. `task` is REQUIRED and is the one thing a reference cannot tell you: a classifier's probabilities are all positive, so read as regression scores they produce a long-everything book that simulates cleanly and means nothing. Prices come from `dataset_id` (inheriting its interval, provider, calendar, start and end) or from those fields given explicitly. Unlike evaluate_model_portfolio there is no registered content hash behind the predictions -- the reference and its producer are recorded in provenance instead, and a tampered copy is not detectable here. For a registered model, prefer evaluate_model_portfolio.
+Evaluate ANY published predictions reference as a shared-cash portfolio: the predictions become target weights, simulated with costs. Returns Sharpe, drawdown, turnover and exposure. The same simulator evaluate_model_portfolio runs, reached by reference instead of by model_id -- which is what makes an ensemble from build_model_ensemble, an externally computed alpha, or a converted panel tradeable rather than only describable. `task` is REQUIRED and is the one thing a reference cannot tell you: a classifier's probabilities are all positive, so read as regression scores they produce a long-everything book that simulates cleanly and means nothing. Prices come from `dataset_id` (inheriting its interval, provider, calendar, start and end) or from those fields given explicitly. Unlike evaluate_model_portfolio there is no registered content hash behind the predictions -- the reference and its producer are recorded in provenance instead, and a tampered copy is not detectable here. For a registered model, prefer evaluate_model_portfolio.
 
 **Required:** `predictions_ref`, `task`, `run_id`  
 **Optional:** `dataset_id`, `interval`, `provider`, `calendar`, `start_date`, `end_date`, `transform`, `portfolio`
@@ -502,7 +503,7 @@ Which features this library can build, what each one measures, and what it costs
 
 #### `list_modeling_capabilities`
 
-What this modeling runtime can do: tasks, estimators and the capabilities of each (sample weights, probabilities, query groups, coefficients, feature importance), features, target types, validation schemes, preprocessing and weighting options, which optional libraries are installed, and what one fit of each estimator costs (`fit_cost`) and what sets its cores (`threads`). Call this before choosing a model rather than assuming an estimator is available.
+What this modeling runtime can do: tasks, estimators and their capabilities, features, target types, validation schemes, preprocessing and weighting options. An estimator's capabilities are sample weights, probabilities, query groups, coefficients and feature importance. It also says which optional libraries are installed, what one fit of each estimator costs (`fit_cost`) and what sets its cores (`threads`). Call this before choosing a model rather than assuming an estimator is available.
 
 *No required arguments.*  
 **Optional:** `include_estimators`
@@ -523,14 +524,14 @@ List the model ids in an artifact store -- a directory, or a bucket reached thro
 
 #### `monitor_model`
 
-Feature and prediction drift of a scored universe against the model's training reference (PSI and KS per feature), and, given outcomes, the realized cross-sectional IC beside the validation's. Statuses come with the thresholds they were read against.
+Feature and prediction drift of a scored universe against the model's training reference (PSI and KS per feature). Given outcomes, also the realized cross-sectional IC beside the validation's. Statuses come with the thresholds they were read against.
 
 **Required:** `model_id`, `predictions_uri`  
 **Optional:** `features_uri`, `outcomes_ref`
 
 #### `plan_model_experiment`
 
-The schedule run_model_experiment would execute, on the real panel, before it executes any of it: every fold with its train and test dates, the training ROWS the label-overlap purge removes from each, the inner folds each training window can actually support, the candidates the search will score, and the estimator fits all of that implies against the spec's own budget.max_fits. validate_model_spec answers the cost question with one integer computed on a date COUNT and no panel, so it cannot see the purge, cannot see a training window too short for its inner search, and reports n_purged as null on every fold; this runs the same planner the engine runs, with the panel, so the numbers are the numbers that will run. Three things it shows that nothing else does: fits_per_fit, the multiplier that turns three quantiles and five conformal blocks into nine fits per fold; a fold with n_inner_folds=0, which silently costs one fit and deploys the spec's base parameters rather than searched ones; and, with include_candidates, the actual parameter combinations -- where a log-spacing mistake is visible before 720 fits are spent on it. An over-budget plan is REPORTED here (within_budget=false plus the refusal text as a warning), not refused: refusing a dry run of a cost would defeat it, and run_model_experiment still refuses. Fits nothing.
+The schedule run_model_experiment would execute, on the real panel, before it executes any of it: every fold with its train and test dates. It also gives the training ROWS the label-overlap purge removes from each, the inner folds each training window can actually support, the candidates the search will score, and the estimator fits all of that implies against the spec's own budget.max_fits. validate_model_spec answers the cost question with one integer computed on a date COUNT and no panel, so it cannot see the purge, cannot see a training window too short for its inner search, and reports n_purged as null on every fold; this runs the same planner the engine runs, with the panel, so the numbers are the numbers that will run. Three things it shows that nothing else does: fits_per_fit, the multiplier that turns three quantiles and five conformal blocks into nine fits per fold; a fold with n_inner_folds=0, which silently costs one fit and deploys the spec's base parameters rather than searched ones; and, with include_candidates, the actual parameter combinations -- where a log-spacing mistake is visible before 720 fits are spent on it. An over-budget plan is REPORTED here (within_budget=false plus the refusal text as a warning), not refused: refusing a dry run of a cost would defeat it, and run_model_experiment still refuses. Fits nothing.
 
 **Required:** `dataset_id`, `spec`  
 **Optional:** `target`, `include_folds`, `include_candidates`
@@ -558,14 +559,14 @@ What a WeightingSpec would actually do to the training rows, before a model is f
 
 #### `promote_model`
 
-Record a lifecycle decision for a registered model: candidate -> validated -> staging -> production one stage at a time, or archived from anywhere, with a reason and the evidence it rests on. The manifest is untouched; the stage is read off an append-only log. The package is re-verified first and a promotion of a model whose artifacts no longer match their registered hashes is REFUSED, because a stage is a statement that somebody read the evidence and the evidence has to be the one that was registered; the manifest digest the decision rested on is written into its evidence. Pass require_verified_package=False to record the decision anyway, and require_signature=True where a signed manifest is the bar.
+Record a lifecycle decision for a registered model, with a reason and the evidence it rests on. Stages run candidate -> validated -> staging -> production one at a time, or archived from anywhere. The manifest is untouched; the stage is read off an append-only log. The package is re-verified first and a promotion of a model whose artifacts no longer match their registered hashes is REFUSED, because a stage is a statement that somebody read the evidence and the evidence has to be the one that was registered; the manifest digest the decision rested on is written into its evidence. Pass require_verified_package=False to record the decision anyway, and require_signature=True where a signed manifest is the bar.
 
 **Required:** `model_id`, `to_stage`, `reason`  
 **Optional:** `actor`, `evidence`, `require_verified_package`, `require_signature`, `public_key_path`
 
 #### `pull_model_package`
 
-Register a model package from an artifact store into THIS runs directory, verified on the way in, so a model trained and validated elsewhere can be inspected, scored, monitored and backtested here. Every file the manifest hashes is checked against it as it arrives and the manifest is written last, so a pull that fails registers nothing. Pass require_signature=True (and public_key_path=<the key you trust>) when the store is not one you wrote to: without a pinned key a signature proves only that the manifest and the signature travelled together, and the result's key_pinned says which of the two it established. The promotion log travels with the package, so `stage` is the stage somebody promoted it to wherever it came from. Refuses rather than overwrites when the id is already registered here.
+Register a model package from an artifact store into THIS runs directory, verified on the way in. A model trained and validated elsewhere can then be inspected, scored, monitored and backtested here. Every file the manifest hashes is checked against it as it arrives and the manifest is written last, so a pull that fails registers nothing. Pass require_signature=True (and public_key_path=<the key you trust>) when the store is not one you wrote to: without a pinned key a signature proves only that the manifest and the signature travelled together, and the result's key_pinned says which of the two it established. The promotion log travels with the package, so `stage` is the stage somebody promoted it to wherever it came from. Refuses rather than overwrites when the id is already registered here.
 
 **Required:** `model_id`  
 **Optional:** `store_url`, `require_signature`, `public_key_path`, `overwrite`
@@ -593,21 +594,21 @@ Run a registered model forward and get its predictions for a universe as of a da
 
 #### `score_prediction_intervals`
 
-Score the quantile and interval columns of a published predictions reference against the realized outcome: pinball loss per level, the quantile crossing rate, and coverage AND width for every symmetric quantile pair and for the lower/upper band. These are the numbers an experiment computes on every fold and averages away, on columns it hands over and that nothing could previously check. Read coverage and width together, always: a band covering 90% of outcomes by spanning ten times the target's spread has told nobody anything, and coverage alone cannot tell the two apart. Set by='date' (or 'entity') for the breakdown that matters most -- exchangeability is the assumption behind a conformal interval and a return panel is not exchangeable across regimes, so a band that covered 97% in a calm stretch and 62% in a selloff pools to a healthy-looking 90%, and only the per-date view separates them. Quantile columns are auto-detected by the convention the library writes them under (q05, q50, q95); a frame with neither quantile nor lower/upper columns is refused naming what was looked for, rather than returning empty statistics. Nothing is fitted and nothing is fetched: this reads the frame it is given, so predictions from another library score on the same yardstick.
+Score the quantile and interval columns of a published predictions reference against the realized outcome: pinball loss per level, the quantile crossing rate, coverage AND width. Coverage and width come for every symmetric quantile pair and for the lower/upper band. These are the numbers an experiment computes on every fold and averages away, on columns it hands over and that nothing could previously check. Read coverage and width together, always: a band covering 90% of outcomes by spanning ten times the target's spread has told nobody anything, and coverage alone cannot tell the two apart. Set by='date' (or 'entity') for the breakdown that matters most -- exchangeability is the assumption behind a conformal interval and a return panel is not exchangeable across regimes, so a band that covered 97% in a calm stretch and 62% in a selloff pools to a healthy-looking 90%, and only the per-date view separates them. Quantile columns are auto-detected by the convention the library writes them under (q05, q50, q95); a frame with neither quantile nor lower/upper columns is refused naming what was looked for, rather than returning empty statistics. Nothing is fitted and nothing is fetched: this reads the frame it is given, so predictions from another library score on the same yardstick.
 
 **Required:** `predictions_ref`  
 **Optional:** `target_column`, `quantile_columns`, `lower_column`, `upper_column`, `nominal_coverage`, `by`, `min_group_rows`, `max_groups`
 
 #### `score_predictions`
 
-Score a predictions reference against its realized outcome — accuracy metrics, cross-sectional IC and ICIR, a predict-the-mean baseline, the headline test a run makes (`beats_null`: the mean per-date rank IC against zero with a long-run-variance t at the label's horizon, or an AUC or concordance against 0.5), and an effective sample size adjusted for overlapping forward returns and for outcomes that move together across entities, with the two bounds it lies between. `beats_baseline` compares r2 only. Works on predictions this library never produced.
+Score a predictions reference against its realized outcome — accuracy metrics, cross-sectional IC and ICIR, a predict-the-mean baseline and the headline test (`beats_null`). That test, the one a run makes, is the mean per-date rank IC against zero with a long-run-variance t at the label's horizon, or an AUC or concordance against 0.5. It also reports an effective sample size adjusted for overlapping forward returns and for outcomes that move together across entities, with the two bounds it lies between. `beats_baseline` compares r2 only. Works on predictions this library never produced.
 
 **Required:** `predictions_ref`, `task`  
 **Optional:** `target_column`, `prediction_column`, `ic_method`, `ndcg_cutoffs`, `horizon`, `train_mean`, `event_column`
 
 #### `validate_model_spec`
 
-Check a ModelSpec before spending an experiment on it: that the estimator exists for the task, that its parameters are accepted, and how many fits the spec implies once a search grid multiplies through every fold. Given a dataset_id it also checks that dataset's entity keys resolve to distinct provider symbols and reports a calendar it adopted from its universe's venue. Fetches nothing and fits nothing.
+Check a ModelSpec before spending an experiment on it: that the estimator exists for the task, that its parameters are accepted, and how many fits the spec implies. That count multiplies a search grid through every fold. Given a dataset_id it also checks that dataset's entity keys resolve to distinct provider symbols and reports a calendar it adopted from its universe's venue. Fetches nothing and fits nothing.
 
 **Required:** `spec`  
 **Optional:** `dataset_id`, `target`
@@ -660,14 +661,14 @@ Buy-and-hold baseline: long the full period. Use as a passive benchmark.
 Simulate a FUTURES account, whose books the shared-cash engine cannot keep. Buying ten ES at 6200 does not cost 10 x 6200 x 50 of cash, it costs margin; the position then has no market value, because its profit arrives as daily variation margin credited to cash; and a short future pays no borrow. Equity here is cash plus posted margin and the contracts contribute nothing, so the leverage reported is economic exposure over equity rather than the gross-market-value ratio, and the two are not comparable. Margin calls reduce the position rather than being financed away.
 
 **Required:** `prices`, `target_contracts`, `multiplier`  
-**Optional:** `initial_capital`, `initial_margin`, `maintenance_margin`, `commission_per_contract`, `slippage_points`, `collateral_rate`, `contract_map`, `allow_fractional`, `roll_day_prior_prices`, `run_id`
+**Optional:** `initial_capital`, `initial_margin`, `maintenance_margin`, `commission_per_contract`, `slippage_points`, `collateral_rate`, `collateral_day_count`, `contract_map`, `allow_fractional`, `roll_day_prior_prices`, `run_id`
 
 #### `run_futures_hedge_backtest`
 
 Carry a cash book and its futures hedge together, bar by bar, and report the two P&L streams SEPARATELY. That separation is the point: a hedged book that made money because the hedge lost less than the cash leg is a different outcome from one where the hedge worked, and a net number cannot distinguish them. Re-hedges on a calendar or when residual exposure leaves a band -- the band is what a desk runs, since every re-hedge costs two spreads. Nothing estimates beta: the lookback is the most consequential choice in the simulation, so you supply it. Collateral is sized so margin never binds, because this measures a hedge, not a margin call.
 
 **Required:** `portfolio_values`, `future_prices`, `multiplier`  
-**Optional:** `portfolio_beta`, `future_beta`, `rehedge`, `drift_band`, `initial_margin`, `commission_per_contract`, `slippage_points`, `collateral_rate`, `contract_map`, `allow_fractional`
+**Optional:** `portfolio_beta`, `future_beta`, `rehedge`, `drift_band`, `initial_margin`, `commission_per_contract`, `slippage_points`, `collateral_rate`, `collateral_day_count`, `contract_map`, `allow_fractional`
 
 #### `run_macd_backtest`
 
@@ -681,14 +682,14 @@ Backtest a MACD signal-line crossover. Trend-following like the SMA version but 
 Backtest a cointegrated pair as one synchronized two-leg trade — both legs enter/exit together and share one cash account, unlike scan_pairs which only screens candidates.
 
 **Required:** `symbol_a`, `symbol_b`, `start_date`, `end_date`, `hedge_ratio`  
-**Optional:** `entry_z`, `exit_z`, `zscore_window`, `initial_capital`, `commission_pct`, `slippage_pct`, `gross_leverage`, `fill_price`, `risk_free_rate`, `run_id`
+**Optional:** `entry_z`, `exit_z`, `zscore_window`, `initial_capital`, `commission_pct`, `slippage_pct`, `gross_leverage`, `fill_price`, `risk_free_rate`, `borrow_fee_bps`, `margin_interest_rate`, `margin_spread_bps`, `cash_rate`, `short_proceeds`, `short_rebate_rate`, `day_count`, `run_id`
 
 #### `run_portfolio_simulation`
 
-True shared-cash portfolio simulation with rebalancing at target-weight dates — unlike run_signal_panel_backtest, positions share one account instead of each ticker getting its own capital.
+True shared-cash portfolio simulation with rebalancing at target-weight dates. Unlike run_signal_panel_backtest, positions share one account instead of each ticker getting its own capital.
 
 **Required:** `tickers`, `start_date`, `end_date`  
-**Optional:** `target_weights_ref`, `target_weights`, `signal_type`, `construction_method`, `gross_leverage`, `n_long`, `n_short`, `vol_lookback`, `make_dollar_neutral`, `initial_capital`, `commission_pct`, `sell_commission_pct`, `slippage_pct`, `max_gross_leverage`, `max_position_pct`, `fill_price`, `commission_model`, `per_share_rate`, `min_commission`, `use_impact_model`, `impact_coefficient`, `impact_lookback`, `borrow_fee_bps`, `margin_interest_rate`, `max_adv_participation`, `benchmark`, `risk_free_rate`, `run_id`
+**Optional:** `target_weights_ref`, `target_weights`, `signal_type`, `construction_method`, `gross_leverage`, `n_long`, `n_short`, `vol_lookback`, `make_dollar_neutral`, `initial_capital`, `commission_pct`, `sell_commission_pct`, `slippage_pct`, `max_gross_leverage`, `max_position_pct`, `fill_price`, `commission_model`, `per_share_rate`, `min_commission`, `use_impact_model`, `impact_coefficient`, `impact_lookback`, `borrow_fee_bps`, `margin_interest_rate`, `margin_spread_bps`, `cash_rate`, `short_proceeds`, `short_rebate_rate`, `day_count`, `max_adv_participation`, `benchmark`, `risk_free_rate`, `run_id`
 
 #### `run_rsi_backtest`
 
@@ -827,10 +828,10 @@ The distribution of outcomes the same edge could have produced, by RESHUFFLING t
 
 #### `run_reality_check`
 
-White's Reality Check: is this strategy better than the best of the alternatives, or the luckiest of them? Different from a t-test on its returns, and it is the question that matters after a search. The bootstrap is BLOCKED because resampling individual days destroys the serial correlation that drives drawdowns and volatility clustering, making the null too narrow and the p-value too small.
+Is a result better than luck after a search, under the hypothesis named in question. The default, best_candidate_vs_benchmark, is White's Reality Check: does the best of every candidate searched beat one benchmark by more than the best of that many would by luck (method='hansen_spa' for Hansen's studentised form). beats_every_alternative asks whether one strategy beats EVERY alternative, and its p-value is the largest pairwise one. The bootstrap is BLOCKED because resampling individual days destroys the serial correlation that drives drawdowns and volatility clustering, making the null too narrow and the p-value too small.
 
-**Required:** `strategy_returns`, `benchmark_returns`  
-**Optional:** `n_bootstrap`, `block_size`, `seed`
+*No required arguments.*  
+**Optional:** `question`, `candidate_returns`, `benchmark_returns`, `strategy_returns`, `alternative_returns`, `method`, `n_bootstrap`, `block_size`, `seed`
 
 #### `run_regime_adaptive_backtest`
 
@@ -848,7 +849,7 @@ Leakage-free regime-adaptive backtest: regime/strategy/parameter selection per w
 
 #### `run_terminal_monte_carlo`
 
-Monte Carlo that keeps only where the paths ENDED, so the simulation count is capped by wall-clock rather than by memory -- a million paths over a year is about 2 GB of path matrix for a handful of terminal quantiles, and this avoids allocating it. Same block bootstrap as run_monte_carlo_simulation. It says nothing about the journey: worst drawdown along the way and time underwater are not in here, and a benign distribution of endpoints can be reached by paths nobody could hold.
+Monte Carlo that keeps only where the paths ENDED, so the simulation count is capped by wall-clock rather than by memory. A million paths over a year is about 2 GB of path matrix for a handful of terminal quantiles, and this avoids allocating it. Same block bootstrap as run_monte_carlo_simulation. It says nothing about the journey: worst drawdown along the way and time underwater are not in here, and a benign distribution of endpoints can be reached by paths nobody could hold.
 
 **Required:** `returns`, `horizon_days`  
 **Optional:** `n_simulations`, `block_size`, `initial_capital`, `seed`
@@ -893,7 +894,7 @@ A field-by-field diff of two result objects, ordered by the size of the change. 
 
 #### `compare_data_sources`
 
-Fetch the same fundamentals from two providers and report where they disagree, separating a SCALE difference (a constant ratio -- a missed unit conversion, fixable by arithmetic) from a DEFINITION difference (systematic with no constant ratio -- the two are computing different quantities and no conversion exists) from noise. FinancialRatios already documents that Polygon derives debt_to_equity from total liabilities and yfinance reports it as a percentage; this checks it rather than leaving it in a docstring. Fetches from both providers.
+Fetch the same fundamentals from two providers and report where they disagree, separating a SCALE difference from a DEFINITION difference from noise. A SCALE difference is a constant ratio -- a missed unit conversion, fixable by arithmetic; a DEFINITION difference is systematic with no constant ratio -- the two are computing different quantities and no conversion exists. FinancialRatios already documents that Polygon derives debt_to_equity from total liabilities and yfinance reports it as a percentage; this checks it rather than leaving it in a docstring. Fetches from both providers.
 
 **Required:** `symbols`  
 **Optional:** `left`, `right`, `fields`
@@ -907,21 +908,21 @@ Turn one kind of published value into another and publish the result: raw model 
 
 #### `describe_data_capabilities`
 
-What a data provider can serve — tick trades, top-of-book quotes, L2 depth, order events, point-in-time records, its own temporal contract, async OHLCV, supported intervals, and its adjusted/survivorship/point-in-time guarantees. Also reports the persistent cache: how many files, how large, and how many were written under a format version nothing reads any more (counted, never deleted). Fetches no market data. Call this before a tool that needs a capability the active provider may not have — depth and order events are served by one provider only, and point-in-time records by a different one.
+What a data provider can serve — tick trades, top-of-book quotes, L2 depth, order events, point-in-time records, async OHLCV and supported intervals. It also gives the provider's own temporal contract and its adjusted/survivorship/point-in-time guarantees, and reports the persistent cache: how many files, how large, and how many were written under a format version nothing reads any more (counted, never deleted). Fetches no market data. Call this before a tool that needs a capability the active provider may not have — depth and order events are served by one provider only, and point-in-time records by a different one.
 
 *No required arguments.*  
 **Optional:** `source`
 
 #### `describe_effective_config`
 
-Every SQT_* setting this process reads, resolved through the functions that read it rather than echoed from the environment -- so an unset variable still reports the value in force. Covers recording, redaction, retention and signing of the decision log, the artifact and cache roots, the directories external data may be read from, the native-extension switch, provider credentials and the model registry. A secret reports only whether it is set: disclosing the redaction salt would undo the redaction it configures. Reads configuration and cannot change it.
+Every SQT_* setting this process reads, resolved through the functions that read it rather than echoed from the environment, so an unset variable reports the value in force. Covers recording, redaction, retention and signing of the decision log, the artifact and cache roots, the directories external data may be read from, the native-extension switch, provider credentials and the model registry. A secret reports only whether it is set: disclosing the redaction salt would undo the redaction it configures. Reads configuration and cannot change it.
 
 *No required arguments.*  
 **Optional:** `include_paths`
 
 #### `describe_numeric_contract`
 
-The numerical rules every public boundary in this library enforces -- an infinity refused, an all-NaN series refused, prices strictly positive, an equity curve's START positive, an annualization ceiling, a covariance symmetric to 1e-9, a bool refused as a count -- with the threshold each bites at, an excerpt of the message it raises, and why the line is where it is. These ran on every call and were reported nowhere, so the only way to learn one was to trigger it after paying for the fetch. Offline and static.
+The numerical rules every public boundary in this library enforces, with the threshold each bites at, an excerpt of the message it raises, and why the line is where it is. Among them: an infinity refused, an all-NaN series refused, prices strictly positive, an equity curve's START positive, an annualization ceiling, a covariance symmetric to 1e-9, a bool refused as a count. These ran on every call and were reported nowhere, so the only way to learn one was to trigger it after paying for the fetch. Offline and static.
 
 *No required arguments.*
 
@@ -1016,20 +1017,20 @@ Shape, date span, per-column statistics and both ends of a persisted Parquet art
 
 #### `describe_audit_log`
 
-What the decision log holds and what it is configured to do: which dates, how many records, how large, and the recording, redaction, retention and signing settings that decide what a count of zero means. Per day, on request, whether it is held, sealed or carries a signed checkpoint. The retention window is reported as a PREVIEW of what a policy would make eligible -- nothing here deletes, seals, holds or releases anything, because the chain cannot tell a policy-driven deletion from the tampering it exists to detect. The redaction salt is reported as set or unset, never as a value.
+What the decision log holds and what it is configured to do: which dates, how many records, how large, and its recording, redaction, retention and signing settings. Those settings decide what a count of zero means. Per day, on request, whether it is held, sealed or carries a signed checkpoint. The retention window is reported as a PREVIEW of what a policy would make eligible -- nothing here deletes, seals, holds or releases anything, because the chain cannot tell a policy-driven deletion from the tampering it exists to detect. The redaction salt is reported as set or unset, never as a value.
 
 *No required arguments.*  
 **Optional:** `include_days`, `max_days`
 
 #### `explain_decision`
 
-What one recorded tool call did: inputs, the market data it read with the content hashes those inputs had at the time, which execution path ran (C++/Numba/Python), timing, and the git commit and package version it ran under.
+What one recorded tool call did: its inputs, the market data it read with the content hashes those inputs had at the time, which execution path ran (C++/Numba/Python) and timing. It also names the git commit and package version it ran under.
 
 **Required:** `request_id`
 
 #### `export_audit_bundle`
 
-Package a date range of the audit log plus its chain index, any checkpoint sidecars and a manifest into one zip; a range covering no day file is refused rather than exported as a bundle of nothing. Writes a new file; modifies no existing record.
+Package a date range of the audit log plus its chain index, any checkpoint sidecars and a manifest into one zip. A range covering no day file is refused rather than exported as a bundle of nothing. Writes a new file; modifies no existing record.
 
 **Required:** `start_date`, `end_date`, `out_path`
 
@@ -1042,7 +1043,7 @@ Search the decision log by tool, status and date, and get back the request ids e
 
 #### `replay_decision`
 
-Re-run a recorded call and classify the result: reproduced, reproduced_to_12_digits (a bit-level miss that agrees to twelve digits on a different build), data_changed (the inputs were revised, so a different answer is expected), data_undecided (only earlier-form input hashes differ, and the replay cannot tell a revision from a pandas difference), code_changed (inputs identical, output differs — the only case implicating the library), or not_comparable.
+Re-run a recorded call and classify the result as reproduced, reproduced_to_12_digits, data_changed, data_undecided, code_changed or not_comparable. reproduced_to_12_digits is a bit-level miss that agrees to twelve digits on a different build; data_changed means the inputs were revised, so a different answer is expected; data_undecided means only earlier-form input hashes differ, and the replay cannot tell a revision from a pandas difference; code_changed means inputs identical, output differs — the only case implicating the library.
 
 **Required:** `request_id`
 
@@ -1074,7 +1075,7 @@ Name several already-published frames as one unit and publish the manifest as a 
 
 #### `compare_ratio_frames`
 
-Two providers' ratios side by side, with each disagreement CLASSIFIED rather than merely measured: a unit mismatch is fixable by rescaling, a definition difference is not, and averaging across the second kind produces a number neither provider would stand behind. Takes the values as arguments, so it works for sources this library cannot fetch, and accepts fetch_financial_ratios' own output on either side -- one company's flat field map or a map of ticker -> ratios, the same shape on both sides. A field neither source reported is counted as `n_no_overlap`, never as a disagreement.
+Two providers' ratios side by side, with each disagreement CLASSIFIED rather than merely measured: a unit mismatch is fixable by rescaling, a definition difference is not. Averaging across the second kind produces a number neither provider would stand behind. Takes the values as arguments, so it works for sources this library cannot fetch, and accepts fetch_financial_ratios' own output on either side -- one company's flat field map or a map of ticker -> ratios, the same shape on both sides. A field neither source reported is counted as `n_no_overlap`, never as a disagreement.
 
 **Required:** `left`, `right`  
 **Optional:** `left_name`, `right_name`, `fields`
@@ -1122,7 +1123,7 @@ Fetch L2 depth snapshots -- price and resting size at each level, level 1 the to
 
 #### `fetch_order_events`
 
-Fetch order-by-order events -- every add, cancel, modify and fill with its own id -- write them once under the run and return an order_event_panel reference for get_order_event_metrics to read as `ref`. A STRICTLY DEEPER FEED THAN DEPTH, and the difference is identity rather than levels: a book snapshot aggregates size per price, and that aggregation is what makes queue position, order lifetime and a true cancellation rate impossible to recover. It is also far denser -- the window that yields thousands of book snapshots yields millions of events -- though cheaper per unit time than depth: the same five minutes of one name measured about 14 MB. `limit` defaults to 100,000 events, a few minutes of an active name, and caps what is WRITTEN rather than what the vendor bills; the window does that. Needs a provider with an order-level feed; one without refuses by name pointing at describe_data_capabilities.
+Fetch order-by-order events -- every add, cancel, modify and fill with its own id -- write them once under the run and return an order_event_panel reference. get_order_event_metrics reads it as `ref`. A STRICTLY DEEPER FEED THAN DEPTH, and the difference is identity rather than levels: a book snapshot aggregates size per price, and that aggregation is what makes queue position, order lifetime and a true cancellation rate impossible to recover. It is also far denser -- the window that yields thousands of book snapshots yields millions of events -- though cheaper per unit time than depth: the same five minutes of one name measured about 14 MB. `limit` defaults to 100,000 events, a few minutes of an active name, and caps what is WRITTEN rather than what the vendor bills; the window does that. Needs a provider with an order-level feed; one without refuses by name pointing at describe_data_capabilities.
 
 **Required:** `start_date`, `end_date`, `run_id`, `name`, `symbol`  
 **Optional:** `source`, `limit`
@@ -1150,7 +1151,7 @@ Fetch individual trades and publish them as a tick_tape reference, for the micro
 
 #### `get_dataset_metadata`
 
-What the active provider GUARANTEES about the data it serves for one symbol: whether prices are adjusted, whether the universe is survivorship-free, whether values are point-in-time, and which timezone stamps them. Read this before trusting a backtest over history, because a provider that is not point-in-time will hand you restated values under their original dates. `notes` carries what the booleans cannot -- which feed answers which window, and what is wrong with it. This is a property of the provider, not of a dataset built by build_model_dataset; inspect_dataset in the modeling runtime describes one of those.
+What the active provider GUARANTEES about one symbol's data: whether prices are adjusted, the universe survivorship-free and values point-in-time, and which timezone stamps them. Read this before trusting a backtest over history, because a provider that is not point-in-time will hand you restated values under their original dates. `notes` carries what the booleans cannot -- which feed answers which window, and what is wrong with it. This is a property of the provider, not of a dataset built by build_model_dataset; inspect_dataset in the modeling runtime describes one of those.
 
 **Required:** `symbol`  
 **Optional:** `source`, `interval`
@@ -1178,21 +1179,21 @@ Convert a RAW vendor extract into this library's contract, the step BEFORE regis
 
 #### `register_external_dataset`
 
-Make a Parquet or CSV dataset already on your disk resolvable as an `sqt://` reference WITHOUT copying it, for data too large to fetch and republish -- L2 depth, a full tick tape, an event history. Every other tool here fetches a frame and then writes a second complete copy under the runs directory; a book cannot survive that twice. Registration reads the schema, checks the columns the declared kind requires, and stores a pointer. It does NOT read the rows, so a book with its bid and ask columns transposed registers cleanly -- run validate_external_dataset next. The path must lie in the runs directory or a directory the operator listed in SQT_EXTERNAL_DIRS; anything else is refused, and no tool call can widen that list.
+Make a Parquet or CSV dataset already on your disk resolvable as an `sqt://` reference WITHOUT copying it, for data too large to fetch and republish. L2 depth, a full tick tape and an event history are the usual cases. Every other tool here fetches a frame and then writes a second complete copy under the runs directory; a book cannot survive that twice. Registration reads the schema, checks the columns the declared kind requires, and stores a pointer. It does NOT read the rows, so a book with its bid and ask columns transposed registers cleanly -- run validate_external_dataset next. The path must lie in the runs directory or a directory the operator listed in SQT_EXTERNAL_DIRS; anything else is refused, and no tool call can widen that list.
 
 **Required:** `path`, `kind`, `run_id`, `name`  
 **Optional:** `file_format`, `source`
 
 #### `validate_data_bundle`
 
-Whether a bundle is safe to model on, returned as a verdict with the blocking reasons rather than raised as an error, because the answer is usually yes-with-caveats and a caller needs the caveats to decide. `require_pit` defaults to false: no shipped provider reports point-in-time for every frame kind, so requiring it refuses almost everything -- set it when a leakage-free join is the point.
+Whether a bundle is safe to model on, returned as a verdict with the blocking reasons rather than raised as an error. The answer is usually yes-with-caveats, and a caller needs the caveats to decide. `require_pit` defaults to false: no shipped provider reports point-in-time for every frame kind, so requiring it refuses almost everything -- set it when a leakage-free join is the point.
 
 **Required:** `ref`  
 **Optional:** `require_pit`
 
 #### `validate_external_dataset`
 
-Scan a registered dataset in batches and report what would produce wrong numbers downstream, as a verdict with blocking reasons rather than an exception -- because three crossed books in nine million rows is fine and a third of them crossed is transposed columns, and only a count separates the two. Checks are per kind: crossed and empty books, non-positive trade prices and sizes, unparseable or out-of-order timestamps, and for an event panel the available_time versus event_time rule that makes a model look prescient. Bounded by scan_limit, and says so when it stops early.
+Scan a registered dataset in batches and report what would produce wrong numbers downstream, as a verdict with blocking reasons rather than an exception. Three crossed books in nine million rows is fine and a third of them crossed is transposed columns, and only a count separates the two. Checks are per kind: crossed and empty books, non-positive trade prices and sizes, unparseable or out-of-order timestamps, and for an event panel the available_time versus event_time rule that makes a model look prescient. Bounded by scan_limit, and says so when it stops early.
 
 **Required:** `ref`  
 **Optional:** `scan_limit`
@@ -1207,7 +1208,7 @@ Check ratios you already hold -- from a vendor, a spreadsheet, another system --
 
 ## `portfolio` — Portfolio & Execution
 
-Turn a view into a position and price what it costs: optimal weights, risk attribution, sizing, stress tests, capacity, and liquidity measured from bars or from ticks.
+Turn a view into a position and price what it costs. Construction: a covariance estimate with its diagnostics, optimal weights (mean-variance, the efficient frontier, Black-Litterman, risk parity, hierarchical risk parity, maximum diversification) and weights from alpha scores. Risk: attribution, marginal contribution, factor exposure, concentration, named scenarios and historical stress windows, liquidity-adjusted VaR. Implementation: position sizing, capacity, a rebalance schedule and the itemized cost of a trade. Liquidity here is estimated from OHLCV bars; spreads and order flow measured from ticks are `microstructure`.
 
 #### `analyze_concentration`
 
@@ -1231,17 +1232,17 @@ A covariance matrix plus the diagnostics that say whether to trust it. Shrinkage
 
 #### `estimate_trade_cost`
 
-Itemized cost of one hypothetical trade under a composed cost model: commission (pct/per-share/directional/maker-taker), spread (fixed bps or a fraction of the bar's range), square-root market impact, short borrow and margin interest. No market data needed.
+Itemized cost of one hypothetical trade under a composed cost model: commission, spread, square-root market impact, short borrow and margin interest. Commission is pct/per-share/directional/maker-taker; spread is fixed bps or a fraction of the bar's range. No market data needed.
 
 **Required:** `notional`  
 **Optional:** `side`, `commission_model`, `commission_pct`, `shares`, `per_share_rate`, `min_commission`, `buy_rate`, `sell_rate`, `taker_rate`, `maker_rate`, `is_maker`, `spread_model`, `spread_bps`, `bar_high`, `bar_low`, `bar_close`, `range_pct`, `avg_dollar_volume`, `volatility`, `impact_coefficient`, `short_borrow_bps`, `holding_days`, `margin_cash`, `margin_annual_rate`
 
 #### `get_capacity_report`
 
-How much account size a target-weight portfolio can support before positions become too large relative to each ticker's own trading volume, plus days-to-liquidate and sector exposure.
+How much account size a target-weight portfolio can support before positions become too large relative to each ticker's own trading volume. It also reports sector exposure and, given an account_size, the days each position takes to liquidate at it.
 
 **Required:** `tickers`, `start_date`, `end_date`, `target_weights`  
-**Optional:** `max_participation`, `adv_lookback`, `include_sector_exposure`
+**Optional:** `max_participation`, `adv_lookback`, `include_sector_exposure`, `account_size`
 
 #### `get_efficient_frontier`
 
@@ -1252,10 +1253,10 @@ The WHOLE efficient frontier in one call, exactly, from the closed form. run_por
 
 #### `get_factor_exposure_budget`
 
-What the portfolio is actually betting on, once the names collapse into factors. Answers the failure that sinks more portfolios than any optimizer: 'I hold 40 names so I am diversified' -- 40 names with the same loading are one position with extra transaction costs. Supply factor_covariance to get each factor's share of portfolio VARIANCE, which is the number that answers what you are taking risk on; without it only exposures can be reported, and a large loading on a quiet factor is not a large risk.
+What the portfolio is actually betting on, once the names collapse into factors. Answers the failure that sinks more portfolios than any optimizer: 'I hold 40 names so I am diversified' -- 40 names with the same loading are one position with extra transaction costs. Supply factor_covariance for the factor variance and each factor's share of it, and specific_variance as well for each factor's share of the portfolio's TOTAL variance -- the number that answers what you are taking risk on. Shares of the factor variance alone sum to 1 whatever the names' own risk, so they cannot say whether the book is a factor bet; without factor_covariance only exposures can be reported, and a large loading on a quiet factor is not a large risk.
 
 **Required:** `weights`, `factor_loadings`  
-**Optional:** `factor_covariance`, `factors`
+**Optional:** `factor_covariance`, `factors`, `specific_variance`
 
 #### `get_liquidity_adjusted_var`
 
@@ -1286,17 +1287,17 @@ Deep portfolio risk decomposition: MCR per asset, PCA attribution, optional fact
 
 #### `get_position_size`
 
-How large to trade, from a stop distance measured in ATR and an account risk budget. Answers the question a signal does not: a correct direction sized wrong loses money. Kelly is optional and is a CEILING rather than a target -- full Kelly maximizes long-run growth and produces drawdowns almost nobody holds through, which is why half-Kelly is the common practice.
+How large to trade, from a stop distance measured in ATR and an account risk budget. Answers the question a signal does not: a correct direction sized wrong loses money. Kelly is optional and is a CEILING rather than a target -- full Kelly maximizes long-run growth and produces drawdowns almost nobody holds through, which is why half-Kelly is the common practice. Kelly's fraction is a POSITION, a multiple of equity, so the half-Kelly size is capped at max_leverage times equity (1 by default) and a warning says when the cap binds.
 
 **Required:** `symbol`, `start_date`, `end_date`, `account_equity`  
-**Optional:** `risk_per_trade_pct`, `atr_period`, `atr_multiplier`, `win_rate`, `avg_win_pct`, `avg_loss_pct`
+**Optional:** `risk_per_trade_pct`, `atr_period`, `atr_multiplier`, `win_rate`, `avg_win_pct`, `avg_loss_pct`, `max_leverage`, `n_trades`
 
 #### `optimize_hierarchical_risk_parity`
 
 Allocation that never INVERTS the covariance matrix. Inversion is where an ill-conditioned estimate does its damage -- the smallest eigenvalue becomes the largest, so the direction the data says least about becomes the one the portfolio bets most on, and with 50 assets on 500 observations that eigenvalue is noise. HRP clusters by correlation, orders the assets so similar ones sit adjacent, and splits capital down the tree. It has NO optimality property and does not maximize anything; it buys robustness by giving that up.
 
 **Required:** `returns`  
-**Optional:** `periods_per_year`
+**Optional:** `alignment`, `periods_per_year`
 
 #### `optimize_max_diversification`
 
@@ -1320,7 +1321,7 @@ A day-by-day path from the weights you hold to the weights you want. Every optim
 
 #### `run_portfolio_optimization`
 
-Produce portfolio weights via Markowitz mean-variance (max_sharpe/min_volatility/target_return/target_volatility), risk parity, or Black-Litterman — unlike get_portfolio_analysis, which only scores weights already chosen.
+Produce portfolio weights via Markowitz mean-variance (max_sharpe/min_volatility/target_return/target_volatility), risk parity, or Black-Litterman. get_portfolio_analysis, by contrast, only scores weights already chosen.
 
 **Required:** `tickers`, `start_date`, `end_date`  
 **Optional:** `method`, `risk_free_rate`, `target_return`, `target_volatility`, `allow_short`, `max_weight`, `risk_budget`, `market_weights`, `views`, `risk_aversion`, `tau`, `periods_per_year`
@@ -1364,7 +1365,7 @@ A quoted future against its carry-fair value, with the mispricing attributed to 
 Index dividends as POINTS to a contract's expiry, dated and attributed by name. A continuous yield is the approximation this replaces: index dividends arrive in dense seasonal clusters, so a June and a September contract straddle the whole season and pricing both off one q puts one badly wrong. Supply a quoted future to get the market's own dividend number alongside the forecast -- a gap between them is usually a position rather than an error on either side.
 
 **Required:** `constituents`, `divisor`, `as_of`, `expiry`  
-**Optional:** `spot`, `future_price`, `financing_rate`, `time_to_expiry`
+**Optional:** `spot`, `future_price`, `financing_rate`, `time_to_expiry`, `day_count`
 
 #### `analyze_etf_fair_value`
 
@@ -1486,7 +1487,7 @@ Measures the spread from ticks and compares it against the OHLCV estimate, so th
 
 #### `classify_trade_direction`
 
-Sign a tick tape buyer- or seller-initiated and publish the signed series, which is what an event study, a CUSUM detector or a model consumes -- get_microstructure_metrics computes this internally and returns only averages. WITH a quote panel it is Lee-Ready, matching each trade against the quote PRECEDING it; without one it falls back to the tick rule, which agrees about 85% of the time on a liquid name and worse on an illiquid one. The result says which was used, because every downstream estimate inherits that error.
+Sign a tick tape buyer- or seller-initiated and publish the signed series, which is what an event study, a CUSUM detector or a model consumes. get_microstructure_metrics computes this internally and returns only averages. WITH a quote panel it is Lee-Ready, matching each trade against the quote PRECEDING it; without one it falls back to the tick rule, which agrees about 85% of the time on a liquid name and worse on an illiquid one. The result says which was used, because every downstream estimate inherits that error.
 
 **Required:** `tick_tape_ref`, `run_id`, `name`  
 **Optional:** `quote_panel_ref`
@@ -1520,7 +1521,7 @@ The effective spread implied by BID-ASK BOUNCE, from trade prices alone (Roll 19
 
 #### `estimate_vpin`
 
-Flow one-sidedness measured in VOLUME time rather than clock time (Easley, Lopez de Prado and O'Hara 2012) -- information arrives with volume, so the series is cut into equal-volume buckets. TWO HONEST CAVEATS. This is built from daily bars with tick-rule signing; the original is a trade-level measure where each bucket holds hundreds of trades, so what comes back is a defensible series of one-sidedness and not the VPIN of the paper. And VPIN is contested: Andersen and Bondarenko (2014) argue it is largely a transformation of volatility. Calling one-sided flow 'informed trading' is a model assumption, not a measurement. A bar whose close did not move is split half to each side, so a flat market reads as balanced flow; `undirected_volume_share` says how much of the volume that was.
+Flow one-sidedness measured in VOLUME time rather than clock time (Easley, Lopez de Prado and O'Hara 2012). Information arrives with volume, so the series is cut into equal-volume buckets. TWO HONEST CAVEATS. This is built from daily bars with tick-rule signing; the original is a trade-level measure where each bucket holds hundreds of trades, so what comes back is a defensible series of one-sidedness and not the VPIN of the paper. And VPIN is contested: Andersen and Bondarenko (2014) argue it is largely a transformation of volatility. Calling one-sided flow 'informed trading' is a model assumption, not a measurement. A bar whose close did not move is split half to each side, so a flat market reads as balanced flow; `undirected_volume_share` says how much of the volume that was.
 
 **Required:** `close`, `volume`  
 **Optional:** `n_buckets`, `window`
@@ -1555,7 +1556,7 @@ How volume distributes across the trading day, and what that implies for a parti
 
 #### `get_microstructure_metrics`
 
-Quoted and effective spread MEASURED from trades and quotes, with the effective spread split into the realized (liquidity-provider) and impact (price-move) halves, plus Lee-Ready signed order flow. Needs a tick feed and refuses without one rather than approximating from bars.
+Quoted and effective spread MEASURED from trades and quotes, the effective spread split into realized (liquidity-provider) and impact (price-move) halves. It also reports Lee-Ready signed order flow. Needs a tick feed and refuses without one rather than approximating from bars.
 
 **Required:** `symbol`, `start`, `end`  
 **Optional:** `realized_horizon_seconds`, `limit`, `source`
@@ -1569,7 +1570,7 @@ Depth-book statistics a top-of-book quote cannot give: the microprice, imbalance
 
 #### `get_order_event_metrics`
 
-Order-level statistics a depth book cannot produce: how much size rests AHEAD of an order at its own price level when it arrives, how long orders live before they are cancelled or filled, cancels per add and per trade, and event intensity by action. Aggregated depth destroys all four -- 5,000 shares at the bid may be one order or two hundred, and size that disappears may have been cancelled or filled, which mean opposite things about who wanted to trade. Orders already resting when the window opened are counted and EXCLUDED from the lifetime averages rather than folded in as instantaneous, which would bias every average toward impatience precisely where the long-resting orders are. The same orders sit ahead of every early arrival: without an opening snapshot every level starts empty, and `queue.queue_is_lower_bound` says the queue figures count only size added inside the window. Takes events inline or as an `sqt://order_event_panel` reference.
+Order-level statistics a depth book cannot produce: the queue AHEAD of an arriving order, order lifetimes, cancels per add and per trade, and event intensity by action. The queue ahead is the size resting at the order's own price level when it arrives; a lifetime is how long an order lives before it is cancelled or filled. Aggregated depth destroys all four -- 5,000 shares at the bid may be one order or two hundred, and size that disappears may have been cancelled or filled, which mean opposite things about who wanted to trade. Orders already resting when the window opened are counted and EXCLUDED from the lifetime averages rather than folded in as instantaneous, which would bias every average toward impatience precisely where the long-resting orders are. The same orders sit ahead of every early arrival: without an opening snapshot every level starts empty, and `queue.queue_is_lower_bound` says the queue figures count only size added inside the window. Takes events inline or as an `sqt://order_event_panel` reference.
 
 *No required arguments.*  
 **Optional:** `events`, `ref`, `max_events`
@@ -1690,7 +1691,7 @@ Interrogate the FEATURES of a built dataset, before and independently of fitting
 
 #### `compare_feature_sets`
 
-Two feature sets measured on the same panel, with the cost of the difference attached: per-set IC, independent-signal count and condition number, what is unique to each side, and the per-feature IC table. Not a single score, because a larger set almost always has a higher maximum IC and almost always more collinearity, and one number hides half of that trade. By default both sets are summarised on every date, which is in-sample by construction and warned about; holdout_fraction summarises on an earlier window and re-measures each set on the dates neither summary read, with the last `embargo_dates` dates before the holdout (the target horizon by default) read by neither.
+Two feature sets measured on the same panel, with the cost of the difference attached: per-set IC, independent-signal count and condition number, and what is unique to each side. The per-feature IC table comes with it. Not a single score, because a larger set almost always has a higher maximum IC and almost always more collinearity, and one number hides half of that trade. By default both sets are summarised on every date, which is in-sample by construction and warned about; holdout_fraction summarises on an earlier window and re-measures each set on the dates neither summary read, with the last `embargo_dates` dates before the holdout (the target horizon by default) read by neither.
 
 **Required:** `dataset_id`, `left`, `right`  
 **Optional:** `cluster_threshold`, `selection_end`, `holdout_fraction`, `embargo_dates`
@@ -1718,7 +1719,7 @@ Which features are restatements of one another, and which one to keep. RSI, 20-d
 
 #### `get_feature_regime_stability`
 
-The feature's IC inside each of several CONTIGUOUS time blocks, never shuffled -- a feature's usual problem is that it worked in one regime, and interleaved folds average exactly that away. Returns per-block IC plus sign consistency against the full-sample IC. Read both: consistent sign with collapsing magnitude is decay, and sign consistency stays at 1.0 through it. screen_feature_stability runs this for every feature at once.
+The feature's IC inside each of several CONTIGUOUS time blocks, never shuffled. A feature's usual problem is that it worked in one regime, and interleaved folds average exactly that away. Returns per-block IC plus sign consistency against the full-sample IC. Read both: consistent sign with collapsing magnitude is decay, and sign consistency stays at 1.0 through it. screen_feature_stability runs this for every feature at once.
 
 **Required:** `dataset_id`, `feature`  
 **Optional:** `n_blocks`, `method`
@@ -1753,14 +1754,14 @@ run_feature_permutation_test for EVERY candidate feature at once, and the noise 
 
 #### `screen_feature_stability`
 
-Every feature's drift and every feature's regime dependence in one pass: PSI and KS across a split, the IC on each side, the IC inside each contiguous block, sign consistency -- plus psi_by_block, the drift CURVE a single split cannot give. get_feature_drift and get_feature_regime_stability answer for one feature and analyze_features is silent about time, so a feature that stopped being the same measurement is invisible unless you already suspected it. Set reference='first' and a monotone slide accumulates and the curve rises; set 'previous' and that same slide reads flat while a jump stands out, which is how a break is told from a decay. Distribution drift and IC decay are reported independently because they need different fixes. Refuses an unknown feature, a split outside the panel, fewer dates than n_blocks, and more features than max_features. Verdicts are the 0.10/0.25 PSI conventions get_feature_drift uses -- conventions, not tests.
+Every feature's drift and every feature's regime dependence in one pass: PSI and KS across a split, the IC on each side, the IC inside each contiguous block and sign consistency. psi_by_block adds the drift CURVE a single split cannot give. get_feature_drift and get_feature_regime_stability answer for one feature and analyze_features is silent about time, so a feature that stopped being the same measurement is invisible unless you already suspected it. Set reference='first' and a monotone slide accumulates and the curve rises; set 'previous' and that same slide reads flat while a jump stands out, which is how a break is told from a decay. Distribution drift and IC decay are reported independently because they need different fixes. Refuses an unknown feature, a split outside the panel, fewer dates than n_blocks, and more features than max_features. Verdicts are the 0.10/0.25 PSI conventions get_feature_drift uses -- conventions, not tests.
 
 **Required:** `dataset_id`  
 **Optional:** `features`, `n_blocks`, `method`, `split_date`, `reference`, `max_features`
 
 #### `select_features`
 
-Choose a feature set from a built dataset: keep one feature per redundancy cluster, apply an optional IC floor, drop what does not pass a permutation test against the target, and return a reason for every exclusion. The test (significance='entity_shuffle', default) runs on the selection window only, before the holdout is read: each cluster representative's mean rank IC against the same feature series handed to randomly permuted entities, kept at p < alpha (0.05); drops are reason 'insignificant' with their p-value, and selection_p_value carries every tested p. On the live panel it kept 2 of 8. correction='bh' passes on Benjamini-Hochberg adjusted p-values instead (off by default). 'circular_shift' is the screen's null; 'none' keeps every non-redundant feature above the floor, as before the test existed, and warns. Needs at least 4-5 entities. The last `embargo_dates` dates before the holdout (the target horizon by default) are read by neither side, so no label the selection reads ends inside the holdout. Deliberately has no greedy search -- a selector scored on the panel it selects from manufactures overfit that looks like evidence. Redundancy is resolved before the floor and the test, because a cluster is one signal. The redundancy work comes back with the answer -- the clusters get_feature_redundancy would return, the keeper each duplicate was dropped for, VIF, condition number and collinear_features -- so the diagnostics need no second call.
+Choose a feature set from a built dataset: keep one feature per redundancy cluster, apply an optional IC floor, and drop what does not pass a permutation test against the target. Every exclusion comes back with a reason. The test (significance='entity_shuffle', default) runs on the selection window only, before the holdout is read: each cluster representative's mean rank IC against the same feature series handed to randomly permuted entities, kept at p < alpha (0.05); drops are reason 'insignificant' with their p-value, and selection_p_value carries every tested p. On the live panel it kept 2 of 8. correction='bh' passes on Benjamini-Hochberg adjusted p-values instead (off by default). 'circular_shift' is the screen's null; 'none' keeps every non-redundant feature above the floor, as before the test existed, and warns. Needs at least 4-5 entities. The last `embargo_dates` dates before the holdout (the target horizon by default) are read by neither side, so no label the selection reads ends inside the holdout. Deliberately has no greedy search -- a selector scored on the panel it selects from manufactures overfit that looks like evidence. Redundancy is resolved before the floor and the test, because a cluster is one signal. The redundancy work comes back with the answer -- the clusters get_feature_redundancy would return, the keeper each duplicate was dropped for, VIF, condition number and collinear_features -- so the diagnostics need no second call.
 
 **Required:** `dataset_id`  
 **Optional:** `features`, `cluster_threshold`, `min_abs_rank_ic`, `max_features`, `significance`, `alpha`, `correction`, `n_permutations`, `random_seed`, `max_draws`, `selection_end`, `embargo_dates`, `holdout_fraction`, `include_correlation`

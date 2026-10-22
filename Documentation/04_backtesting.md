@@ -365,11 +365,12 @@ carries a weight, prefixing the ticker; it too takes `adjusted=` or reads
 each frame's `attrs`. It used to have none: a 10:1 split in one of two held
 tickers moved final equity by −43.9% and the only caveat was "cash went
 negative". The wording depends on what is known about
-the bars: pass `adjusted=` (a provider's `DataSetMetadata.adjusted`), or let
-the engine read `price_data.attrs["adjusted"]` — the Databento provider sets
-it to `False` on the frames it returns — and the warning says whether the
-bar is a real move on adjusted data or a split that every compounded metric
-is wrong through. The pass is free: the engine already walks every bar for
+the bars: pass `adjusted=` (a provider's `DataSetMetadata.split_adjusted`),
+or let the engine read `price_data.attrs` — yfinance, Polygon and Bloomberg
+stamp `split_adjusted` on the frames they serve, and Databento's older
+`adjusted = False` is read when that is absent — and the warning says
+whether the bar is a real move on adjusted data or a split that every
+compounded metric is wrong through. The pass is free: the engine already walks every bar for
 its total-loss guard. The warning travels in `result["warnings"]` like the
 fill caveat, so it reaches every tool built on the engine;
 `run_backtest_compact` used to build its own warning list from scratch and
@@ -379,6 +380,18 @@ still resolves to it), and the rule is one function,
 `_split_screen.screen_moves`, which the dataset build's screen
 (`data.quality.detect_split_like_moves`) also runs, so the two name the
 same bars. The screen only warns: nothing is adjusted.
+
+**The return basis.** A backtest compounds bar returns, and whether those
+include dividends depends on the provider: yfinance's daily bars and
+Bloomberg's are dividend-adjusted, Polygon's and Databento's are not. The
+same stock held through a 2% dividend ends 2% lower on price-return bars,
+and nothing in the numbers says which ran. `run_strategy` returns
+`return_basis` (`total_return`, `price_return` or `unknown`), read off the
+frame's `attrs`, and so does every tool that returns its `BacktestResult`.
+`run_portfolio_simulation` reads it per held ticker and reports `mixed`,
+with a `RETURN BASIS MIXED` warning naming which ticker is which, when the
+book holds names from both kinds of feed; a ticker whose frame says nothing
+makes the basis `unknown` and is named too.
 
 **Validation:** `run_strategy` raises `ValidationError` if `initial_capital`
 isn't finite and `> 0`, if `commission_pct`/`slippage_pct` isn't finite
@@ -441,16 +454,34 @@ error. One 400-bar SMA-crossover run, measured:
 
 ```python
 run_strategy(df, signals)                        # Sharpe 1.58
-run_strategy(df, signals, risk_free_rate=0.045)  # Sharpe 1.22
+run_strategy(df, signals, risk_free_rate=0.045,
+             cash_rate=0.0, financing_rate=0.0)  # Sharpe 1.22
 ```
 
 Same trades, same equity curve — a 23% lower Sharpe, because the first
-number was never measuring excess return.
+number was never measuring excess return. (The second call pins the cash and
+financing rates at zero to isolate the scoring; left at their defaults,
+the flat bars' cash also earns the 4.5% — see below.)
 
-**It is a scoring convention, not a cash flow.** `total_return`,
-`final_equity`, `max_drawdown` and `num_trades` are identical either way —
-the rate changes what the ratios are measured *against*, and nothing about
-what the strategy did.
+**It is earned by cash, not only subtracted.** A signal is a fraction of
+equity, so `1 - signal` of the account is cash on every bar. That cash now
+earns `cash_rate`, exposure beyond 1x pays `financing_rate`, and a short pays
+`borrow_fee_bps` — each accrued per bar at `rate / periods_per_year` on the
+position held at the previous close. The two rates default to
+`risk_free_rate`, so the world the Sharpe is measured in is the world the
+account lives in: a book that is flat half the time is not charged the rate
+on cash that earned nothing, and a constant k-times signal returns
+`k*R - (k - 1)*r` on every bar, so its Sharpe is the 1x Sharpe. Before this,
+at 5% the same signal read -0.062 at 3x against -0.258 at 1x; both read
+-0.257 now. Pin `cash_rate=0, financing_rate=0` to recover the scoring-only
+behaviour; at `risk_free_rate=0` nothing changes at all.
+
+**Nothing accrues on bar 0.** Its return is the placeholder `0.0` of an
+account that has only just opened, so the rate is subtracted from every bar
+*after* it. Charging bar 0 a period of the rate gave a book that held only
+cash — and earned the rate on every other bar — a Sharpe of
+`-sqrt(periods_per_year / n)` instead of an undefined one; a book with no
+risk now reports `NaN`.
 
 **Both execution paths honour it identically.** The rate reaches the C++
 kernel and the pure-Python fallback through the same argument, so the
@@ -467,9 +498,8 @@ Two details of the arithmetic, because they are easy to get subtly wrong:
 - **Sortino's does.** The rate decides which bars count as downside at all,
   so it moves the semi-deviation as well. In the kernel's allocation-free
   summary path — the one every grid reads from — bar 0's implicit return of
-  `0.0` has an excess of `-rate/periods_per_year` and contributes to the
-  downside sum. That term is invisible at `rate = 0`, which is exactly why
-  the parity tests run at several rates.
+  `0.0` is seeded by hand, and its excess is zero (nothing accrued over it),
+  as in the full kernel and the Python path.
 
 `backtest_grid` takes it too, through all three of its execution paths. A
 grid that ranked on a zero-rate Sharpe while the single run it is compared
@@ -1076,7 +1106,20 @@ is `gross_exposure_curve / equity_curve`, the continuous version of
 `n_positions`, plus `n_capped`, `capped_notional` and `capped` — the trades
 the ADV cap sized down on that rebalance, the notional they gave up and the
 tickers involved), `final_equity`, `final_cash`, four peak diagnostics
-(below), and `warnings` (`list[str]`).
+(below), `financing` (the rates and what they came to, below), and
+`warnings` (`list[str]`).
+
+**The Sharpe is measured against what cash accrued.**
+`run_portfolio_simulation` (the tool), `run_pair_trade_backtest` and
+`evaluate_model_portfolio` report Sharpe and Sortino over the risk-free rate
+accrued bar by bar on the declared day count — `rate x calendar days /
+basis`, the engine's own credit divided by the cash — rather than
+`rate / 252`. A book that holds only cash therefore has an excess return of
+exactly zero, a book half in cash scores like the same asset fully invested
+(0.8499 against 0.8467 on the probe that found it; 0.5703 against 0.8375
+before), and a dollar-neutral book, whose cash is its equity plus its short
+proceeds, no longer collapses when a rate is given (0.0389 at 5% against
+0.0444 at zero, with 50 bps of borrow; it read -0.6967).
 
 ### Peaks, not just averages
 
@@ -1144,7 +1187,10 @@ as everywhere else in this library):**
   `margin_interest_rate`, `impact_coefficient`) must be finite and
   non-negative (`initial_capital` strictly positive); `max_gross_leverage`,
   `max_position_pct`, `impact_lookback`, and `max_adv_participation` (when
-  set) must be finite and strictly positive.
+  set) must be finite and strictly positive. `cash_rate` and
+  `short_rebate_rate` may be negative but must be finite decimal rates at
+  most 1 in magnitude, and a `day_count` or `short_proceeds` outside its
+  values is refused by name.
 
 **Post-trade enforcement — target weights vs. realized, post-cost state:**
 
@@ -1217,9 +1263,13 @@ result = run_portfolio_simulation(
     price_data, target_weights,
     commission_model="per_share", per_share_rate=0.005, min_commission=1.0,
     use_impact_model=True, impact_coefficient=1.0, impact_lookback=20,
-    borrow_fee_bps=50.0,          # annualized, accrued daily on short notional
-    margin_interest_rate=0.06,    # annualized, accrued daily on negative cash
+    borrow_fee_bps=50.0,          # annualized, on short notional
+    margin_interest_rate=0.06,    # annualized, on negative cash
+    cash_rate=0.045,              # annualized, CREDITED on positive cash
+    short_proceeds="net_cash",    # or "segregated", with short_rebate_rate
+    day_count="ACT/360",          # or "ACT/365F" (the default)
 )
+print(result["financing"])        # rates, day count, and what each came to
 ```
 
 - `commission_model`: `"pct"` (default, unchanged) or `"per_share"` —
@@ -1230,15 +1280,24 @@ result = run_portfolio_simulation(
   commission + spread. Requires a `'Volume'` column — no other new data
   dependency, since `Close * Volume` is already computable from any OHLCV
   frame.
-- `borrow_fee_bps` / `margin_interest_rate`: financing costs accrued on
-  short notional / negative cash respectively, charged once per bar based
-  on the position/cash carried in from the previous bar. The accrual uses
-  the **actual elapsed calendar days** since the prior bar (`(date -
-  prev_date).days` — e.g. 3 over a Friday→Monday weekend gap, or more
-  across a holiday), not a hardcoded `days=1.0` — a fixed 1-day assumption
-  would under-accrue financing across every weekend/holiday gap in the
-  trading calendar. Both default to `0.0` (today's exact behavior — no
-  financing cost beyond the existing "cash went negative" warning).
+- **Financing.** On every bar after the first, on the cash and positions
+  carried in from the previous bar and over the actual calendar days since
+  it (3 over a weekend): positive cash earns `cash_rate`, negative cash pays
+  `margin_interest_rate`, shorts pay `borrow_fee_bps`. Under
+  `short_proceeds="segregated"` a short sale's proceeds are held by the
+  lender: they earn only `short_rebate_rate`, and interest accrues on cash
+  less the short book (a rebate under `"net_cash"` is refused, since the
+  proceeds already earn the cash rate). Every accrual is
+  `rate x balance x days / basis` on the declared `day_count` — `ACT/365F`,
+  the default and the convention this engine always used, or `ACT/360`, how
+  USD margin and money-market rates are quoted. All rates default to 0.0
+  here, which is the engine's exact old behaviour; the agent tools default
+  `cash_rate` to their `risk_free_rate` and `margin_interest_rate` to it
+  plus `margin_spread_bps`. The result's `financing` echoes the rates and
+  day count and totals the interest credited, interest charged, borrow
+  charged and rebate credited, and a book whose cash went negative is told
+  how far, on how many bars, and what it was charged — or, at a zero margin
+  rate, the debit in currency-years and what each 1% of rate would cost.
 
 **Liquidity constraint:** pass `max_adv_participation=0.1` to cap any
 rebalance trade at 10% of the ticker's own rolling average dollar volume. A
@@ -1261,9 +1320,9 @@ makes it refuse, and the engine catches that refusal and reruns the Python
 loop, which is the branch that can size a trade down. A capped run that
 actually caps is therefore correct and merely slower.
 
-**Scope, stated explicitly:** short-sale proceeds are credited to cash in
-full with no margin haircut modeling beyond the flat `margin_interest_rate`
-accrual above; sector-exposure constraints (as opposed to reporting — see
+**Scope, stated explicitly:** short-sale proceeds are either cash
+(`"net_cash"`) or held by the lender at a rebate (`"segregated"`), with no
+margin haircut modelled beyond the financing above; sector-exposure constraints (as opposed to reporting — see
 `get_capacity_report`) aren't enforced by the engine itself. Neither is
 required for the shared-cash architecture itself to be correct.
 
@@ -1384,8 +1443,11 @@ engine.
 | `pct_of_range_spread` | `(notional, high, low, close, pct)` | Spread cost as a fraction of the bar's own `(High - Low)` range, scaled to notional via `Close`. Raises `ValidationError` if `close <= 0`. Not wired into the engine. |
 | `sqrt_impact_bps` | `(participation, volatility, coefficient=1.0)` | Square-root impact model, returned in **basis points**: `coefficient * volatility * sqrt(participation) * 10_000` (`impact_cost` divides the 1e4 back out). Raises `ValidationError` if `participation < 0`. |
 | `impact_cost` | `(notional, avg_dollar_volume, volatility, coefficient=1.0)` | Dollar impact cost combining `sqrt_impact_bps` with trade notional; returns `0.0` if `avg_dollar_volume <= 0` (no volume baseline). |
-| `short_borrow_cost` | `(notional, annual_bps, days=1.0)` | Daily-accrued borrow fee on short notional. |
-| `margin_interest` | `(cash, annual_rate, days=1.0)` | Daily-accrued interest on negative cash; `0.0` when `cash >= 0`. |
+| `short_borrow_cost` | `(notional, annual_bps, days=1.0, day_count="ACT/365F")` | Borrow fee on short notional over `days` calendar days on the declared day count. |
+| `margin_interest` | `(cash, annual_rate, days=1.0, day_count="ACT/365F")` | Interest on negative cash; `0.0` when `cash >= 0`. |
+| `cash_interest` | `(cash, annual_rate, days=1.0, day_count="ACT/365F")` | Interest CREDITED on positive cash; `0.0` when `cash <= 0`. The rate may be negative. |
+| `day_count_basis` | `(day_count)` | 365.0 for `"ACT/365F"`, 360.0 for `"ACT/360"`; anything else is refused by name. |
+| `require_annual_rate` | `(value, name)` | A finite decimal rate at most 1 in magnitude — 5 for "5%" is the mistake it catches. |
 
 ```python
 from standard_quant_tools.backtest.costs import per_share_commission
@@ -1399,6 +1461,7 @@ cost = per_share_commission(shares=500, rate_per_share=0.005, minimum=1.0)
 |---|---|---|
 | `adv_participation` | `(notional, avg_dollar_volume)` | Fraction of average dollar volume a trade's notional represents; `NaN` ("not estimable") when `avg_dollar_volume` is non-positive or non-finite, which the simulator refuses rather than reads as zero. What `max_adv_participation` above checks under the hood. |
 | `days_to_liquidate` | `(shares, avg_daily_volume, max_participation)` | Estimated trading days to unwind a position without exceeding `max_participation` of average daily volume. Raises `ValidationError` if `avg_daily_volume <= 0` or `max_participation <= 0`, or if `shares` is not a finite number (a NaN or infinite count used to come back as a NaN or infinite number of days). |
+| `liquidation_days` | `(account_size, target_weights, prices, avg_daily_volumes, max_participation)` | Trading days each position of a book takes to unwind at `account_size`: \|weight\| × account_size / price / (volume × max_participation). 0 for a zero weight; `NaN` ("not estimable") for a ticker with no positive volume or price. What `get_capacity_report` reports as `days_to_liquidate` when given an `account_size`. Raises `ValidationError` for an `account_size` or `max_participation` that is not finite and `> 0`, a weight that is not finite, or a weighted ticker missing a price or volume. |
 | `sector_exposure` | `(weights, sectors)` | Aggregate portfolio weight by sector; tickers missing from `sectors` are bucketed into `"Unknown"` rather than dropped. A weight that is not finite is refused by name; one NaN made its whole sector NaN. |
 | `capacity_report` | `(tickers, avg_dollar_volumes, target_weights, max_participation)` | Per-ticker max account size deployable at `max_participation` of its own ADV, given its target weight. Returns `per_ticker`, `binding_ticker` (tightest constraint, `None` if every weight is 0), `max_account_size`. Raises `ValidationError` on missing tickers, a ticker listed twice, a target weight that is not finite, or `max_participation` that is not finite and `> 0` -- the rules `get_capacity_report`'s schema applies. A NaN weight used to become a NaN capacity chosen as the binding constraint, and an infinite one a capacity of exactly 0.0. |
 
@@ -1456,6 +1519,17 @@ print(f"Round trips  : {result['n_round_trips']}")
 print(f"Final equity : ${result['final_equity']:,.2f}")
 print(result["rebalance_log"])
 ```
+
+A pair with a positive hedge ratio is always short one leg, so
+`run_pair_backtest` (and the `run_pair_trade_backtest` tool) take the
+financing terms the shared-cash engine does: `borrow_fee_bps` for the short
+leg, `margin_interest_rate`, `cash_rate`, `short_proceeds` /
+`short_rebate_rate` and `day_count`. The engine's warning about a free short
+used to tell the caller to set `borrow_fee_bps`, an argument this tool did
+not have. In the tool, the cash and margin rates default to
+`risk_free_rate` (plus `margin_spread_bps` for margin), so a pair holding
+its equity plus the short leg's proceeds in cash earns the rate its Sharpe
+subtracts.
 
 **Position logic:** long the spread (long `symbol_a`, short `symbol_b`)
 when the z-scored spread (`analysis/cointegration.py`'s `compute_spread` +
