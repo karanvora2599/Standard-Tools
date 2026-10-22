@@ -115,17 +115,40 @@ def provider_guarantee_warnings(metadata: Optional[Any]) -> List[str]:
             "survivors-only sample. Backtested returns on such a universe are biased "
             "upward, and no amount of walk-forward validation corrects for it."
         )
-    # `is False`, not falsiness: only a provider that SAYS its bars are
-    # unadjusted gets the line. A mocked provider's attribute is not a bool,
-    # and a provider that adjusts says True.
-    if getattr(metadata, "adjusted", None) is False:
+    # `is False`, not falsiness: only a provider that SAYS its bars leave a
+    # split or a dividend in gets the line. A mocked provider's attribute is
+    # not a bool, and a provider that adjusts says True. The two are asked
+    # separately: a split-only feed (Polygon) has its splits out and its
+    # dividends in, and one `adjusted` flag called it unadjusted.
+    split = getattr(metadata, "split_adjusted", getattr(metadata, "adjusted", None))
+    dividend = getattr(
+        metadata, "dividend_adjusted", getattr(metadata, "adjusted", None)
+    )
+    if split is False and dividend is False:
         warnings.append(
-            f"provider {provider!r} serves unadjusted bars (adjusted=False): a "
+            f"provider {provider!r} serves unadjusted bars (split_adjusted=False, "
+            "dividend_adjusted=False): a "
             "dividend is a price drop on its ex-date, so return targets built "
             "here are price returns, not the total returns an adjusting provider "
             "gives; a split is a price fall, which the price-jump screen names "
             "when one is in the window. DatasetSpec.corporate_actions adjusts a "
             "split declared there; nothing here adjusts a dividend."
+        )
+    elif dividend is False:
+        warnings.append(
+            f"provider {provider!r} serves split-adjusted bars that are NOT "
+            "dividend-adjusted (dividend_adjusted=False): a dividend is a price "
+            "drop on its ex-date, so return targets built here are price "
+            "returns, not the total returns a dividend-adjusting provider "
+            "gives -- the gap is each name's dividend yield. Nothing here "
+            "adjusts a dividend."
+        )
+    elif split is False:
+        warnings.append(
+            f"provider {provider!r} serves bars that are not split-adjusted "
+            "(split_adjusted=False): a split is a price fall, which the "
+            "price-jump screen names when one is in the window. "
+            "DatasetSpec.corporate_actions adjusts a split declared there."
         )
     return warnings
 

@@ -539,31 +539,60 @@ class TotalReturnFutureResult(_Result):
 class DividendContribution(_Row):
     symbol: str = ""
     ex_date: str = ""
+    pay_date: Optional[str] = None
     dividend_per_share: Stat = None
-    index_points: Stat = None
+    index_points: Stat = Field(None, description="Nominal points.")
+    discounted_to: str = Field(
+        "", description="'pay_date' when one was given, else 'ex_date'."
+    )
+    discount_years: Stat = Field(
+        None, description="Year fraction from as_of to that date, under day_count."
+    )
+    present_value_points: Stat = Field(
+        None,
+        description="index_points discounted to as_of at financing_rate. Null "
+        "without a financing_rate.",
+    )
 
 
 class DividendPointsResult(_Result):
     as_of: str = ""
     expiry: str = ""
     divisor: Stat = None
+    day_count: str = ""
     n_constituents: int = 0
     n_included: int = 0
     n_excluded_already_ex: int = 0
     n_excluded_after_expiry: int = 0
+    n_discounted_to_ex_date: int = Field(
+        0,
+        description="Dividends discounted to their ex-date for want of a "
+        "pay_date, each present value overstated by about rate x the lag.",
+    )
     total_index_points: Stat = Field(
-        None, description="INDEX POINTS, not a yield. That is the whole point."
+        None,
+        description="INDEX POINTS, not a yield. That is the whole point. "
+        "NOMINAL: the undiscounted sum.",
+    )
+    forecast_pv_points: Stat = Field(
+        None,
+        description="The same dividends discounted to as_of at financing_rate "
+        "-- the number comparable with implied_index_points. Null without a "
+        "financing_rate.",
     )
     points_by_date: Dict[str, Stat] = Field(default_factory=dict)
     points_by_constituent: List[DividendContribution] = Field(default_factory=list)
     largest_contributor: Optional[str] = None
     implied_index_points: Stat = Field(
-        None, description="What the quoted future implies. Null without one."
+        None,
+        description="What the quoted future implies, S - F exp(-rT): a "
+        "PRESENT VALUE. Null without one.",
     )
     forecast_minus_implied: Stat = Field(
         None,
-        description="The tradeable quantity. A gap is usually a position "
-        "rather than an error on either side.",
+        description="forecast_pv_points - implied_index_points, present value "
+        "against present value: the tradeable quantity. A gap is usually a "
+        "position rather than an error on either side.",
     )
 
 

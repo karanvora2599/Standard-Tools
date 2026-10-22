@@ -1245,6 +1245,13 @@ def describe_data_capabilities(
             "survivorship_free": metadata.survivorship_free,
             "point_in_time": metadata.point_in_time,
         }
+        # The two questions `adjusted` is the AND of, each only when the
+        # provider answers it: a split-only feed reads adjusted=False with
+        # its splits already out.
+        for flag in ("split_adjusted", "dividend_adjusted"):
+            value = getattr(metadata, flag, None)
+            if isinstance(value, bool):
+                guarantees[flag] = value
         if not metadata.point_in_time:
             notes.append(
                 "point_in_time=False: historical values may be silently "

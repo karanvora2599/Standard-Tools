@@ -293,7 +293,7 @@ class TestTheBuildScreen:
             f"dataset was built from: BBB {SPLIT_DATE} (-90%, within "
         )
         assert "of a 10:1 split)" in warning
-        assert "The provider reports adjusted=False" in warning
+        assert "The provider reports split_adjusted=False" in warning
         n_rows = len(built["panel"])
         assert f"In this panel 5 of {n_rows:,} targets span one" in warning
         assert "20 rows (" in warning
@@ -519,7 +519,8 @@ class TestTheProviderLine:
         )
         [line] = provider_guarantee_warnings(metadata)
         assert line.startswith(
-            "provider 'databento' serves unadjusted bars (adjusted=False): a "
+            "provider 'databento' serves unadjusted bars (split_adjusted=False, "
+            "dividend_adjusted=False): a "
             "dividend is a price drop on its ex-date, so return targets built "
             "here are price returns, not the total returns"
         )
@@ -920,7 +921,7 @@ class TestScoring:
         )
         assert (
             "of a 10:1 split) is inside the 126 bars this score's features read, "
-            "and the provider reports adjusted=False, so the score reads the "
+            "and the provider reports split_adjusted=False, so the score reads the "
             "split as a return." in hits[0]
         )
 

@@ -627,6 +627,12 @@ class DividendConstituent(BaseModel):
     )
     dividend_per_share: float = Field(..., description="Cash amount per share.")
     ex_date: str = Field(..., description="ISO ex-date, e.g. '2026-04-15'.")
+    pay_date: Optional[str] = Field(
+        None,
+        description="ISO pay date, on or after ex_date. The present value is "
+        "taken to it, because the cash arrives then; without it the ex-date "
+        "is used, which overstates the present value by about rate x the lag.",
+    )
 
 
 class DividendPointsInput(BaseModel):
@@ -648,8 +654,21 @@ class DividendPointsInput(BaseModel):
         description="Supply with spot, financing_rate and time_to_expiry to "
         "get the market's own dividend number alongside your forecast.",
     )
-    financing_rate: Optional[float] = Field(None, ge=-10, le=10)
+    financing_rate: Optional[float] = Field(
+        None,
+        ge=-10,
+        le=10,
+        description="Continuously compounded, as a fraction. Discounts each "
+        "forecast dividend to as_of (forecast_pv_points) and, with "
+        "future_price, prices the implied number -- both present values.",
+    )
     time_to_expiry: Optional[float] = Field(None, gt=0, le=100)
+    day_count: Literal["ACT/365F", "ACT/360", "30/360", "ACT/ACT"] = Field(
+        "ACT/365F",
+        description="Year fractions from as_of to each pay (or ex) date. "
+        "time_to_expiry should be this convention's fraction to expiry; a "
+        "warning says when it is not.",
+    )
 
 
 class IndexRebalanceInput(BaseModel):

@@ -639,10 +639,12 @@ class TestHonestSelfReport:
         """
         The field that will surprise someone. Databento serves what the
         venue published, so a split is a real -50% bar -- and every other
-        provider here reports adjusted=True.
+        provider here takes splits out. Neither adjustment, stated as two
+        flags since the CHANGELOG entry of 2026-10-22.
         """
         meta = _provider(StubClient({})).get_metadata("NVDA")
         assert meta.adjusted is False
+        assert (meta.split_adjusted, meta.dividend_adjusted) == (False, False)
         assert meta.provider == "databento"
         assert meta.timezone == "UTC"
 

@@ -249,6 +249,7 @@ def _run_backtest(
         final_equity=results["final_equity"],
         equity_curve=results["equity_curve"].tolist(),
         trade_log=trades,
+        return_basis=results.get("return_basis", "unknown"),
         # run_strategy emits a look-ahead caveat for fill_price="close" (a
         # signal derived from bar t's own Close cannot realistically be
         # filled at that same Close). Rebuilding the result here without it

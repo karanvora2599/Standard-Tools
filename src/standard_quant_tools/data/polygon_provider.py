@@ -33,10 +33,12 @@ BloombergProvider):
   ratios in Polygon's reference data. `market_cap` comes straight from
   Ticker Details v3. The rest (`trailing_pe`, `price_to_book`,
   `debt_to_equity`, `return_on_equity`, `profit_margins`) are derived from
-  the most recent filing on the Financials vX endpoint combined with
-  `market_cap` (e.g. `trailing_pe ~= market_cap / net_income`, avoiding a
-  separate per-share price fetch since both market_cap and net_income scale
-  with share count). `forward_pe` (no forward estimates in this data) and
+  the Financials vX endpoint combined with `market_cap` (e.g. `trailing_pe
+  ~= market_cap / net_income`, avoiding a separate per-share price fetch
+  since both market_cap and net_income scale with share count). The flows
+  (net income, revenue) come from the trailing-twelve-month record, else the
+  latest annual one, and never from a single quarter; the balance sheet from
+  the newest filing. `forward_pe` (no forward estimates in this data) and
   `dividend_yield` (would need a separate dividends-history aggregation)
   are always `None` — missing, not wrong.
 - Same two-tier cache as YFinanceProvider (in-memory session TTL cache +
@@ -83,6 +85,7 @@ from ._cache import (
     trim_to_inclusive_end,
 )
 from ._retry import retry
+from .adjustment import stamp_adjustment
 from .bar_hygiene import (
     US_EQUITY,
     UTC_DAY,
@@ -113,6 +116,19 @@ _TIMESPAN_MAP = {
     "1mo": (1, "month"),
     "3mo": (3, "month"),
 }
+
+# What the aggregates request's `adjusted=true` takes out. Polygon's
+# Aggregates (Bars) reference documents the parameter as "Whether or not the
+# results are adjusted for splits. By default, results are adjusted. Set this
+# to false to get results that are NOT adjusted for splits." -- splits only.
+# There is no dividend-adjustment parameter on that endpoint: a cash dividend
+# stays in the price as the ex-date drop, so a return computed from these
+# bars is a price return, not the total return yfinance's auto_adjust gives.
+_AGGS_ADJUSTMENT_NOTE = (
+    "Requested with adjusted=true, which Polygon's Aggregates reference "
+    "documents as adjustment for splits; the endpoint has no dividend "
+    "adjustment, so cash dividends stay in the price (price-return bars)."
+)
 
 # Timespans whose bars represent a full calendar day (or coarser) — their
 # timestamps are normalized to a tz-naive midnight date. Anything finer
@@ -399,23 +415,59 @@ def _financial_value(section: Dict[str, Any], key: str) -> Optional[float]:
     return float(entry["value"])
 
 
+#: The periods a FLOW (net income, revenue) may be read from for a ratio
+#: against a stock (market cap, equity). One quarter's net income is about a
+#: quarter of a year's, so a P/E built on a 10-Q reads four times too high and
+#: an ROE a quarter of its value -- the reason a quarterly answer is refused.
+_ANNUAL_TIMEFRAMES = ("ttm", "annual")
+
+#: The ratios that divide by, or are, a flow over a period.
+_FLOW_RATIOS = ("trailing_pe", "return_on_equity", "profit_margins")
+
+
 def _parse_financial_ratios(
-    details: Dict[str, Any], financials: Dict[str, Any]
+    details: Dict[str, Any],
+    financials: Dict[str, Any],
+    *,
+    timeframe: Optional[str] = None,
+    period: Optional[str] = None,
+    balance_sheet: Optional[Dict[str, Any]] = None,
 ) -> FinancialRatios:
     """
-    Derive FinancialRatios from a Ticker Details v3 `results` object plus
-    the most recent Financials vX filing's `financials` object. Pure
-    function — see module docstring for exactly which ratios are computed
-    vs. always None, and why.
+    Derive FinancialRatios from a Ticker Details v3 `results` object plus a
+    Financials vX record's `financials` object. Pure function — see module
+    docstring for exactly which ratios are computed vs. always None, and why.
+
+    `timeframe` is the record's own period: "ttm" (trailing twelve months)
+    or "annual" (a 10-K). Only those make the flow ratios -- trailing P/E,
+    return on equity, profit margin -- which are None for any other
+    timeframe, a quarterly one or one not stated, with the reason in
+    `definition_notes`. `period` (the record's fiscal label) names an annual
+    figure's year in its note. `balance_sheet`, when given, replaces the
+    record's own for the stock ratios (price-to-book, liabilities-to-equity)
+    and for return on equity's denominator: the latest filing's balance
+    sheet is the current one whatever period the flows cover.
     """
     income = financials.get("income_statement") or {}
-    balance = financials.get("balance_sheet") or {}
+    if balance_sheet is not None:
+        balance = balance_sheet
+    else:
+        balance = financials.get("balance_sheet") or {}
 
     net_income = _financial_value(income, "net_income_loss")
     revenues = _financial_value(income, "revenues")
     equity = _financial_value(balance, "equity")
     liabilities = _financial_value(balance, "liabilities")
     market_cap = details.get("market_cap")
+
+    frame = str(timeframe).strip().lower() if timeframe else None
+    flows_usable = frame in _ANNUAL_TIMEFRAMES
+    if not flows_usable:
+        # A quarter's (or an unstated period's) net income against a market
+        # cap or an equity balance is not a trailing ratio; the stock ratios
+        # below need no period and are still computed.
+        net_income = None
+        revenues = None
 
     trailing_pe = None
     if market_cap and net_income:
@@ -461,6 +513,32 @@ def _parse_financial_ratios(
             "higher than a debt-based ratio and is not directly comparable "
             "to one from another provider."
         )
+    if not flows_usable:
+        stated = (
+            f"the record Polygon returned covers a {frame!r} period"
+            if frame
+            else "Polygon returned no trailing-twelve-month or annual financials"
+        )
+        for name in _FLOW_RATIOS:
+            notes[name] = (
+                f"Not computed: {stated}, and a flow ratio needs a full year. "
+                "One quarter's net income is about a quarter of a year's, so "
+                "a ratio built on it reads a P/E four times too high and an "
+                "ROE a quarter of its value."
+            )
+    elif frame == "annual":
+        year = f" ({period})" if period else ""
+        for name, value in (
+            ("trailing_pe", trailing_pe),
+            ("return_on_equity", return_on_equity),
+            ("profit_margins", profit_margins),
+        ):
+            if value is not None:
+                notes[name] = (
+                    f"From the latest ANNUAL filing{year}, not trailing twelve "
+                    "months: Polygon returned no TTM record for this name. "
+                    "The year's figure can be up to a year older than a TTM one."
+                )
     ratios = FinancialRatios(
         forward_pe=None,
         trailing_pe=trailing_pe,
@@ -638,11 +716,17 @@ class PolygonProvider(DataProvider):
                     tier="session_cache",
                     frame=cached_df,
                 )
-            return disclose_served(cached_df.copy(), symbol, interval, clock)
+            return stamp_adjustment(
+                disclose_served(cached_df.copy(), symbol, interval, clock),
+                self.get_metadata(symbol, interval),
+            )
 
         result = self._get_ohlcv_uncached(symbol, start_str, end_str, interval)
         _session_cache_set(cache_key, result, end=end_str)
-        return disclose_served(result.copy(), symbol, interval, clock)
+        return stamp_adjustment(
+            disclose_served(result.copy(), symbol, interval, clock),
+            self.get_metadata(symbol, interval),
+        )
 
     @retry(times=3, delay=1)
     def _get_ohlcv_uncached(
@@ -683,6 +767,9 @@ class PolygonProvider(DataProvider):
         multiplier, timespan = _TIMESPAN_MAP[interval]
         ticker = _urlquote(symbol.strip().upper(), safe=":")
         path = f"/v2/aggs/ticker/{ticker}/range/{multiplier}/{timespan}/{start_str}/{end_str}"
+        # `adjusted=true` takes out SPLITS ONLY -- see _AGGS_ADJUSTMENT_NOTE
+        # and get_metadata, which states it as split_adjusted=True,
+        # dividend_adjusted=False.
         payload = _polygon_get(
             path,
             {"adjusted": "true", "sort": "asc", "limit": 50000},
@@ -754,21 +841,67 @@ class PolygonProvider(DataProvider):
         if not symbol:
             raise InvalidSymbolError("Symbol cannot be empty.")
         details = self._fetch_ticker_details(symbol)
-        financials_payload = _polygon_get(
-            "/vX/reference/financials",
-            {
-                "ticker": symbol.strip().upper(),
-                "limit": 1,
-                "sort": "filing_date",
-                "order": "desc",
-            },
-            self._api_key,
+        # The FLOWS come from a trailing-twelve-month record, else the latest
+        # annual one -- never from whichever filing is newest. That used to
+        # be the request (limit=1, newest filing, no period filter), so after
+        # a 10-Q the trailing P/E was market cap over ONE QUARTER's net
+        # income (40 where the TTM figure is 10) and return on equity a
+        # quarter of its value, with nothing in the result saying so.
+        # Polygon's financials endpoint takes `timeframe` (annual, quarterly,
+        # ttm); a name with neither a TTM nor an annual record gets no flow
+        # ratios and a note saying why (see _parse_financial_ratios).
+        requested = "ttm"
+        record = self._latest_financials(symbol, requested)
+        if record is None:
+            requested = "annual"
+            record = self._latest_financials(symbol, requested)
+        financials = (record or {}).get("financials") or {}
+        # The record's own label wins over the filter that asked for it: a
+        # quarterly record served despite the filter is still a quarter.
+        timeframe = None
+        if record is not None:
+            timeframe = record.get("timeframe") or requested
+        # The STOCKS (equity, liabilities) are as of a date, not over a
+        # period: the newest balance sheet of any filing is the current one.
+        # A record that carries its own is used as it is.
+        balance = financials.get("balance_sheet")
+        if not balance:
+            latest = self._latest_financials(symbol, None)
+            balance = ((latest or {}).get("financials") or {}).get("balance_sheet")
+        period = " ".join(
+            str(part)
+            for part in (
+                (record or {}).get("fiscal_period"),
+                (record or {}).get("fiscal_year"),
+            )
+            if part
         )
-        financials_results = financials_payload.get("results") or []
-        financials = (
-            financials_results[0].get("financials", {}) if financials_results else {}
+        return _parse_financial_ratios(
+            details,
+            financials,
+            timeframe=timeframe,
+            period=period or None,
+            balance_sheet=balance or {},
         )
-        return _parse_financial_ratios(details, financials)
+
+    def _latest_financials(
+        self, symbol: str, timeframe: Optional[str]
+    ) -> Optional[Dict[str, Any]]:
+        """The most recent Financials vX record of `timeframe` (None: any),
+        by the period it reports on rather than the date it was filed -- a
+        late amendment to an old year must not stand in for the latest one."""
+        params: Dict[str, Any] = {
+            "ticker": symbol.strip().upper(),
+            "limit": 1,
+            "sort": "period_of_report_date",
+            "order": "desc",
+        }
+        if timeframe is not None:
+            params["timeframe"] = timeframe
+        results = _polygon_get(_FINANCIALS_PATH, params, self._api_key).get("results")
+        if not results:
+            return None
+        return results[0]
 
     def get_point_in_time_records(
         self,
@@ -888,17 +1021,22 @@ class PolygonProvider(DataProvider):
 
     def get_metadata(self, symbol: str, interval: str = "1d") -> DataSetMetadata:
         """
-        Honest self-report: `adjusted=True` because every `get_ohlcv` call
-        requests `adjusted=true`, but Polygon makes no guarantee in this
-        provider's scope that a delisted security remains queryable
-        (survivorship_free=False) or that financials/aggregates are never
-        restated after the fact (point_in_time=False). timezone defaults to
-        America/New_York — Polygon's primary coverage is US exchanges, and
-        this provider doesn't do a per-symbol exchange lookup.
+        Honest self-report: every `get_ohlcv` call requests `adjusted=true`,
+        which Polygon documents as split adjustment only, so the bars are
+        split_adjusted=True and dividend_adjusted=False -- a return computed
+        from them is a price return, and `adjusted` (their AND) is False.
+        Polygon makes no guarantee in this provider's scope that a delisted
+        security remains queryable (survivorship_free=False) or that
+        financials/aggregates are never restated after the fact
+        (point_in_time=False). timezone defaults to America/New_York —
+        Polygon's primary coverage is US exchanges, and this provider
+        doesn't do a per-symbol exchange lookup.
         """
         return DataSetMetadata(
             provider="polygon",
-            adjusted=True,
+            split_adjusted=True,
+            dividend_adjusted=False,
+            adjustment_note=_AGGS_ADJUSTMENT_NOTE,
             survivorship_free=False,
             point_in_time=False,
             frequency=interval,

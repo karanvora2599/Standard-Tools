@@ -3089,9 +3089,10 @@ class DatabentoProvider(DataProvider):
         An honest self-report, and two fields worth reading before trusting
         a backtest built on this.
 
-        `adjusted=False` because Databento serves what the venue published.
-        A split is a real -50% bar. Every other provider here reports True,
-        so this is the one that will surprise someone.
+        `split_adjusted=False` and `dividend_adjusted=False` because
+        Databento serves what the venue published. A split is a real -50%
+        bar. Every other provider here takes splits out, so this is the one
+        that will surprise someone.
 
         `point_in_time=False` because Databento does reprocess and correct
         data. The corrections are announced rather than silent, which is
@@ -3134,7 +3135,14 @@ class DatabentoProvider(DataProvider):
             )
         return DataSetMetadata(
             provider="databento",
-            adjusted=False,
+            split_adjusted=False,
+            dividend_adjusted=False,
+            adjustment_note=(
+                "Databento serves the prices the venue published and offers "
+                "no adjusted series: a split is a real price fall and a cash "
+                "dividend is the ex-date drop (price-return bars). Every frame "
+                "carries attrs['adjusted'] = False to say so."
+            ),
             # The archive is organized by publication, so an instrument that
             # stopped trading stays queryable over the window it traded in.
             survivorship_free=True,

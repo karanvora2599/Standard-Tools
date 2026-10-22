@@ -28,6 +28,11 @@ from standard_quant_tools.backtest.costs import (
     short_borrow_cost,
 )
 from standard_quant_tools.backtest.screens import split_screen_warnings
+from standard_quant_tools.data.adjustment import (
+    combine_return_bases,
+    return_basis_of,
+    split_adjusted_of,
+)
 from standard_quant_tools.error import ValidationError
 
 logger = logging.getLogger(__name__)
@@ -418,9 +423,9 @@ def run_portfolio_simulation(
             ValidationError — fails closed (can't estimate liquidity means
             the trade is rejected), not open (silently treated as
             unconstrained).
-        adjusted: whether the bars are split- and dividend-adjusted, when
-            the caller knows; otherwise read per ticker from
-            `price_data[t].attrs['adjusted']`. Used only to phrase the split
+        adjusted: whether the bars are split-adjusted, when the caller
+            knows; otherwise read per ticker from `price_data[t].attrs`
+            (`split_adjusted`, else `adjusted`). Used only to phrase the split
             screen: every held ticker's close-to-close moves beyond 35% are
             named in `warnings`, with the ticker, exactly as run_strategy
             names them.
@@ -463,7 +468,10 @@ def run_portfolio_simulation(
         net_exposure_curve, leverage_curve (all pd.Series on the master
         trading-calendar index), rebalance_log (pd.DataFrame: date,
         turnover_pct, gross_leverage_after, n_positions), final_equity,
-        final_cash, warnings (list[str]).
+        final_cash, return_basis ("total_return", "price_return",
+        "mixed" or "unknown": whether the held tickers' returns include
+        dividends, as their providers stamped the frames -- "mixed", with a
+        warning, when they disagree), warnings (list[str]).
     """
     if fill_price not in _VALID_FILL_PRICES:
         raise ValidationError(
@@ -743,14 +751,24 @@ def run_portfolio_simulation(
     # screened: a split in a name never held cannot move the equity.
     split_warnings: List[str] = []
     held = np.abs(weights_mat).max(axis=0) > 1e-12
+    held_bases: Dict[str, str] = {}
     for t, i in ticker_pos.items():
         if not held[i]:
             continue
         closes = pd.Series(price_matrices["Close"][:, i], index=master_index)
-        flag = adjusted if adjusted is not None else price_data[t].attrs.get("adjusted")
+        flag = adjusted if adjusted is not None else split_adjusted_of(price_data[t])
         split_warnings.extend(
             f"{t}: {message}" for message in split_screen_warnings(closes, flag)
         )
+        held_bases[t] = return_basis_of(price_data[t])
+    # Whether each held ticker's returns include its dividends, as its
+    # provider stamped the frame. Two feeds in one book -- a total-return
+    # name beside a split-only one -- make the book's return part dividend
+    # policy, so a disagreement is said once, naming which is which.
+    return_basis, basis_warnings = combine_return_bases(
+        held_bases, what="the held tickers"
+    )
+    split_warnings.extend(basis_warnings)
 
     rebalance_dates = set(target_weights.index)
     # Rebalance date -> row of weights_mat, so the per-bar loop resolves a
@@ -1464,5 +1482,6 @@ def run_portfolio_simulation(
             if rebalance_log and not equity_curve.empty
             else None
         ),
+        "return_basis": return_basis,
         "warnings": warnings,
     }

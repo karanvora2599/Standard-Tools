@@ -382,6 +382,10 @@ def build_model_dataset(input_data: BuildModelDatasetInput) -> BuildModelDataset
             # The provider's adjusted flag as resolved for this build:
             # True, False, or None when nothing said.
             "bars_adjusted": built.get("bars_adjusted"),
+            # Whether the returns the labels and features were computed
+            # from include dividends: total_return, price_return, mixed or
+            # unknown.
+            "return_basis": built.get("return_basis"),
             # What each split declared in DatasetSpec.corporate_actions did.
             "corporate_actions_applied": built.get("corporate_actions_applied", []),
         },
@@ -2370,6 +2374,7 @@ def inspect_dataset(input_data: InspectDatasetInput) -> InspectDatasetResult:
         warnings=list(meta.get("warnings") or []),
         price_jumps=meta.get("price_jumps"),
         bars_adjusted=meta.get("bars_adjusted"),
+        return_basis=meta.get("return_basis"),
         data_hash=meta.get("data_hash"),
         data_hash_version=meta.get("data_hash_version"),
         built_with=meta.get("built_with"),

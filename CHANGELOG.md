@@ -1,5 +1,84 @@
 # Changelog
 
+## Adjustment is two flags, a trailing ratio is a year, and a dividend gap is a present value
+
+- **`adjusted=True` meant three things.** yfinance requests
+  `auto_adjust=True` (total-return bars), Polygon's aggregates
+  `adjusted=true` takes out splits only, and Bloomberg set
+  `adjustmentSplit` alone, so its dividends were whatever the answering
+  terminal's DPDF settings said. All three reported `adjusted=True`, and
+  a return computed from one was not the return computed from another,
+  by the dividend yield. `DataSetMetadata` now states `split_adjusted`
+  and `dividend_adjusted` separately (True, False, or None with the
+  reason), names what they rest on in `adjustment_note`, keeps
+  `adjusted` as their AND and adds `return_basis` (`total_return`,
+  `price_return`, `unknown`). yfinance daily-and-coarser bars are both;
+  its intraday bars are split-adjusted with dividends None, because
+  Yahoo sends no adjusted close with them and yfinance then substitutes
+  Close; Polygon is split-only, so its `adjusted` is now False; Databento
+  is neither. A constructor given `adjusted` alone is read at that
+  field's documented word: both or neither.
+- **Bloomberg's dividends are requested, not inherited.** Every
+  `HistoricalDataRequest` sets `adjustmentSplit`, `adjustmentNormal` and
+  `adjustmentAbnormal` to True and `adjustmentFollowDPDF` to False, so
+  the bars are total-return bars on every terminal. On a terminal whose
+  DPDF did not adjust for cash dividends, every price before an ex-date
+  now moves down by that dividend's ratio.
+- **Every frame says what it is, and every consumer that compounds it
+  echoes it.** Providers stamp `split_adjusted`, `dividend_adjusted` and
+  `return_basis` on the frames they serve. `run_strategy`,
+  `run_portfolio_simulation` (engine and tool), the backtest tools built
+  on `run_strategy` and `build_dataset` (recorded in `dataset_meta.json`
+  and shown by `inspect_dataset`) report `return_basis`; the ones that
+  take several inputs report `mixed`, with a warning naming which name
+  is which, when they disagree. A planted stock held through a 2%
+  dividend ends 2% lower on price-return bars, and only this field tells
+  the two results apart. `get_dataset_metadata` and
+  `describe_data_capabilities` show both flags.
+- **The split logic reads the split flag, not the AND.** The split
+  screen, the dataset build's `bars_adjusted` and its refusal of a
+  declared split read `split_adjusted`; read off the AND, Polygon's
+  bars would have been called unadjusted and a declared split divided
+  into them twice. Polygon builds now warn that their return targets
+  are price returns.
+- **Polygon's trailing P/E and ROE came from one quarter.**
+  `get_financial_ratios` read the newest filing with no period filter,
+  so after a 10-Q the P/E was market cap over a quarter's net income:
+  planted 40 against a trailing-twelve-month 10, ROE 6.25% against 25%.
+  The flows now come from the `timeframe=ttm` record, else the latest
+  annual one (named as such in `definition_notes`), sorted by the period
+  reported rather than the filing date; the balance sheet from the
+  newest filing. A name with neither gets no trailing P/E, ROE or
+  margin, and a note saying why. One to two more requests per name.
+- **`analyze_dividend_points` compared a present value with a nominal
+  sum.** The futures-implied total, S - F exp(-rT), is a present value;
+  the forecast was not discounted, so a future priced exactly off a
+  60-point dividend 91 days out at 5% reported a 0.74-point gap "It is a
+  position". Each dividend is now discounted at the financing rate to
+  `as_of` from its `pay_date` when given (the cash arrives then), else
+  its ex-date with a warning saying so; `forecast_pv_points` sits beside
+  the nominal `total_index_points`, `forecast_minus_implied` is present
+  value against present value (0.000 on the planted future), and a
+  `time_to_expiry` that disagrees with the dates under `day_count` is
+  named.
+- **`get_stock_fundamentals` carries what `fetch_financial_ratios`
+  carries**: `definition_notes`, `implausible`, a `source` input and
+  echo, and a warning that the ratios are today's, not point-in-time.
+- **`run_screener`'s P/E bound read a field Polygon never fills.**
+  `pe_ratio_max` compared `forward_pe` alone, so every Polygon name
+  failed it. It compares forward P/E, else trailing, says which per row
+  (`pe_basis`, beside `trailing_pe`) and warns when the screen mixed
+  them. A fundamental filter with an `end_date` in the past is warned:
+  the ratios are today's, whatever the window.
+- **A `DataSource` symbol fetched 1900-2100 from the default
+  provider.** It now takes `start_date`, `end_date` (both required with a
+  symbol) and `source`. A reference is resolved with
+  `expect="returns_panel"`, so a weight panel or a state curve is
+  refused by its kind; an `equity_curve` is refused with the conversion
+  that fixes it, and a raw artifact path is refused for carrying no kind.
+- The point-in-time module's docstring said no provider serves
+  point-in-time fundamentals; Polygon's quarterly filings do.
+
 ## Ten portfolio answers that were a number they did not have now refuse, flag or explain it
 
 - **A bounded `target_volatility` answer is never certified.** It

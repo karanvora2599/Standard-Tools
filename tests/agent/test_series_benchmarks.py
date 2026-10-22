@@ -206,10 +206,12 @@ class TestEqualLengthIsNotAlignment:
 
     @staticmethod
     def _publish(runs_dir, name, values, start):
+        """Published as the one kind a return-series source resolves: a
+        one-column `returns_panel` (see the CHANGELOG entry of 2026-10-22)."""
         index = pd.date_range(start, periods=len(values), freq="B")
         return handoff.publish(
-            pd.Series(values, index=index, name=name),
-            kind="analytic_series",
+            pd.Series(values, index=index, name=name).to_frame(),
+            kind="returns_panel",
             run_id="alignment",
             name=name,
             producer="test",

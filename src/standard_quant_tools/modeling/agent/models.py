@@ -1280,6 +1280,15 @@ class InspectDatasetResult(BaseModel):
             "recorded. None when not recorded."
         ),
     )
+    return_basis: Any = Field(
+        None,
+        description=(
+            "Whether the returns the labels and features were computed from "
+            "include dividends -- 'total_return', 'price_return', 'mixed' or "
+            "'unknown' -- as recorded. None for a dataset built before builds "
+            "recorded it."
+        ),
+    )
     data_hash: Optional[str] = None
     data_hash_version: Any = Field(
         None, description="The form of data_hash, as recorded. None when not recorded."

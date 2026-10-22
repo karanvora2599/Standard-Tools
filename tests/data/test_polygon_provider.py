@@ -190,6 +190,7 @@ class TestParseTickerInfo:
 
 class TestParseFinancialRatios:
     def test_derives_ratios_from_financials_and_market_cap(self):
+        """A trailing-twelve-month record: every ratio, flows included."""
         details = {"market_cap": 1_000_000_000.0}
         financials = {
             "income_statement": {
@@ -201,7 +202,7 @@ class TestParseFinancialRatios:
                 "liabilities": {"value": 200_000_000.0},
             },
         }
-        ratios = _parse_financial_ratios(details, financials)
+        ratios = _parse_financial_ratios(details, financials, timeframe="ttm")
         assert isinstance(ratios, FinancialRatios)
         assert ratios.market_cap == 1_000_000_000
         assert ratios.trailing_pe == pytest.approx(10.0)
@@ -527,10 +528,16 @@ class TestAsyncFetch:
 
 class TestGetMetadata:
     def test_reports_honest_defaults(self):
+        """`adjusted=true` on the aggregates request is split adjustment
+        only, so `adjusted` -- the AND of the two flags -- is False; see the
+        CHANGELOG entry of 2026-10-22."""
         provider = PolygonProvider(api_key="test-key")
         meta = provider.get_metadata("AAPL")
         assert meta.provider == "polygon"
-        assert meta.adjusted is True
+        assert meta.split_adjusted is True
+        assert meta.dividend_adjusted is False
+        assert meta.adjusted is False
+        assert meta.return_basis == "price_return"
         assert meta.survivorship_free is False
         assert meta.point_in_time is False
         assert meta.timezone == "America/New_York"

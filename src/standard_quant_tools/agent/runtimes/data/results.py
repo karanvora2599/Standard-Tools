@@ -255,7 +255,29 @@ class DatasetMetadataResult(_Result):
     symbol: str
     interval: str
     provider: Optional[str] = None
-    adjusted: Optional[bool] = None
+    adjusted: Optional[bool] = Field(
+        None,
+        description="split_adjusted AND dividend_adjusted, kept for callers "
+        "that read one flag.",
+    )
+    split_adjusted: Optional[bool] = Field(
+        None, description="Whether splits are taken out of the prices."
+    )
+    dividend_adjusted: Optional[bool] = Field(
+        None,
+        description="Whether cash dividends are taken out of the prices, so "
+        "a return computed from them is a total return.",
+    )
+    return_basis: Optional[str] = Field(
+        None,
+        description="'total_return', 'price_return' or 'unknown': what a "
+        "return computed from these bars is.",
+    )
+    adjustment_note: Optional[str] = Field(
+        None,
+        description="The request parameter the flags rest on and the "
+        "vendor's documented meaning of it.",
+    )
     survivorship_free: Optional[bool] = None
     point_in_time: Optional[bool] = None
     timezone: Optional[str] = None

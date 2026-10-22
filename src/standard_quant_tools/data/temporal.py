@@ -260,8 +260,8 @@ def price_contract(source: str) -> TemporalContract:
 
     ADJUSTMENT IS A SEPARATE QUESTION. A split-adjusted history is revised
     every time a split happens, and the adjusted close for 2019 is not the
-    number anybody saw in 2019. That is `DataSetMetadata.adjusted`, and it
-    is not what this contract describes.
+    number anybody saw in 2019. That is `DataSetMetadata.split_adjusted` and
+    `dividend_adjusted`, and it is not what this contract describes.
     """
     return TemporalContract(
         source=source,

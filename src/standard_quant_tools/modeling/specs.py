@@ -740,10 +740,10 @@ class DatasetSpec(BaseModel):
         description=(
             "Stock splits to adjust, each {entity, ex_date, split_ratio}. "
             "For a provider that serves unadjusted bars (Databento reports "
-            "adjusted=False): every bar of the entity before the ex-date has "
+            "split_adjusted=False): every bar of the entity before the ex-date has "
             "Open/High/Low/Close divided by the ratio and Volume multiplied by "
             "it, before any feature or label is computed. Refused when the "
-            "provider reports adjusted=True, where it would adjust twice. A "
+            "provider reports split_adjusted=True, where it would adjust twice. A "
             "declared split whose ex-date bar does not move by about the "
             "ratio is applied as declared and named in a warning. Dividends "
             "are not adjusted. Empty (the default) leaves the bars as served, "

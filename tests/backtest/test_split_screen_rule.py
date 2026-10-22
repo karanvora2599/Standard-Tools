@@ -139,7 +139,7 @@ class TestTheBacktestWarning:
             "SPLIT SCREEN: 1 bar(s) move more than 35% close to close, or fall "
             "26% to 35% as a 3:2 split does (-33%): "
             f"{date} ({move:+.1%}, near a 3:2 split). The provider reports "
-            "adjusted=False, so a split is a real bar here"
+            "split_adjusted=False, so a split is a real bar here"
         )
 
     def test_null_moves_beyond_35_keep_the_old_words(self):
@@ -151,7 +151,7 @@ class TestTheBacktestWarning:
             "SPLIT SCREEN: 2 bar(s) move more than 35% close to close: "
             f"{prices.index[60].date()} ({moves.iloc[60]:+.1%}), "
             f"{prices.index[200].date()} ({moves.iloc[200]:+.1%}). The provider "
-            "reports adjusted=True, so this is either a genuine move or a bad "
+            "reports split_adjusted=True, so this is either a genuine move or a bad "
             "print; check the bar before trusting the result."
         )
 

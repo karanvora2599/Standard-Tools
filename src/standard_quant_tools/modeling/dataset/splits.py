@@ -50,6 +50,7 @@ from standard_quant_tools._split_screen import (
     below_threshold_band,
 )
 from standard_quant_tools.constants import SPLIT_SCREEN_THRESHOLD
+from standard_quant_tools.data.adjustment import split_adjusted_of
 from standard_quant_tools.data.quality import (
     SPLIT_RATIO_TOLERANCE,
     _stamp,
@@ -88,19 +89,27 @@ def bars_adjusted_flag(
 ) -> Optional[bool]:
     """
     Whether the bars are split-adjusted: the provider's metadata when it
-    says, else the frames' `attrs["adjusted"]` when every frame carries one
-    and they agree, else None (not known).
+    says, else the frames' stamps when every frame carries one and they
+    agree, else None (not known).
 
     The metadata comes first because it is the provider's statement about
     the feed; a frame's stamp is the fallback for a provider whose
     metadata is unavailable. A mocked provider's metadata is not a bool
     and is read as silence, not as an answer.
+
+    `split_adjusted` is the question, and `adjusted` is not: it is the AND
+    of the split and dividend flags, so a split-only feed (Polygon) reports
+    adjusted=False while its splits are already out -- read as
+    "unadjusted", a declared split would divide its prices a second time.
+    `adjusted` is read only from an object that predates the split flag
+    (a frame stamped by Databento, whose False means neither).
     """
     if metadata is not None:
-        flag = _as_flag(getattr(metadata, "adjusted", None))
+        name = "split_adjusted" if hasattr(metadata, "split_adjusted") else "adjusted"
+        flag = _as_flag(getattr(metadata, name, None))
         if flag is not None:
             return flag
-    stamps = [_as_flag(getattr(frame, "attrs", {}).get("adjusted")) for frame in frames]
+    stamps = [split_adjusted_of(frame) for frame in frames]
     if stamps and all(stamp is not None for stamp in stamps):
         if len(set(stamps)) == 1:
             return stamps[0]
@@ -120,7 +129,7 @@ def refuse_declared_splits_on_adjusted_bars(
     )
     raise ValidationError(
         f"build_model_dataset: DatasetSpec.corporate_actions declares {listing}, "
-        f"but the provider reports adjusted=True ({source}): its bars already "
+        f"but the provider reports split_adjusted=True ({source}): its bars already "
         "have splits taken out, so adjusting them again would divide the "
         "earlier prices a second time. Remove corporate_actions, or build from "
         "a provider that serves unadjusted bars."
@@ -571,13 +580,13 @@ def price_jump_warnings(
         )
     if bars_adjusted is False:
         parts.append(
-            "The provider reports adjusted=False, so a split is a price fall in "
+            "The provider reports split_adjusted=False, so a split is a price fall in "
             "these bars, and every label or feature that spans one reads it as a "
             "return."
         )
     elif bars_adjusted is True:
         parts.append(
-            "The provider reports adjusted=True, so each is a genuine move or a "
+            "The provider reports split_adjusted=True, so each is a genuine move or a "
             "bad print; check the bar before trusting the rows that read it."
         )
     else:
@@ -644,13 +653,13 @@ def scored_row_jump_warnings(
             )
         elif bars_adjusted is False:
             tail = (
-                ", and the provider reports adjusted=False, so the score reads the "
+                ", and the provider reports split_adjusted=False, so the score reads the "
                 "split as a return. Retrain from a spec that declares it in "
                 "corporate_actions to score adjusted bars."
             )
         elif bars_adjusted is True:
             tail = (
-                ", and the provider reports adjusted=True, so it is a genuine move "
+                ", and the provider reports split_adjusted=True, so it is a genuine move "
                 "or a bad print; check the bar before trusting the score."
             )
         else:

@@ -48,6 +48,7 @@ from ._cache import (
     trim_to_inclusive_end,
 )
 from ._retry import retry
+from .adjustment import stamp_adjustment
 from .bar_hygiene import (
     CME_TRADE_DATE,
     US_EQUITY,
@@ -103,6 +104,45 @@ _EXCHANGE_SUFFIX_TIMEZONES = {
     ".V": "America/Toronto",
     ".SA": "America/Sao_Paulo",
 }
+
+# ── What `auto_adjust=True` takes out, per interval ───────────────────────
+# `get_ohlcv` calls `ticker.history(..., auto_adjust=True)`. yfinance
+# documents the flag as "Adjust all OHLC automatically": it rescales Open,
+# High, Low and Close by Yahoo's `Adj Close / Close` (yfinance
+# `utils.auto_adjust`). Yahoo documents its Close as "adjusted for splits"
+# and its Adj Close as "adjusted for splits and dividend and/or capital gain
+# distributions" (the CRSP method), so daily-and-coarser bars here are
+# total-return bars.
+#
+# Intraday is different, and not knowable from the request: Yahoo sends an
+# adjusted close only with daily and coarser bars, and where its answer has
+# none yfinance uses Close in its place (`utils.parse_quotes`: `adjclose =
+# closes`), which leaves the ratio at 1 and the dividends in. Whether a given
+# intraday answer carried one is a fact about that answer, so the flag is
+# None rather than a guess.
+_INTRADAY_SUFFIXES = ("m", "h")
+_SPLIT_DIVIDEND_NOTE = (
+    "Requested with auto_adjust=True: yfinance rescales OHLC by Yahoo's "
+    "Adj Close / Close, and Yahoo documents Adj Close as adjusted for splits "
+    "and dividend and capital-gain distributions (CRSP method) -- total-return "
+    "bars."
+)
+_INTRADAY_DIVIDEND_NOTE = (
+    "Requested with auto_adjust=True, but Yahoo publishes an adjusted close "
+    "only for daily and coarser bars; for intraday bars yfinance substitutes "
+    "Close when Yahoo sends none (utils.parse_quotes), which leaves dividends "
+    "in. Whether this answer carried one cannot be read from the request, so "
+    "dividend_adjusted is None. Yahoo's Close is split-adjusted at every "
+    "interval."
+)
+
+
+def _adjustment(interval: str) -> "tuple[Optional[bool], Optional[bool], str]":
+    """(split_adjusted, dividend_adjusted, the note they rest on)."""
+    if str(interval).endswith(_INTRADAY_SUFFIXES):
+        return True, None, _INTRADAY_DIVIDEND_NOTE
+    return True, True, _SPLIT_DIVIDEND_NOTE
+
 
 # The exchange calendar each suffix's listings trade on, consulted to decide
 # whether a daily bar's session has closed. Shenzhen keeps Shanghai's hours,
@@ -720,7 +760,10 @@ class YFinanceProvider(DataProvider):
                     tier="session_cache",
                     frame=cached_df,
                 )
-            return disclose_served(cached_df.copy(), symbol, interval, clock)
+            return stamp_adjustment(
+                disclose_served(cached_df.copy(), symbol, interval, clock),
+                self.get_metadata(symbol, interval),
+            )
 
         try:
             result = self._fetch_ohlcv_uncached(
@@ -744,7 +787,10 @@ class YFinanceProvider(DataProvider):
         # Judged on the copy handed out, at the moment it is handed out: a
         # window served from the session cache a minute later may have
         # closed in between.
-        return disclose_served(result.copy(), symbol, interval, clock)
+        return stamp_adjustment(
+            disclose_served(result.copy(), symbol, interval, clock),
+            self.get_metadata(symbol, interval),
+        )
 
     @retry(times=_ATTEMPTS, delay=1)
     def _fetch_ohlcv_uncached(
@@ -977,8 +1023,11 @@ class YFinanceProvider(DataProvider):
 
     def get_metadata(self, symbol: str, interval: str = "1d") -> DataSetMetadata:
         """
-        Honest self-report, not aspirational: yfinance auto-adjusts prices
-        by default (adjusted=True), but makes no guarantee that delisted
+        Honest self-report, not aspirational: every fetch requests
+        auto_adjust=True, so daily-and-coarser bars are split- and
+        dividend-adjusted (total return) and intraday bars split-adjusted
+        with dividends not known (see `_adjustment`). yfinance makes no
+        guarantee that delisted
         securities remain queryable (survivorship_free=False) or that
         historical values are never silently revised
         (point_in_time=False) — neither is a yfinance API contract.
@@ -997,9 +1046,12 @@ class YFinanceProvider(DataProvider):
             if upper_symbol.endswith(suffix):
                 timezone = tz_name
                 break
+        split_adjusted, dividend_adjusted, adjustment_note = _adjustment(interval)
         return DataSetMetadata(
             provider="yfinance",
-            adjusted=True,
+            split_adjusted=split_adjusted,
+            dividend_adjusted=dividend_adjusted,
+            adjustment_note=adjustment_note,
             survivorship_free=False,
             point_in_time=False,
             frequency=interval,

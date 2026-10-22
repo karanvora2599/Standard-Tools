@@ -1101,11 +1101,22 @@ def get_dataset_metadata(
             "This provider does NOT guarantee a survivorship-free universe, "
             "so a screen run over history sees only names that still exist."
         )
+    if getattr(meta, "dividend_adjusted", None) is False:
+        warnings.append(
+            "These bars are NOT dividend-adjusted: a return computed from them "
+            "is a PRICE return, short of what a holder earned by the dividend "
+            "yield. A result from a provider that adjusts for dividends is on "
+            "a different basis and is not comparable to one from this."
+        )
     return DatasetMetadataResult(
         symbol=input_data.symbol,
         interval=input_data.interval,
         provider=getattr(meta, "provider", None),
         adjusted=getattr(meta, "adjusted", None),
+        split_adjusted=getattr(meta, "split_adjusted", None),
+        dividend_adjusted=getattr(meta, "dividend_adjusted", None),
+        return_basis=getattr(meta, "return_basis", None),
+        adjustment_note=getattr(meta, "adjustment_note", None),
         survivorship_free=getattr(meta, "survivorship_free", None),
         point_in_time=getattr(meta, "point_in_time", None),
         timezone=getattr(meta, "timezone", None),

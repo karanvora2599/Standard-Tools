@@ -28,6 +28,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools.data.adjustment import resolve_return_basis
 from standard_quant_tools.data.bundle import DataBundle, validate_bundle
 from standard_quant_tools.data.factory import DataFactory
 from standard_quant_tools.error import ValidationError
@@ -380,6 +381,14 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
     bars_adjusted = bars_adjusted_flag(
         metadata, [*ohlcv_by_entity.values(), benchmark_df]
     )
+    # Whether every return computed below -- labels, return features, the
+    # returns panel -- includes dividends: the provider's statement when it
+    # makes one, else the frames' stamps, which must agree to mean anything.
+    return_basis, return_basis_warnings = resolve_return_basis(
+        metadata,
+        {**ohlcv_by_entity, f"{spec.benchmark} (benchmark)": benchmark_df},
+        what="the universe's bars",
+    )
     declared_splits: List[Dict[str, Any]] = []
     if spec.corporate_actions:
         if bars_adjusted is True:
@@ -425,6 +434,7 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
     warnings: List[str] = []
     warnings.extend(interval_warnings(spec.interval))
     warnings.extend(provider_guarantee_warnings(metadata))
+    warnings.extend(return_basis_warnings)
     warnings.extend(entity_coverage_warnings(ohlcv_by_entity, spec.start, spec.end))
     warnings.extend(
         intersection_warnings(ohlcv_by_entity, returns_panel, has_universe_scope)
@@ -844,5 +854,6 @@ def build_dataset(spec: DatasetSpec, include_target: bool = True) -> Dict[str, A
     result["price_jumps"] = jump_screen.jumps
     result["price_jump_rows"] = jump_screen.rows
     result["bars_adjusted"] = bars_adjusted
+    result["return_basis"] = return_basis
     result["corporate_actions_applied"] = declared_splits
     return result

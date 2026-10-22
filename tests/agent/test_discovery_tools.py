@@ -162,9 +162,14 @@ class TestDescribeDataCapabilities:
         assert set(result["supported_intervals"]) == set(declared)
 
     def test_guarantees_are_the_providers_own_self_report(self):
+        """The two adjustment flags beside their AND: yfinance's daily bars
+        are split- and dividend-adjusted (see the CHANGELOG entry of
+        2026-10-22)."""
         result = dispatch("describe_data_capabilities", {"source": "yfinance"})
         assert result["guarantees"] == {
             "adjusted": True,
+            "split_adjusted": True,
+            "dividend_adjusted": True,
             "survivorship_free": False,
             "point_in_time": False,
         }

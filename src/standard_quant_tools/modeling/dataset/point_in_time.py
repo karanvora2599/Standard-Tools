@@ -25,13 +25,20 @@ not `event_time <= t`, which is the mistake this module exists to make
 impossible to write by accident.
 
 WHY THE MODALITIES ARE NOT HERE. This is the join primitive and the contract,
-not a fundamentals feed. No shipped provider exposes point-in-time
-fundamentals — `get_financial_ratios(symbol)` takes no `as_of` at all, and
-every provider reports `point_in_time=False` — so a DataBundle carrying
-fundamentals today would be an empty box with a correct label on it. What is
-buildable and testable NOW is the join and its rules, so that when a PIT
-source does arrive the leakage-critical part is already written and covered
-rather than being invented under deadline.
+not a fundamentals feed. The feed is a provider's, and one provider serves
+it: `PolygonProvider.get_point_in_time_records(..., frame_kind="fundamentals")`
+returns Polygon's QUARTERLY filings, one row per filing, with the period end
+as `event_time` and the `filing_date` as `available_time`, and its temporal
+contract says so (`get_temporal_contract("fundamentals")`). The dataset
+builder joins those records through this module for the point-in-time
+fundamental features (`pit_features`). No other provider does:
+`get_financial_ratios(symbol)` takes no `as_of` on any of them and answers
+with today's ratios, and a provider's `point_in_time=False` is a statement
+about its bars being restated, not about filings. Quarterly records carry no
+fourth quarter (it is in the annual 10-K), so trailing-twelve-month flows are
+not buildable from them as they stand. The join and its rules were written
+and tested before that source existed, so the leakage-critical part was not
+invented under deadline.
 
 REVISIONS. A record may be restated. `asof_join` therefore takes the latest
 row whose `available_time <= t`, which for a revised value means the version

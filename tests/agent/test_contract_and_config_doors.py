@@ -326,7 +326,14 @@ class TestValidateToolCallRunsTheContractWithoutRunningAnything:
         and a validator that fetched would defeat its own purpose."""
         result = self._validate(
             "calculate_series_metrics",
-            {"series": {"symbol": "AAPL"}, "metrics": ["sharpe_ratio"]},
+            {
+                "series": {
+                    "symbol": "AAPL",
+                    "start_date": "2024-01-02",
+                    "end_date": "2024-12-31",
+                },
+                "metrics": ["sharpe_ratio"],
+            },
         )
         assert result["valid"] is True
         assert result["problems"] == []

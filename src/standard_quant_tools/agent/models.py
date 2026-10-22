@@ -267,6 +267,16 @@ class BacktestResult(ExplainsNulls):
     final_equity: float
     equity_curve: List[float]
     trade_log: Optional[List[Trade]] = None
+    return_basis: str = Field(
+        "unknown",
+        description=(
+            "What the compounded bar returns are: 'total_return' when the "
+            "provider adjusted the bars for dividends (yfinance daily, "
+            "Bloomberg), 'price_return' when it did not (Polygon, "
+            "Databento), 'unknown' when the frame does not say. The two "
+            "differ by the dividend yield, so compare results on one basis."
+        ),
+    )
     warnings: List[str] = Field(
         default_factory=list,
         description=(
@@ -969,7 +979,9 @@ class ScreenerInput(BaseModel):
             "Filter criteria dict. Keys: pe_ratio_max, pb_ratio_max, "
             "debt_equity_max, roe_min, profit_margin_min, div_yield_min, "
             "market_cap_min, rsi_max, rsi_min, price_above_sma (int), "
-            "price_below_sma (int), beta_max, beta_min."
+            "price_below_sma (int), beta_max, beta_min. pe_ratio_max reads "
+            "forward P/E, else trailing (pe_basis says which). Fundamental "
+            "keys read TODAY's ratios."
         ),
     )
     start_date: Optional[str] = Field(
@@ -2958,6 +2970,9 @@ class FundamentalsInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     symbol: str = Field(..., description="Ticker symbol (e.g. 'AAPL').")
+    source: Optional[ProviderName] = Field(
+        None, description="Data provider; None uses the default."
+    )
 
 
 class FundamentalsResult(BaseModel):
@@ -2975,6 +2990,21 @@ class FundamentalsResult(BaseModel):
     profit_margins: Optional[float]
     dividend_yield: Optional[float]
     market_cap: Optional[int]
+    source: Optional[str] = Field(None, description="The provider that answered.")
+    definition_notes: Dict[str, str] = Field(
+        default_factory=dict,
+        description="field -> how this provider's definition departs from the "
+        "canonical one, or why the field is null (e.g. a trailing ratio "
+        "refused because only a quarter's figures were available).",
+    )
+    implausible: List[str] = Field(
+        default_factory=list,
+        description="Values that fail a plausibility check on their face.",
+    )
+    warnings: List[str] = Field(
+        default_factory=list,
+        description="Always says these are TODAY's values, not point in time.",
+    )
 
 
 # ──────────────────────────────────────────────
@@ -3994,6 +4024,14 @@ class PortfolioSimulationResult(ExplainsNulls):
     avg_gross_leverage: Stat
     max_gross_leverage_used: Stat
     equity_curve: List[Stat]
+    return_basis: str = Field(
+        "unknown",
+        description=(
+            "Whether the held tickers' returns include dividends, as their "
+            "providers stamped the bars: 'total_return', 'price_return', "
+            "'mixed' (a warning names which ticker is which) or 'unknown'."
+        ),
+    )
     # ── Net exposure, inline ─────────────────────────────────────────────
     # The three numbers that answer "did the book stay where I built it".
     # A dollar-neutral construction is an INPUT (make_dollar_neutral); a

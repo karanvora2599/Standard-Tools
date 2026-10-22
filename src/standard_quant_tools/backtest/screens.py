@@ -94,13 +94,13 @@ def split_screen_warnings(prices: pd.Series, adjusted: Optional[bool]) -> List[s
         )
     if adjusted is False:
         provenance = (
-            "The provider reports adjusted=False, so a split is a real bar "
+            "The provider reports split_adjusted=False, so a split is a real bar "
             "here and every metric that compounds through it is wrong; "
             "adjust the prices or fetch adjusted bars"
         )
     elif adjusted is True:
         provenance = (
-            "The provider reports adjusted=True, so this is either a genuine "
+            "The provider reports split_adjusted=True, so this is either a genuine "
             "move or a bad print; check the bar before trusting the result"
         )
     else:

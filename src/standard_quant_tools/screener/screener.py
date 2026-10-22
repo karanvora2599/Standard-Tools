@@ -11,8 +11,10 @@ Design:
 
 Supported filter keys
 ─────────────────────
-Fundamental:
-  pe_ratio_max        float   Forward P/E upper bound
+Fundamental (TODAY's ratios -- see `fundamental_snapshot_warnings`):
+  pe_ratio_max        float   P/E upper bound: forward P/E, else trailing
+                              P/E where the provider has no forward figure
+                              (Polygon never does); `pe_basis` says which
   pb_ratio_max        float   Price-to-Book upper bound
   debt_equity_max     float   Debt-to-Equity upper bound
   roe_min             float   Return on Equity lower bound (as decimal, e.g. 0.15)
@@ -70,6 +72,18 @@ _VALID_FILTER_KEYS = frozenset(
 # Filters whose value is a window LENGTH in bars, not a threshold: these
 # must be positive integers, and are passed straight to an indicator.
 _WINDOW_FILTERS = frozenset(("price_above_sma", "price_below_sma"))
+
+# Filters read from `get_financial_ratios`: the provider's ratios as of the
+# moment of the call, whatever window the screen's bars cover.
+_FUNDAMENTAL_FILTERS = (
+    "pe_ratio_max",
+    "pb_ratio_max",
+    "debt_equity_max",
+    "roe_min",
+    "profit_margin_min",
+    "div_yield_min",
+    "market_cap_min",
+)
 
 # Default minimum overlap with the benchmark before a beta filter will act on
 # an estimate. A beta from a handful of bars is noise, and this module does
@@ -179,9 +193,14 @@ async def _fetch_ticker_data(
     filters: Dict[str, Any],
     spy_df: Optional[pd.DataFrame] = None,
     min_beta_obs: int = DEFAULT_MIN_BETA_OBS,
+    pe_bases: Optional[Dict[str, str]] = None,
 ) -> Tuple[str, str, Any]:
     """
     Fetch all required data for one ticker and evaluate filters.
+
+    `pe_bases`, when given, receives ticker -> which P/E pe_ratio_max was
+    compared with ("forward", "trailing", or "none" when the provider had
+    neither), for every ticker whose P/E was read -- passed or failed.
 
     Returns a 3-tuple (status, ticker, payload):
       ("passed", ticker, row_dict) — passed every filter.
@@ -198,19 +217,10 @@ async def _fetch_ticker_data(
     data fetch was broken.
     """
     row: Dict[str, Any] = {"ticker": ticker}
+    if pe_bases is None:
+        pe_bases = {}
 
-    needs_fundamentals = any(
-        k in filters
-        for k in (
-            "pe_ratio_max",
-            "pb_ratio_max",
-            "debt_equity_max",
-            "roe_min",
-            "profit_margin_min",
-            "div_yield_min",
-            "market_cap_min",
-        )
-    )
+    needs_fundamentals = any(k in filters for k in _FUNDAMENTAL_FILTERS)
     needs_ohlcv = any(
         k in filters
         for k in (
@@ -228,9 +238,21 @@ async def _fetch_ticker_data(
             ratios = await asyncio.get_event_loop().run_in_executor(
                 None, provider.get_financial_ratios, ticker
             )
+            # The P/E the bound is compared with: forward, else trailing.
+            # pe_ratio_max read forward_pe alone, which Polygon never fills
+            # -- every Polygon name failed it whatever its earnings -- and
+            # a yfinance name with no analyst estimate failed it too. A
+            # trailing figure stands in where there is no forward one, and
+            # `pe_basis` says which was compared, per ticker.
+            pe_value, pe_basis = ratios.forward_pe, "forward"
+            if pe_value is None and ratios.trailing_pe is not None:
+                pe_value, pe_basis = ratios.trailing_pe, "trailing"
+            if "pe_ratio_max" in filters:
+                pe_bases[ticker] = pe_basis if pe_value is not None else "none"
             row.update(
                 {
                     "forward_pe": ratios.forward_pe,
+                    "trailing_pe": ratios.trailing_pe,
                     "price_to_book": ratios.price_to_book,
                     "debt_to_equity": ratios.debt_to_equity,
                     "return_on_equity": ratios.return_on_equity,
@@ -240,10 +262,10 @@ async def _fetch_ticker_data(
                 }
             )
 
-            if "pe_ratio_max" in filters and (
-                ratios.forward_pe is None or ratios.forward_pe > filters["pe_ratio_max"]
-            ):
-                return ("failed_filter", ticker, "pe_ratio_max")
+            if "pe_ratio_max" in filters:
+                row["pe_basis"] = pe_basis if pe_value is not None else None
+                if pe_value is None or pe_value > filters["pe_ratio_max"]:
+                    return ("failed_filter", ticker, "pe_ratio_max")
             if "pb_ratio_max" in filters and (
                 ratios.price_to_book is None
                 or ratios.price_to_book > filters["pb_ratio_max"]
@@ -412,6 +434,10 @@ async def screen_stocks_async(
         -> error message for a data-fetch/compute exception — kept
         separate from failed_filters so a broken data fetch is never
         indistinguishable from a ticker that simply didn't meet the bar.
+        df.attrs["pe_basis"] maps ticker -> the P/E pe_ratio_max compared
+        ("forward", "trailing" or "none"), and df.attrs["warnings"] says
+        when fundamental filters met a window that ended in the past, and
+        when the P/E compared was not forward for every ticker.
 
     Raises:
         ValidationError: filters contains an unrecognized key, a filter value
@@ -445,8 +471,11 @@ async def screen_stocks_async(
         except Exception:
             spy_df = None
 
+    pe_bases: Dict[str, str] = {}
     tasks = [
-        _fetch_ticker_data(provider, ticker, start, end, filters, spy_df, min_beta_obs)
+        _fetch_ticker_data(
+            provider, ticker, start, end, filters, spy_df, min_beta_obs, pe_bases
+        )
         for ticker in tickers
     ]
     raw = await asyncio.gather(*tasks)
@@ -473,7 +502,83 @@ async def screen_stocks_async(
 
     df.attrs["failed_filters"] = failed_filters
     df.attrs["failed_tickers"] = failed_tickers
+    df.attrs["pe_basis"] = dict(pe_bases)
+    df.attrs["warnings"] = fundamental_snapshot_warnings(
+        filters, end_date
+    ) + pe_basis_warnings(pe_bases)
     return df
+
+
+def fundamental_snapshot_warnings(
+    filters: Dict[str, Any], end_date: Optional[str], today: Optional[Any] = None
+) -> List[str]:
+    """
+    The warning a screen earns by reading today's fundamentals against a
+    window that ended in the past, or [] when it does not.
+
+    Every provider's `get_financial_ratios` answers with the ratios as they
+    stand now; none takes a date. A screen whose technical window ends in
+    2020 therefore admitted names on 2026's P/E, and a backtest of the
+    tickers it passed is run on information the past did not have. The
+    window is stated, so the mismatch is said rather than left for the
+    caller to notice. An `end_date` of today or later (or none) earns
+    nothing.
+    """
+    used = [k for k in _FUNDAMENTAL_FILTERS if k in filters]
+    if not used or not end_date:
+        return []
+    today_date = today or datetime.date.today()
+    try:
+        ended = pd.Timestamp(end_date).date()
+    except (TypeError, ValueError):
+        return []
+    if ended >= today_date:
+        return []
+    days = (today_date - ended).days
+    return [
+        f"FUNDAMENTALS ARE TODAY'S: {', '.join(used)} read each provider's "
+        f"current ratios (as of {today_date}), but the screen's window ends "
+        f"{end_date}, {days} day(s) earlier. No provider here serves a ratio "
+        "as of a past date, so this admits names on figures that were not "
+        "known on that date -- a backtest of the tickers that passed has "
+        "look-ahead in its universe. Screen on technical filters alone for a "
+        "historical window, or build point-in-time features from filings "
+        "(PolygonProvider.get_point_in_time_records)."
+    ]
+
+
+def pe_basis_warnings(pe_bases: Dict[str, str]) -> List[str]:
+    """Which P/E pe_ratio_max compared, when it was not forward P/E for
+    every ticker: a forward and a trailing P/E differ by a year of expected
+    earnings growth, so a screen mixing them ranks the two groups apart."""
+    trailing = sorted(t for t, basis in pe_bases.items() if basis == "trailing")
+    neither = sorted(t for t, basis in pe_bases.items() if basis == "none")
+    forward = sorted(t for t, basis in pe_bases.items() if basis == "forward")
+    out: List[str] = []
+    if trailing:
+        mixed = (
+            f" while {len(forward)} were compared on forward P/E, so the bound "
+            "means a different thing for the two groups"
+            if forward
+            else ""
+        )
+        out.append(
+            f"pe_ratio_max compared TRAILING P/E for {len(trailing)} ticker(s) "
+            f"whose provider gave no forward P/E ({_listed(trailing)}){mixed}. "
+            "Each row's `pe_basis` says which was used."
+        )
+    if neither:
+        out.append(
+            f"pe_ratio_max: {len(neither)} ticker(s) had neither a forward nor a "
+            f"trailing P/E ({_listed(neither)}) and failed the filter for want "
+            "of one, not on its value."
+        )
+    return out
+
+
+def _listed(names: List[str], limit: int = 8) -> str:
+    more = f" and {len(names) - limit} more" if len(names) > limit else ""
+    return ", ".join(names[:limit]) + more
 
 
 # ── Module-level batch worker (picklable for ProcessPoolExecutor) ─────────────
@@ -595,7 +700,8 @@ def screen_stocks(
         crashed batch also appears individually in "failed_tickers", so no
         symbol can go missing from all three without a trace. A ticker's
         exception is never indistinguishable from a genuine filter
-        rejection.
+        rejection. "pe_basis" and "warnings" are as `screen_stocks_async`
+        documents them, said once for the whole universe.
 
     Raises:
         ValidationError: filters contains an unrecognized key.
@@ -692,9 +798,11 @@ def screen_stocks(
 
     failed_filters: Dict[str, str] = {}
     failed_tickers: Dict[str, str] = dict(failed_tickers_from_batches)
+    pe_bases: Dict[str, str] = {}
     for df in batch_results:
         failed_filters.update(df.attrs.get("failed_filters", {}))
         failed_tickers.update(df.attrs.get("failed_tickers", {}))
+        pe_bases.update(df.attrs.get("pe_basis", {}))
 
     non_empty = [df for df in batch_results if not df.empty]
     if not non_empty:
@@ -707,4 +815,9 @@ def screen_stocks(
     combined.attrs["failed_filters"] = failed_filters
     combined.attrs["failed_tickers"] = failed_tickers
     combined.attrs["failed_batches"] = failed_batches
+    # Said once for the whole universe, not once per worker batch.
+    combined.attrs["pe_basis"] = pe_bases
+    combined.attrs["warnings"] = fundamental_snapshot_warnings(
+        filters, end
+    ) + pe_basis_warnings(pe_bases)
     return combined

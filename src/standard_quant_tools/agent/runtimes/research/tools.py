@@ -119,7 +119,7 @@ from standard_quant_tools.analysis.rally import detect_rally
 from standard_quant_tools.analysis.regression import calculate_beta, rolling_beta
 from standard_quant_tools.backtest.artifacts import save_artifact
 from standard_quant_tools.data.bar_hygiene import collect_served_bars
-from standard_quant_tools.data.factory import DataFactory
+from standard_quant_tools.data.factory import DEFAULT_SOURCE, DataFactory
 from standard_quant_tools.data.quality import (
     detect_duplicate_timestamps,
     detect_missing_bars,
@@ -130,6 +130,7 @@ from standard_quant_tools.data.quality import (
     detect_stale_prices,
     detect_volume_anomalies,
 )
+from standard_quant_tools.data.ratios import implausible_value_warnings
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.indicators.momentum import rsi, stochastic_oscillator
 from standard_quant_tools.indicators.panel import (
@@ -574,7 +575,9 @@ def run_screener(input_data: ScreenerInput) -> ScreenerResult:
     failed_tickers = dict(result_df.attrs.get("failed_tickers", {}))
     failed_batches = list(result_df.attrs.get("failed_batches", []))
 
-    warnings: List[str] = []
+    # The screen's own: today's fundamentals against a past window, and
+    # which P/E pe_ratio_max compared where forward P/E was missing.
+    warnings: List[str] = list(result_df.attrs.get("warnings", []))
     # `.index.empty`, not `.empty`: a screen with no filters passes every
     # ticker and produces a frame with rows and NO columns, which `.empty`
     # calls empty. That reported num_passed=0 for a universe where
@@ -1513,12 +1516,36 @@ def scan_pairs(input_data: PairScannerInput) -> PairScannerResult:
     )
 
 
+#: Said on every fundamentals answer: no provider here serves these ratios
+#: as of a past date.
+FUNDAMENTALS_SNAPSHOT_WARNING = (
+    "These ratios are TODAY's snapshot, not point-in-time values: the "
+    "provider computes them from its latest data, and a ratio as it stood on "
+    "a past date is not available from this call. Joined onto history -- a "
+    "screen or a backtest over a past window -- they put future information "
+    "into every earlier row. PolygonProvider.get_point_in_time_records serves "
+    "filings stamped with their filing dates for that."
+)
+
+
 def get_stock_fundamentals(input_data: FundamentalsInput) -> FundamentalsResult:
-    """Fetch company metadata and key financial ratios for a single ticker."""
+    """Fetch company metadata and key financial ratios for a single ticker.
+
+    The honesty fields `fetch_financial_ratios` carries are carried here
+    too: `definition_notes` (a provider's definition that is not the
+    canonical one, or why a field is null), `implausible` (a value that
+    fails a plausibility check on its face) and `warnings`, which always
+    says the ratios are today's, not point-in-time. `source` picks the
+    provider; it could only ever be the default before.
+    """
     logger.debug("[fundamentals] %s", input_data.symbol)
-    provider = DataFactory.get_provider()
+    source = input_data.source
+    provider = _quality_provider(source)
     info = provider.get_ticker_info(input_data.symbol)
     ratios = provider.get_financial_ratios(input_data.symbol)
+    implausible = list(implausible_value_warnings(ratios))
+    notes = getattr(ratios, "definition_notes", None) or {}
+    definition_notes = {str(k): str(v) for k, v in notes.items()}
     logger.debug(
         "[fundamentals] %s  sector=%s  fwd_pe=%s  mktcap=%s",
         info.name,
@@ -1541,6 +1568,10 @@ def get_stock_fundamentals(input_data: FundamentalsInput) -> FundamentalsResult:
         profit_margins=ratios.profit_margins,
         dividend_yield=ratios.dividend_yield,
         market_cap=ratios.market_cap,
+        source=source or DEFAULT_SOURCE,
+        definition_notes=definition_notes,
+        implausible=implausible,
+        warnings=[FUNDAMENTALS_SNAPSHOT_WARNING],
     )
 
 

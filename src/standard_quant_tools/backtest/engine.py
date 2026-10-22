@@ -17,6 +17,7 @@ from standard_quant_tools.backtest.screens import (  # noqa: F401
     split_screen_warnings,
 )
 from standard_quant_tools.backtest.strategies import STRATEGY_REGISTRY
+from standard_quant_tools.data.adjustment import return_basis_of, split_adjusted_of
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.indicators.trend import sma
 from standard_quant_tools.metrics.annualization import resolve_periods_per_year
@@ -488,9 +489,10 @@ def run_strategy(
             already reported. Passed identically to the native kernel and
             the Python fallback: a machine with the C++ extension built
             must not report a different ratio from one without it.
-        adjusted: whether the bars are split- and dividend-adjusted, when
-            the caller knows (a provider's DataSetMetadata.adjusted). Read
-            from `price_data.attrs['adjusted']` when not passed. Used only
+        adjusted: whether the bars are split-adjusted, when the caller
+            knows (a provider's DataSetMetadata.split_adjusted). Read from
+            `price_data.attrs` when not passed (`split_adjusted`, else the
+            older `adjusted` stamp). Used only
             to phrase the split screen's warning: this engine compounds
             every bar return, so an unadjusted split prints as a real
             -50% bar (a 10:1 split reported buy-and-hold at -62% against
@@ -521,7 +523,11 @@ def run_strategy(
 
     Returns:
         Dict with performance metrics, equity curve, `periods_per_year` and
-        `periods_per_year_source`, and optionally trade_log. When fill_price
+        `periods_per_year_source`, `return_basis` (what the compounded
+        bar returns are: "total_return" when the frame's provider adjusted
+        for dividends, "price_return" when it did not, "unknown" when the
+        frame does not say -- read off `price_data.attrs`, see
+        `data.adjustment`), and optionally trade_log. When fill_price
         is "close" or "hl2_exploratory", result["warnings"] includes a
         look-ahead-bias caveat (see below). sortino_ratio and calmar_ratio
         are +inf over an empty denominator with a positive numerator and
@@ -679,9 +685,12 @@ def run_strategy(
     warnings.extend(
         split_screen_warnings(
             prices,
-            adjusted if adjusted is not None else price_data.attrs.get("adjusted"),
+            adjusted if adjusted is not None else split_adjusted_of(price_data),
         )
     )
+    # Whether the returns compounded below include dividends, as the
+    # provider stamped the frame. One frame, one basis: nothing to mix.
+    return_basis = return_basis_of(price_data)
     if fill_price == "close":
         warnings.append(
             "fill_price='close': a signal known at bar t-1's close is assumed filled "
@@ -828,6 +837,7 @@ def run_strategy(
             "warnings": warnings,
             "periods_per_year": ppy,
             "periods_per_year_source": ppy_source,
+            "return_basis": return_basis,
         }
         # Turnover and the cost it realized, which the Python path computes
         # on its way to the returns and this path recomputes here from the
@@ -966,6 +976,7 @@ def run_strategy(
         "realized_cost_pct": round(float(transaction_costs.sum()), 6),
         "periods_per_year": ppy,
         "periods_per_year_source": ppy_source,
+        "return_basis": return_basis,
     }
 
     trade_log = _build_trade_log(
@@ -1098,6 +1109,9 @@ def _run_grid_job(job: Dict[str, Any]) -> Dict[str, Any]:
     result.pop("trade_log", None)
     result.pop("periods_per_year", None)
     result.pop("periods_per_year_source", None)
+    # One frame for the whole grid, so one basis: a per-row copy would be
+    # a column the native grid path does not build.
+    result.pop("return_basis", None)
     result.update(job["params"])
     return result
 
@@ -1155,6 +1169,7 @@ def _run_signal_fn_job(
     result.pop("trade_log", None)
     result.pop("periods_per_year", None)
     result.pop("periods_per_year_source", None)
+    result.pop("return_basis", None)
     result.update(params)
     return result
 

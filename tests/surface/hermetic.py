@@ -625,6 +625,13 @@ _REF_BY_TOOL = {
 }
 
 
+def _fetched_returns() -> Dict[str, str]:
+    """A `DataSource` that fetches: a symbol needs its window, and the
+    synthesizer, trying one optional field at a time, settles on a `ref`
+    that names nothing."""
+    return {"symbol": SYMBOLS[0], "start_date": "2019-01-02", "end_date": "2020-12-31"}
+
+
 def _date_series(
     n: int = 120, start: float = 100.0, step: float = 0.3
 ) -> Dict[str, float]:
@@ -662,7 +669,12 @@ def _hand_written(
     if tool == "run_screener":
         return {"filters": {"pe_ratio_max": 40.0}}
     if tool == "calculate_series_metrics":
-        return {"metrics": ["sharpe_ratio", "annualized_volatility"]}
+        return {
+            "series": _fetched_returns(),
+            "metrics": ["sharpe_ratio", "annualized_volatility"],
+        }
+    if tool == "run_terminal_monte_carlo":
+        return {"returns": _fetched_returns()}
     if tool == "construct_weights_from_scores":
         return {"scores_ref": refs.get("score_panel")}
     if tool == "run_futures_backtest":

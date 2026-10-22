@@ -1397,6 +1397,7 @@ def run_signal_panel_backtest(
             final_equity=res["final_equity"],
             equity_curve=res["equity_curve"].tolist(),
             trade_log=trades,
+            return_basis=res.get("return_basis", "unknown"),
         )
 
     portfolio_metrics_out = dict(raw["portfolio_metrics"])
@@ -1854,6 +1855,7 @@ def run_portfolio_simulation(
         avg_gross_leverage=avg_gross_leverage,
         max_gross_leverage_used=max_gross_leverage_used,
         equity_curve=equity_curve.tolist(),
+        return_basis=raw.get("return_basis", "unknown"),
         net_exposure_min=net_exposure_min,
         net_exposure_max=net_exposure_max,
         net_exposure_mean=net_exposure_mean,

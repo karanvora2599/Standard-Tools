@@ -14,7 +14,8 @@ up with `calculate_beta`, `calculate_beta_from_returns` and
 `DataSource` says the tool is the QUESTION and the input says where the
 bytes are. Three origins, one schema:
 
-    {"symbol": "NVDA"}                  fetch it
+    {"symbol": "NVDA", "start_date": "2024-01-02", "end_date": "2025-12-31"}
+                                        fetch it, over that window
     {"ref": "sqt://returns_panel/..."}  something already computed it
     {"values": [0.01, -0.004, ...]}     the caller has it in hand
 
@@ -43,13 +44,20 @@ class DataSource(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     symbol: Optional[str] = Field(
-        None, description="A ticker this library's provider can fetch."
+        None,
+        description="A ticker, fetched as daily close-to-close returns over "
+        "start_date..end_date (both required with it).",
+    )
+    start_date: Optional[str] = Field(None, description="YYYY-MM-DD, inclusive.")
+    end_date: Optional[str] = Field(None, description="YYYY-MM-DD, inclusive.")
+    source: Optional[ProviderName] = Field(
+        None, description="Provider for `symbol`; None uses the default."
     )
     ref: Optional[str] = Field(
         None,
         description=(
-            "An `sqt://` reference published by another tool. Resolving it "
-            "does not refetch anything."
+            "An `sqt://returns_panel/...` reference, one column. Resolving "
+            "it does not refetch anything; another kind is refused."
         ),
     )
     values: Optional[List[float]] = Field(
@@ -77,6 +85,39 @@ class DataSource(BaseModel):
                 f"got {given or 'none'}. Two sources would make the "
                 "precedence rule part of the contract, and a caller who "
                 "passed both meant something this tool cannot infer."
+            )
+        window = [
+            name
+            for name, value in (
+                ("start_date", self.start_date),
+                ("end_date", self.end_date),
+                ("source", self.source),
+            )
+            if value is not None
+        ]
+        if self.symbol is None and window:
+            raise ValueError(
+                f"{', '.join(window)} only apply to a `symbol`: a ref or "
+                "inline values already fix their own window and origin. Drop "
+                f"{', '.join(window)}, or pass a symbol."
+            )
+        if self.symbol is not None and (
+            self.start_date is None or self.end_date is None
+        ):
+            missing = [
+                name
+                for name, value in (
+                    ("start_date", self.start_date),
+                    ("end_date", self.end_date),
+                )
+                if value is None
+            ]
+            raise ValueError(
+                f"symbol={self.symbol!r} needs {' and '.join(missing)}. A "
+                "symbol was fetched over 1900-2100 from the default provider, "
+                "so the answer depended on the day it ran and on how much "
+                "history that provider holds; name the window, e.g. "
+                '"start_date": "2024-01-02", "end_date": "2025-12-31".'
             )
         return self
 
@@ -611,7 +652,14 @@ def resolve_source(source: "DataSource", *, what: str = "series"):
     `max_drawdown`'s own validator refuses the infinities, so asking for a
     drawdown protected you and asking for a Sharpe alone did not.
 
-    `_refuse_if_not_returns` closes that, on all three paths.
+    `_refuse_if_not_returns` closes that, on all three paths, and a
+    reference is now resolved with `expect="returns_panel"`, so a weight
+    panel or a state curve is refused by its kind before its values are
+    read; an `equity_curve` is refused with the conversion that fixes it.
+
+    A symbol is fetched over the caller's `start_date`..`end_date` from the
+    caller's `source`. It was fetched over 1900-2100 from the default
+    provider whatever was asked.
     """
     import pandas as pd
 
@@ -625,10 +673,29 @@ def resolve_source(source: "DataSource", *, what: str = "series"):
         return series
 
     if source.ref is not None:
+        from ..handoff import parse as _parse
         from ..handoff import resolve as _resolve
 
         try:
-            data = _resolve(source.ref)
+            kind = _parse(str(source.ref).strip()).kind
+        except Exception:  # noqa: BLE001 -- resolve says what is wrong
+            kind = None
+        if kind == "equity_curve":
+            raise ValidationError(
+                f"{what}: {source.ref!r} is an `equity_curve` -- a level "
+                "series (account value per bar), and this tool needs a RETURN "
+                "series. A Sharpe taken on levels is scale-invariant and comes "
+                "back two to three orders of magnitude too high with nothing "
+                "looking wrong. Run convert_reference from `equity_curve` to "
+                "`returns_panel`, which drops the first bar rather than "
+                "carrying it as a fabricated flat period, and pass the "
+                "reference it returns."
+            )
+        try:
+            # The kind is checked, not assumed: a reference to a weight panel,
+            # a cash curve or a state machine resolved here as if it were
+            # returns before.
+            data = _resolve(source.ref, expect="returns_panel")
         except Exception as exc:  # noqa: BLE001 -- one refusal, not a trace
             raise ValidationError(
                 f"{what}: {source.ref!r} could not be resolved -- {exc}"
@@ -650,10 +717,20 @@ def resolve_source(source: "DataSource", *, what: str = "series"):
 
     from standard_quant_tools.data.factory import DataFactory
 
-    provider = DataFactory.get_provider()
-    frame = provider.get_ohlcv(source.symbol, "1900-01-01", "2100-01-01")
+    # The caller's window and provider. This fetched 1900-2100 from the
+    # default provider whatever was asked, so the same call answered
+    # differently on different days and for different history depths.
+    provider = (
+        DataFactory.get_provider(source.source)
+        if source.source
+        else DataFactory.get_provider()
+    )
+    frame = provider.get_ohlcv(source.symbol, source.start_date, source.end_date)
     if frame is None or frame.empty:
-        raise ValidationError(f"{what}: {source.symbol!r} returned no bars.")
+        raise ValidationError(
+            f"{what}: {source.symbol!r} returned no bars over "
+            f"{source.start_date}..{source.end_date}."
+        )
     return frame["Close"].pct_change(fill_method=None).dropna()
 
 

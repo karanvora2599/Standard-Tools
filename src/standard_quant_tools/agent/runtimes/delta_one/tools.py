@@ -364,6 +364,7 @@ def analyze_dividend_points(
             future_price=input_data.future_price,
             financing_rate=input_data.financing_rate,
             time_to_expiry=input_data.time_to_expiry,
+            day_count=input_data.day_count,
         )
     )
 

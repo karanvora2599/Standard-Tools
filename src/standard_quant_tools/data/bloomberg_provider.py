@@ -55,6 +55,7 @@ from standard_quant_tools.error import (
 
 from ._cache import trim_to_inclusive_end
 from ._retry import retry
+from .adjustment import stamp_adjustment
 from .bar_hygiene import (
     CME_TRADE_DATE,
     US_EQUITY,
@@ -88,6 +89,37 @@ _PERIODICITY = {
     "1wk": "WEEKLY",
     "1mo": "MONTHLY",
 }
+
+# ── Price adjustment, stated on every request ─────────────────────────────
+# Bloomberg's API reference (HistoricalDataRequest) defines four switches:
+#   adjustmentSplit       spin-offs, stock splits/consolidations, stock
+#                         dividends/bonus, rights offerings;
+#   adjustmentNormal      regular cash dividends (interim, final, income,
+#                         ... -- the "normal" cash distributions);
+#   adjustmentAbnormal    special cash, capital gains, return of capital,
+#                         liquidation and the other "abnormal" distributions;
+#   adjustmentFollowDPDF  follow the terminal's own DPDF<GO> settings, and
+#                         True by default.
+# This provider used to set adjustmentSplit alone, so whether dividends came
+# out was whatever DPDF said on the terminal that answered: one library call,
+# two different return series on two desks, and nothing in the result saying
+# which. Every switch is now explicit and DPDF is not followed. Dividends are
+# adjusted -- normal and abnormal both -- so the bars are total-return bars,
+# the basis the default provider (yfinance's auto_adjust) serves and the one
+# a holder of the stock actually earned. `get_metadata` states the same.
+_ADJUSTMENT_REQUEST = (
+    ("adjustmentFollowDPDF", False),
+    ("adjustmentSplit", True),
+    ("adjustmentNormal", True),
+    ("adjustmentAbnormal", True),
+)
+_ADJUSTMENT_NOTE = (
+    "Requested with adjustmentSplit, adjustmentNormal and adjustmentAbnormal "
+    "all True and adjustmentFollowDPDF False: Bloomberg's HistoricalDataRequest "
+    "reference defines these as split/capital-change, regular cash dividend "
+    "and special-distribution adjustment, applied as requested rather than as "
+    "the terminal's DPDF settings say -- total-return bars."
+)
 
 # Bloomberg "yellow key" market-sector suffixes get_ohlcv/get_ticker_info
 # recognize as "already a fully-qualified Bloomberg ticker" — appended
@@ -393,12 +425,15 @@ class BloombergProvider(DataProvider):
         result = self._get_ohlcv_uncached(symbol, start_date, end_date, interval)
         # BDH labels a weekly or monthly bar by the END of its period, so
         # the last bar's own date is the session that completes it.
-        return disclose_served(
-            result,
-            symbol,
-            interval,
-            _session_clock(_to_bloomberg_ticker(symbol)),
-            anchor="end",
+        return stamp_adjustment(
+            disclose_served(
+                result,
+                symbol,
+                interval,
+                _session_clock(_to_bloomberg_ticker(symbol)),
+                anchor="end",
+            ),
+            self.get_metadata(symbol, interval),
         )
 
     @retry(times=3, delay=1)
@@ -423,7 +458,8 @@ class BloombergProvider(DataProvider):
             request.set("periodicitySelection", _PERIODICITY[interval])
             request.set("startDate", start_str)
             request.set("endDate", end_str)
-            request.set("adjustmentSplit", True)
+            for switch, value in _ADJUSTMENT_REQUEST:
+                request.set(switch, value)
 
             session.sendRequest(request)
             bars, error = _drain_historical_response(session, bbg_ticker)
@@ -524,8 +560,11 @@ class BloombergProvider(DataProvider):
 
     def get_metadata(self, symbol: str, interval: str = "1d") -> DataSetMetadata:
         """
-        Honest self-report: `adjustmentSplit=True` is always requested for
-        historical bars (adjusted=True), but Desktop API makes no guarantee
+        Honest self-report: every historical request sets the split, normal-
+        and abnormal-dividend adjustments explicitly and does not follow the
+        terminal's DPDF settings (see `_ADJUSTMENT_REQUEST`), so the bars are
+        split- and dividend-adjusted (total return), whichever terminal
+        answers. Desktop API makes no guarantee
         that delisted securities remain queryable (survivorship_free=False)
         or that historical values are never revised (point_in_time=False) —
         a real point-in-time/survivorship-free feed needs Bloomberg's PORT/
@@ -536,7 +575,9 @@ class BloombergProvider(DataProvider):
         bbg_ticker = _to_bloomberg_ticker(symbol)
         return DataSetMetadata(
             provider="bloomberg",
-            adjusted=True,
+            split_adjusted=True,
+            dividend_adjusted=True,
+            adjustment_note=_ADJUSTMENT_NOTE,
             survivorship_free=False,
             point_in_time=False,
             frequency=interval,
