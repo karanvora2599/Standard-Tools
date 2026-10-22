@@ -24,10 +24,7 @@ from standard_quant_tools.modeling.agent import (
 from standard_quant_tools.modeling.agent import (
     evaluate_model_portfolio as evaluate_model_portfolio_tool,
 )
-from standard_quant_tools.modeling.agent import (
-    modeling_dispatch,
-    run_model_experiment,
-)
+from standard_quant_tools.modeling.agent import modeling_dispatch, run_model_experiment
 from standard_quant_tools.modeling.portfolio_eval import (
     apply_exposure_targets,
     evaluate_model_portfolio,

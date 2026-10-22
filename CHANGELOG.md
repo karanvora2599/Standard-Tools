@@ -1,5 +1,13 @@
 # Changelog
 
+## Two import blocks joined, as the pinned isort writes them
+
+- The previous entry's lint pass was checked with an isort that was not
+  the pinned 9.0.2; that release also joins a plain import with the
+  aliased one above it from the same module, in `analysis/diagnostics.py`
+  and `tests/modeling/test_portfolio_eval.py`. Both now read as isort
+  9.0.2 and black 26.5.1 write them.
+
 ## The source passes its formatter again, and names no particular downstream application
 
 - **Lint passes.** The lint job had failed on `main` for three commits:
