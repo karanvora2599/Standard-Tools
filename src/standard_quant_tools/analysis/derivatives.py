@@ -689,6 +689,15 @@ def _bisect_root(curve: Any, low: float, high: float, value_at_low: float) -> fl
 # ── the surface ─────────────────────────────────────────────────────────
 
 
+#: Points across the fitted log-moneyness range at which Durrleman's
+#: condition is evaluated.
+DURRLEMAN_GRID_POINTS = 121
+
+#: Violations listed in a smile fit, nearest the money first. All of them
+#: are counted.
+MAX_LISTED_VIOLATIONS = 10
+
+
 def fit_volatility_smile(
     strikes: Sequence[float],
     implied_vols: Sequence[float],
@@ -788,21 +797,34 @@ def fit_volatility_smile(
     else:
         r_squared = float(1.0 - (residual**2).sum() / total_ss)
 
-    violations = _durrleman_violations(c0, c1, c2, x, t)
-    for violation in violations:
+    # Every violation counted, the nearest the money listed. The list was
+    # cut to ten inside the check and the warning counted the cut list, so
+    # a smile concave across the whole range reported "10 of the sampled
+    # points" when 38 of them failed.
+    every_violation = _durrleman_violations(c0, c1, c2, x, t)
+    for violation in every_violation:
         # The strike in the underlying's units, beside the moneyness.
         violation["strike"] = float(violation["moneyness"] * forward)
+    violations = every_violation[:MAX_LISTED_VIOLATIONS]
+    violating_strikes = [v["strike"] for v in every_violation]
 
     warnings: List[str] = []
     if violations:
         warnings.append(
             f"The fitted smile implies a NEGATIVE risk-neutral density at "
-            f"{len(violations)} of the sampled log-moneyness points (nearest "
-            f"the money at strike {violations[0]['strike']:.2f}, moneyness "
-            f"{violations[0]['moneyness']:.3f}). That is a "
-            "butterfly arbitrage in the fitted surface. Usually one quote is "
-            "stale rather than the market being free money -- check the "
-            "inputs before trading it."
+            f"{len(every_violation)} of the {DURRLEMAN_GRID_POINTS} sampled "
+            f"log-moneyness points, between strikes {min(violating_strikes):.2f} "
+            f"and {max(violating_strikes):.2f} (nearest the money at strike "
+            f"{violations[0]['strike']:.2f}, moneyness "
+            f"{violations[0]['moneyness']:.3f}"
+            + (
+                f"; the {len(violations)} nearest are listed"
+                if len(every_violation) > len(violations)
+                else ""
+            )
+            + "). That is a butterfly arbitrage in the fitted surface. Usually "
+            "one quote is stale rather than the market being free money -- "
+            "check the inputs before trading it."
         )
     if math.isfinite(r_squared) and r_squared < 0.9:
         warnings.append(
@@ -829,6 +851,13 @@ def fit_volatility_smile(
         "residual_std": float(residual.std(ddof=1)) if k.size > 3 else 0.0,
         "strike_range": [float(k.min()), float(k.max())],
         "arbitrage_violations": violations,
+        "n_arbitrage_violations": len(every_violation),
+        "n_arbitrage_points_checked": DURRLEMAN_GRID_POINTS,
+        "arbitrage_violation_strike_range": (
+            [float(min(violating_strikes)), float(max(violating_strikes))]
+            if violating_strikes
+            else None
+        ),
         "fitted": [
             {"strike": float(kk), "observed_vol": float(vv), "fitted_vol": float(ff)}
             for kk, vv, ff in zip(k, v, fitted)
@@ -845,9 +874,12 @@ def _durrleman_violations(c0, c1, c2, x, t) -> List[Dict[str, Any]]:
     Evaluated on the fitted range only. Outside it the fit is not claimed to
     hold, so a violation there is a statement about the polynomial rather
     than about the quotes.
+
+    Every violation, nearest the money first; `fit_volatility_smile` lists
+    the first `MAX_LISTED_VIOLATIONS` and counts them all.
     """
     out: List[Dict[str, Any]] = []
-    grid = np.linspace(float(x.min()), float(x.max()), 121)
+    grid = np.linspace(float(x.min()), float(x.max()), DURRLEMAN_GRID_POINTS)
     for xi in grid:
         vol = c0 + c1 * xi + c2 * xi * xi
         if vol <= 0:
@@ -876,7 +908,7 @@ def _durrleman_violations(c0, c1, c2, x, t) -> List[Dict[str, Any]]:
         # trader was told the arbitrage sat at k=1.00 while strike_range
         # in the same payload said [300, 370].
         entry["moneyness"] = float(math.exp(entry["log_moneyness"]))
-    return out[:10]
+    return out
 
 
 def volatility_cone(

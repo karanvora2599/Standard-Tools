@@ -439,6 +439,27 @@ class TestVolatilitySmile:
         assert violations
         assert violations[0]["reason"] == "negative fitted vol"
 
+    def test_every_violation_is_counted_and_the_nearest_listed(self):
+        """A smile concave across the whole range: 38 of the 121 grid
+        points fail, and the warning said 10 -- the length of the list it
+        had already cut to ten."""
+        forward = 100.0
+        strikes = np.linspace(85, 118, 9)
+        x = np.log(strikes / forward)
+        result = fit_volatility_smile(
+            strikes, 0.3 - 4.0 * x**2, forward=forward, time_to_expiry=0.5
+        )
+        assert result["n_arbitrage_violations"] == 38
+        assert result["n_arbitrage_points_checked"] == 121
+        assert len(result["arbitrage_violations"]) == 10
+        listed = [abs(v["log_moneyness"]) for v in result["arbitrage_violations"]]
+        assert listed == sorted(listed)
+        low, high = result["arbitrage_violation_strike_range"]
+        assert low <= result["arbitrage_violations"][0]["strike"] <= high
+        (warning,) = [w for w in result["warnings"] if "NEGATIVE" in w]
+        assert "at 38 of the 121 sampled" in warning
+        assert "the 10 nearest are listed" in warning
+
     def test_a_well_behaved_smile_has_no_violations(self):
         """The null case: a gentle, realistic smile must come back clean, or
         the detector is useless."""
@@ -449,6 +470,8 @@ class TestVolatilitySmile:
             time_to_expiry=self.T,
         )
         assert not result["arbitrage_violations"]
+        assert result["n_arbitrage_violations"] == 0
+        assert result["arbitrage_violation_strike_range"] is None
 
 
 class TestVolatilityCone:

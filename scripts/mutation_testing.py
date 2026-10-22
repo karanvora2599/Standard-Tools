@@ -223,6 +223,14 @@ MUTATIONS: List[Mutation] = [
         "tests/analysis/test_inference.py",
     ),
     Mutation(
+        # The count taken from the list after it is cut to ten, as it was.
+        "volatility smile: count the listed violations, not all of them",
+        SRC / "analysis/derivatives.py",
+        '        "n_arbitrage_violations": len(every_violation),\n',
+        '        "n_arbitrage_violations": len(violations),\n',
+        "tests/analysis/test_derivatives.py",
+    ),
+    Mutation(
         # run_cointegration_test returning a random walk's half-life with
         # nothing said about the test that rejects it.
         "cointegration tool: say nothing when the half-life's test fails",

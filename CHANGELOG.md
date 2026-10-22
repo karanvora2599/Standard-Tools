@@ -1,5 +1,26 @@
 # Changelog
 
+## A smile fit counts every arbitrage violation, and lists the ten nearest the money
+
+- **The count was the length of a list already cut to ten.**
+  `fit_volatility_smile` (and the tool over it) evaluates Durrleman's
+  condition at 121 points across the fitted range. The check returned at
+  most ten violations, nearest the money first, and the warning counted
+  that list: a smile with curvature -4 at half a year, strikes 85 to 118,
+  fails at 38 of the 121 points and was reported as "a NEGATIVE
+  risk-neutral density at 10 of the sampled log-moneyness points"; one at
+  -20 over two years failed at 104 and said 10 too. A smile negative
+  across most of its range read like a local blemish.
+- **Now:** every violation is counted in `n_arbitrage_violations`, out of
+  `n_arbitrage_points_checked`, with the lowest and highest violating
+  strike in `arbitrage_violation_strike_range`; `arbitrage_violations`
+  still lists the ten nearest the money (`MAX_LISTED_VIOLATIONS`), and the
+  warning gives the true count, the strike range and says when the list
+  is shorter than the count. `_durrleman_violations` returns them all.
+- Tests: the 38-point smile counted, listed ten in order of distance from
+  the money and warned about in those words; a clean smile counts zero.
+  The mutation catalogue gains one entry, killed.
+
 ## A half-life comes with its own test: `run_cointegration_test` reports it and `scan_pairs` keeps a pair only when it passes
 
 - **The test was computed and dropped.** `half_life_statistics` exists

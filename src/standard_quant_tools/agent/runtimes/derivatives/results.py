@@ -170,7 +170,24 @@ class VolatilitySmileResult(_Result):
         "evaluates it outside: a quadratic continued into the wings reaches "
         "negative variance. Keep any evaluation of the coefficients inside.",
     )
-    arbitrage_violations: List[ArbitrageViolation] = Field(default_factory=list)
+    arbitrage_violations: List[ArbitrageViolation] = Field(
+        default_factory=list,
+        description="The violations nearest the money, at most ten; "
+        "n_arbitrage_violations counts them all.",
+    )
+    n_arbitrage_violations: int = Field(
+        0,
+        description="Grid points where the fitted smile implies a negative "
+        "density, out of n_arbitrage_points_checked.",
+    )
+    n_arbitrage_points_checked: int = Field(
+        0,
+        description="Points across the fitted range Durrleman's condition "
+        "was evaluated at.",
+    )
+    arbitrage_violation_strike_range: Optional[List[float]] = Field(
+        None, description="The lowest and highest strike where it fails."
+    )
     fitted: List[SmilePoint] = Field(default_factory=list)
 
 
