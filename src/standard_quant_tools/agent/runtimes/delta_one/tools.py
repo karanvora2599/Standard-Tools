@@ -238,7 +238,14 @@ def analyze_index_basket(input_data: IndexBasketInput) -> IndexBasketResult:
 def compare_delta_one_expressions(
     input_data: CompareExpressionsInput,
 ) -> CompareExpressionsResult:
-    expressions = [e.model_dump() for e in input_data.expressions]
+    # Only the terms the caller set. `model_dump()` wrote every field with
+    # its default, so each expression arrived carrying all ten cost terms
+    # and `terms_supplied` listed all ten whatever was priced -- and the
+    # warning for an expression priced on one term or none, which reads
+    # that list, could not fire from here. The library's defaults are the
+    # model's, so every number is unchanged; a term set explicitly to its
+    # default still counts as supplied.
+    expressions = [e.model_dump(exclude_unset=True) for e in input_data.expressions]
     return CompareExpressionsResult(
         **_expressions.compare_expressions(
             expressions,

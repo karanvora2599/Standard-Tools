@@ -223,6 +223,15 @@ MUTATIONS: List[Mutation] = [
         "tests/analysis/test_inference.py",
     ),
     Mutation(
+        # Every field dumped with its default, as the tool did: each
+        # expression then lists all ten terms as supplied.
+        "delta one expressions: dump every default as a supplied term",
+        SRC / "agent/runtimes/delta_one/tools.py",
+        "    expressions = [e.model_dump(exclude_unset=True) for e in input_data.expressions]\n",
+        "    expressions = [e.model_dump() for e in input_data.expressions]\n",
+        "tests/delta_one/test_delta_one.py",
+    ),
+    Mutation(
         # The count taken from the list after it is cut to ten, as it was.
         "volatility smile: count the listed violations, not all of them",
         SRC / "analysis/derivatives.py",

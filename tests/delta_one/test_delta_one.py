@@ -491,6 +491,52 @@ class TestExpressionComparison:
             # Execution is a cost either way -- it does not flip.
             assert a["execution_bps"] == pytest.approx(b["execution_bps"])
 
+    def test_the_tool_reports_only_the_terms_the_caller_supplied(self):
+        """Through the tool every expression listed all ten cost terms as
+        supplied -- the model's defaults, dumped -- so the warning for an
+        ETF priced on nothing could never fire there."""
+        from standard_quant_tools.agent.tools import dispatch
+
+        result = dispatch(
+            "compare_delta_one_expressions",
+            {
+                "expressions": [
+                    {"label": "etf", "kind": "etf"},
+                    {"label": "fut", "kind": "future", "financing_rate": 0.05},
+                    {
+                        "label": "swap",
+                        "kind": "swap",
+                        "financing_rate": 0.05,
+                        "fee_rate": 0.0,
+                    },
+                ],
+                "notional": 1e6,
+                "horizon_years": 1.0,
+            },
+        )
+        supplied = {e["label"]: e["terms_supplied"] for e in result["expressions"]}
+        assert supplied == {
+            "etf": [],
+            "fut": ["financing_rate"],
+            # Set to its default, and still supplied: the caller said zero.
+            "swap": ["fee_rate", "financing_rate"],
+        }
+        (thin,) = [w for w in result["warnings"] if "one term or none" in w]
+        assert "'etf'" in thin and "'fut'" in thin and "'swap'" not in thin
+        library = compare_expressions(
+            [
+                {"label": "etf", "kind": "etf"},
+                {"label": "fut", "kind": "future", "financing_rate": 0.05},
+                {"label": "swap", "kind": "swap", "financing_rate": 0.05},
+            ],
+            notional=1e6,
+            horizon_years=1.0,
+        )
+        totals = {e["label"]: e["total_annualized_bps"] for e in library["expressions"]}
+        assert {
+            e["label"]: e["total_annualized_bps"] for e in result["expressions"]
+        } == totals
+
     def test_an_unpriced_term_is_refused_rather_than_ignored(self):
         with pytest.raises(ValidationError, match="unknown fields"):
             compare_expressions(

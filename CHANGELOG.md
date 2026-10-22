@@ -1,5 +1,25 @@
 # Changelog
 
+## `compare_delta_one_expressions` reports the terms the caller supplied, so its "priced on one term or none" warning can fire
+
+- **Every expression listed all ten cost terms.** The library's
+  `compare_expressions` reports `terms_supplied` per expression and warns
+  when one was priced on one term or none -- an omitted expense ratio
+  makes an ETF look free. The tool handed it `model_dump()` of each
+  expression, which writes every field with its default, so an ETF given
+  no terms at all and a future given only a financing rate both listed
+  all ten as supplied, and the warning never fired from the tool. The
+  library called directly listed `[]` and `['financing_rate']` and
+  warned.
+- **Now** the tool passes only the fields the caller set
+  (`exclude_unset`). The library's defaults are the model's, so every cost
+  is unchanged; a term set explicitly to its default (a fee of zero)
+  still counts as supplied, because the caller said so.
+- Tests: through the tool, an empty ETF lists `[]`, a future
+  `['financing_rate']`, a swap with an explicit zero fee lists it; the
+  warning names the two thin rows and not the third; every total equals
+  the library's. The mutation catalogue gains one entry, killed.
+
 ## A smile fit counts every arbitrage violation, and lists the ten nearest the money
 
 - **The count was the length of a list already cut to ten.**
