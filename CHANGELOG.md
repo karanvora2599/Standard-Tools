@@ -1,5 +1,33 @@
 # Changelog
 
+## The regime concentration belongs to the regime it names, and a loss is attributed to the regime that lost it
+
+- **The share and the name came from two different regimes.**
+  `regime_stratified_performance` (the `get_regime_stratified_performance`
+  tool) reported the largest share of total P&L in absolute value and
+  named the best regime in its warning. Whenever the total was a loss
+  they were different regimes: one regime losing 11.8% beside one making
+  2.8% (a 9.1% loss) was reported as "130% of total P&L came from the
+  single regime 'b'" -- the one that made money -- with "this is a bet on
+  that regime recurring". With a profit the two could also differ: one
+  regime losing 20% beside two making 15% each reported 200%, the
+  loser's share, under the best regime's name, whose own share is 150%.
+- **Now:** a profit's concentration is the best regime's own share, and a
+  loss's is the worst regime's share of the loss; `pnl_concentration`
+  is that share, `pnl_concentration_regime` the regime it belongs to and
+  `pnl_concentration_of` `profit` or `loss`. The loss warning says the
+  loss is that regime's, and above 100% either warning says the other
+  regimes together went the other way. In the common case -- a profit
+  whose best regime holds the largest share -- the number is unchanged.
+- **A total that is rounding residue is zero.** +1% twenty times and -1%
+  twenty times summed to -1.4e-17, and every regime's share of it was
+  about 10^16; a total within 1e-12 of the gross P&L now names no regime
+  and gives no shares, as an exact zero always did.
+- Tests: the loss attributed to the regime that lost it, the profit to
+  the best regime at its own 150%, a zero total naming no regime, and
+  the two fields on the wire. The mutation catalogue gains two entries,
+  both killed.
+
 ## The bootstrap intervals draw circular blocks widened by the block bootstrap's own bias, so a short series is covered near the nominal rate
 
 - **The intervals were too narrow on short series.** `bootstrap_statistic`

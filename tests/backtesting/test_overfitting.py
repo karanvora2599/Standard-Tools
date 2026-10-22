@@ -1079,6 +1079,79 @@ class TestRegimeStratified:
             regime_stratified_performance(returns, pd.Series(["only"] * 300))
 
 
+class TestTheConcentrationBelongsToTheRegimeItNames:
+    """
+    The concentration was the largest share in absolute value and the
+    warning named the best regime, and those were different regimes
+    whenever the total was a loss: a regime that lost 12% beside one that
+    made 3% was reported as "130% of total P&L came from the single
+    regime" that made the 3%.
+    """
+
+    @staticmethod
+    def _loss_in_one_regime():
+        rng = np.random.default_rng(3)
+        losing = -0.004 + rng.normal(0, 0.001, 30)
+        gaining = 0.001 + rng.normal(0, 0.001, 30)
+        return (
+            pd.Series(np.r_[losing, gaining]),
+            pd.Series(["a"] * 30 + ["b"] * 30),
+        )
+
+    def test_a_loss_is_attributed_to_the_regime_that_lost_it(self):
+        returns, labels = self._loss_in_one_regime()
+        result = regime_stratified_performance(returns, labels)
+        rows = {r["regime"]: r for r in result["by_regime"]}
+        assert rows["a"]["total_return"] < 0 < rows["b"]["total_return"]
+        assert result["pnl_concentration_regime"] == "a"
+        assert result["pnl_concentration_of"] == "loss"
+        assert result["pnl_concentration"] == rows["a"]["share_of_pnl"]
+        assert result["pnl_concentration"] == pytest.approx(1.302, abs=1e-3)
+        (warning,) = [w for w in result["warnings"] if "130%" in w]
+        assert "'a'" in warning and "'b'" not in warning
+        assert "loss" in warning and "bet on that regime" not in warning
+
+    def test_a_profit_is_the_best_regimes_own_share(self):
+        """One regime lost 20%, two made 15% each: the best made 150% of
+        the 10% total. The largest share in absolute value is the loser's
+        200%, which is not the best regime's and was reported as if it
+        were."""
+        returns = pd.Series([-0.01] * 20 + [0.0075] * 40)
+        labels = pd.Series(["a"] * 20 + ["b"] * 20 + ["c"] * 20)
+        result = regime_stratified_performance(returns, labels)
+        named = result["pnl_concentration_regime"]
+        rows = {r["regime"]: r for r in result["by_regime"]}
+        assert result["pnl_concentration_of"] == "profit"
+        assert named in ("b", "c")
+        assert result["pnl_concentration"] == rows[named]["share_of_pnl"]
+        assert result["pnl_concentration"] == pytest.approx(1.5)
+        assert any(
+            f"150% of total P&L came from the single regime '{named}'" in w
+            for w in result["warnings"]
+        )
+
+    def test_a_zero_total_names_no_regime(self):
+        returns = pd.Series([0.01] * 20 + [-0.01] * 20)
+        labels = pd.Series(["up"] * 20 + ["down"] * 20)
+        result = regime_stratified_performance(returns, labels)
+        assert result["pnl_concentration"] is None
+        assert result["pnl_concentration_regime"] is None
+        assert result["pnl_concentration_of"] is None
+
+    def test_the_regime_reaches_the_wire(self):
+        from standard_quant_tools.agent.runtimes.backtest.validation_tools import (
+            RegimeStratifiedInput,
+            get_regime_stratified_performance,
+        )
+
+        returns, labels = self._loss_in_one_regime()
+        wire = get_regime_stratified_performance(
+            RegimeStratifiedInput(returns=list(returns), regimes=list(labels))
+        ).model_dump(mode="json")
+        assert wire["pnl_concentration_regime"] == "a"
+        assert wire["pnl_concentration_of"] == "loss"
+
+
 class TestParameterDecay:
     def test_a_broad_optimum_is_recognised_as_robust(self):
         """A parameter whose neighbours perform almost as well describes a

@@ -1194,6 +1194,15 @@ def regime_stratified_performance(
     CONCENTRATION IS THE HEADLINE. The result reports what fraction of total
     P&L came from the single best regime. Above about 70% from one regime the
     strategy is a bet on that regime recurring, whatever it says on the tin.
+    When the total is a LOSS it reports the fraction of the loss from the
+    single worst regime instead, and `pnl_concentration_regime` and
+    `pnl_concentration_of` say which regime and which of the two it is.
+
+    THE SHARE USED TO BE THE LARGEST IN ABSOLUTE VALUE, NAMED AFTER THE BEST
+    REGIME, and the two were different regimes whenever the total was a
+    loss: a regime that lost 12% beside one that made 3% was reported as
+    "133% of total P&L came from the single regime" that made the 3%. The
+    share now belongs to the regime it is named after.
 
     `regimes` is any labelling aligned to the returns -- volatility buckets
     from `detect_regimes`, a bull/bear flag, VIX terciles, calendar years.
@@ -1217,6 +1226,11 @@ def regime_stratified_performance(
         )
 
     total_pnl = float(aligned["r"].sum())
+    # A total that is rounding residue of the returns -- +1% twenty times
+    # and -1% twenty times summed to -1.4e-17 -- is zero: a share of it is
+    # 10^16, and is no share of anything.
+    if abs(total_pnl) <= 1e-12 * float(aligned["r"].abs().sum()):
+        total_pnl = 0.0
     rows: List[Dict[str, Any]] = []
     for label, chunk in aligned.groupby("g"):
         array = chunk["r"].to_numpy()
@@ -1242,18 +1256,42 @@ def regime_stratified_performance(
         )
     rows.sort(key=lambda r: r["total_return"], reverse=True)
 
-    shares = [abs(r["share_of_pnl"]) for r in rows if r["share_of_pnl"] is not None]
-    concentration = max(shares) if shares else None
+    # The best regime's share of a profit, or the worst regime's share of a
+    # loss: either way the regime that did most to make the total what it
+    # is, and the share is positive. Above 100% the other regimes, taken
+    # together, went the other way.
+    if total_pnl > 0:
+        concentrated, concentration_of = rows[0], "profit"
+    elif total_pnl < 0:
+        concentrated, concentration_of = rows[-1], "loss"
+    else:
+        concentrated, concentration_of = None, None
+    concentration = concentrated["share_of_pnl"] if concentrated else None
     positive_regimes = sum(1 for r in rows if r["total_return"] > 0)
 
     warnings: List[str] = []
     if concentration is not None and concentration > 0.7:
-        warnings.append(
-            f"{concentration:.0%} of total P&L came from the single regime "
-            f"'{rows[0]['regime']}', which was {rows[0]['share_of_sample']:.0%} "
-            "of the sample. This is a bet on that regime recurring, whatever "
-            "the full-sample Sharpe says."
+        name = concentrated["regime"]
+        sample_share = f"{concentrated['share_of_sample']:.0%}"
+        offset = (
+            " The other regimes, together, went the other way."
+            if concentration > 1
+            else ""
         )
+        if concentration_of == "profit":
+            warnings.append(
+                f"{concentration:.0%} of total P&L came from the single regime "
+                f"'{name}', which was {sample_share} of the sample.{offset} "
+                "This is a bet on that regime recurring, whatever the "
+                "full-sample Sharpe says."
+            )
+        else:
+            warnings.append(
+                f"The total is a loss of {-total_pnl:.2%}, and {concentration:.0%} "
+                f"of it came from the single regime '{name}', which was "
+                f"{sample_share} of the sample.{offset} The loss is that "
+                "regime's; the full-sample number averages it over the rest."
+            )
     if positive_regimes == 1 and len(rows) > 2:
         warnings.append(
             f"Only 1 of {len(rows)} regimes was profitable. The full-sample "
@@ -1272,6 +1310,8 @@ def regime_stratified_performance(
         "n_regimes": len(rows),
         "overall_sharpe": _sharpe(aligned["r"].to_numpy(), periods_per_year),
         "pnl_concentration": concentration,
+        "pnl_concentration_regime": concentrated["regime"] if concentrated else None,
+        "pnl_concentration_of": concentration_of,
         "n_profitable_regimes": positive_regimes,
         "by_regime": rows,
         "warnings": warnings,

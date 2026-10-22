@@ -460,8 +460,18 @@ class RegimeStratifiedResult(_Result):
     overall_sharpe: Stat = None
     pnl_concentration: Stat = Field(
         None,
-        description="Share of total P&L from the single best regime. Above "
-        "0.7 the strategy is a bet on that regime recurring.",
+        description="Share of total P&L from the single best regime -- or, "
+        "when the total is a loss, share of the loss from the single worst "
+        "one. Above 0.7 the strategy is a bet on that regime recurring; "
+        "above 1 the other regimes together went the other way.",
+    )
+    pnl_concentration_regime: Optional[str] = Field(
+        None, description="The regime pnl_concentration is the share of."
+    )
+    pnl_concentration_of: Optional[Literal["profit", "loss"]] = Field(
+        None,
+        description="`profit` when the total P&L is positive, `loss` when it "
+        "is negative; null when it is exactly zero.",
     )
     n_profitable_regimes: int = 0
     by_regime: List[RegimeRow] = Field(default_factory=list)

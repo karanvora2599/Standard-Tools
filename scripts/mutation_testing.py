@@ -202,6 +202,26 @@ MUTATIONS: List[Mutation] = [
         "tests/backtest/test_robustness.py",
     ),
     Mutation(
+        # The concentration as it was: the largest share in absolute value,
+        # whichever regime it belongs to, under the best regime's name.
+        "regime stratified: report the largest absolute share as the best's",
+        SRC / "backtesting/overfitting.py",
+        '    concentration = concentrated["share_of_pnl"] if concentrated else None\n',
+        "    concentration = (\n"
+        '        max(abs(r["share_of_pnl"]) for r in rows) if concentrated else None\n'
+        "    )\n",
+        "tests/backtesting/test_overfitting.py",
+    ),
+    Mutation(
+        # A loss attributed to the best regime, which is the one that lost
+        # least of it.
+        "regime stratified: attribute a loss to the best regime",
+        SRC / "backtesting/overfitting.py",
+        '        concentrated, concentration_of = rows[-1], "loss"\n',
+        '        concentrated, concentration_of = rows[0], "loss"\n',
+        "tests/backtesting/test_overfitting.py",
+    ),
+    Mutation(
         # The interval's draw back to moving blocks: the first and last
         # block - 1 observations are under-drawn and the draws centre off
         # the sample's statistic. A day carrying the whole sum then
