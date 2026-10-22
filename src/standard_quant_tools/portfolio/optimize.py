@@ -15,7 +15,10 @@ an existing alpha score into weights (backtest/sizing.py). Three families:
   exactly by the active-set methods in `_active_set` and certified against
   their KKT conditions, with SLSQP as the last fallback. Capped or shorting
   max_sharpe runs SLSQP and is then solved exactly on SLSQP's active set;
-  target_volatility is SLSQP's alone.
+  target_volatility is SLSQP's alone, and is reported uncertified with a
+  warning on every bounded solve: its volatility constraint is a quadratic
+  EQUALITY, which is not convex, and SLSQP can stop on a portfolio that
+  another inside the same bounds beats at the same volatility.
 - `risk_parity_weights` — equalizes each asset's fractional contribution to
   total portfolio variance (or a custom risk budget). It validates the
   request and delegates to `construction.risk_parity`'s cyclical coordinate
@@ -919,6 +922,44 @@ def _constraint_residuals(
     return ", ".join(parts)
 
 
+def _target_volatility_warning(target_volatility: float) -> str:
+    """
+    Why a bounded target_volatility answer is never certified.
+
+    The objective is linear and the constraint is w'Sw == sigma^2, a
+    quadratic EQUALITY. That is not a convex set: on the fully-invested
+    portfolios inside the bounds, the ones at exactly this volatility can
+    hold several local maxima of expected return, and one can sit on the
+    inefficient branch. SLSQP follows the constraint from equal weights and
+    stops at whichever it reaches. On two assets it is Newton's method on
+    the variance along the one line of fully-invested portfolios, so it
+    lands on the root on the same side of the minimum-variance mix as the
+    start -- the inefficient one whenever equal weights hold more of the
+    low-return asset than the minimum-variance mix does. Over 60 random
+    long-only problems of six assets, 6 came back up to 16 percentage
+    points of return below the frontier at the requested volatility, with
+    converged=True and no warning. The closed form (allow_short=True,
+    max_weight=None) takes the efficient root and is not affected.
+    """
+    return (
+        f"target_volatility={target_volatility:.6f} with bounds "
+        "(allow_short=False and/or max_weight set) is solved by SLSQP on the "
+        "equality w'Sw = target_volatility^2, which is not convex: the "
+        "fully-invested portfolios inside the bounds at exactly this "
+        "volatility can include several local maxima of expected return, one "
+        "of them on the inefficient branch, and SLSQP stops at whichever it "
+        "reaches first. These weights meet the target volatility, but nothing "
+        "certifies that they earn the most return at it -- a portfolio inside "
+        "the same bounds can earn more at the same risk. Measured on two "
+        "assets at 25% and 20% volatility with correlation -0.5, long-only at "
+        "a 13% target: 5.20% expected return where 7.98% is attainable. "
+        "solver.certified is False for this reason. For a certified answer, "
+        "use objective='target_return', which is solved exactly: the "
+        "efficient portfolio at this volatility is the target_return "
+        "portfolio whose volatility equals it."
+    )
+
+
 def _slsqp_stop(report: Dict[str, Any]) -> str:
     return (
         f"SLSQP ended with status {report.get('status')} "
@@ -1269,9 +1310,11 @@ def mean_variance_optimize(
         did), solver (the run: method — "closed_form", "active_set" or
         "SLSQP" — iterations, status, message, objective,
         n_function_evals, multipliers; certified and certificate, the KKT
-        residuals of the returned weights where a certificate applies; and
-        fallback, why the exact solve's cold start did not produce the
-        answer when it did not) and condition_number (of the annualized
+        residuals of the returned weights where a certificate applies, with
+        certified False on every bounded target_volatility solve, which is
+        not convex and can stop on a dominated portfolio; and fallback, why
+        the exact solve's cold start did not produce the answer when it did
+        not) and condition_number (of the annualized
         covariance, reported at every level rather than only warned about
         above the threshold).
 
@@ -1531,6 +1574,15 @@ def mean_variance_optimize(
                 # SLSQP stopped with.
                 if solver["certified"] and not run.warnings:
                     converged = True
+            if objective == "target_volatility":
+                # Not null: a certificate does not merely fail to apply here,
+                # the problem is non-convex and SLSQP can stop on a dominated
+                # portfolio, so the answer is positively uncertified -- on
+                # every bounded solve, since which ones are dominated cannot
+                # be told from the weights without solving the frontier.
+                solver["certified"] = False
+                assert target_volatility is not None  # validated above
+                warnings.append(_target_volatility_warning(target_volatility))
             if attainable is not None:
                 warnings.append(
                     f"target_return={target_return:.6f} is outside "
@@ -1758,7 +1810,14 @@ def black_litterman(
 
     Raises:
         ValidationError: shape mismatches, non-positive tau/risk_aversion,
-            or a singular cov_matrix/omega.
+            a singular cov_matrix/omega, or an optimal holding whose sum is
+            not positive. Renormalizing by a negative sum flips every
+            position: the holding's posterior expected return is
+            posterior_returns' (delta Sigma)^-1 posterior_returns, a positive
+            quadratic form, so the flipped book's is its negative. Bearish
+            views on every asset gave a 100%-long book at a posterior Sharpe
+            of -1.16. Refused with the reason, as the max_sharpe tangency
+            with a negative normalizing sum is.
     """
     # Every matrix and vector here is inverted or multiplied into the
     # posterior, so one non-finite entry anywhere makes the whole result NaN
@@ -1833,10 +1892,41 @@ def black_litterman(
         except np.linalg.LinAlgError as e:
             raise ValidationError(f"posterior_cov is singular: {e}") from e
         implied_weights_raw = (posterior_cov_inv @ posterior_returns) / risk_aversion
-    total = implied_weights_raw.sum()
-    if abs(total) < 1e-14:
+    total = float(implied_weights_raw.sum())
+    # The sign matters, as it does for the tangency portfolio, and checking
+    # only the magnitude was the bug. The raw holding's posterior expected
+    # return is posterior_returns' (delta * posterior_cov)^-1
+    # posterior_returns, a quadratic form in a positive-definite matrix and
+    # so positive; divided by a negative sum, every position flips and so
+    # does the sign of that return. Bearish views on all three assets of a
+    # universe came back as a 100%-long book with a posterior Sharpe of
+    # -1.16 and converged=True.
+    if not total > 1e-14:
+        holding_return = float(implied_weights_raw @ posterior_returns)
+        if total > -1e-14:
+            reason = (
+                f"sums to {total:.3e}, which is zero to rounding, so "
+                "rescaling it to sum to 1 divides by zero"
+            )
+        else:
+            reason = (
+                f"sums to {total:.6f}: it is a net SHORT book. Rescaling it "
+                "to sum to 1 divides every position by that negative number "
+                "and flips it, so the posterior expected return "
+                f"{holding_return:+.6f} the holding earns becomes "
+                f"{holding_return / total:+.6f} -- the worst portfolio along "
+                "the posterior's optimal direction, reported as the best"
+            )
         raise ValidationError(
-            "implied Black-Litterman weights sum to ~0 — cannot renormalize to 1.0"
+            "black_litterman: the posterior's optimal holding "
+            "(risk_aversion * posterior_cov)^-1 @ posterior_returns "
+            f"{reason}. No fully-invested portfolio carries this holding: the "
+            "book the posterior prefers is not long on net (posterior "
+            f"returns {np.round(posterior_returns, 6).tolist()}). Refused "
+            "rather than flipped, as max_sharpe refuses a tangency portfolio "
+            "with a negative normalizing sum. State a bearish view as a "
+            "relative one (one asset against another), lower its confidence, "
+            "or act on the posterior returns above directly."
         )
     implied_weights = implied_weights_raw / total
 

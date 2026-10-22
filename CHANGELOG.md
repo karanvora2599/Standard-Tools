@@ -1,5 +1,88 @@
 # Changelog
 
+## Ten portfolio answers that were a number they did not have now refuse, flag or explain it
+
+- **A bounded `target_volatility` answer is never certified.** It
+  maximizes return subject to w'Sw = sigma^2, a quadratic EQUALITY, which
+  is not convex: the fully-invested portfolios inside the bounds at one
+  volatility can hold several local maxima of return, one of them on the
+  inefficient branch, and SLSQP stops at whichever it reaches. Over 60
+  random long-only problems of six assets, 6 came back up to 16 percentage
+  points of return below the frontier at the requested volatility, with
+  `converged=True`, no warning and a null `certified`. Every bounded solve
+  now reports `solver.certified=False` and a warning naming the problem and
+  the certified alternative (`target_return`, solved exactly). The weights
+  do not change yet: two assets at 25% and 20% volatility correlated -0.5,
+  long-only at 13%, still return 5.20% where 7.98% is attainable, and that
+  case is pinned so the exact solve flips it. The closed form
+  (`allow_short=True`, `max_weight=None`) takes the efficient root and is
+  unaffected.
+- **Black-Litterman refuses a net-short optimal holding.** The posterior's
+  holding (delta * posterior_cov)^-1 posterior_returns was rescaled by its
+  sum, and a negative sum flips every position: bearish views on all three
+  assets of a universe came back as a 100%-long book at a posterior Sharpe
+  of -1.16. It is refused with the sum, the return the flip would have
+  turned negative and the posterior returns, as the max_sharpe tangency
+  already was. `run_portfolio_optimization` wrote `converged=True` for
+  every Black-Litterman answer; it is now checked from the weights.
+- **`max_diversification` refuses a holding whose sum is not positive.**
+  The guard tested the sum of the correlation inverse's row sums, and only
+  for exactly zero; the weights were normalized by 1'Sigma^-1 sigma, which
+  can be negative. Three assets at volatilities 3.17, 4.59 and 0.80 with a
+  condition number of 204 came back at a diversification ratio of -5.32,
+  the minimum; it is now refused, naming the holding and the ratio it
+  would have flipped. Two test matrices that are not positive
+  semi-definite had been returning flipped answers (ratios of -97 and
+  -11,979) and are refused too.
+- **`max_weight` and `allow_short` are refused with `risk_parity` and
+  `black_litterman`.** Neither method reads them, so Black-Litterman with
+  `max_weight=0.2, allow_short=False` returned 1.787 and -1.120.
+  `allow_short` is refused whenever it is given with those methods, False
+  included.
+- **A non-finite risk budget, tolerance or portfolio value is refused.**
+  NaN compares False against `<= 0`: a NaN or infinite risk-parity budget
+  came back as NaN weights, an infinite tolerance reported the
+  inverse-volatility start as converged, and `plan_rebalance` with a NaN or
+  infinite `portfolio_value` returned a NaN cost (with `converged=True` for
+  NaN). Each is refused at the library, the input model and dispatch, as
+  are a NaN holding or ADV and a non-finite or negative impact coefficient
+  passed to `plan_rebalance` directly.
+- **Factor risk is measured against the portfolio's total variance.**
+  `get_factor_exposure_budget` called each factor's share of the FACTOR
+  variance its share of PORTFOLIO variance and took no specific risk, so
+  two names with a beta of 1 to a market factor at 1% volatility and 40%
+  specific volatility each read "100% ... it is one bet" when the market
+  carries 0.12% of their variance. A new `specific_variance` input adds
+  `specific_variance`, `total_variance`, `total_variance_shares` and
+  `specific_variance_share`; `factor_variance_shares` keeps its numbers and
+  is described as what it is, and without specific variance a warning says
+  it is not the portfolio's total risk. "One bet" is now said of the
+  total only.
+- **`portfolio_pc_exposures` is each component's share of the portfolio's
+  variance.** It was raw weights times eigenvectors of the correlation
+  matrix, a number in no unit: 50/50 in names at 1% and 10% volatility
+  correlated 0.5 put PC2 at 0.0 (and PC1 at 0.7071) when PC2 carries
+  18.24% of the variance. It is now (x'v_k)^2 lambda_k / w'Sigma w on the
+  same components `pca_variance_explained` reports, x the weights times
+  the volatilities: 0.8176 and 0.1824 there, summing to 1 over all
+  components.
+- **The replication basket reads its solver's status.** A run that hit
+  SLSQP's iteration limit returned its last iterate as the basket. The
+  result now carries `converged` and a warning with the solver's status
+  and message.
+- **Construction results say why a number is null.** The eight
+  construction tools' results are built on `ExplainsNulls`: a factor
+  variance with no factor covariance, a top-k share of a book smaller than
+  k, a scenario with no covariance to size it, a liquidity-VaR multiple of
+  a zero position each carry a line naming the field and the reason, and a
+  non-finite weight in a weight map becomes a null that says so.
+- **`get_liquidity_metrics` reports null, not 0.0, when it cannot
+  estimate.** Zero is the most liquid reading either proxy gives, so a
+  ticker with too few bars could come back as `most_liquid_ticker`. The
+  Amihud ratio and the Corwin-Schultz spread are null with the reason, the
+  ranking skips them, and the ranking itself is null when no ticker has an
+  estimate.
+
 ## Every growth rate and drawdown counts the first period, and an expected shortfall says how many days it is the mean of
 
 - **The first period's return was dropped from CAGR, maximum drawdown and

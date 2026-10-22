@@ -505,6 +505,22 @@ class BLViewInput(BaseModel):
     )
 
 
+#: The methods of `run_portfolio_optimization` that take no weight bounds,
+#: and what each returns instead -- the reason `max_weight` and
+#: `allow_short` are refused with them rather than ignored.
+_UNBOUNDED_METHODS: Dict[str, str] = {
+    "risk_parity": (
+        "risk parity solves for equal (or budgeted) risk contributions, whose "
+        "weights are long-only by construction and take no cap."
+    ),
+    "black_litterman": (
+        "Black-Litterman returns the posterior's unconstrained optimal "
+        "holding rescaled to sum to 1, which can short any asset and exceed "
+        "any cap."
+    ),
+}
+
+
 class PortfolioOptimizationInput(BaseModel):
     # An argument this tool does not take is REJECTED, not ignored.
     # Pydantic's default would drop it silently, so a typo or a
@@ -536,11 +552,15 @@ class PortfolioOptimizationInput(BaseModel):
         None, description="Required (annualized) for method='target_volatility'."
     )
     allow_short: bool = Field(
-        False, description="Mean-variance methods only: allow negative weights."
+        False,
+        description="Mean-variance methods only: allow negative weights. "
+        "Refused with risk_parity and black_litterman, which do not read it.",
     )
     max_weight: Optional[float] = Field(
         None,
-        description="Mean-variance methods only: per-asset weight cap. Setting this requires scipy.",
+        description="Mean-variance methods only: per-asset weight cap. "
+        "Setting this requires scipy. Refused with risk_parity and "
+        "black_litterman, which do not read it.",
     )
     risk_budget: Optional[Dict[str, float]] = Field(
         None,
@@ -597,6 +617,26 @@ class PortfolioOptimizationInput(BaseModel):
             raise ValueError("method='target_volatility' requires target_volatility")
         if self.method == "black_litterman" and not self.views:
             raise ValueError("method='black_litterman' requires at least one view")
+        # Refused, not ignored. Neither method reads these fields, so a
+        # caller who set them got weights that broke them without a word:
+        # black_litterman with max_weight=0.2 and allow_short=False returned
+        # 1.787 and -1.120. allow_short counts when it is given at all --
+        # False is a promise of a long-only book that Black-Litterman's
+        # unconstrained holding does not keep.
+        if self.method in _UNBOUNDED_METHODS:
+            ignored = []
+            if self.max_weight is not None:
+                ignored.append(f"max_weight={self.max_weight}")
+            if "allow_short" in self.model_fields_set:
+                ignored.append(f"allow_short={self.allow_short}")
+            if ignored:
+                raise ValueError(
+                    f"method={self.method!r} does not read {' or '.join(ignored)}: "
+                    f"{_UNBOUNDED_METHODS[self.method]} Omit "
+                    f"{'them' if len(ignored) > 1 else 'it'}, or use a "
+                    "mean-variance method (min_volatility, max_sharpe, "
+                    "target_return, target_volatility), which applies both."
+                )
         if self.risk_budget is not None:
             missing = [t for t in self.tickers if t not in self.risk_budget]
             if missing:
@@ -650,8 +690,9 @@ class SolverReport(BaseModel):
         description="'active_set' for an exact, certified solve: "
         "min_volatility, target_return and long-only max_sharpe without a "
         "binding cap from a cold start, and capped or shorting max_sharpe "
-        "from SLSQP's answer. 'SLSQP' for target_volatility, an infeasible "
-        "target, and an answer the exact solve could not certify. "
+        "from SLSQP's answer. 'SLSQP' for bounded target_volatility (never "
+        "certified), an infeasible target, and an answer the exact solve "
+        "could not certify. "
         "'closed_form' for the unconstrained analytic solution, which runs "
         "no iterations.",
     )
@@ -688,10 +729,13 @@ class SolverReport(BaseModel):
         None,
         description="True when `certificate` shows the weights are the "
         "optimum of the problem asked, to its tolerance. False when a "
-        "certificate was computed and does not show that: an SLSQP answer "
+        "certificate was computed and does not show that -- an SLSQP answer "
         "the exact solve could not certify, whose residuals say how near the "
-        "optimum it is. Null where no certificate applies: the closed form, "
-        "target_volatility, and an infeasible target.",
+        "optimum it is -- and on every bounded target_volatility solve, "
+        "whose volatility equality is not convex: SLSQP can stop there on a "
+        "portfolio another inside the same bounds beats at the same "
+        "volatility, and a warning says so. Null where no certificate "
+        "applies: the closed form and an infeasible target.",
     )
     certificate: Optional[Dict[str, float]] = Field(
         None,
@@ -2511,7 +2555,16 @@ class RiskAttributionResult(BaseModel):
     ]  # fractional contribution to portfolio vol (sums to 1)
     # PCA decomposition
     pca_variance_explained: Dict[str, float]  # EVR per PC across the asset universe
-    portfolio_pc_exposures: Dict[str, float]  # portfolio's loading on each PC
+    portfolio_pc_exposures: Dict[str, Stat] = Field(
+        ...,
+        description="Each principal component's share of the PORTFOLIO's "
+        "variance, on the components pca_variance_explained describes: "
+        "(x'v_k)^2 lambda_k / w'Sigma w with x the weights times the asset "
+        "volatilities, since those components are of the correlation "
+        "matrix. Over every component the shares sum to 1; a PC that "
+        "explains much of the universe can carry little of this portfolio. "
+        "Null when the portfolio's returns have no variance.",
+    )
     # Factor model (optional)
     factor_loadings: Optional[Dict[str, float]] = None
     factor_r_squared: Optional[float] = None
@@ -4624,11 +4677,40 @@ class LiquidityAnalysisInput(BaseModel):
         return _distinct(v, "tickers")
 
 
-class LiquidityAnalysisResult(BaseModel):
+class LiquidityAnalysisResult(ExplainsNulls):
+    null_reasons = {
+        "amihud_illiquidity": (
+            "no window of `window` consecutive bars had a return and a "
+            "positive dollar volume on every bar -- too few bars, or a "
+            "zero-volume day in every window -- so there is no Amihud ratio "
+            "to estimate (0.0 would read as perfectly liquid)"
+        ),
+        "corwin_schultz_spread_bps": (
+            "there are not `window` + 1 bars with a usable high and low, so "
+            "no pair of consecutive ranges can be smoothed over the window "
+            "(0.0 would read as a zero spread)"
+        ),
+    }
+
     tickers: List[str]
-    per_ticker: Dict[str, Dict[str, float]]
-    least_liquid_ticker: str
-    most_liquid_ticker: str
+    per_ticker: Dict[str, Dict[str, Stat]] = Field(
+        ...,
+        description="Per ticker: avg_dollar_volume, amihud_illiquidity and "
+        "corwin_schultz_spread_bps. A proxy that cannot be estimated is "
+        "null, with the reason in `warnings` -- never 0.0, which is the "
+        "most liquid reading either proxy can give.",
+    )
+    least_liquid_ticker: Optional[str] = Field(
+        None,
+        description="Highest Amihud ratio among the tickers that have one. "
+        "Null when none does.",
+    )
+    most_liquid_ticker: Optional[str] = Field(
+        None,
+        description="Lowest Amihud ratio among the tickers that have one. "
+        "Null when none does.",
+    )
+    warnings: List[str] = Field(default_factory=list)
 
 
 # ──────────────────────────────────────────────
@@ -7790,6 +7872,21 @@ class PlanRebalanceInput(BaseModel):
         # no distance to its target, and it came back as a schedule of
         # nulls with a reason instead of a refusal naming the name.
         return v if v is None else _finite_entries(v, info.field_name)
+
+    @field_validator("portfolio_value", "impact_coefficient")
+    @classmethod
+    def _finite_scale(cls, v: float, info: Any) -> float:
+        # `gt=0` admits an infinity, and every traded notional and cost is a
+        # multiple of these: an infinite portfolio value came back as a NaN
+        # cost.
+        import math
+
+        if not math.isfinite(v):
+            raise ValueError(
+                f"{info.field_name} must be a finite number, got {v!r}; every "
+                "traded notional and impact cost is a multiple of it."
+            )
+        return v
 
 
 class PlanRebalanceResult(ExplainsNulls):

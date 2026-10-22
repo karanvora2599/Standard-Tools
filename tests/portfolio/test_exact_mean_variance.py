@@ -707,7 +707,9 @@ class TestNonConvergenceSaysWhatHappened:
                 frame, "target_volatility", target_volatility=0.25
             )
         assert result["converged"] is False
-        assert result["solver"]["certified"] is None
+        # Never certified: its volatility equality is not convex (the
+        # CHANGELOG entry of 2026-10-22).
+        assert result["solver"]["certified"] is False
         (warning,) = [w for w in result["warnings"] if "status 8" in w]
         assert "SLSQP ended with status 8" in warning
         assert "sum-to-1 residual" in warning

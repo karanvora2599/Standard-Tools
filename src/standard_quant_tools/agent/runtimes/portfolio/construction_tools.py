@@ -29,6 +29,9 @@ from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_valida
 
 from standard_quant_tools.agent.models import _distinct
 from standard_quant_tools.agent.runtimes._json_safe import (
+    ExplainsNulls,
+)
+from standard_quant_tools.agent.runtimes._json_safe import (
     finite_or_none as _finite_or_none,
 )
 from standard_quant_tools.error import ValidationError
@@ -55,10 +58,23 @@ logger = logging.getLogger(__name__)
 Stat = Annotated[Optional[float], BeforeValidator(_finite_or_none)]
 
 
-class _Result(BaseModel):
+class _Result(ExplainsNulls):
+    """Every construction result: its caveats, and a reason beside each
+    null number. These results were plain models, so a ratio that divides
+    by zero, a share of a variance nobody supplied, or a weight the solver
+    could not produce arrived as a bare null -- or as a NaN in a mapping --
+    with nothing saying whether it was undefined or never computed."""
+
     model_config = ConfigDict(extra="allow")
 
     warnings: List[str] = Field(default_factory=list)
+
+
+#: Why each construction result's numbers can be null.
+_NO_SPECIFIC = (
+    "no specific_variance was supplied, so the names' own risk is not "
+    "measured and the portfolio's total variance is unknown"
+)
 
 
 def _square_frame(
@@ -115,9 +131,9 @@ class RiskParityInput(NamedCovarianceInput):
     )
     budget: Optional[List[float]] = Field(
         None,
-        description="RISK budget per asset, e.g. [0.5, 0.3, 0.2]. Normalized "
-        "internally. Omit for equal contribution. Most real mandates are "
-        "stated this way rather than as equal risk.",
+        description="RISK budget per asset, e.g. [0.5, 0.3, 0.2]: finite and "
+        "positive. Normalized internally. Omit for equal contribution. Most "
+        "real mandates are stated this way rather than as equal risk.",
     )
     max_iterations: int = Field(5000, ge=1, le=100000)
     tolerance: float = Field(1e-10, gt=0)
@@ -126,6 +142,34 @@ class RiskParityInput(NamedCovarianceInput):
     @classmethod
     def _assets_once(cls, v: List[str]) -> List[str]:
         return _distinct_assets(v)
+
+    @field_validator("budget")
+    @classmethod
+    def _finite_budget(cls, v: Optional[List[float]]) -> Optional[List[float]]:
+        # NaN passed the library's positivity check (it compares False) and
+        # an infinity survived it; both came back as NaN weights.
+        if v is None:
+            return v
+        bad = [i for i, value in enumerate(v) if not math.isfinite(value)]
+        if bad:
+            raise ValueError(
+                f"budget is not finite at position(s) {bad[:10]} "
+                f"({[v[i] for i in bad[:10]]}); each asset's risk budget must "
+                "be a finite positive number, e.g. [0.5, 0.3, 0.2]."
+            )
+        return v
+
+    @field_validator("tolerance")
+    @classmethod
+    def _finite_tolerance(cls, v: float) -> float:
+        # `gt=0` admits an infinity, which the first sweep meets: the
+        # starting point came back as a converged risk parity portfolio.
+        if not math.isfinite(v):
+            raise ValueError(
+                f"tolerance must be a finite positive number, got {v!r}; "
+                "an infinite one is met by the first sweep."
+            )
+        return v
 
 
 class HRPInput(BaseModel):
@@ -183,6 +227,17 @@ class FactorExposureInput(BaseModel):
     factors: Optional[List[str]] = Field(
         None, description="Explicit factor order for factor_covariance."
     )
+    specific_variance: Optional[Dict[str, float]] = Field(
+        None,
+        description="Asset -> specific (idiosyncratic) return VARIANCE, in "
+        "the units of factor_covariance: the part of each name's variance its "
+        "factor loadings do not explain, taken as uncorrelated across names. "
+        "Every held asset needs one. WITH it the result reports each "
+        "factor's share of the portfolio's TOTAL variance and the specific "
+        "share; WITHOUT it only shares of the factor variance can be "
+        "reported, which say nothing about how much of the portfolio's risk "
+        "the factors carry. Needs factor_covariance.",
+    )
 
     @field_validator("weights")
     @classmethod
@@ -190,6 +245,13 @@ class FactorExposureInput(BaseModel):
         # A NaN or infinite weight became a NaN or infinite exposure on
         # every factor it touched.
         return _finite_map(v, "weights")
+
+    @field_validator("specific_variance")
+    @classmethod
+    def _finite_specific(
+        cls, v: Optional[Dict[str, float]]
+    ) -> Optional[Dict[str, float]]:
+        return v if v is None else _finite_map(v, "specific_variance")
 
     @field_validator("factor_loadings")
     @classmethod
@@ -301,14 +363,14 @@ class LiquidityVarInput(BaseModel):
 class RiskParityResult(_Result):
     n_assets: int = 0
     assets: List[str] = Field(default_factory=list)
-    weights: Dict[str, float] = Field(default_factory=dict)
-    risk_contributions: Dict[str, float] = Field(default_factory=dict)
-    risk_shares: Dict[str, float] = Field(
+    weights: Dict[str, Stat] = Field(default_factory=dict)
+    risk_contributions: Dict[str, Stat] = Field(default_factory=dict)
+    risk_shares: Dict[str, Stat] = Field(
         default_factory=dict,
         description="Each asset's share of total portfolio volatility. These "
         "are what is being equalized, NOT the weights.",
     )
-    target_shares: Dict[str, float] = Field(default_factory=dict)
+    target_shares: Dict[str, Stat] = Field(default_factory=dict)
     portfolio_volatility: Stat = None
     converged: bool = False
     iterations: int = 0
@@ -325,13 +387,13 @@ class HRPResult(_Result):
         "Null for undated lists, whose alignment cannot be checked; a "
         "warning says so.",
     )
-    weights: Dict[str, float] = Field(default_factory=dict)
+    weights: Dict[str, Stat] = Field(default_factory=dict)
     cluster_order: List[str] = Field(
         default_factory=list,
         description="Assets reordered so similar ones sit adjacent. The "
         "grouping the tree found.",
     )
-    risk_contributions: Dict[str, float] = Field(default_factory=dict)
+    risk_contributions: Dict[str, Stat] = Field(default_factory=dict)
     portfolio_volatility: Stat = None
     effective_n: Stat = None
     periods_per_year: int = Field(
@@ -349,18 +411,62 @@ class NamedExposure(BaseModel):
 
 
 class FactorExposureResult(_Result):
+    null_reasons = {
+        "factor_variance": (
+            "no factor_covariance was supplied, so the exposures cannot be "
+            "turned into a variance"
+        ),
+        "specific_variance": _NO_SPECIFIC,
+        "total_variance": _NO_SPECIFIC,
+        "specific_variance_share": (
+            f"{_NO_SPECIFIC}; or the total variance is zero, so there is "
+            "nothing to apportion"
+        ),
+    }
+
     n_positions: int = 0
     n_unmapped: int = 0
     unmapped: List[str] = Field(default_factory=list)
     n_factors: int = 0
     exposures: Dict[str, Stat] = Field(default_factory=dict)
     largest_exposures: List[NamedExposure] = Field(default_factory=list)
-    factor_variance: Stat = None
+    factor_variance: Stat = Field(
+        None,
+        description="The FACTOR part of the portfolio's variance, x'Fx with "
+        "x the exposures. Not the portfolio's variance: the names' specific "
+        "risk is not in it.",
+    )
     factor_variance_shares: Optional[Dict[str, Stat]] = Field(
         None,
-        description="Each factor's share of portfolio variance. This is the "
-        "number that answers 'what am I taking risk on'. Null when no factor "
-        "covariance was supplied.",
+        description="Each factor's share of the FACTOR variance x'Fx; they "
+        "sum to 1. NOT shares of the portfolio's total variance -- two names "
+        "with a beta of 1 to a market factor at 1% volatility and 40% "
+        "specific volatility each are 100% market here and 0.12% market in "
+        "total_variance_shares. Null when no factor covariance was supplied "
+        "or the factor variance is zero.",
+    )
+    specific_variance: Stat = Field(
+        None,
+        description="The portfolio's specific variance, sum(w_i^2 s_i) over "
+        "the held names, from the specific_variance input. Null without it.",
+    )
+    total_variance: Stat = Field(
+        None,
+        description="factor_variance + specific_variance: the portfolio's "
+        "variance under the factor model. Null without specific_variance.",
+    )
+    total_variance_shares: Optional[Dict[str, Stat]] = Field(
+        None,
+        description="Each factor's share of the portfolio's TOTAL variance. "
+        "With specific_variance_share they sum to 1. This is the number that "
+        "answers 'what am I taking risk on'. Null without specific_variance.",
+    )
+    specific_variance_share: Stat = Field(
+        None,
+        description="The share of the portfolio's total variance that is "
+        "specific to the names rather than explained by the factors. High "
+        "means a stock-picking book, low a factor bet. Null without "
+        "specific_variance.",
     )
     gross_exposure: Stat = None
     net_exposure: Stat = None
@@ -375,6 +481,10 @@ class LargestPosition(BaseModel):
 
 
 class ConcentrationResult(_Result):
+    null_reasons = {
+        f"top_{k}_share": f"the book holds fewer than {k} positions" for k in (3, 5, 10)
+    }
+
     n_positions: int = 0
     gross_exposure: Stat = None
     net_exposure: Stat = None
@@ -394,8 +504,17 @@ class ConcentrationResult(_Result):
     largest_positions: List[LargestPosition] = Field(default_factory=list)
 
 
-class PositionVar(BaseModel):
+class PositionVar(ExplainsNulls):
+    """One position's row. It has no warnings of its own: a null here is
+    reported by the result that holds the row."""
+
     model_config = ConfigDict(extra="allow")
+    null_reasons = {
+        "adjustment_multiple": (
+            "the position is zero, so its 1-day VaR is zero and the multiple "
+            "of it is 0/0"
+        ),
+    }
 
     asset: str = ""
     position_value: Stat = None
@@ -408,6 +527,13 @@ class PositionVar(BaseModel):
 
 
 class LiquidityVarResult(_Result):
+    null_reasons = {
+        "adjustment_multiple": (
+            "every position is zero, so the naive VaR the multiple divides by "
+            "is zero"
+        ),
+    }
+
     n_positions: int = 0
     confidence: Stat = None
     participation_rate: Stat = None
@@ -490,7 +616,10 @@ def get_factor_exposure_budget(
             "get_factor_exposure_budget",
         )
     result = lib.factor_exposure_budget(
-        input_data.weights, loadings, factor_covariance=covariance
+        input_data.weights,
+        loadings,
+        factor_covariance=covariance,
+        specific_variance=input_data.specific_variance,
     )
     overflowed = [f for f, e in result["exposures"].items() if not math.isfinite(e)]
     if overflowed:
@@ -514,7 +643,12 @@ def analyze_concentration(input_data: ConcentrationInput) -> ConcentrationResult
             "beyond the float range. Give weights as fractions of the "
             "portfolio or as position values in currency."
         )
-    return ConcentrationResult(**lib.concentration_analysis(input_data.weights))
+    result = lib.concentration_analysis(input_data.weights)
+    # A top-k share for a book of fewer than k names is not computed, and
+    # stated as null so the result can say why rather than leave it absent.
+    for k in (3, 5, 10):
+        result.setdefault(f"top_{k}_share", None)
+    return ConcentrationResult(**result)
 
 
 def get_liquidity_adjusted_var(input_data: LiquidityVarInput) -> LiquidityVarResult:
@@ -563,10 +697,14 @@ CONSTRUCTION_TOOL_DEFS = [
         "into factors. Answers the failure that sinks more portfolios than "
         "any optimizer: 'I hold 40 names so I am diversified' -- 40 names "
         "with the same loading are one position with extra transaction costs. "
-        "Supply factor_covariance to get each factor's share of portfolio "
-        "VARIANCE, which is the number that answers what you are taking risk "
-        "on; without it only exposures can be reported, and a large loading "
-        "on a quiet factor is not a large risk.",
+        "Supply factor_covariance for the factor variance and each factor's "
+        "share of it, and specific_variance as well for each factor's share "
+        "of the portfolio's TOTAL variance -- the number that answers what "
+        "you are taking risk on. Shares of the factor variance alone sum to "
+        "1 whatever the names' own risk, so they cannot say whether the book "
+        "is a factor bet; without factor_covariance only exposures can be "
+        "reported, and a large loading on a quiet factor is not a large "
+        "risk.",
         FactorExposureInput,
     ),
     (
@@ -686,8 +824,14 @@ class PortfolioScenariosInput(NamedCovarianceInput):
 
 
 class MaxDiversificationResult(_Result):
+    null_reasons = {
+        "diversification_ratio": (
+            "the portfolio's volatility is zero, so the ratio divides by zero"
+        ),
+    }
+
     n_assets: int = 0
-    weights: Dict[str, float] = Field(default_factory=dict)
+    weights: Dict[str, Stat] = Field(default_factory=dict)
     diversification_ratio: Stat = Field(
         None,
         description="Weighted average volatility over portfolio volatility. "
@@ -727,8 +871,19 @@ class MarginalRiskResult(_Result):
     )
 
 
-class ScenarioOutcome(BaseModel):
+#: Why a scenario's move cannot be stated in portfolio sigmas.
+_NO_SCENARIO_VOLATILITY = (
+    "no covariance was supplied, or it does not cover every held asset, so "
+    "the portfolio's volatility is not measured"
+)
+
+
+class ScenarioOutcome(ExplainsNulls):
+    """One scenario's row. It has no warnings of its own: a null here is
+    reported by the result that holds the row."""
+
     model_config = ConfigDict(extra="allow")
+    null_reasons = {"sigma_move": _NO_SCENARIO_VOLATILITY}
 
     scenario: str = ""
     portfolio_return: Stat = None
@@ -740,6 +895,8 @@ class ScenarioOutcome(BaseModel):
 
 
 class PortfolioScenariosResult(_Result):
+    null_reasons = {"portfolio_volatility": _NO_SCENARIO_VOLATILITY}
+
     n_positions: int = 0
     n_scenarios: int = 0
     portfolio_volatility: Stat = None

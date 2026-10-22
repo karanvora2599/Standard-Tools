@@ -134,11 +134,15 @@ class TestTheChecksTheContractDoesNotOwn:
 
     def test_the_psd_repair_still_runs(self):
         """A symmetric matrix with a negative eigenvalue is repaired and
-        says so, rather than being refused."""
+        says so, rather than being refused. (The matrix this used to plant,
+        three names correlated 0.99 with a 0.10 diagonal, repairs to one
+        whose maximum-diversification holding sums negative; that is now
+        refused for its own reason -- the CHANGELOG entry of 2026-10-22 --
+        so the repair is shown on one that it is not.)"""
         matrix = [
-            [1.0, 0.99, 0.99],
-            [0.99, 1.0, 0.99],
-            [0.99, 0.99, 0.10],
+            [1.0, 0.9, 0.7],
+            [0.9, 1.0, -0.6],
+            [0.7, -0.6, 1.0],
         ]
         result = max_diversification(_frame(matrix))
         assert any("positive semi-definite" in w for w in result["warnings"])

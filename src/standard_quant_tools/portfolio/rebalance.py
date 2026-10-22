@@ -52,6 +52,7 @@ convert it through the identity above and pass the result.
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
@@ -81,6 +82,16 @@ def _as_vector(weights: Dict[str, float], names: Sequence[str]) -> np.ndarray:
     return np.array([float(weights.get(n, 0.0)) for n in names], dtype=float)
 
 
+def _finite_number(value: Any) -> bool:
+    """A real, finite number; False for NaN, an infinity, or a non-number."""
+    if isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError):
+        return False
+
+
 def plan_rebalance(
     current_weights: Dict[str, float],
     target_weights: Dict[str, float],
@@ -106,8 +117,37 @@ def plan_rebalance(
     cannot be computed, so the plan is returned WITHOUT impact costs and says
     so -- rather than defaulting to a number that would look like an estimate.
     """
-    if portfolio_value <= 0:
-        raise ValidationError("plan_rebalance: portfolio_value must be positive")
+    # Finite before positive. NaN compares False against `<= 0`, so a NaN
+    # portfolio value passed this guard and the plan came back with a NaN
+    # cost and converged=True; an infinite one gave a NaN cost too. The
+    # holdings and volumes are inline numbers with no missing value to
+    # skip, and the impact coefficient scales every cost.
+    if not _finite_number(portfolio_value) or portfolio_value <= 0:
+        raise ValidationError(
+            f"plan_rebalance: portfolio_value must be a finite positive number, "
+            f"got {portfolio_value!r}. It is the book's notional in the "
+            "currency of `adv`; every traded notional and cost is a multiple "
+            "of it."
+        )
+    if not _finite_number(impact_coefficient) or impact_coefficient < 0:
+        raise ValidationError(
+            f"plan_rebalance: impact_coefficient must be a finite, non-negative "
+            f"number of basis points, got {impact_coefficient!r} "
+            f"(default {DEFAULT_IMPACT_COEFFICIENT})."
+        )
+    for field, values in (
+        ("current_weights", current_weights),
+        ("target_weights", target_weights),
+        ("adv", adv or {}),
+    ):
+        bad = {str(k): v for k, v in values.items() if not _finite_number(v)}
+        if bad:
+            raise ValidationError(
+                f"plan_rebalance: {field} is not finite for "
+                f"{dict(list(bad.items())[:10])}; every entry must be a finite "
+                "number. A NaN weight has no distance to its target, so the "
+                "turnover and the plan built on it would be NaN."
+            )
     if not 0.0 <= urgency <= 1.0:
         raise ValidationError("plan_rebalance: urgency must be between 0 and 1")
     if max_days < 1:

@@ -114,18 +114,25 @@ class TestMaxDiversification:
 
     def test_negative_weights_are_reported_rather_than_clipped(self):
         """Clipping to zero would silently return a different portfolio than
-        the one that was optimized."""
+        the one that was optimized. A, correlated with each of the others,
+        is shorted. (The matrix this used to plant, A at 0.9 against three
+        names at 0.2, is not positive semi-definite; repaired, its holding
+        sums negative and is now refused -- the CHANGELOG entry of
+        2026-10-22 -- where it used to come back flipped, at a ratio of
+        -11979, and this test only checked the warning conditionally.)"""
         corr = np.array(
             [
-                [1.0, 0.9, 0.9, 0.9],
-                [0.9, 1.0, 0.2, 0.2],
-                [0.9, 0.2, 1.0, 0.2],
-                [0.9, 0.2, 0.2, 1.0],
+                [1.0, 0.7, 0.5, 0.5],
+                [0.7, 1.0, 0.2, 0.2],
+                [0.5, 0.2, 1.0, 0.2],
+                [0.5, 0.2, 0.2, 1.0],
             ]
         )
         result = max_diversification(_cov(corr))
-        if result["n_negative_weights"]:
-            assert any("shorting" in w for w in result["warnings"])
+        assert result["n_negative_weights"] == 1
+        assert result["weights"]["A"] < 0
+        assert result["diversification_ratio"] > 1
+        assert any("shorting" in w for w in result["warnings"])
 
     def test_a_single_asset_is_refused(self):
         with pytest.raises(ValidationError, match="at least two"):

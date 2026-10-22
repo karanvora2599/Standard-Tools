@@ -89,9 +89,12 @@ def test_the_tool_reports_the_exact_method_and_its_certificate(kwargs):
 
 
 def test_methods_outside_the_exact_solve_report_no_certification():
+    """Bounded target_volatility is not convex, so it is reported as
+    positively uncertified rather than as a method a certificate does not
+    apply to (see the CHANGELOG entry of 2026-10-22)."""
     result = _run(method="target_volatility", target_volatility=0.2)
     assert result.solver.method == "SLSQP"
-    assert result.solver.certified is None
+    assert result.solver.certified is False
     assert result.solver.certificate is None
 
 

@@ -291,16 +291,21 @@ class TestFactorExposureBudget:
     def test_a_dominant_factor_is_flagged_however_many_names_are_held(self):
         """
         'I hold 40 names so I am diversified' is the failure this exists
-        for.
+        for. Dominant in the portfolio's TOTAL variance, which needs the
+        names' specific risk (the CHANGELOG entry of 2026-10-22): at 20%
+        specific volatility each, forty names at 2.5% add 40 * 0.025^2 *
+        0.04 = 0.001 to a market variance of 0.04, so the market carries
+        97.6% of the total.
         """
-        loadings = pd.DataFrame(
-            {"mkt": np.full(40, 1.0)}, index=[f"n{i}" for i in range(40)]
-        )
+        names = [f"n{i}" for i in range(40)]
+        loadings = pd.DataFrame({"mkt": np.full(40, 1.0)}, index=names)
         result = factor_exposure_budget(
-            {f"n{i}": 0.025 for i in range(40)},
+            {name: 0.025 for name in names},
             loadings,
             factor_covariance=pd.DataFrame([[0.04]], index=["mkt"], columns=["mkt"]),
+            specific_variance={name: 0.04 for name in names},
         )
+        assert result["total_variance_shares"]["mkt"] == pytest.approx(0.04 / 0.041)
         assert any("it is one bet" in w for w in result["warnings"])
 
     def test_without_a_covariance_it_says_exposure_is_not_risk(self):

@@ -448,6 +448,13 @@ class ReplicationBasketResult(_Result):
     )
     largest_weight: Stat = None
     periods_per_year: int = 252
+    converged: bool = Field(
+        False,
+        description="False when SLSQP did not report success on the final "
+        "solve, or the weights miss the fully-invested or long-only "
+        "constraint: the basket is then the solver's last iterate, and a "
+        "warning says how it stopped.",
+    )
 
 
 class EtfFairValueResult(_Result):

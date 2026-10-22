@@ -45,7 +45,7 @@ fit is riding sample noise it will not see again.
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -163,7 +163,7 @@ def optimize_replication_basket(
         )
 
     support = np.arange(n_assets)
-    weights = _solve(cov, cross, support, lower, caps, n_assets)
+    weights, stop = _solve(cov, cross, support, lower, caps, n_assets)
 
     thresholded = False
     if max_names is not None:
@@ -177,7 +177,7 @@ def optimize_replication_basket(
                 break
             keep = active[np.argsort(-np.abs(weights[active]))[:max_names]]
             support = np.sort(keep)
-            weights = _solve(cov, cross, support, lower, caps, n_assets)
+            weights, stop = _solve(cov, cross, support, lower, caps, n_assets)
             thresholded = True
 
     held = np.flatnonzero(np.abs(weights) > 1e-8)
@@ -205,16 +205,29 @@ def optimize_replication_basket(
     # Verified from the returned vector rather than trusted from the solver.
     # `result.success` is the solver's opinion of its own run; these are the
     # constraints it was given, recomputed.
+    converged = stop is None
     if abs(float(weights.sum()) - 1.0) > 1e-6:
+        converged = False
         warnings.append(
             f"The weights sum to {weights.sum():.6f} rather than 1, so the "
             "fully-invested constraint was not met. The basket below is not "
             "the portfolio that was asked for."
         )
     if long_only and float(weights.min()) < -1e-9:
+        converged = False
         warnings.append(
             f"A weight came back at {weights.min():.6g} despite long_only, "
             "so the bound was not respected."
+        )
+    # And the solver's own opinion, which was never read: a run that hit
+    # the iteration limit or stalled in its line search returned its last
+    # iterate as the basket, with nothing in the result to say so.
+    if stop is not None:
+        warnings.append(
+            f"SLSQP did not confirm a minimum of tracking error: {stop}. The "
+            "weights are its last iterate, not a solved basket; converged is "
+            "False. The constraint checks above say whether they are at "
+            "least feasible."
         )
 
     if thresholded:
@@ -262,6 +275,7 @@ def optimize_replication_basket(
         "net_weight": float(weights.sum()),
         "largest_weight": float(np.max(np.abs(weights))) if len(held) else 0.0,
         "periods_per_year": int(periods_per_year),
+        "converged": converged,
         "warnings": warnings,
     }
 
@@ -276,9 +290,12 @@ def _solve(
     lower: float,
     caps: np.ndarray,
     n_assets: int,
-) -> np.ndarray:
+) -> Tuple[np.ndarray, Optional[str]]:
     """
     Minimize `w'Sw - 2 w'c` over `support`, fully invested and inside caps.
+
+    Returns the weights and, when SLSQP did not report success, how it
+    stopped (its status and message); None when it did.
 
     The constant `var_b` is dropped: it does not depend on w, so it shifts
     the objective without moving its minimum, and leaving it out keeps the
@@ -324,7 +341,17 @@ def _solve(
 
     weights = np.zeros(n_assets, dtype=float)
     weights[support] = result.x
-    return weights
+    stop = (
+        None
+        if bool(getattr(result, "success", False))
+        else (
+            f"status {getattr(result, 'status', None)} "
+            f"({getattr(result, 'message', None)!r}) after "
+            f"{getattr(result, 'nit', None)} iterations on "
+            f"{len(support)} candidate(s)"
+        )
+    )
+    return weights, stop
 
 
 def _aligned(returns: Any, benchmark: Any):

@@ -328,6 +328,17 @@ def risk_parity(
     n = matrix.shape[0]
     if n < 2:
         raise ValidationError("risk_parity: needs at least two assets.")
+    # Finite before positive. `abs(change) < inf` holds on the first sweep,
+    # so an infinite tolerance reported the inverse-volatility start as a
+    # converged risk parity portfolio; NaN never converged at all.
+    tolerance = float(tolerance)
+    if not math.isfinite(tolerance) or tolerance <= 0:
+        raise ValidationError(
+            f"risk_parity: tolerance must be a finite positive number, got "
+            f"{tolerance!r}. An infinite one is met by the first sweep, so "
+            "the starting point would be reported as converged; 1e-10 is the "
+            "default."
+        )
 
     if budget is None:
         targets = np.full(n, 1.0 / n)
@@ -336,6 +347,22 @@ def risk_parity(
         if targets.size != n:
             raise ValidationError(
                 f"risk_parity: budget has {targets.size} entries for {n} assets."
+            )
+        # Finite before positive, for the same reason: NaN compares False
+        # against `<= 0`, so a NaN budget passed the check below, and an
+        # infinite one survived it and made every normalized target NaN.
+        # Both came back as NaN weights.
+        bad = {
+            str(name): float(t)
+            for name, t in zip(frame.columns, targets)
+            if not math.isfinite(t)
+        }
+        if bad:
+            raise ValidationError(
+                f"risk_parity: the risk budget is not finite for {bad}. Each "
+                "asset's budget is its share of portfolio risk and must be a "
+                "finite positive number, e.g. [0.5, 0.3, 0.2]; omit `budget` "
+                "for equal risk contributions."
             )
         if (targets <= 0).any():
             raise ValidationError(
@@ -784,6 +811,7 @@ def factor_exposure_budget(
     factor_loadings: pd.DataFrame,
     *,
     factor_covariance: Optional[Any] = None,
+    specific_variance: Optional[Dict[str, float]] = None,
 ) -> Dict[str, Any]:
     """
     What the portfolio is actually betting on, once the names are collapsed
@@ -797,16 +825,26 @@ def factor_exposure_budget(
 
     RISK IS DECOMPOSED, not just exposure. A large loading on a low-variance
     factor is not a large risk, and a small loading on a volatile one can be.
-    When `factor_covariance` is supplied the result reports each factor's
-    share of total portfolio VARIANCE, which is the number that answers "what
-    am I actually taking risk on". Without it, only the exposures can be
-    reported, and the result says so rather than implying the exposures are
-    the risk.
+    When `factor_covariance` is supplied the result reports the FACTOR
+    variance x'Fx of the exposures x = B'w, and each factor's share of it
+    (`factor_variance_shares`, summing to 1). Without it, only the exposures
+    can be reported, and the result says so rather than implying the
+    exposures are the risk.
 
-    THE RESIDUAL MATTERS AS MUCH AS THE FACTORS. A portfolio whose variance
-    is 90% explained by three factors is a factor bet. One where the factors
-    explain 20% is a stock-picking portfolio, and its risk lives somewhere
-    this decomposition cannot see. Both are reported.
+    THE SPECIFIC RISK MATTERS AS MUCH AS THE FACTORS, and it is not in the
+    factor variance. A portfolio whose variance is 90% factor is a factor
+    bet; one where the factors carry 20% is a stock-picking portfolio whose
+    risk lives in the names. Shares of the factor variance cannot tell the
+    two apart: they sum to 1 either way, and they used to be described as
+    shares of PORTFOLIO variance, so two names with a beta of 1 to a market
+    factor at 1% volatility and 40% specific volatility each read as "100%
+    market, one bet" when the market carries 0.12% of their variance. With
+    `specific_variance` -- each held asset's idiosyncratic return variance,
+    in the units of `factor_covariance` -- the result also reports the
+    portfolio's specific variance sum(w_i^2 s_i), the total, each factor's
+    share of the TOTAL (`total_variance_shares`) and the specific share,
+    which together sum to 1. Without it those are null and a warning says
+    the factor shares are not the portfolio's total risk.
 
     INPUTS ARE CHECKED BY NAME, as the tool door checks them: every weight
     finite and named once, each asset one row of loadings and each factor
@@ -859,8 +897,24 @@ def factor_exposure_budget(
     gross = _finite_gross(aligned_weights, who)
     exposure_map = {str(f): float(e) for f, e in zip(loadings.columns, exposures)}
 
+    if specific_variance is not None and factor_covariance is None:
+        raise ValidationError(
+            f"{who}: specific_variance was given without factor_covariance. "
+            "The shares of total variance divide each factor's variance by the "
+            "factor plus specific variance, and there is no factor variance "
+            "without the factor covariance; pass both, or neither."
+        )
+    specific = None
+    if specific_variance is not None:
+        specific = _specific_variances(specific_variance, common, aligned_weights, who)
+
     variance_shares: Optional[Dict[str, float]] = None
-    factor_variance = None
+    total_shares: Optional[Dict[str, float]] = None
+    factor_variance: Optional[float] = None
+    specific_total: Optional[float] = None
+    total_variance: Optional[float] = None
+    specific_share: Optional[float] = None
+    contributions: Optional[np.ndarray] = None
     if factor_covariance is not None:
         factor_frame = _covariance_frame(factor_covariance, "factor_exposure_budget")
         if factor_frame.shape[0] != loadings.shape[1]:
@@ -871,12 +925,32 @@ def factor_exposure_budget(
             )
         matrix = factor_frame.to_numpy()
         factor_variance = float(exposures @ matrix @ exposures)
+        contributions = exposures * (matrix @ exposures)
         if factor_variance > 0:
-            contributions = exposures * (matrix @ exposures)
             variance_shares = {
                 str(f): float(c / factor_variance)
                 for f, c in zip(loadings.columns, contributions)
             }
+    if specific is not None and contributions is not None:
+        assert factor_variance is not None  # set beside contributions
+        # Diagonal specific risk: the names' idiosyncratic returns are
+        # uncorrelated with each other and with the factors, which is what
+        # makes x'Fx + sum(w_i^2 s_i) the portfolio's variance.
+        with np.errstate(over="ignore", invalid="ignore"):
+            specific_total = float(np.sum(aligned_weights**2 * specific))
+        if not math.isfinite(specific_total):
+            raise ValidationError(
+                f"{who}: the specific variance of these weights is beyond the "
+                "float range. Give weights as fractions of the portfolio and "
+                "specific_variance in the units of factor_covariance."
+            )
+        total_variance = float(factor_variance) + specific_total
+        if total_variance > 0:
+            total_shares = {
+                str(f): float(c / total_variance)
+                for f, c in zip(loadings.columns, contributions)
+            }
+            specific_share = specific_total / total_variance
 
     ranked = sorted(exposure_map.items(), key=lambda kv: abs(kv[1]), reverse=True)
     warnings: List[str] = []
@@ -887,20 +961,48 @@ def factor_exposure_budget(
             "decomposition, so the picture is incomplete by exactly their "
             "weight."
         )
-    if variance_shares:
-        top_factor, top_share = max(variance_shares.items(), key=lambda kv: abs(kv[1]))
+    if total_shares:
+        top_factor, top_share = max(total_shares.items(), key=lambda kv: abs(kv[1]))
         if abs(top_share) > 0.6:
             warnings.append(
-                f"{abs(top_share):.0%} of factor variance comes from "
-                f"'{top_factor}' alone. However many names this portfolio "
+                f"{abs(top_share):.0%} of the portfolio's total variance comes "
+                f"from '{top_factor}' alone. However many names this portfolio "
                 "holds, it is one bet."
             )
+    elif variance_shares:
+        top_factor, top_share = max(variance_shares.items(), key=lambda kv: abs(kv[1]))
+        warnings.append(
+            "factor_variance_shares are shares of the FACTOR variance x'Fx "
+            "only, not of the portfolio's total risk: no specific_variance "
+            "was given, so the names' own risk is not measured and the "
+            f"factors' share of the total is unknown. '{top_factor}' carries "
+            f"{abs(top_share):.0%} of the factor variance, which is a bet only "
+            "if the factors dominate the total -- two names with a beta of 1 "
+            "to a market factor at 1% volatility and 40% specific volatility "
+            "each are 100% market by this measure and 0.12% market by the "
+            "total. Pass specific_variance (each asset's idiosyncratic "
+            "return variance, in the units of factor_covariance) for "
+            "total_variance_shares."
+        )
+    elif factor_covariance is not None:
+        warnings.append(
+            "The factor exposures carry no factor variance (x'Fx = 0), so "
+            "there is no factor risk to apportion and factor_variance_shares "
+            "is null."
+        )
     else:
         warnings.append(
             "No factor covariance was supplied, so only EXPOSURES are "
             "reported -- not risk. A large loading on a quiet factor is not "
             "a large risk, and a small loading on a volatile one can be. "
-            "Pass factor_covariance to get the variance decomposition."
+            "Pass factor_covariance to get the variance decomposition, and "
+            "specific_variance to see it against the portfolio's total."
+        )
+    if specific is not None and total_variance is not None and not total_variance > 0:
+        warnings.append(
+            "The portfolio has zero total variance under this model -- no "
+            "factor exposure and no specific variance -- so there is nothing "
+            "to apportion and total_variance_shares is null."
         )
     warnings.append(
         "Name count is not diversification. Forty names with the same "
@@ -916,10 +1018,57 @@ def factor_exposure_budget(
         "largest_exposures": [{"factor": f, "exposure": e} for f, e in ranked[:5]],
         "factor_variance": factor_variance,
         "factor_variance_shares": variance_shares,
+        "specific_variance": specific_total,
+        "total_variance": total_variance,
+        "total_variance_shares": total_shares,
+        "specific_variance_share": specific_share,
         "gross_exposure": gross,
         "net_exposure": float(aligned_weights.sum()),
         "warnings": warnings,
     }
+
+
+def _specific_variances(
+    specific_variance: Dict[str, float],
+    assets: List[str],
+    weights: np.ndarray,
+    who: str,
+) -> np.ndarray:
+    """
+    Each asset's specific variance, in the order of `assets`, or a refusal
+    naming the held assets that have none or a bad one.
+
+    Absent is not zero for a name that is held: it would be counted as
+    riskless beyond its factors, which is the understatement this input
+    exists to remove. A name at zero weight contributes nothing whatever
+    its specific variance, so it may be left out.
+    """
+    values = pd.Series(specific_variance, dtype=float)
+    _named_once(values.index, "specific_variance", who)
+    held = [a for a, w in zip(assets, weights) if w != 0.0]
+    absent = [a for a in held if a not in values.index]
+    if absent:
+        raise ValidationError(
+            f"{who}: specific_variance has no entry for the held asset(s) "
+            f"{absent[:10]}. Give every held asset its idiosyncratic return "
+            "variance (0.0 only if it genuinely has none); a missing one would "
+            "be counted as riskless beyond its factor exposure."
+        )
+    bad = {
+        str(a): float(values[a])
+        for a in assets
+        if a in values.index
+        and (not math.isfinite(float(values[a])) or float(values[a]) < 0)
+    }
+    if bad:
+        raise ValidationError(
+            f"{who}: specific_variance must be a finite, non-negative variance "
+            f"for every asset; got {dict(list(bad.items())[:10])}. It is a "
+            "variance (volatility squared), in the units of factor_covariance."
+        )
+    return np.array(
+        [float(values[a]) if a in values.index else 0.0 for a in assets], dtype=float
+    )
 
 
 def concentration_analysis(weights: Dict[str, float]) -> Dict[str, Any]:
@@ -1278,12 +1427,45 @@ def max_diversification(covariance: Any) -> Dict[str, Any]:
             ) from None
         condition = float(np.linalg.cond(correlation))
     raw = inverse @ np.ones(n)
-    if raw.sum() == 0:
+    # The unconstrained maximum is w proportional to Sigma^-1 sigma, which
+    # is raw / volatilities, and its normalizing sum 1'Sigma^-1 sigma can be
+    # NEGATIVE. The old guard tested a different sum (raw's, of the
+    # correlation inverse) and only for exactly zero. Dividing by a negative
+    # sum flips every position: the ratio of the flipped book is
+    # -sqrt(sigma'Sigma^-1 sigma), the MINIMUM, reported as the maximum.
+    # Measured on three assets at volatilities 3.17, 4.59 and 0.80 with
+    # correlations -0.474, 0.792 and 0.144: a diversification ratio of
+    # -5.32 and a negative weighted-average volatility, with a condition
+    # number of 204 and nothing else amiss. No fully-invested portfolio
+    # attains the maximum then -- the ratio only approaches it as the
+    # positions grow without bound -- so the request is refused, as the
+    # tangency portfolio with a negative normalizing sum is.
+    direction = raw / volatilities
+    total = float(direction.sum())
+    scale = float(np.abs(direction).sum()) or 1.0
+    if not total > 1e-12 * scale:
+        best = float(math.sqrt(max(float(volatilities @ direction), 0.0)))
+        shape = {
+            str(c): round(float(d) / scale, 4) for c, d in zip(frame.columns, direction)
+        }
+        flipped = total < 0
         raise ValidationError(
-            "max_diversification: the solution is degenerate, which happens "
-            "when the correlation matrix is singular."
+            "max_diversification: the maximum-diversification holding "
+            f"Sigma^-1 sigma, scaled to a gross of 1, is {shape}; its weights "
+            f"sum to {total / scale:.6g} of that gross, so no fully-invested "
+            "portfolio carries it. Rescaling it to sum to 1 would divide every "
+            "position by "
+            + ("a negative number and flip it" if flipped else "zero")
+            + f", turning the maximum diversification ratio ({best:.4f}, "
+            "approached only as the positions grow without bound) into "
+            + (f"its minimum ({-best:.4f})" if flipped else "a division by zero")
+            + ". It happens when a low-volatility asset is strongly correlated "
+            "with a combination of the others and the holding shorts it "
+            "heavily. Use optimize_risk_parity or "
+            "optimize_hierarchical_risk_parity, which are long-only, or drop "
+            "the asset with the most negative entry above."
         )
-    weights = (raw / volatilities) / (raw / volatilities).sum()
+    weights = direction / total
 
     portfolio_volatility = _portfolio_volatility(weights, matrix)
     weighted_average = float(weights @ volatilities)

@@ -123,6 +123,7 @@ from standard_quant_tools.portfolio.optimize import (
     _condition_number,
     _conditioning_warnings,
     _small_sample_warnings,
+    _verify_solution,
     annualized_mean_cov,
     black_litterman,
     build_bl_views,
@@ -266,6 +267,26 @@ def run_portfolio_optimization(
         sharpe = (
             (exp_ret - input_data.risk_free_rate) / exp_vol if exp_vol > 1e-12 else 0.0
         )
+        # Checked from the weights, not asserted. `converged` was the
+        # literal True here, so a book the blend had flipped onto its worst
+        # direction read as converged; the library now refuses that case,
+        # and what is left to check is what a closed form can still get
+        # wrong -- a non-finite weight or a sum that is not 1.
+        bl_issues = _verify_solution(
+            w,
+            np.asarray(bl["posterior_returns"], dtype=float),
+            np.asarray(bl["posterior_cov"], dtype=float),
+            "black_litterman",
+            None,
+            None,
+            True,
+            None,
+        )
+        if bl_issues:
+            warnings.append(
+                "the Black-Litterman weights do not satisfy the "
+                "fully-invested constraint: " + "; ".join(bl_issues) + "."
+            )
         # The REASON, not only the weights. The blend computes an
         # equilibrium prior, a posterior and a posterior covariance, and
         # every one of them was used for two scalars and dropped -- so a
@@ -296,7 +317,7 @@ def run_portfolio_optimization(
             expected_return=round(exp_ret, 6),
             expected_volatility=round(exp_vol, 6),
             sharpe_ratio=round(sharpe, 4),
-            converged=True,
+            converged=not bl_issues,
             condition_number=_condition_number(cov),
             implied_equilibrium_returns={
                 t: round(float(v), 6) for t, v in zip(solved_tickers, pi)
@@ -616,18 +637,41 @@ def get_portfolio_risk_attribution(
     evr = {
         k: round(float(v), 4) for k, v in pca_res["explained_variance_ratio"].items()
     }
-    loadings_mat = pca_res["loadings"].values  # (n_assets, n_comp)
-    port_exposures = weights @ loadings_mat  # (n_comp,)
+    # Each PC's share of the PORTFOLIO's variance, on the same principal
+    # components `pca_variance_explained` describes. Those are components of
+    # the correlation matrix, R = D^-1 Sigma D^-1 with D the volatilities, so
+    # the portfolio's coordinates in that space are x = D w, its variance is
+    # x'Rx = w'Sigma w, and with R = sum_k lambda_k v_k v_k' it splits
+    # exactly as sum_k (x'v_k)^2 lambda_k. This used to report w'v_k -- raw
+    # weights against eigenvectors of standardized returns, a number in no
+    # unit: two names at 1% and 10% volatility, correlated 0.5 and held
+    # 50/50, put PC2 at 0.0 when PC2 carries 18.2% of the portfolio's
+    # variance. lambda_k is the variance of the PC's own return series.
+    loadings_mat = pca_res["loadings"].to_numpy(dtype=float)  # (n_assets, n_comp)
+    pc_variances = (
+        pca_res["factor_returns"].var(ddof=1).to_numpy(dtype=float)
+    )  # (n_comp,)
+    scaled = weights * returns_df.std(ddof=1).to_numpy(dtype=float)
+    scaled_variance = float(port_ret.var(ddof=1))
+    pc_shares = (
+        (scaled @ loadings_mat) ** 2 * pc_variances / scaled_variance
+        if scaled_variance > 0
+        else np.full(n_comp, np.nan)
+    )
     pc_names = list(pca_res["explained_variance_ratio"].index)
-    port_pc_exposures = {
-        pc_names[i]: round(float(port_exposures[i]), 4) for i in range(n_comp)
-    }
+    port_pc_exposures = {pc_names[i]: _rounded(pc_shares[i], 4) for i in range(n_comp)}
 
     # ── Optional factor regression on portfolio returns ───────────
     factor_loadings: Optional[Dict[str, float]] = None
     factor_r2: Optional[float] = None
     factor_alpha: Optional[float] = None
     warnings: List[str] = []
+    if not scaled_variance > 0:
+        warnings.append(
+            "portfolio_pc_exposures are null: the portfolio's returns have "
+            "no variance over this window, so there is none to apportion "
+            "among the principal components."
+        )
 
     if input_data.factor_tickers:
         # One name per ticker, unique -- the input model checks both, as it
@@ -1030,28 +1074,59 @@ def get_liquidity_metrics(
         amihud_valid = amihud.dropna()
         cs_valid = cs_spread.dropna()
 
+        # NaN, not 0.0, when there is nothing to estimate from. Zero is the
+        # most liquid reading either proxy can give, so a name with too few
+        # bars -- or a zero-volume day in every window -- was reported as
+        # perfectly liquid and could come back as `most_liquid_ticker`. The
+        # result turns the NaN into a null and says why.
         per_ticker[t] = {
             "avg_dollar_volume": round(float(avg_dollar_volume.iloc[-1]), 2),
             "amihud_illiquidity": (
                 round(float(amihud_valid.iloc[-1]), 6)
                 if not amihud_valid.empty
-                else 0.0
+                else float("nan")
             ),
             "corwin_schultz_spread_bps": (
                 round(float(cs_valid.iloc[-1]) * 10_000.0, 4)
                 if not cs_valid.empty
-                else 0.0
+                else float("nan")
             ),
         }
 
-    least_liquid = max(per_ticker, key=lambda t: per_ticker[t]["amihud_illiquidity"])
-    most_liquid = min(per_ticker, key=lambda t: per_ticker[t]["amihud_illiquidity"])
+    ranked = [
+        t for t in per_ticker if math.isfinite(per_ticker[t]["amihud_illiquidity"])
+    ]
+    least_liquid = (
+        max(ranked, key=lambda t: per_ticker[t]["amihud_illiquidity"])
+        if ranked
+        else None
+    )
+    most_liquid = (
+        min(ranked, key=lambda t: per_ticker[t]["amihud_illiquidity"])
+        if ranked
+        else None
+    )
+    warnings: List[str] = []
+    unranked = [t for t in per_ticker if t not in ranked]
+    if unranked:
+        warnings.append(
+            f"{unranked} could not be ranked by liquidity: no Amihud ratio "
+            f"could be estimated over a {window}-bar window, so "
+            + (
+                f"least_liquid_ticker and most_liquid_ticker are chosen among "
+                f"{ranked} only."
+                if ranked
+                else "neither least_liquid_ticker nor most_liquid_ticker can "
+                "be named, and both are null."
+            )
+        )
 
     return LiquidityAnalysisResult(
         tickers=input_data.tickers,
         per_ticker=per_ticker,
         least_liquid_ticker=least_liquid,
         most_liquid_ticker=most_liquid,
+        warnings=warnings,
     )
 
 
