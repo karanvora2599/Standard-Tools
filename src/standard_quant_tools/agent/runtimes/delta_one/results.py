@@ -294,7 +294,21 @@ class RollAnalysisResult(_Result):
     )
     days_to_front_expiry: Stat = None
     days_between_expiries: Stat = None
-    breakeven_annualized_rate: Stat = None
+    breakeven_annualized_rate: Stat = Field(
+        None,
+        description="The return on notional that repays the roll, a year, "
+        "over the time the next contract is held: the gap between the "
+        "expiries. Without that gap, over the front's remaining life, and "
+        "null below 30 days of it, where 365 / days measures when the roll "
+        "is made rather than what it costs. net_roll_cost_bps is the cost "
+        "itself.",
+    )
+    breakeven_holding_days: Stat = Field(
+        None, description="Days the break-even was annualized over."
+    )
+    breakeven_annualized_over: Optional[
+        Literal["days_between_expiries", "days_to_front_expiry"]
+    ] = None
 
 
 class FuturesHedgeResult(_Result):

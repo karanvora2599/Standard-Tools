@@ -235,6 +235,13 @@ def futures_curve(
     }
 
 
+#: The shortest front life a roll's break-even is annualized over when the
+#: gap between the expiries is not given. Annualizing one cost over the days
+#: left on the front multiplies it by 365 / days, which is unbounded as the
+#: roll date approaches expiry.
+MIN_BREAKEVEN_DAYS = 30.0
+
+
 def roll_analysis(
     *,
     front_price: float,
@@ -258,9 +265,21 @@ def roll_analysis(
     absolute size would report the wrong sign for half its callers.
 
     The break-even is the number to read. A roll is not free and it is not
-    a loss either; it is a cost that the position has to out-earn before
-    the next expiry, and `breakeven_annualized_rate` is the rate of return
-    on the position's notional that exactly repays it.
+    a loss either; it is a cost that the position has to out-earn while it
+    sits in the next contract, and `breakeven_annualized_rate` is the rate
+    of return on the position's notional that exactly repays it over that
+    time -- the gap between the two expiries, which is what the next
+    contract is held for before it is rolled in turn. `net_roll_cost_bps`
+    is the same cost, not annualized.
+
+    IT WAS ANNUALIZED OVER THE FRONT'S REMAINING LIFE, which is when the
+    roll happens to be made rather than how long the cost buys: the same
+    roll, 1% of notional, read 4.06% a year at 90 days to expiry and 365%
+    at one day, and the day before expiry is when a roll is made. Without
+    `days_between_expiries` the front's life is all there is, so it is
+    used only from `MIN_BREAKEVEN_DAYS` up, and below that the rate is
+    null and a warning says why. `breakeven_holding_days` and
+    `breakeven_annualized_over` say what it was annualized over.
 
     BOTH ANNUALIZED NUMBERS DEPEND ON `day_count`, and it is reported back
     rather than assumed. The roll yield and the break-even are a price step
@@ -368,16 +387,42 @@ def roll_analysis(
         )
     roll_yield = math.log(f1 / f0) / carry_years if carry_years else None
 
-    # The break-even is a cost over the HOLDING period, so this one really
-    # is the front's remaining life. Same convention as the roll yield
-    # above: two rates out of one function under two different day counts
-    # would be a worse answer than either.
-    years = days / denominator
-    breakeven = (
-        net_cost / front_notional / years if front_notional and years else float("nan")
-    )
-
+    # The break-even is the cost over the period the rolled position is
+    # held, which is the gap between the expiries; the front's remaining
+    # life only stands in for it when the gap is not given, and not near
+    # expiry, where 365 / days has no bound. Same convention as the roll
+    # yield above: two rates out of one function under two different day
+    # counts would be a worse answer than either.
     warnings: List[str] = []
+    cost_fraction = net_cost / front_notional
+    if carry_years is not None:
+        holding_days, annualized_over = (
+            float(days_between_expiries),
+            "days_between_expiries",
+        )
+    else:
+        holding_days, annualized_over = days, "days_to_front_expiry"
+    breakeven: Optional[float]
+    if annualized_over == "days_to_front_expiry" and days < MIN_BREAKEVEN_DAYS:
+        breakeven = None
+        warnings.append(
+            f"breakeven_annualized_rate is null: without days_between_expiries "
+            f"the roll's cost, {cost_fraction * 10_000.0:.1f} bp of notional "
+            f"(net_roll_cost_bps), could only be annualized over the front's "
+            f"remaining {days:g} days, which multiplies it by "
+            f"{denominator / days:.0f}. That measures when the roll is made, "
+            "not what it costs. Pass days_between_expiries for a rate."
+        )
+    else:
+        breakeven = cost_fraction / (holding_days / denominator)
+        if annualized_over == "days_to_front_expiry":
+            warnings.append(
+                f"breakeven_annualized_rate is annualized over the front's "
+                f"remaining {days:g} days because days_between_expiries was "
+                "not given, so it moves with the roll date. Pass the gap "
+                "between the expiries for the rate over the time the next "
+                "contract is held."
+            )
     if abs(m1 - m0) > 1e-12:
         warnings.append(
             f"The two contracts have different multipliers ({m0:g} and "
@@ -426,7 +471,11 @@ def roll_analysis(
         "days_between_expiries": (
             float(days_between_expiries) if days_between_expiries is not None else None
         ),
-        "breakeven_annualized_rate": float(breakeven),
+        "breakeven_annualized_rate": (
+            float(breakeven) if breakeven is not None else None
+        ),
+        "breakeven_holding_days": float(holding_days),
+        "breakeven_annualized_over": annualized_over,
         "warnings": warnings,
     }
 

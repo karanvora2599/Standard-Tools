@@ -231,11 +231,12 @@ class RollAnalysisInput(BaseModel):
         gt=0,
         le=10_000,
         description="Calendar days between the two contracts' expiries, e.g. "
-        "about 91 for a quarterly roll. This is what roll_yield is "
-        "annualized over, because the step between the contracts is earned "
-        "across the gap between them. Omitted, roll_yield_bps is null "
-        "rather than annualized by the front's remaining life, which made "
-        "the answer depend on the roll date.",
+        "about 91 for a quarterly roll. This is what roll_yield and the "
+        "break-even are annualized over, because the step between the "
+        "contracts is earned across the gap between them and the rolled "
+        "position is held for it. Omitted, roll_yield_bps is null and the "
+        "break-even falls back on the front's remaining life -- null below "
+        "30 days of it -- rather than depending on the roll date.",
     )
     next_multiplier: Optional[float] = Field(
         None, gt=0, description="Only when the two differ, e.g. micro to full-size."

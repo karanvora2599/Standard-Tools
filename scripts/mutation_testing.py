@@ -223,6 +223,23 @@ MUTATIONS: List[Mutation] = [
         "tests/analysis/test_inference.py",
     ),
     Mutation(
+        # The break-even annualized over the front's remaining life again,
+        # whatever the gap between the expiries: 365% at one day.
+        "roll: annualize the break-even over the front's remaining life",
+        SRC / "delta_one/futures.py",
+        '            float(days_between_expiries),\n            "days_between_expiries",\n',
+        '            days,\n            "days_between_expiries",\n',
+        "tests/delta_one/test_delta_one.py",
+    ),
+    Mutation(
+        # The floor dropped: a cost annualized over one day of front life.
+        "roll: annualize over any front life when the gap is missing",
+        SRC / "delta_one/futures.py",
+        '    if annualized_over == "days_to_front_expiry" and days < MIN_BREAKEVEN_DAYS:\n',
+        '    if annualized_over == "days_to_front_expiry" and days < 0:\n',
+        "tests/delta_one/test_delta_one.py",
+    ),
+    Mutation(
         # Every field dumped with its default, as the tool did: each
         # expression then lists all ten terms as supplied.
         "delta one expressions: dump every default as a supplied term",

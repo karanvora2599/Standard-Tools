@@ -1,5 +1,34 @@
 # Changelog
 
+## A roll's break-even is annualized over the time the next contract is held, so it no longer depends on the roll date
+
+- **The same roll read 4.06% a year at 90 days to expiry and 365% at
+  one.** `roll_analysis` (the `analyze_roll` tool) annualized the roll's
+  cost over the front contract's remaining life: a cost of 1% of notional
+  (a 50-point step on 5,000, ten contracts of 50) divided by 90/365 or by
+  1/365. The day before expiry is when a roll is made, and the number
+  measured that rather than the cost. The roll yield had been moved off
+  the front's life onto the gap between the expiries for the same reason;
+  the break-even had not.
+- **Now** it is annualized over `days_between_expiries`, the time the
+  rolled position sits in the next contract before it is rolled in turn
+  -- 4.01% for that roll at any distance from expiry, and with no
+  execution cost about the roll yield, as it should be. Without the gap
+  the front's remaining life is all there is: it is used from 30 days up
+  (`MIN_BREAKEVEN_DAYS`) with a warning that the rate moves with the roll
+  date, and below 30 days the rate is null and the warning gives the cost
+  in bp of notional. `net_roll_cost_bps` was and is the raw cost;
+  `breakeven_holding_days` and `breakeven_annualized_over` now say what
+  the rate was annualized over.
+- **What moves:** every break-even computed with `days_between_expiries`,
+  by days_to_front_expiry / days_between_expiries -- the pinned 5-day,
+  91-day roll from 0.2992 to 0.0164; without the gap, nothing at 30 days
+  or more and null below.
+- Tests: the break-even at 90, 30, 5 and 1 days to expiry is one number;
+  without the gap, null at one day with the cost in the warning and the
+  front's life at 90 with its warning; the pinned roll now pins the gap's
+  rate. The mutation catalogue gains two entries, both killed.
+
 ## `compare_delta_one_expressions` reports the terms the caller supplied, so its "priced on one term or none" warning can fire
 
 - **Every expression listed all ten cost terms.** The library's

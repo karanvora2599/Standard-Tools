@@ -101,7 +101,13 @@ class TestTheRollSaysWhichDayCountItUsed:
 
         assert default.roll_yield_bps == 160.37562393888237
         assert default.roll_yield_rate == 0.016037562393888236
-        assert default.breakeven_annualized_rate == 0.2992396671066364
+        # Over the 91 days between the expiries since the CHANGELOG entry
+        # "A roll's break-even is annualized over the time the next contract
+        # is held"; over the front's remaining 5 days it was 0.29924, the
+        # same cost 18.2 times over.
+        assert default.breakeven_annualized_rate == pytest.approx(
+            0.2992396671066364 * 5.0 / 91.0, rel=1e-12
+        )
         assert default.model_dump() == spelled_out.model_dump()
 
     def test_30_360_is_refused_because_a_roll_is_given_in_days(self):

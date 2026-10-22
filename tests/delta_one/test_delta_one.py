@@ -302,6 +302,36 @@ class TestRoll:
         assert out["roll_yield_rate"] == pytest.approx(0.0)
         assert out["net_roll_cost"] == pytest.approx(out["execution_cost"])
 
+    @pytest.mark.parametrize("days_to_front", [90.0, 30.0, 5.0, 1.0])
+    def test_the_break_even_does_not_depend_on_the_roll_date(self, days_to_front):
+        """1% of notional: 4.06% a year at 90 days to expiry and 365% at
+        one, when it was annualized over the front's remaining life."""
+        out = roll_analysis(
+            front_price=5000,
+            next_price=5050,
+            contracts_held=10,
+            multiplier=50,
+            days_to_front_expiry=days_to_front,
+            days_between_expiries=91.0,
+        )
+        assert out["net_roll_cost_bps"] == pytest.approx(100.0)
+        assert out["breakeven_annualized_rate"] == pytest.approx(0.01 * 365 / 91)
+        assert out["breakeven_holding_days"] == 91.0
+        assert out["breakeven_annualized_over"] == "days_between_expiries"
+
+    def test_without_the_gap_a_short_front_life_gives_no_rate(self):
+        common = dict(
+            front_price=5000, next_price=5050, contracts_held=10, multiplier=50
+        )
+        near = roll_analysis(days_to_front_expiry=1.0, **common)
+        assert near["breakeven_annualized_rate"] is None
+        assert near["net_roll_cost_bps"] == pytest.approx(100.0)
+        assert any("is null" in w and "100.0 bp" in w for w in near["warnings"])
+        far = roll_analysis(days_to_front_expiry=90.0, **common)
+        assert far["breakeven_annualized_rate"] == pytest.approx(0.01 * 365 / 90)
+        assert far["breakeven_annualized_over"] == "days_to_front_expiry"
+        assert any("moves with the roll date" in w for w in far["warnings"])
+
     def test_a_zero_position_is_not_a_roll(self):
         with pytest.raises(ValidationError, match="position"):
             roll_analysis(
