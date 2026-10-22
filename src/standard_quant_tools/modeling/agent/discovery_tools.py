@@ -108,12 +108,13 @@ _CONVENTIONAL_SESSIONS = 252.0
 
 DESCRIBE_EXCHANGE_CALENDAR_DESCRIPTION = (
     "List the exchange calendars this installation knows, and resolve one "
-    "into the numbers that annualize an intraday model: sessions per year "
-    "(counted over the calendar's complete years, so holidays are in it -- "
-    "NYSE is 251.6, not 252), session length in minutes (390 for NYSE, 510 "
-    "for London, 1440 for a crypto venue), bars per session at a given "
-    "interval (a 6.5-hour session at '1h' is SEVEN bars, the stub counted, "
-    "because the provider emits it) and bars per year. This is the value "
+    "into the numbers that annualize an intraday model. Those are sessions "
+    "per year, session length, bars per session at a given interval and "
+    "bars per year. Sessions per year are counted over the calendar's complete "
+    "years, so holidays are in it -- NYSE is 251.6, not 252. Session "
+    "length is in minutes (390 for NYSE, 510 for London, 1440 for a crypto "
+    "venue). A 6.5-hour session at '1h' is SEVEN bars, the stub counted, "
+    "because the provider emits it. This is the value "
     "DatasetSpec.calendar takes, and without this tool the only ways to "
     "find a valid code were to guess one or to read the handful of names "
     "that fit inside a refusal. An unrecognised code is refused with the "
@@ -242,8 +243,9 @@ def describe_exchange_calendar(
 
 DESCRIBE_ESTIMATOR_DESCRIPTION = (
     "What an estimator's params actually accept: every parameter name, its "
-    "type, its range, its exact choices and the reason behind each bound, "
-    "plus the rules BETWEEN parameters that no single bound can express. "
+    "type, its range, its exact choices and the reason behind each bound. "
+    "It also gives the rules BETWEEN parameters that no single bound can "
+    "express. "
     "All of it is enforced on every fit and none of it was readable, so "
     "the bounds could only be discovered by tripping them -- n_estimators "
     "caps at 2000 and num_leaves at 4096; logistic's penalty='l1' needs "

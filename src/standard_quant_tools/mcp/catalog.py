@@ -42,6 +42,7 @@ is wrong.
 from __future__ import annotations
 
 import json
+import re
 import typing
 from dataclasses import dataclass
 from typing import (
@@ -164,11 +165,15 @@ class ToolEntry:
     @property
     def idempotent(self) -> bool:
         """
-        False when a call writes a new artifact.
+        False when a call writes an artifact.
 
         MCP's `idempotentHint` asks whether repeating a call with the same
-        arguments has any additional effect. Four tools persist a Parquet
-        artifact per call and so genuinely do; the other fifty do not.
+        arguments has any additional effect. A call that writes an artifact
+        does: either a new one per call (a `*_uri` field), or a reference
+        published at the caller's `run_id`, which a repeat with the same
+        arguments is refused for -- "a value is already published at
+        run_id=..." -- because publishing never overwrites by default. See
+        `_writes_artifact` for the rule.
         """
         return not self.persists_artifact
 
@@ -213,6 +218,36 @@ def _reads_market_data(input_schema: Dict[str, Any]) -> bool:
     return any(marker in name for name in names for marker in _NETWORK_MARKERS)
 
 
+def _is_reference_field(name: str) -> bool:
+    """A result field that carries `sqt://` references: `ref`, `refs`,
+    `*_ref` or `*_refs`."""
+    return name in ("ref", "refs") or name.endswith(("_ref", "_refs"))
+
+
+def _writes_artifact(input_schema: Dict[str, Any], result_fields: Set[str]) -> bool:
+    """
+    Whether a call writes an artifact, read off the tool's own signature.
+
+    Two shapes do. A result with a `*_uri` field reports a file the call
+    saved, a new one per call. And a tool that takes a `run_id` and answers
+    with a reference publishes that reference at `sqt://<kind>/<run_id>/
+    <name>`: `handoff.publish` refuses to overwrite, so the same arguments
+    a second time are REFUSED -- the opposite of idempotent.
+
+    The second shape was missed while the rule looked only for `*_uri`,
+    and 32 publishing tools were advertised with `idempotentHint: true`; a
+    client that trusts the hint and retries a call gets a refusal. A
+    `run_id` WITHOUT a reference in the result is a filter, not an address
+    (`list_artifacts` narrows its listing by it), and a reference WITHOUT a
+    `run_id` is one the caller passed in and the tool describes or reads
+    (`describe_reference`, `validate_external_dataset`); neither writes.
+    """
+    if any(field.endswith("_uri") for field in result_fields):
+        return True
+    takes_address = "run_id" in input_schema.get("properties", {})
+    return takes_address and any(_is_reference_field(f) for f in result_fields)
+
+
 def _entries_for_registry(
     schemas: Sequence[Dict[str, Any]],
     dispatch_table: Dict[str, Any],
@@ -240,7 +275,7 @@ def _entries_for_registry(
             input_schema=input_schema,
             output_schema=output_schema,
             reads_market_data=_reads_market_data(input_schema),
-            persists_artifact=any(f.endswith("_uri") for f in result_fields),
+            persists_artifact=_writes_artifact(input_schema, result_fields),
         )
 
 
@@ -321,7 +356,42 @@ DEFAULT_DETAIL_BUDGET = 32_768
 SCHEMA_FETCH_TOOL = "describe_tool"
 
 
-def thin_description(description: str, limit: int = 180) -> str:
+#: The longest thinned description, in characters. Every tool's first
+#: sentence is written to fit inside it, and a test holds them to it.
+THIN_DESCRIPTION_LIMIT = 180
+
+#: Words whose period never ends a sentence in these descriptions. "vs."
+#: is the one that bit: `get_volatility_estimators` was advertised as
+#: "... Yang-Zhang estimators vs." because the first ". " was taken for
+#: the end of its sentence.
+_NON_TERMINAL_ABBREVIATIONS = frozenset(
+    {"vs.", "e.g.", "i.e.", "cf.", "approx.", "incl.", "viz.", "resp.", "al."}
+)
+
+#: A sentence ends at `.`, `?` or `!` followed by whitespace or the end of
+#: the text. A decimal point ("0.5") is followed by a digit, and a period
+#: inside a call ("etc.)") by a bracket, so neither ends one.
+_SENTENCE_END = re.compile(r"[.?!](?=\s|$)")
+
+
+def first_sentence(description: str) -> str:
+    """
+    The first sentence of a description, whitespace collapsed.
+
+    A period after a known abbreviation does not end a sentence; a `?` or
+    `!` does. With no terminator at all the whole text is one sentence.
+    """
+    text = " ".join(description.strip().split())
+    for match in _SENTENCE_END.finditer(text):
+        end = match.end()
+        word = text[:end].rsplit(" ", 1)[-1].lstrip("([{'\"`").lower()
+        if word in _NON_TERMINAL_ABBREVIATIONS:
+            continue
+        return text[:end]
+    return text
+
+
+def thin_description(description: str, limit: int = THIN_DESCRIPTION_LIMIT) -> str:
     """
     The first sentence of a tool's description, capped.
 
@@ -330,14 +400,22 @@ def thin_description(description: str, limit: int = 180) -> str:
     The first sentence of these descriptions is already written to do
     exactly that -- the paragraphs after it explain arguments and
     edge cases, which is what `describe_tool` returns.
+
+    Every tool's first sentence fits in `limit`, so the cut below is a
+    safety net, not the normal path: a first sentence that outgrows the
+    limit is cut at the last whole word and marked with an ellipsis, and
+    the catalog test names the tool. The cut used to be taken at the first
+    ". " -- which split "vs." -- and at 180 characters for 46 tools whose
+    first sentence ran longer, so their advertised purpose stopped
+    mid-clause (see the CHANGELOG entry of 2026-10-22).
     """
-    text = " ".join(description.strip().split())
-    stop = text.find(". ")
-    if 0 < stop < limit:
-        return text[: stop + 1]
-    if len(text) <= limit:
-        return text
-    return text[: limit - 1].rsplit(" ", 1)[0] + "\u2026"
+    sentence = first_sentence(description)
+    if len(sentence) <= limit:
+        return sentence
+    head = sentence[: limit - 1]
+    if " " in head and not sentence[limit - 1].isspace():
+        head = head.rsplit(" ", 1)[0]
+    return head.rstrip(" ,;:-\u2014") + "\u2026"
 
 
 def thin_schema(name: str) -> Dict[str, Any]:

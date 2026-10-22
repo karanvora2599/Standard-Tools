@@ -78,7 +78,7 @@ TOOL_DEFS = [
     ),
     (
         "run_portfolio_optimization",
-        "Produce portfolio weights via Markowitz mean-variance (max_sharpe/min_volatility/target_return/target_volatility), risk parity, or Black-Litterman — unlike get_portfolio_analysis, which only scores weights already chosen.",
+        "Produce portfolio weights via Markowitz mean-variance (max_sharpe/min_volatility/target_return/target_volatility), risk parity, or Black-Litterman. get_portfolio_analysis, by contrast, only scores weights already chosen.",
         PortfolioOptimizationInput,
     ),
     (
@@ -121,7 +121,7 @@ TOOL_DEFS = [
     ),
     (
         "get_capacity_report",
-        "How much account size a target-weight portfolio can support before positions become too large relative to each ticker's own trading volume, plus days-to-liquidate and sector exposure.",
+        "How much account size a target-weight portfolio can support before positions become too large relative to each ticker's own trading volume. It also reports days-to-liquidate and sector exposure.",
         CapacityReportInput,
     ),
     (
@@ -131,7 +131,7 @@ TOOL_DEFS = [
     ),
     (
         "estimate_trade_cost",
-        "Itemized cost of one hypothetical trade under a composed cost model: commission (pct/per-share/directional/maker-taker), spread (fixed bps or a fraction of the bar's range), square-root market impact, short borrow and margin interest. No market data needed.",
+        "Itemized cost of one hypothetical trade under a composed cost model: commission, spread, square-root market impact, short borrow and margin interest. Commission is pct/per-share/directional/maker-taker; spread is fixed bps or a fraction of the bar's range. No market data needed.",
         EstimateTradeCostInput,
     ),
 ]

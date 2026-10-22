@@ -100,8 +100,9 @@ def _json_safe(value: Any) -> Any:
 SCORE_PREDICTION_INTERVALS_DESCRIPTION = (
     "Score the quantile and interval columns of a published predictions "
     "reference against the realized outcome: pinball loss per level, the "
-    "quantile crossing rate, and coverage AND width for every symmetric "
-    "quantile pair and for the lower/upper band. These are the numbers an "
+    "quantile crossing rate, coverage AND width. Coverage and width "
+    "come for every symmetric quantile pair and for the lower/upper band. "
+    "These are the numbers an "
     "experiment computes on every fold and averages away, on columns it "
     "hands over and that nothing could previously check. Read coverage and "
     "width together, always: a band covering 90% of outcomes by spanning "

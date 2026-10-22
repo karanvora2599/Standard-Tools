@@ -214,7 +214,7 @@ TOOL_DEFS = [
     ),
     (
         "run_hurst_analysis",
-        "Hurst exponent (DFA, or R/S corrected for its small-sample upward bias): regime classification against a random-walk band that widens for short series (regime_band), and optional rolling breakdown. hurst is null when the series is too short for the window range.",
+        "Hurst exponent (DFA, or R/S corrected for its small-sample upward bias), with regime classification against a random-walk band that widens for short series (regime_band). A rolling breakdown is optional. hurst is null when the series is too short for the window range.",
         HurstInput,
     ),
     (
@@ -264,7 +264,7 @@ TOOL_DEFS = [
     ),
     (
         "get_data_quality_report",
-        "Dataset provenance (adjusted/survivorship-free/point-in-time guarantees, the dataset that answered, and whether it is a sample feed) plus missing-bar/stale-price/price-jump/thin-volume detection and duplicate-timestamp, out-of-order and OHLC-consistency checks on a symbol's OHLCV.",
+        "Dataset provenance plus missing-bar/stale-price/price-jump/thin-volume detection and duplicate-timestamp, out-of-order and OHLC-consistency checks on a symbol's OHLCV. Provenance is the adjusted/survivorship-free/point-in-time guarantees, the dataset that answered, and whether it is a sample feed.",
         DataQualityReportInput,
     ),
     (

@@ -3741,8 +3741,8 @@ _MODELING_TOOL_DEFS: List[tuple] = [
         "validate_model_spec",
         "Check a ModelSpec before spending an experiment on it: that the "
         "estimator exists for the task, that its parameters are accepted, "
-        "and how many fits the spec implies once a search grid multiplies "
-        "through every fold. Given a dataset_id it also checks that dataset's "
+        "and how many fits the spec implies. That count multiplies a search "
+        "grid through every fold. Given a dataset_id it also checks that dataset's "
         "entity keys resolve to distinct provider symbols and reports a "
         "calendar it adopted from its universe's venue. Fetches nothing and "
         "fits nothing.",
@@ -3752,10 +3752,10 @@ _MODELING_TOOL_DEFS: List[tuple] = [
         "score_predictions",
         "Score a predictions reference against its realized outcome — "
         "accuracy metrics, cross-sectional IC and ICIR, a predict-the-mean "
-        "baseline, the headline test a run makes (`beats_null`: the mean "
-        "per-date rank IC against zero with a long-run-variance t at the "
-        "label's horizon, or an AUC or concordance against 0.5), and an "
-        "effective "
+        "baseline and the headline test (`beats_null`). That test, the one "
+        "a run makes, is the mean per-date rank IC against zero with a "
+        "long-run-variance t at the label's horizon, or an AUC or "
+        "concordance against 0.5. It also reports an effective "
         "sample size adjusted for overlapping forward returns and for "
         "outcomes that move together across entities, with the two bounds "
         "it lies between. `beats_baseline` compares r2 only. Works on "
@@ -3812,11 +3812,12 @@ _MODELING_TOOL_DEFS: List[tuple] = [
     ),
     (
         "list_modeling_capabilities",
-        "What this modeling runtime can do: tasks, estimators and the "
-        "capabilities of each (sample weights, probabilities, query groups, "
-        "coefficients, feature importance), features, target types, "
-        "validation schemes, preprocessing and weighting options, which "
-        "optional libraries are installed, and what one fit of each estimator "
+        "What this modeling runtime can do: tasks, estimators and their "
+        "capabilities, features, target types, validation schemes, "
+        "preprocessing and weighting options. An estimator's capabilities "
+        "are sample weights, probabilities, query groups, coefficients and "
+        "feature importance. It also says which optional libraries are "
+        "installed, what one fit of each estimator "
         "costs (`fit_cost`) and what sets its cores (`threads`). Call this "
         "before choosing a model rather than assuming an estimator is "
         "available.",
@@ -3825,9 +3826,10 @@ _MODELING_TOOL_DEFS: List[tuple] = [
     (
         "analyze_features",
         "Score a built dataset's FEATURES before fitting anything: coverage, "
-        "turnover, cross-sectional IC and ICIR, decile spread and monotonicity, "
-        "which features are near-duplicates of one another, and a lead-lag "
-        "causality screen for features whose information arrives too early. "
+        "turnover, cross-sectional IC and ICIR, decile spread and "
+        "monotonicity, and near-duplicate features. "
+        "A lead-lag causality screen flags features whose information "
+        "arrives too early. "
         "Use this to choose features; use inspect_model(view='feature_importance') "
         "to see what one fitted model then leaned on.",
         AnalyzeFeaturesInput,
@@ -3841,9 +3843,9 @@ _MODELING_TOOL_DEFS: List[tuple] = [
     ),
     (
         "promote_model",
-        "Record a lifecycle decision for a registered model: candidate -> "
-        "validated -> staging -> production one stage at a time, or archived "
-        "from anywhere, with a reason and the evidence it rests on. The "
+        "Record a lifecycle decision for a registered model, with a reason "
+        "and the evidence it rests on. Stages run candidate -> validated -> "
+        "staging -> production one at a time, or archived from anywhere. The "
         "manifest is untouched; the stage is read off an append-only log. "
         "The package is re-verified first and a promotion of a model whose "
         "artifacts no longer match their registered hashes is REFUSED, "
@@ -3878,8 +3880,9 @@ _MODELING_TOOL_DEFS: List[tuple] = [
     (
         "monitor_model",
         "Feature and prediction drift of a scored universe against the "
-        "model's training reference (PSI and KS per feature), and, given "
-        "outcomes, the realized cross-sectional IC beside the validation's. "
+        "model's training reference (PSI and KS per feature). Given "
+        "outcomes, also the realized cross-sectional IC beside the "
+        "validation's. "
         "Statuses come with the thresholds they were read against.",
         MonitorModelInput,
     ),
@@ -3936,8 +3939,8 @@ _MODELING_TOOL_DEFS: List[tuple] = [
     (
         "evaluate_model_portfolio",
         "Evaluate a model's out-of-sample predictions as a shared-cash "
-        "portfolio: transform predictions into target weights and simulate "
-        "them with costs, returning Sharpe, drawdown, turnover and exposure.",
+        "portfolio: predictions become target weights, simulated with costs. "
+        "Returns Sharpe, drawdown, turnover and exposure.",
         EvaluateModelPortfolioInput,
     ),
     (
@@ -3948,7 +3951,7 @@ _MODELING_TOOL_DEFS: List[tuple] = [
     (
         "backtest_model_signal",
         "Turn a registered model's out-of-sample predictions into a "
-        "tradeable signal panel and publish it, then price it with "
+        "tradeable signal panel and publish it. Price it with "
         "run_signal_panel_backtest(signal_panel_ref=..., "
         "signal_type='direction', fill_price='next_open'). THE VERIFIED "
         "ROUTE from a model to a backtest, and the reason to prefer it over "

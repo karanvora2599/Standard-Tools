@@ -70,7 +70,7 @@ from .tools import (
 TOOL_DEFS = [
     (
         "compare_data_sources",
-        "Fetch the same fundamentals from two providers and report where they disagree, separating a SCALE difference (a constant ratio -- a missed unit conversion, fixable by arithmetic) from a DEFINITION difference (systematic with no constant ratio -- the two are computing different quantities and no conversion exists) from noise. FinancialRatios already documents that Polygon derives debt_to_equity from total liabilities and yfinance reports it as a percentage; this checks it rather than leaving it in a docstring. Fetches from both providers.",
+        "Fetch the same fundamentals from two providers and report where they disagree, separating a SCALE difference from a DEFINITION difference from noise. A SCALE difference is a constant ratio -- a missed unit conversion, fixable by arithmetic; a DEFINITION difference is systematic with no constant ratio -- the two are computing different quantities and no conversion exists. FinancialRatios already documents that Polygon derives debt_to_equity from total liabilities and yfinance reports it as a percentage; this checks it rather than leaving it in a docstring. Fetches from both providers.",
         CompareDataSourcesInput,
     ),
     (
@@ -110,12 +110,12 @@ TOOL_DEFS = [
     ),
     (
         "explain_decision",
-        "What one recorded tool call did: inputs, the market data it read with the content hashes those inputs had at the time, which execution path ran (C++/Numba/Python), timing, and the git commit and package version it ran under.",
+        "What one recorded tool call did: its inputs, the market data it read with the content hashes those inputs had at the time, which execution path ran (C++/Numba/Python) and timing. It also names the git commit and package version it ran under.",
         ExplainDecisionInput,
     ),
     (
         "replay_decision",
-        "Re-run a recorded call and classify the result: reproduced, reproduced_to_12_digits (a bit-level miss that agrees to twelve digits on a different build), data_changed (the inputs were revised, so a different answer is expected), data_undecided (only earlier-form input hashes differ, and the replay cannot tell a revision from a pandas difference), code_changed (inputs identical, output differs — the only case implicating the library), or not_comparable.",
+        "Re-run a recorded call and classify the result as reproduced, reproduced_to_12_digits, data_changed, data_undecided, code_changed or not_comparable. reproduced_to_12_digits is a bit-level miss that agrees to twelve digits on a different build; data_changed means the inputs were revised, so a different answer is expected; data_undecided means only earlier-form input hashes differ, and the replay cannot tell a revision from a pandas difference; code_changed means inputs identical, output differs — the only case implicating the library.",
         ReplayDecisionInput,
     ),
     (
@@ -130,7 +130,7 @@ TOOL_DEFS = [
     ),
     (
         "export_audit_bundle",
-        "Package a date range of the audit log plus its chain index, any checkpoint sidecars and a manifest into one zip; a range covering no day file is refused rather than exported as a bundle of nothing. Writes a new file; modifies no existing record.",
+        "Package a date range of the audit log plus its chain index, any checkpoint sidecars and a manifest into one zip. A range covering no day file is refused rather than exported as a bundle of nothing. Writes a new file; modifies no existing record.",
         ExportAuditBundleInput,
     ),
     (
@@ -145,7 +145,7 @@ TOOL_DEFS = [
     ),
     (
         "describe_audit_log",
-        "What the decision log holds and what it is configured to do: which dates, how many records, how large, and the recording, redaction, retention and signing settings that decide what a count of zero means. Per day, on request, whether it is held, sealed or carries a signed checkpoint. The retention window is reported as a PREVIEW of what a policy would make eligible -- nothing here deletes, seals, holds or releases anything, because the chain cannot tell a policy-driven deletion from the tampering it exists to detect. The redaction salt is reported as set or unset, never as a value.",
+        "What the decision log holds and what it is configured to do: which dates, how many records, how large, and its recording, redaction, retention and signing settings. Those settings decide what a count of zero means. Per day, on request, whether it is held, sealed or carries a signed checkpoint. The retention window is reported as a PREVIEW of what a policy would make eligible -- nothing here deletes, seals, holds or releases anything, because the chain cannot tell a policy-driven deletion from the tampering it exists to detect. The redaction salt is reported as set or unset, never as a value.",
         AuditLogInput,
     ),
     (
@@ -155,12 +155,12 @@ TOOL_DEFS = [
     ),
     (
         "describe_numeric_contract",
-        "The numerical rules every public boundary in this library enforces -- an infinity refused, an all-NaN series refused, prices strictly positive, an equity curve's START positive, an annualization ceiling, a covariance symmetric to 1e-9, a bool refused as a count -- with the threshold each bites at, an excerpt of the message it raises, and why the line is where it is. These ran on every call and were reported nowhere, so the only way to learn one was to trigger it after paying for the fetch. Offline and static.",
+        "The numerical rules every public boundary in this library enforces, with the threshold each bites at, an excerpt of the message it raises, and why the line is where it is. Among them: an infinity refused, an all-NaN series refused, prices strictly positive, an equity curve's START positive, an annualization ceiling, a covariance symmetric to 1e-9, a bool refused as a count. These ran on every call and were reported nowhere, so the only way to learn one was to trigger it after paying for the fetch. Offline and static.",
         NumericContractInput,
     ),
     (
         "describe_effective_config",
-        "Every SQT_* setting this process reads, resolved through the functions that read it rather than echoed from the environment -- so an unset variable still reports the value in force. Covers recording, redaction, retention and signing of the decision log, the artifact and cache roots, the directories external data may be read from, the native-extension switch, provider credentials and the model registry. A secret reports only whether it is set: disclosing the redaction salt would undo the redaction it configures. Reads configuration and cannot change it.",
+        "Every SQT_* setting this process reads, resolved through the functions that read it rather than echoed from the environment, so an unset variable reports the value in force. Covers recording, redaction, retention and signing of the decision log, the artifact and cache roots, the directories external data may be read from, the native-extension switch, provider credentials and the model registry. A secret reports only whether it is set: disclosing the redaction salt would undo the redaction it configures. Reads configuration and cannot change it.",
         EffectiveConfigInput,
     ),
     (
@@ -175,7 +175,7 @@ TOOL_DEFS = [
     ),
     (
         "describe_data_capabilities",
-        "What a data provider can serve — tick trades, top-of-book quotes, L2 depth, order events, point-in-time records, its own temporal contract, async OHLCV, supported intervals, and its adjusted/survivorship/point-in-time guarantees. Also reports the persistent cache: how many files, how large, and how many were written under a format version nothing reads any more (counted, never deleted). Fetches no market data. Call this before a tool that needs a capability the active provider may not have — depth and order events are served by one provider only, and point-in-time records by a different one.",
+        "What a data provider can serve — tick trades, top-of-book quotes, L2 depth, order events, point-in-time records, async OHLCV and supported intervals. It also gives the provider's own temporal contract and its adjusted/survivorship/point-in-time guarantees, and reports the persistent cache: how many files, how large, and how many were written under a format version nothing reads any more (counted, never deleted). Fetches no market data. Call this before a tool that needs a capability the active provider may not have — depth and order events are served by one provider only, and point-in-time records by a different one.",
         DataCapabilitiesInput,
     ),
 ]

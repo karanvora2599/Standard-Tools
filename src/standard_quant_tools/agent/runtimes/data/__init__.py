@@ -171,7 +171,7 @@ TOOL_DEFS = [
         "fetch_order_events",
         "Fetch order-by-order events -- every add, cancel, modify and fill "
         "with its own id -- write them once under the run and return an "
-        "order_event_panel reference for get_order_event_metrics to read as "
+        "order_event_panel reference. get_order_event_metrics reads it as "
         "`ref`. A STRICTLY DEEPER FEED THAN DEPTH, and the difference is "
         "identity rather than levels: a book snapshot aggregates size per "
         "price, and that aggregation is what makes queue position, order "
@@ -217,10 +217,10 @@ TOOL_DEFS = [
     ),
     (
         "get_dataset_metadata",
-        "What the active provider GUARANTEES about the data it serves for "
-        "one symbol: whether prices are adjusted, whether the universe is "
-        "survivorship-free, whether values are point-in-time, and which "
-        "timezone stamps them. Read this before trusting a backtest over "
+        "What the active provider GUARANTEES about one symbol's data: "
+        "whether prices are adjusted, the universe survivorship-free and "
+        "values point-in-time, and which timezone stamps them. Read this "
+        "before trusting a backtest over "
         "history, because a provider that is not point-in-time will hand you "
         "restated values under their original dates. `notes` carries what "
         "the booleans cannot -- which feed answers which window, and what is "
@@ -261,7 +261,8 @@ TOOL_DEFS = [
         "register_external_dataset",
         "Make a Parquet or CSV dataset already on your disk resolvable as an "
         "`sqt://` reference WITHOUT copying it, for data too large to fetch "
-        "and republish -- L2 depth, a full tick tape, an event history. Every "
+        "and republish. L2 depth, a full tick tape and an event history are "
+        "the usual cases. Every "
         "other tool here fetches a frame and then writes a second complete "
         "copy under the runs directory; a book cannot survive that twice. "
         "Registration reads the schema, checks the columns the declared kind "
@@ -287,9 +288,9 @@ TOOL_DEFS = [
         "validate_external_dataset",
         "Scan a registered dataset in batches and report what would produce "
         "wrong numbers downstream, as a verdict with blocking reasons rather "
-        "than an exception -- because three crossed books in nine million "
-        "rows is fine and a third of them crossed is transposed columns, and "
-        "only a count separates the two. Checks are per kind: crossed and "
+        "than an exception. Three crossed books in nine million rows is fine "
+        "and a third of them crossed is transposed columns, and only a count "
+        "separates the two. Checks are per kind: crossed and "
         "empty books, non-positive trade prices and sizes, unparseable or "
         "out-of-order timestamps, and for an event panel the available_time "
         "versus event_time rule that makes a model look prescient. Bounded by "
@@ -322,9 +323,9 @@ TOOL_DEFS = [
     (
         "validate_data_bundle",
         "Whether a bundle is safe to model on, returned as a verdict with "
-        "the blocking reasons rather than raised as an error, because the "
-        "answer is usually yes-with-caveats and a caller needs the caveats "
-        "to decide. `require_pit` defaults to false: no shipped provider "
+        "the blocking reasons rather than raised as an error. The answer is "
+        "usually yes-with-caveats, and a caller needs the caveats to "
+        "decide. `require_pit` defaults to false: no shipped provider "
         "reports point-in-time for every frame kind, so requiring it refuses "
         "almost everything -- set it when a leakage-free join is the point.",
         ValidateDataBundleInput,
@@ -341,7 +342,7 @@ TOOL_DEFS = [
         "compare_ratio_frames",
         "Two providers' ratios side by side, with each disagreement "
         "CLASSIFIED rather than merely measured: a unit mismatch is fixable "
-        "by rescaling, a definition difference is not, and averaging across "
+        "by rescaling, a definition difference is not. Averaging across "
         "the second kind produces a number neither provider would stand "
         "behind. Takes the values as arguments, so it works for sources this "
         "library cannot fetch, and accepts fetch_financial_ratios' own "

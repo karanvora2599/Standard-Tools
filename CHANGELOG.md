@@ -1,5 +1,79 @@
 # Changelog
 
+## A publishing call is no longer advertised as safe to repeat, a thinned tool reads as a whole sentence, and a covariance or a dated return stream passes from one tool to the next
+
+- **`idempotentHint` is false for the 32 tools that publish at a
+  `run_id`.** The hint was derived from one shape -- a result field
+  ending in `_uri`, a file saved per call -- so every tool that takes a
+  `run_id` and answers with the reference it published there was
+  advertised as idempotent. Repeating such a call is refused:
+  `handoff.publish` never overwrites by default, so the second identical
+  call fails with "a value is already published at run_id=...", and a
+  client that trusted the hint and retried got a refusal. The rule now
+  reads the tool's own signature: a `*_uri` result, or a `run_id` input
+  together with a reference (`ref`, `refs`, `*_ref`, `*_refs`) in the
+  result. A `run_id` with no reference is a filter (`list_artifacts`); a
+  reference with no `run_id` is one the caller passed in
+  (`describe_reference`, `validate_external_dataset`). `describe_tool`'s
+  `persists_artifact` follows the same rule. A test pins the 32 names, a
+  second walks the dispatch tables so a new tool taking a `run_id` must
+  be declared a publisher or a filter, and a third repeats a real publish
+  and sees the refusal.
+- **A thinned tool is advertised by its whole first sentence.** The thin
+  entry was cut at the first ". " or at 180 characters. The first rule
+  split "vs." -- `get_volatility_estimators` read "... Yang-Zhang
+  estimators vs." -- and the second stopped 43 first sentences
+  mid-clause, among them `run_portfolio_optimization` and
+  `estimate_trade_cost`, the two tools `auto` thins in `portfolio`. The
+  boundary now skips known abbreviations and also ends at `?` and `!`
+  (`run_reality_check` opens with a question), and the 43 first
+  sentences were shortened to fit, the rest of each moved into the
+  sentences after it. A test holds every tool's thin text to a complete
+  sentence of at most 180 characters; an over-long one is cut at a whole
+  word and named by the test. 45 thin texts change, and the full
+  descriptions of 43 tools.
+- **The `portfolio` descriptions name what is there.** The runtime
+  description still said liquidity was measured "from ticks" -- those
+  tools moved to `microstructure` -- and the router's `portfolio_risk`
+  description named about half of the category's 19 tools. Both now
+  cover construction (covariance, mean-variance, the efficient frontier,
+  Black-Litterman, risk parity, HRP, maximum diversification, weights
+  from scores), risk (attribution, marginal contribution, factor
+  budgets, concentration, scenarios, stress windows, liquidity-adjusted
+  VaR) and implementation (sizing, capacity, rebalancing, trade cost); a
+  test maps each of the 19 tools to the words that route to it. The
+  `microstructure` router description said "nothing here works from
+  bars" beside the bar-based estimators the routing eval sends there; it
+  now names both fidelities. The largest description overlap between two
+  categories is unchanged at 0.14.
+- **HRP sees the dates.** `optimize_hierarchical_risk_parity` took
+  undated lists, so two equal-length series from different calendars
+  were accepted as aligned and each day was correlated against some
+  other day. A series may now be a date-keyed map {ISO date: return},
+  read by `parse_date_keys`. Under the default `alignment="exact"`,
+  dated series whose dates differ are refused with what each lacks, the
+  equal-length case named as such; `alignment="intersect"` uses the
+  dates every series shares and reports per series what was supplied
+  and dropped (`alignment.by_series`). Undated lists still work, with
+  `alignment` null and a warning that their alignment could not be
+  checked. On aligned input the weights are unchanged.
+- **`estimate_covariance`'s matrix is accepted where a covariance is
+  taken.** It returns `matrix` as a map of asset to {asset: covariance};
+  `optimize_risk_parity`, `optimize_max_diversification`,
+  `get_marginal_risk_contribution` and `run_portfolio_scenarios` took
+  only rows parallel to `assets` and refused the map as `list_type`.
+  They accept both now. The map is read by name and laid out in
+  `assets` order; names that are not exactly `assets`, or a row that
+  lacks a column, are refused by name, and symmetry and finiteness stay
+  the numeric contract's to check. The answers equal the rows' exactly,
+  tested end to end from `estimate_covariance`'s own output.
+- No computed number changes. What changes for a caller: 32 hints, 45
+  thin descriptions, two router descriptions and one runtime
+  description; a new optional `alignment` argument and result field on
+  HRP and a warning on its undated form; the map form at four doors.
+  `portfolio`'s full-detail listing grows from 43 to 45 KB (37 KB under
+  `auto`, which still thins the same two tools).
+
 ## The replication basket solves on one BLAS thread, so its weights are the same bits whatever the caller's thread count
 
 - **SLSQP's weights followed the thread count on the CI runners.** On

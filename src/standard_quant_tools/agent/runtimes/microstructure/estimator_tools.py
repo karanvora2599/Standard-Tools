@@ -811,7 +811,7 @@ ESTIMATOR_TOOL_DEFS = [
     (
         "estimate_vpin",
         "Flow one-sidedness measured in VOLUME time rather than clock time "
-        "(Easley, Lopez de Prado and O'Hara 2012) -- information arrives with "
+        "(Easley, Lopez de Prado and O'Hara 2012). Information arrives with "
         "volume, so the series is cut into equal-volume buckets. TWO HONEST "
         "CAVEATS. This is built from daily bars with tick-rule signing; the "
         "original is a trade-level measure where each bucket holds hundreds "

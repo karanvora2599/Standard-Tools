@@ -36,6 +36,66 @@ class TestToolCategories:
             assert meta.get("label"), f"{key} missing a label"
             assert meta.get("description"), f"{key} missing a description"
 
+    #: Each portfolio_risk tool, and the words in the category description
+    #: a request for it would be routed by.
+    PORTFOLIO_RISK_VOCABULARY = {
+        "analyze_concentration": "concentration",
+        "construct_weights_from_scores": "alpha scores",
+        "estimate_covariance": "covariance matrix",
+        "estimate_trade_cost": "trade's cost",
+        "get_capacity_report": "capacity",
+        "get_efficient_frontier": "efficient frontier",
+        "get_factor_exposure_budget": "factor exposure budget",
+        "get_liquidity_adjusted_var": "liquidity-adjusted var",
+        "get_liquidity_metrics": "liquidity of each holding",
+        "get_marginal_risk_contribution": "marginal contribution",
+        "get_portfolio_risk_attribution": "pca, factor model",
+        "get_position_size": "size a position",
+        "optimize_hierarchical_risk_parity": "hierarchical risk parity",
+        "optimize_max_diversification": "maximum diversification",
+        "optimize_risk_parity": "risk parity",
+        "plan_rebalance": "rebalance",
+        "run_portfolio_optimization": "black-litterman",
+        "run_portfolio_scenarios": "hypothetical scenarios",
+        "run_stress_test": "historical crash windows",
+    }
+
+    def test_the_portfolio_description_names_every_portfolio_tool(self):
+        """
+        The router chooses by description, so a tool the description does
+        not mention is reached only by luck. `portfolio_risk` named about
+        half of its 19 tools -- nothing about the covariance estimate, the
+        efficient frontier, HRP, maximum diversification, scenarios,
+        concentration, factor budgets, liquidity-adjusted VaR, rebalancing
+        or trade cost. See the CHANGELOG entry of 2026-10-22.
+
+        The map must cover the category exactly, so a tool added to
+        portfolio_risk fails here until the description says what routes
+        to it.
+        """
+        tools = {name for name, c in TOOL_CATEGORY.items() if c == "portfolio_risk"}
+        assert set(self.PORTFOLIO_RISK_VOCABULARY) == tools, (
+            "the portfolio_risk tools changed: "
+            f"added {sorted(tools - set(self.PORTFOLIO_RISK_VOCABULARY))}, "
+            f"removed {sorted(set(self.PORTFOLIO_RISK_VOCABULARY) - tools)}"
+        )
+        description = TOOL_CATEGORIES["portfolio_risk"]["description"].lower()
+        unnamed = {
+            tool: phrase
+            for tool, phrase in self.PORTFOLIO_RISK_VOCABULARY.items()
+            if phrase not in description
+        }
+        assert not unnamed, f"the router description does not mention {unnamed}"
+
+    def test_the_bar_based_estimators_are_routed_to_microstructure(self):
+        """The microstructure description said "nothing here works from
+        bars" while the category holds the bar-based estimators the eval
+        routes there ("the effective spread ... from daily bars", Amihud)."""
+        description = TOOL_CATEGORIES["microstructure"]["description"]
+        assert "nothing here works from bars" not in description
+        for phrase in ("OHLCV bars", "Amihud", "Roll", "Corwin-Schultz"):
+            assert phrase in description, phrase
+
 
 class TestBuildRouterPrompt:
     def test_includes_every_categorys_label(self):

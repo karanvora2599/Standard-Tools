@@ -68,7 +68,7 @@ from .series_tools import (  # noqa: F401
 TICK_TOOL_DEFS = [
     (
         "get_microstructure_metrics",
-        "Quoted and effective spread MEASURED from trades and quotes, with the effective spread split into the realized (liquidity-provider) and impact (price-move) halves, plus Lee-Ready signed order flow. Needs a tick feed and refuses without one rather than approximating from bars.",
+        "Quoted and effective spread MEASURED from trades and quotes, the effective spread split into realized (liquidity-provider) and impact (price-move) halves. It also reports Lee-Ready signed order flow. Needs a tick feed and refuses without one rather than approximating from bars.",
         MicrostructureInput,
     ),
     (
@@ -93,7 +93,7 @@ SERIES_TOOL_DEFS = [
         "classify_trade_direction",
         "Sign a tick tape buyer- or seller-initiated and publish the signed "
         "series, which is what an event study, a CUSUM detector or a model "
-        "consumes -- get_microstructure_metrics computes this internally and "
+        "consumes. get_microstructure_metrics computes this internally and "
         "returns only averages. WITH a quote panel it is Lee-Ready, matching "
         "each trade against the quote PRECEDING it; without one it falls "
         "back to the tick rule, which agrees about 85% of the time on a "

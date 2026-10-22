@@ -128,12 +128,17 @@ TOOL_CATEGORIES: Dict[str, Dict[str, str]] = {
     "microstructure": {
         "label": "Microstructure",
         "description": (
-            "Spreads MEASURED from tick data rather than estimated from "
-            "bars: quoted and effective spread, the realized/impact "
-            "decomposition, signed order flow, trade-size and intraday "
-            "volume profiles, and a check of the OHLCV spread proxy against "
-            "the real thing. Requires a data provider with a tick feed; "
-            "nothing here works from bars."
+            "What the market charges to trade, at two data fidelities. "
+            "MEASURED from ticks, quotes, depth books and order events: "
+            "quoted and effective spread with the realized/impact split, "
+            "signed order flow, depth-book imbalance and microprice, queue "
+            "position and order lifetimes, trade-size profiles and "
+            "liquidity regime changes. ESTIMATED from OHLCV bars when there "
+            "is no tick feed: Amihud illiquidity, Roll and Corwin-Schultz "
+            "spreads, Kyle's lambda, VPIN, order-flow imbalance and the "
+            "intraday volume profile. Also the implementation shortfall of "
+            "an execution, and a check of a bar-based spread proxy against "
+            "ticks."
         ),
     },
     "provenance": {
@@ -160,12 +165,18 @@ TOOL_CATEGORIES: Dict[str, Dict[str, str]] = {
     "portfolio_risk": {
         "label": "Portfolio Risk & Sizing",
         "description": (
-            "Decompose portfolio risk (marginal contribution, PCA, factor "
-            "model), produce optimal portfolio weights (Markowitz "
-            "mean-variance, risk parity, Black-Litterman), size a position "
-            "(ATR/Kelly), assess capacity/liquidity constraints, and "
-            "stress-test a portfolio against named historical crash "
-            "windows."
+            "Build, risk and implement a multi-asset portfolio. Construct "
+            "weights: estimate the covariance matrix, optimize (Markowitz "
+            "mean-variance, Black-Litterman, the efficient frontier, risk "
+            "parity, hierarchical risk parity, maximum diversification) or "
+            "turn alpha scores into rank/z-score weights. Decompose its risk "
+            "(marginal contribution, PCA, factor model, factor exposure "
+            "budget, concentration), stress-test it against named historical "
+            "crash windows and hypothetical scenarios, and measure "
+            "liquidity-adjusted VaR. Implement it: size a position "
+            "(ATR/Kelly), check capacity against each name's traded volume "
+            "and the liquidity of each holding, schedule a rebalance, and "
+            "itemize one trade's cost."
         ),
     },
 }

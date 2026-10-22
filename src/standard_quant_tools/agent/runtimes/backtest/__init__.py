@@ -85,8 +85,8 @@ TOOL_DEFS = [
     (
         "run_terminal_monte_carlo",
         "Monte Carlo that keeps only where the paths ENDED, so the "
-        "simulation count is capped by wall-clock rather than by memory -- "
-        "a million paths over a year is about 2 GB of path matrix for a "
+        "simulation count is capped by wall-clock rather than by memory. "
+        "A million paths over a year is about 2 GB of path matrix for a "
         "handful of terminal quantiles, and this avoids allocating it. Same "
         "block bootstrap as run_monte_carlo_simulation. It says nothing "
         "about the journey: worst drawdown along the way and time "
@@ -190,7 +190,7 @@ TOOL_DEFS = [
     ),
     (
         "run_portfolio_simulation",
-        "True shared-cash portfolio simulation with rebalancing at target-weight dates — unlike run_signal_panel_backtest, positions share one account instead of each ticker getting its own capital.",
+        "True shared-cash portfolio simulation with rebalancing at target-weight dates. Unlike run_signal_panel_backtest, positions share one account instead of each ticker getting its own capital.",
         PortfolioSimulationInput,
     ),
     (

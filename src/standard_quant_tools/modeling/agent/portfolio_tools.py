@@ -57,8 +57,8 @@ logger = logging.getLogger(__name__)
 #: not have to restate what this door is for.
 EVALUATE_PREDICTIONS_PORTFOLIO_DESCRIPTION = (
     "Evaluate ANY published predictions reference as a shared-cash "
-    "portfolio: transform them into target weights and simulate them with "
-    "costs, returning Sharpe, drawdown, turnover and exposure. The same "
+    "portfolio: the predictions become target weights, simulated with "
+    "costs. Returns Sharpe, drawdown, turnover and exposure. The same "
     "simulator evaluate_model_portfolio runs, reached by reference instead "
     "of by model_id -- which is what makes an ensemble from "
     "build_model_ensemble, an externally computed alpha, or a converted "

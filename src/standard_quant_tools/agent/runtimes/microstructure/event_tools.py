@@ -290,10 +290,12 @@ def get_order_event_metrics(input_data: OrderEventInput) -> OrderEventResult:
 EVENT_TOOL_DEFS = [
     (
         "get_order_event_metrics",
-        "Order-level statistics a depth book cannot produce: how much size "
-        "rests AHEAD of an order at its own price level when it arrives, how "
-        "long orders live before they are cancelled or filled, cancels per "
-        "add and per trade, and event intensity by action. Aggregated depth "
+        "Order-level statistics a depth book cannot produce: the queue AHEAD "
+        "of an arriving order, order lifetimes, cancels per add and per "
+        "trade, and event intensity by action. The queue ahead is the size "
+        "resting at the order's own price level when it arrives; a lifetime "
+        "is how long an order lives before it is cancelled or filled. "
+        "Aggregated depth "
         "destroys all four -- 5,000 shares at the bid may be one order or two "
         "hundred, and size that disappears may have been cancelled or filled, "
         "which mean opposite things about who wanted to trade. Orders already "

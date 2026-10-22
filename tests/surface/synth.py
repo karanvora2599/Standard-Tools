@@ -431,8 +431,11 @@ def _value(annotation: Any, info: Any, name: str, length: int, salt: int = 0) ->
             typing.Union,
             getattr(__import__("types"), "UnionType", None),
         ):
+            # A union of shapes -- HRP's returns per asset, a list or a
+            # dated mapping -- is synthesized as its first, as a top-level
+            # union is.
             options = [a for a in get_args(value_type) if a is not type(None)]
-            if len(options) == 1:
+            if options:
                 value_type, _low, _high = _unwrap_annotated(options[0])
         # The WHOLE symbol set, not the first three. A tool taking both
         # `tickers` and a ticker-keyed mapping validates that they agree,

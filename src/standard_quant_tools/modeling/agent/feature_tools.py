@@ -1306,9 +1306,9 @@ FEATURE_TOOL_DEFS: List[tuple] = [
     (
         "select_features",
         "Choose a feature set from a built dataset: keep one feature per "
-        "redundancy cluster, apply an optional IC floor, drop what does not "
-        "pass a permutation test against the target, and return a reason "
-        "for every exclusion. The test (significance='entity_shuffle', "
+        "redundancy cluster, apply an optional IC floor, and drop what does "
+        "not pass a permutation test against the target. Every exclusion "
+        "comes back with a reason. The test (significance='entity_shuffle', "
         "default) runs on the selection window only, before the holdout is "
         "read: each cluster representative's mean rank IC against the same "
         "feature series handed to randomly permuted entities, kept at p < "
@@ -1334,8 +1334,9 @@ FEATURE_TOOL_DEFS: List[tuple] = [
         "compare_feature_sets",
         "Two feature sets measured on the same panel, with the cost of the "
         "difference attached: per-set IC, independent-signal count and "
-        "condition number, what is unique to each side, and the per-feature "
-        "IC table. Not a single score, because a larger set almost always "
+        "condition number, and what is unique to each side. The per-feature "
+        "IC table comes with it. Not a single score, because a larger set "
+        "almost always "
         "has a higher maximum IC and almost always more collinearity, and "
         "one number hides half of that trade. By default both sets are "
         "summarised on every date, which is in-sample by construction and "
@@ -1360,7 +1361,7 @@ FEATURE_TOOL_DEFS: List[tuple] = [
     (
         "get_feature_regime_stability",
         "The feature's IC inside each of several CONTIGUOUS time blocks, "
-        "never shuffled -- a feature's usual problem is that it worked in "
+        "never shuffled. A feature's usual problem is that it worked in "
         "one regime, and interleaved folds average exactly that away. "
         "Returns per-block IC plus sign consistency against the full-sample "
         "IC. Read both: consistent sign with collapsing magnitude is decay, "
@@ -1415,7 +1416,7 @@ FEATURE_TOOL_DEFS: List[tuple] = [
         "screen_feature_stability",
         "Every feature's drift and every feature's regime dependence in one "
         "pass: PSI and KS across a split, the IC on each side, the IC inside "
-        "each contiguous block, sign consistency -- plus psi_by_block, the "
+        "each contiguous block and sign consistency. psi_by_block adds the "
         "drift CURVE a single split cannot give. get_feature_drift and "
         "get_feature_regime_stability answer for one feature and "
         "analyze_features is silent about time, so a feature that stopped "

@@ -168,9 +168,16 @@ RUNTIME_DESCRIPTIONS: Dict[str, str] = {
         "themselves. Does not construct portfolios or size positions."
     ),
     "portfolio": (
-        "Turn a view into a position and price what it costs: optimal "
-        "weights, risk attribution, sizing, stress tests, capacity, and "
-        "liquidity measured from bars or from ticks."
+        "Turn a view into a position and price what it costs. Construction: "
+        "a covariance estimate with its diagnostics, optimal weights "
+        "(mean-variance, the efficient frontier, Black-Litterman, risk "
+        "parity, hierarchical risk parity, maximum diversification) and "
+        "weights from alpha scores. Risk: attribution, marginal "
+        "contribution, factor exposure, concentration, named scenarios and "
+        "historical stress windows, liquidity-adjusted VaR. Implementation: "
+        "position sizing, capacity, a rebalance schedule and the itemized "
+        "cost of a trade. Liquidity here is estimated from OHLCV bars; "
+        "spreads and order flow measured from ticks are `microstructure`."
     ),
     "meta": (
         "Questions about the library and the session rather than about a "

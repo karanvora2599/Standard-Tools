@@ -63,8 +63,9 @@ LIST_REMOTE_MODELS_DESCRIPTION = (
 
 PULL_MODEL_PACKAGE_DESCRIPTION = (
     "Register a model package from an artifact store into THIS runs "
-    "directory, verified on the way in, so a model trained and validated "
-    "elsewhere can be inspected, scored, monitored and backtested here. "
+    "directory, verified on the way in. A model trained and validated "
+    "elsewhere can then be inspected, scored, monitored and backtested "
+    "here. "
     "Every file the manifest hashes is checked against it as it arrives "
     "and the manifest is written last, so a pull that fails registers "
     "nothing. Pass require_signature=True (and public_key_path=<the key "
