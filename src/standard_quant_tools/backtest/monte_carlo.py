@@ -131,7 +131,9 @@ def simulate_forward_paths(
     replacement, concatenated to the target length) — deliberately
     reimplemented here rather than imported, to avoid coupling this new,
     unrelated feature to that function's own evolution and to keep each
-    module independently testable.
+    module independently testable. That function has since moved to a
+    circular draw for its interval; this one keeps the moving draw, since a
+    forward path has no centre for the wrap to keep (see `_resampling`).
 
     Args:
         returns: Historical daily (or per-bar) return series to resample

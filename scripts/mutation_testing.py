@@ -190,11 +190,60 @@ MUTATIONS: List[Mutation] = [
         # Drop the sqrt(n / (n - b)) widening as a cosmetic factor near 1.
         # It is 1.095 at 120 days with 20-day blocks, and without it White's
         # best of three rejected 37 of 400 true nulls at a nominal 5%.
+        #
+        # The factor moved to `_resampling.circular_block_scale` when the
+        # bootstrap intervals took it too, so the mutation follows it there
+        # and each of its three users' tests has to notice.
         "reality check: drop the block-bootstrap variance scale",
-        SRC / "backtesting/overfitting.py",
+        SRC / "_resampling.py",
         "    return math.sqrt(n / (n - block_size)) if block_size < n else 1.0\n",
         "    return 1.0\n",
-        "tests/backtesting/test_overfitting.py",
+        "tests/backtesting/test_overfitting.py tests/analysis/test_inference.py "
+        "tests/backtest/test_robustness.py",
+    ),
+    Mutation(
+        # The interval's draw back to moving blocks: the first and last
+        # block - 1 observations are under-drawn and the draws centre off
+        # the sample's statistic. A day carrying the whole sum then
+        # averaged 7% of the sample mean across the draws.
+        "bootstrap interval: draw moving blocks instead of circular ones",
+        SRC / "analysis/inference.py",
+        "_draw_resamples(array, block_size, hi - lo, rng, circular=True)",
+        "_draw_resamples(array, block_size, hi - lo, rng, circular=False)",
+        "tests/analysis/test_inference.py",
+    ),
+    Mutation(
+        # The widening dropped at the interval's own call site, which the
+        # helper's mutation above cannot reach: 60 observations in 20-day
+        # blocks then covered the mean 80% of the time at a nominal 95%.
+        "bootstrap interval: drop the widening of the draws",
+        SRC / "analysis/inference.py",
+        "        usable = centre + scale * (usable - centre)\n",
+        "        usable = centre + (usable - centre)\n",
+        "tests/analysis/test_inference.py",
+    ),
+    Mutation(
+        # A widened win rate left unbounded: two losing days in sixty put
+        # the upper bound past 1.
+        "bootstrap interval: let a widened draw leave the statistic's range",
+        SRC / "analysis/inference.py",
+        "            usable = np.clip(usable, *_STATISTIC_BOUNDS[statistic])\n",
+        "            usable = usable\n",
+        "tests/analysis/test_inference.py",
+    ),
+    Mutation(
+        "robustness CI: draw moving blocks instead of circular ones",
+        SRC / "backtest/robustness.py",
+        "    draw = circular_block_indices if circular else block_indices\n",
+        "    draw = block_indices\n",
+        "tests/backtest/test_robustness.py",
+    ),
+    Mutation(
+        "robustness CI: drop the widening of the draws",
+        SRC / "backtest/robustness.py",
+        "        boot_metrics = centre + scale * (boot_metrics - centre)\n",
+        "        boot_metrics = centre + (boot_metrics - centre)\n",
+        "tests/backtest/test_robustness.py",
     ),
     Mutation(
         # Moved here from backtesting/overfitting.py, where this check used

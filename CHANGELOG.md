@@ -1,5 +1,48 @@
 # Changelog
 
+## The bootstrap intervals draw circular blocks widened by the block bootstrap's own bias, so a short series is covered near the nominal rate
+
+- **The intervals were too narrow on short series.** `bootstrap_statistic`
+  (the `get_bootstrap_interval` tool) and `block_bootstrap_ci` (the Sharpe
+  interval of `get_robustness_diagnostics`) drew moving blocks, the draw
+  the reality check left today for the same reason. Measured on 1,000
+  normal series per cell, a nominal 95% interval for a mean covered the
+  truth 92.9 / 92.4 / 93.3% at 60 / 120 / 250 observations with the
+  n^(1/3) default block, 89.6 / 90.1 / 91.4% under AR(0.3), and with the
+  robustness tool's 20-day blocks 76 / 87 / 90% -- a Sharpe ratio the
+  same. The moving draw reaches the first and last block - 1 observations
+  through fewer starts, so its draws centre off the sample's statistic,
+  and any block bootstrap's variance of a mean is short by (1 - b/n).
+- **Both now take the reality check's treatment.** The draws wrap around
+  the sample (`circular_block_indices`) and are widened about their own
+  mean by sqrt(n / (n - b)), now `_resampling.circular_block_scale`,
+  which `reality_check` shares: 94.0 / 93.4 / 94.2% and 91.2 / 91.6 /
+  92.2% with the default block, 90 / 91 / 93% with 20-day blocks. What
+  is left is a variance read off n / b blocks, and under AR(0.3) the
+  n^(1/3) block being too short for the dependence. The median, a win
+  rate, a 95% VaR and skew gained up to 14 points of coverage the same way.
+- **Where the factor does not apply, it is not applied.** A maximum
+  drawdown is a running minimum over the path: it takes the circular draw
+  unwidened. A widened win rate is held to [0, 1] and a widened standard
+  deviation to non-negative values. `block_bootstrap_ci(circular=False)`
+  keeps the moving, unwidened draw for a metric the factor does not
+  describe, and reproduces an interval seeded before this change.
+- **The results say what ran.** Both return `bootstrap_scheme` and
+  `bootstrap_scale`, declared on `BootstrapResult` and
+  `RobustnessDiagnosticsResult` so they reach the wire, and the
+  bootstrap's block warning names the factor. Seeded intervals from
+  either function differ from those drawn before. `block_indices` is
+  unchanged: its remaining callers draw forward paths, and the native
+  forward-path kernel reproduces it bit for bit.
+- Tests: coverage at 60 observations with 20-observation blocks for both
+  functions (86% and 85% floors; the moving draw measured 75% and
+  72.5% on the same seeds), a day carrying the whole sum drawn as often
+  as any other, the factor and its exceptions, and the fields on the
+  wire. The batched bootstrap is held, to the bit, to a loop over the
+  circular draw, and its moving draw still to `block_indices`. The
+  mutation catalogue gains five entries, and the reality check's scale
+  mutation follows the factor to `_resampling.py`; all killed.
+
 ## A persistent basis is no longer read as a shifted one: the basis detector calibrates its threshold to the basis's memory, and the spread monitor standardizes by the long-run sd
 
 - **The three CUSUM detectors fired on noise.** `detect_basis_dislocation`,

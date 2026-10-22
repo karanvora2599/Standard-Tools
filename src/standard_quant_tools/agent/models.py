@@ -4749,6 +4749,17 @@ class RobustnessDiagnosticsResult(ExplainsNulls):
     bootstrap_ci_lower: float
     bootstrap_ci_upper: float
     bootstrap_confidence: float
+    bootstrap_scheme: str = Field(
+        "circular",
+        description="How the Sharpe CI's blocks were drawn: `circular`, "
+        "wrapping around the sample so every return is drawn equally often.",
+    )
+    bootstrap_scale: float = Field(
+        1.0,
+        description="What the bootstrap Sharpes were widened by about their "
+        "mean, sqrt(n / (n - block_size)): a block bootstrap understates the "
+        "variance of a mean by (1 - block_size / n).",
+    )
     warnings: List[str] = []
 
 

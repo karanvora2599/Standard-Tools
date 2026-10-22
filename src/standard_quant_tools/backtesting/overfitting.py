@@ -48,6 +48,7 @@ from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools._resampling import circular_block_scale
 from standard_quant_tools._special import (
     norm_cdf,
     norm_ppf,
@@ -776,8 +777,10 @@ def _rc_bootstrap_means(
 
 def _rc_bootstrap_scale(n: int, block_size: int) -> float:
     """sqrt(n / (n - block_size)): what a circular block bootstrap's draws
-    are widened by. See `_rc_bootstrap_means`."""
-    return math.sqrt(n / (n - block_size)) if block_size < n else 1.0
+    are widened by. See `_rc_bootstrap_means`; the factor itself is
+    `_resampling.circular_block_scale`, which the bootstrap intervals use
+    too."""
+    return circular_block_scale(n, block_size)
 
 
 def _rc_standard_errors(differences: np.ndarray, block_size: int) -> np.ndarray:

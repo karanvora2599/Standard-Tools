@@ -160,3 +160,17 @@ class TestTheTwoVocabulariesAreAccountedFor:
             "cvar_95",
         }
         assert set(it._STATISTIC_ALIASES.values()) <= here
+
+
+class TestTheIntervalSaysHowItWasDrawn:
+    """The circular draw and its widening are on the wire: the tool's
+    result model declares both, so they are not left to `extra`."""
+
+    def test_the_scheme_and_the_scale_reach_the_caller(self, returns):
+        wire = _interval(returns, "sharpe").model_dump(mode="json")
+        assert wire["bootstrap_scheme"] == "circular"
+        n, block = 400, round(400 ** (1 / 3))
+        assert wire["bootstrap_scale"] == pytest.approx((n / (n - block)) ** 0.5)
+        assert {"bootstrap_scheme", "bootstrap_scale"} <= set(
+            it.BootstrapResult.model_fields
+        )

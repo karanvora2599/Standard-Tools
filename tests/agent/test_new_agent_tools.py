@@ -2690,6 +2690,10 @@ class TestRobustnessDiagnostics:
             <= result.bootstrap_point_estimate
             <= result.bootstrap_ci_upper
         )
+        # The draw and its widening reach the caller.
+        wire = result.model_dump(mode="json")
+        assert wire["bootstrap_scheme"] == "circular"
+        assert wire["bootstrap_scale"] > 1.0
 
     def test_reproducible_with_same_seed(self, patched_long):
         kwargs = dict(

@@ -29,7 +29,11 @@ from typing import Any, Callable, Dict, Optional
 import numpy as np
 import pandas as pd
 
-from standard_quant_tools._resampling import block_indices
+from standard_quant_tools._resampling import (
+    block_indices,
+    circular_block_indices,
+    circular_block_scale,
+)
 from standard_quant_tools._special import (
     norm_cdf,
     norm_ppf,
@@ -59,13 +63,31 @@ def block_bootstrap_ci(
     block_size: int = 20,
     confidence: float = 0.95,
     seed: Optional[int] = None,
-) -> Dict[str, float]:
+    *,
+    circular: bool = True,
+) -> Dict[str, Any]:
     """
     Block bootstrap confidence interval for a metric computed from a return
     series. Overlapping blocks of `block_size` consecutive returns are
     resampled with replacement (preserving short-range autocorrelation that
     an i.i.d. resample would destroy), concatenated to the original length,
     and `metric_fn` is recomputed on each resample.
+
+    THE BLOCKS WRAP AROUND THE SAMPLE AND THE DRAWS ARE WIDENED, because
+    with the moving draw a nominal 95% interval for a Sharpe ratio with the
+    default 20-day blocks covered the truth 76% of the time at 60 days, 87%
+    at 120 and 90% at 250 (IID returns). The moving draw reaches the first
+    and last block - 1 returns through fewer starts, so its draws are
+    centred off the sample's own metric, and a block bootstrap's variance
+    of a mean is short by (1 - block_size / n). The circular draw
+    (`_resampling.circular_block_indices`) reaches every return equally,
+    and the draws are widened about their mean by sqrt(n / (n - b)): 90%,
+    91% and 93%. What is left is the noise in a variance read off n / b
+    blocks; `_resampling.circular_block_scale` has the measurements. The
+    factor is derived for a mean and holds for a smooth function of means,
+    which a Sharpe ratio is; `circular=False` gives the moving, unwidened
+    draw for a metric it does not describe, and reproduces an interval
+    seeded before this change.
 
     Args:
         returns: Daily (or per-bar) return series — e.g. a strategy's
@@ -77,10 +99,14 @@ def block_bootstrap_ci(
         confidence: Two-sided confidence level for the reported interval.
         seed: RNG seed for reproducibility — recorded by the audit trail
             when called through the get_robustness_diagnostics agent tool.
+        circular: Draw circular blocks and widen the draws (the default),
+            or draw moving blocks unwidened.
 
     Returns:
         Dict with point_estimate (metric on the original series), ci_lower,
-        ci_upper, confidence, n_iterations, block_size.
+        ci_upper, confidence, n_iterations, block_size, bootstrap_scheme
+        ("circular" or "moving") and bootstrap_scale (what the draws were
+        widened by; 1.0 for the moving draw).
 
     Raises:
         ValidationError: empty returns, or block_size not in (0, len(returns)].
@@ -101,10 +127,15 @@ def block_bootstrap_ci(
     values = returns.to_numpy(dtype=float)
     point_estimate = float(metric_fn(returns))
     boot_metrics = np.empty(n_iterations, dtype=float)
+    draw = circular_block_indices if circular else block_indices
     for i in range(n_iterations):
         # Same starts, same stream, same indices -- see `_resampling`.
-        resampled = values[block_indices(n, block_size, rng)]
+        resampled = values[draw(n, block_size, rng)]
         boot_metrics[i] = metric_fn(pd.Series(resampled))
+    scale = circular_block_scale(n, block_size) if circular else 1.0
+    if scale != 1.0:
+        centre = float(np.mean(boot_metrics))
+        boot_metrics = centre + scale * (boot_metrics - centre)
 
     alpha = 1.0 - confidence
     lower = float(np.percentile(boot_metrics, 100.0 * alpha / 2.0))
@@ -127,6 +158,8 @@ def block_bootstrap_ci(
         "confidence": confidence,
         "n_iterations": n_iterations,
         "block_size": block_size,
+        "bootstrap_scheme": "circular" if circular else "moving",
+        "bootstrap_scale": scale,
     }
 
 

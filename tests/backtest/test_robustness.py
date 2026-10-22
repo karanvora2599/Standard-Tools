@@ -1,5 +1,7 @@
 """Tests for backtest/robustness.py — bootstrap CI, parameter sensitivity, DSR."""
 
+import math
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -69,8 +71,77 @@ class TestBlockBootstrapCi:
             "confidence",
             "n_iterations",
             "block_size",
+            "bootstrap_scheme",
+            "bootstrap_scale",
         ):
             assert key in result
+
+
+class TestTheIntervalCoversAShortSeries:
+    """
+    With moving blocks, a nominal 95% interval on 60 returns with the
+    default 20-day blocks covered the true mean 72.5% of the time on these
+    seeds: the draws under-reach the first and last 19 returns and a block
+    bootstrap's variance of a mean is short by (1 - b/n). Circular blocks
+    widened by sqrt(n / (n - b)): 89%.
+    """
+
+    @staticmethod
+    def _coverage(**kwargs):
+        mu, covered, trials = 0.0008, 0, 200
+        for seed in range(trials):
+            returns = pd.Series(np.random.default_rng(seed).normal(mu, 0.012, 60))
+            result = block_bootstrap_ci(
+                returns,
+                lambda r: float(r.mean()),
+                n_iterations=400,
+                block_size=20,
+                seed=seed,
+                **kwargs,
+            )
+            covered += result["ci_lower"] <= mu <= result["ci_upper"]
+        return covered / trials
+
+    def test_sixty_returns_with_twenty_day_blocks(self):
+        rate = self._coverage()
+        assert rate >= 0.85, f"a nominal 95% interval covered the mean {rate:.0%}"
+
+    def test_the_moving_draw_is_kept_on_request_and_is_what_was_too_narrow(self):
+        assert self._coverage(circular=False) < 0.8
+
+    def test_every_return_is_drawn_equally_often(self):
+        """One day carries the whole sum; its draws average the sample mean
+        only if that day is reached as often as any other."""
+        returns = pd.Series(np.r_[1.0, np.zeros(59)])
+        draws = []
+
+        def recorded(r):
+            draws.append(float(r.mean()))
+            return draws[-1]
+
+        block_bootstrap_ci(returns, recorded, n_iterations=2000, block_size=20, seed=0)
+        point, resampled = draws[0], np.mean(draws[1:])
+        assert resampled == pytest.approx(point, rel=0.05)
+
+    def test_the_draws_are_widened_and_say_by_how_much(self):
+        returns = pd.Series(np.random.default_rng(4).normal(0, 0.01, 120))
+        result = block_bootstrap_ci(
+            returns, lambda r: float(r.mean()), n_iterations=200, block_size=20, seed=1
+        )
+        assert result["bootstrap_scheme"] == "circular"
+        assert result["bootstrap_scale"] == pytest.approx(math.sqrt(120 / 100))
+        moving = block_bootstrap_ci(
+            returns,
+            lambda r: float(r.mean()),
+            n_iterations=200,
+            block_size=20,
+            seed=1,
+            circular=False,
+        )
+        assert (moving["bootstrap_scheme"], moving["bootstrap_scale"]) == (
+            "moving",
+            1.0,
+        )
 
 
 class TestParameterSensitivity:

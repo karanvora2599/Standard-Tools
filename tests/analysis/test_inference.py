@@ -82,6 +82,67 @@ class TestBootstrapCoverage:
         assert long["interval_width"] < short["interval_width"]
 
 
+class TestAShortSeriesIsCoveredNearTheNominalRate:
+    """
+    The moving-block interval was too narrow on a short series. Its draws
+    reach the first and last block - 1 observations through fewer starts,
+    so they centre off the sample's own statistic, and any block
+    bootstrap's variance of a mean is short by (1 - b/n). At 60
+    observations with 20-observation blocks a nominal 95% interval for a
+    mean covered the truth 75% of the time; circular blocks alone 80%, and
+    widened by sqrt(n / (n - b)) 88% on these seeds.
+    """
+
+    def test_sixty_observations_with_long_blocks(self):
+        covered, trials = 0, 300
+        for seed in range(trials):
+            sample = np.random.default_rng(seed).normal(MU, SIGMA, 60)
+            result = bootstrap_statistic(
+                sample, statistic="mean", n_bootstrap=500, block_size=20, seed=seed
+            )
+            covered += result["lower"] <= MU <= result["upper"]
+        rate = covered / trials
+        assert rate >= 0.86, f"a nominal 95% interval covered the mean {rate:.0%}"
+
+    def test_every_observation_is_drawn_equally_often(self):
+        """One day carries the whole sum. A circular draw reaches it as
+        often as any other day, so the draws' mean is the sample's; the
+        moving draw reached it only from a block starting on it, and its
+        draws averaged 7% of the sample mean."""
+        sample = np.zeros(60)
+        sample[0] = 1.0
+        result = bootstrap_statistic(
+            sample, statistic="mean", n_bootstrap=2000, block_size=20, seed=0
+        )
+        assert result["bootstrap_mean"] == pytest.approx(
+            result["point_estimate"], rel=0.05
+        )
+
+    def test_the_draws_are_widened_by_the_block_bootstraps_own_bias(self):
+        sample = np.random.default_rng(1).normal(MU, SIGMA, 60)
+        result = bootstrap_statistic(sample, statistic="sharpe", block_size=20)
+        assert result["bootstrap_scheme"] == "circular"
+        assert result["bootstrap_scale"] == pytest.approx(math.sqrt(60 / 40))
+        assert any("widened by 1.225" in w for w in result["warnings"])
+
+    def test_a_maximum_drawdown_is_drawn_circularly_and_not_widened(self):
+        sample = np.random.default_rng(2).normal(MU, SIGMA, 120)
+        result = bootstrap_statistic(sample, statistic="max_drawdown")
+        assert result["bootstrap_scale"] == 1.0
+        assert result["upper"] <= 0.0
+
+    def test_a_widened_win_rate_is_still_a_fraction(self):
+        """Two losing days in sixty: the draws sit near 1, and widening
+        them about their mean would carry the upper bound past it."""
+        sample = np.full(60, 0.01)
+        sample[[0, 30]] = -0.01
+        result = bootstrap_statistic(
+            sample, statistic="win_rate", block_size=20, seed=3
+        )
+        assert 0.0 <= result["lower"] <= result["upper"] <= 1.0
+        assert result["upper"] == 1.0
+
+
 class TestBlockedVersusIid:
     @pytest.mark.parametrize("statistic", ["sharpe", "max_drawdown"])
     def test_at_zero_autocorrelation_the_two_agree(self, statistic):

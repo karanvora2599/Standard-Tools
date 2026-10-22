@@ -52,7 +52,7 @@ from typing import Any, Dict, List, Optional, Sequence
 import numpy as np
 import pandas as pd
 
-from standard_quant_tools._resampling import block_indices
+from standard_quant_tools._resampling import block_indices, circular_block_scale
 from standard_quant_tools.analysis._series import clean_series
 from standard_quant_tools.constants import TRADING_DAYS_PER_YEAR
 from standard_quant_tools.error import ValidationError
@@ -163,6 +163,18 @@ def _block_indices(n: int, block_size: int, rng: np.random.Generator) -> np.ndar
     return block_indices(n, block_size, rng)
 
 
+#: The statistics whose draws `bootstrap_statistic` does not widen by
+#: `circular_block_scale`. The factor is derived for a mean and holds for a
+#: smooth function of means; a maximum drawdown is a running minimum over
+#: the path, which it does not describe, and widening that linearly could
+#: carry a draw past zero.
+_UNWIDENED_STATISTICS = ("max_drawdown",)
+
+#: Where a widened draw is held, for the statistics that have a bound: a
+#: win rate is a fraction and a standard deviation is never negative.
+_STATISTIC_BOUNDS = {"win_rate": (0.0, 1.0), "std": (0.0, math.inf)}
+
+
 #: `bootstrap_statistic` evaluates its resamples together, in passes of
 #: about this many values. Large enough to spread numpy's per-call cost over
 #: many resamples, small enough that a pass's temporaries stay in cache:
@@ -172,24 +184,38 @@ _PASS_ELEMENTS = 1 << 16
 
 
 def _draw_resamples(
-    array: np.ndarray, block_size: int, count: int, rng: np.random.Generator
+    array: np.ndarray,
+    block_size: int,
+    count: int,
+    rng: np.random.Generator,
+    *,
+    circular: bool = False,
 ) -> np.ndarray:
     """
-    `count` moving-block resamples of `array`, one per row.
+    `count` block resamples of `array`, one per row: moving blocks, or with
+    `circular` the series bent into a circle.
 
     Row for row, the same values `array[_block_indices(n, block_size, rng)]`
-    gives when called `count` times. The block starts come from one
-    `rng.integers` call with the same bounds rather than `count` calls, and
-    numpy draws them one after another from the same stream either way, so
-    every start -- and every seeded interval -- is unchanged. The blocks are
-    then read as rows of a sliding-window view instead of through an index
-    array, which measured 4.7x faster than building one.
+    gives when called `count` times -- `circular_block_indices` with
+    `circular`. The block starts come from one `rng.integers` call with the
+    same bounds rather than `count` calls, and numpy draws them one after
+    another from the same stream either way, so every start -- and every
+    seeded interval -- is the loop's. The blocks are then read as rows of a
+    sliding-window view instead of through an index array, which measured
+    4.7x faster than building one; the circular draw reads them from the
+    series with its first `span - 1` values appended, so a window that
+    starts near the end runs on into the beginning.
     """
     n = array.size
     span = min(block_size, n)
     n_blocks = int(math.ceil(n / span))
-    starts = rng.integers(0, n - span + 1, (count, n_blocks))
-    windows = np.lib.stride_tricks.sliding_window_view(array, span)
+    if circular:
+        starts = rng.integers(0, n, (count, n_blocks))
+        source = np.concatenate([array, array[: span - 1]])
+    else:
+        starts = rng.integers(0, n - span + 1, (count, n_blocks))
+        source = array
+    windows = np.lib.stride_tricks.sliding_window_view(source, span)
     return np.ascontiguousarray(windows[starts].reshape(count, -1)[:, :n])
 
 
@@ -316,6 +342,20 @@ def bootstrap_statistic(
     exactly the statistics people care about: maximum drawdown is a minimum
     over the sample, so it is biased toward zero in short samples, and the
     Sharpe ratio is biased upward.
+
+    CIRCULAR BLOCKS, WIDENED, because the moving-block interval was too
+    narrow on short series: a nominal 95% interval for a mean or a Sharpe
+    covered the truth 92.4% of the time at 120 days with IID returns and
+    90.1% under AR(0.3), and 76% at 60 days with 20-day blocks. The moving
+    draw reaches the first and last block - 1 observations through fewer
+    starts, so its draws are centred off the sample's own statistic, and
+    any block bootstrap's variance of a mean is short by (1 - b/n). The
+    draws now wrap around the sample (`_resampling.circular_block_indices`)
+    and are widened about their mean by sqrt(n / (n - b)), the treatment
+    `reality_check` takes; `_resampling.circular_block_scale` has the
+    measurements. Maximum drawdown takes the circular draw unwidened (see
+    `_UNWIDENED_STATISTICS`). `bootstrap_scheme` and `bootstrap_scale` say
+    what ran, and a seeded interval differs from one drawn before this.
     """
     array = _clean(values, "bootstrap_statistic")
     if statistic not in STATISTICS:
@@ -338,7 +378,7 @@ def bootstrap_statistic(
     for lo in range(0, n_bootstrap, per_pass):
         hi = min(lo + per_pass, n_bootstrap)
         draws[lo:hi] = _statistic_rows(
-            _draw_resamples(array, block_size, hi - lo, rng),
+            _draw_resamples(array, block_size, hi - lo, rng, circular=True),
             statistic,
             periods_per_year,
         )
@@ -349,6 +389,18 @@ def bootstrap_statistic(
             f"{n_bootstrap - usable.size} of {n_bootstrap} resamples. The "
             "statistic is not estimable on this series."
         )
+    # Widened about the draws' own mean, so the bias read off that mean is
+    # the circular draw's and only the spread changes.
+    scale = (
+        1.0
+        if statistic in _UNWIDENED_STATISTICS
+        else circular_block_scale(n, block_size)
+    )
+    if scale != 1.0:
+        centre = usable.mean()
+        usable = centre + scale * (usable - centre)
+        if statistic in _STATISTIC_BOUNDS:
+            usable = np.clip(usable, *_STATISTIC_BOUNDS[statistic])
 
     alpha = (1.0 - confidence) / 2.0
     lower = float(np.percentile(usable, alpha * 100))
@@ -402,9 +454,17 @@ def bootstrap_statistic(
             warnings.append(caution)
     warnings.append(
         f"Block bootstrap with blocks of {block_size} observations, which "
-        "preserves local serial correlation. The interval is a statement "
-        "about THIS sample's distribution, not about a regime the sample "
-        "does not contain."
+        "preserves local serial correlation. The blocks wrap around the "
+        "sample, so every observation is drawn equally often"
+        + (
+            f", and the draws are widened by {scale:.3f} (sqrt(n / (n - "
+            "block))), because a block bootstrap understates the variance of "
+            "a mean by that much. "
+            if scale != 1.0
+            else ". "
+        )
+        + "The interval is a statement about THIS sample's distribution, "
+        "not about a regime the sample does not contain."
     )
 
     return {
@@ -421,6 +481,8 @@ def bootstrap_statistic(
         "bootstrap_std": float(usable.std(ddof=1)),
         "estimated_bias": bias,
         "contains_zero": bool(lower <= 0 <= upper),
+        "bootstrap_scheme": "circular",
+        "bootstrap_scale": float(scale),
         "warnings": warnings,
     }
 

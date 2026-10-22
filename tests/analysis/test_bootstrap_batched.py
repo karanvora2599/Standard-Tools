@@ -10,6 +10,11 @@ is computed along the rows of a batch (see the CHANGELOG entry of
 result is required to be the same double -- the same random draws, in the
 same order, reduced in the same order. A seeded interval that moved in the
 last bit would be a different interval under the same seed.
+
+The loop draws circular blocks and widens its draws since the CHANGELOG
+entry "The bootstrap intervals draw circular blocks widened by the block
+bootstrap's own bias"; the batch is held to that loop, and the moving draw
+the batch can still make is held to `block_indices` below.
 """
 
 from __future__ import annotations
@@ -21,12 +26,15 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from standard_quant_tools._resampling import block_indices
+from standard_quant_tools._resampling import (
+    block_indices,
+    circular_block_indices,
+    circular_block_scale,
+)
 from standard_quant_tools.analysis import inference
 from standard_quant_tools.analysis.inference import (
     STATISTICS,
     TRADING_DAYS,
-    _block_indices,
     _clean,
     _statistic,
     bootstrap_statistic,
@@ -49,7 +57,9 @@ def _reference_bootstrap_statistic(
     seed: int = 0,
 ) -> Dict[str, Any]:
     """`bootstrap_statistic` as it was before the resamples were batched,
-    verbatim but for this docstring and the tail-count warning added since."""
+    verbatim but for this docstring, the tail-count warning added since, and
+    the circular draw widened by `circular_block_scale` that replaced the
+    moving one."""
     array = _clean(values, "bootstrap_statistic")
     if statistic not in STATISTICS:
         raise ValidationError(
@@ -69,7 +79,9 @@ def _reference_bootstrap_statistic(
     draws = np.empty(n_bootstrap)
     for i in range(n_bootstrap):
         draws[i] = _statistic(
-            array[_block_indices(n, block_size, rng)], statistic, periods_per_year
+            array[circular_block_indices(n, block_size, rng)],
+            statistic,
+            periods_per_year,
         )
     usable = draws[np.isfinite(draws)]
     if usable.size < n_bootstrap // 2:
@@ -78,6 +90,14 @@ def _reference_bootstrap_statistic(
             f"{n_bootstrap - usable.size} of {n_bootstrap} resamples. The "
             "statistic is not estimable on this series."
         )
+    scale = 1.0 if statistic == "max_drawdown" else circular_block_scale(n, block_size)
+    if scale != 1.0:
+        centre = usable.mean()
+        usable = centre + scale * (usable - centre)
+        if statistic == "win_rate":
+            usable = np.clip(usable, 0.0, 1.0)
+        if statistic == "std":
+            usable = np.clip(usable, 0.0, math.inf)
 
     alpha = (1.0 - confidence) / 2.0
     lower = float(np.percentile(usable, alpha * 100))
@@ -132,9 +152,17 @@ def _reference_bootstrap_statistic(
             warnings.append(caution)
     warnings.append(
         f"Block bootstrap with blocks of {block_size} observations, which "
-        "preserves local serial correlation. The interval is a statement "
-        "about THIS sample's distribution, not about a regime the sample "
-        "does not contain."
+        "preserves local serial correlation. The blocks wrap around the "
+        "sample, so every observation is drawn equally often"
+        + (
+            f", and the draws are widened by {scale:.3f} (sqrt(n / (n - "
+            "block))), because a block bootstrap understates the variance of "
+            "a mean by that much. "
+            if scale != 1.0
+            else ". "
+        )
+        + "The interval is a statement about THIS sample's distribution, "
+        "not about a regime the sample does not contain."
     )
 
     return {
@@ -151,6 +179,8 @@ def _reference_bootstrap_statistic(
         "bootstrap_std": float(usable.std(ddof=1)),
         "estimated_bias": bias,
         "contains_zero": bool(lower <= 0 <= upper),
+        "bootstrap_scheme": "circular",
+        "bootstrap_scale": float(scale),
         "warnings": warnings,
     }
 
@@ -167,7 +197,9 @@ def _reference_draws(values, statistic, n_bootstrap, block_size, seed):
     draws = np.empty(max(100, int(n_bootstrap)))
     for i in range(draws.size):
         draws[i] = _statistic(
-            array[_block_indices(n, block_size, rng)], statistic, TRADING_DAYS
+            array[circular_block_indices(n, block_size, rng)],
+            statistic,
+            TRADING_DAYS,
         )
     return draws
 
@@ -291,19 +323,27 @@ class TestEveryStatisticIsTheLoopToTheBit:
         100 resamples are raised to 100."""
         _assert_same(_ar1(30, seed=6), statistic=statistic, n_bootstrap=5, seed=1)
 
-    def test_the_resample_draw_is_the_shared_helpers_draw(self):
+    @pytest.mark.parametrize(
+        "circular, helper",
+        [(False, block_indices), (True, circular_block_indices)],
+        ids=["moving", "circular"],
+    )
+    def test_the_resample_draw_is_the_shared_helpers_draw(self, circular, helper):
         """The batch takes one `rng.integers` call for many resamples where
         the loop took one each. numpy draws them from the same stream one
-        after another either way, so every row matches `block_indices` and
-        the generator is left in the same state."""
+        after another either way, so every row matches the shared helper --
+        `block_indices`, or `circular_block_indices` for the circular draw
+        -- and the generator is left in the same state."""
         array = _ar1(401, seed=2)
         for block_size, count in ((1, 7), (3, 33), (7, 50), (200, 9)):
             rng_loop = np.random.default_rng(13)
             loop = np.stack(
-                [array[block_indices(401, block_size, rng_loop)] for _ in range(count)]
+                [array[helper(401, block_size, rng_loop)] for _ in range(count)]
             )
             rng_batch = np.random.default_rng(13)
-            batch = inference._draw_resamples(array, block_size, count, rng_batch)
+            batch = inference._draw_resamples(
+                array, block_size, count, rng_batch, circular=circular
+            )
             assert np.array_equal(batch, loop)
             assert batch.flags["C_CONTIGUOUS"]
             assert rng_batch.integers(0, 2**31, 4).tolist() == (

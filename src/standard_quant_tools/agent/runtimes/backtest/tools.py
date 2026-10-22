@@ -2158,6 +2158,8 @@ def get_robustness_diagnostics(
         bootstrap_ci_lower=round(bootstrap["ci_lower"], 4),
         bootstrap_ci_upper=round(bootstrap["ci_upper"], 4),
         bootstrap_confidence=input_data.bootstrap_confidence,
+        bootstrap_scheme=bootstrap["bootstrap_scheme"],
+        bootstrap_scale=round(bootstrap["bootstrap_scale"], 6),
         warnings=warnings,
     )
 

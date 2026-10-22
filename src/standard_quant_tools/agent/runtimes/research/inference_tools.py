@@ -179,6 +179,18 @@ class BootstrapResult(_Result):
     bootstrap_std: Stat = None
     estimated_bias: Stat = None
     contains_zero: bool = False
+    bootstrap_scheme: str = Field(
+        "circular",
+        description="How the blocks were drawn: `circular`, wrapping around "
+        "the sample so every observation is drawn equally often.",
+    )
+    bootstrap_scale: Stat = Field(
+        None,
+        description="What the draws were widened by about their mean, "
+        "sqrt(n / (n - block_size)): a block bootstrap understates the "
+        "variance of a mean by (1 - block_size / n). 1.0 for max_drawdown, "
+        "which is not widened.",
+    )
 
 
 class MomentSummary(BaseModel):

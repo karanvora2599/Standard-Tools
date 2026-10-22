@@ -41,12 +41,19 @@ the sample mean needs, and `reality_check` is that test: on 120 days with
 20-day blocks the moving draw left its null too narrow and it rejected a
 true null 9-12% of the time at a nominal 5%.
 
-The moving draw stays for everyone else, deliberately. Its other callers
-draw intervals and forward paths rather than a centred null, and two
-twins reproduce its draws bit for bit -- the batched resampler in
-`analysis/inference.py` and the native forward-path kernel in
-`monte_carlo.cpp` -- so changing the shared scheme would move every seeded
-interval and simulation and part each from its twin.
+The two confidence intervals took the circular draw next, for the same
+reason: `bootstrap_statistic` and `block_bootstrap_ci` read a percentile
+interval off draws that should be centred on the sample's own statistic,
+and on short series their nominal 95% intervals covered the truth about
+92% of the time with the default blocks and 76-87% with 20-day ones (see
+`circular_block_scale`). Each asks for the circular draw itself. The
+shared `block_indices` is unchanged, deliberately: its remaining callers
+draw forward paths, which have no centre to keep, and the native
+forward-path kernel in `monte_carlo.cpp` reproduces it bit for bit, so
+changing it would move every seeded simulation and part it from its twin.
+
+A BLOCK BOOTSTRAP ALSO UNDERSTATES THE VARIANCE OF A MEAN, whichever way
+it draws; `circular_block_scale` is the factor that corrects it.
 """
 
 from __future__ import annotations
@@ -57,7 +64,7 @@ import numpy as np
 
 from standard_quant_tools.numeric_contract import require_positive_int
 
-__all__ = ["block_indices", "circular_block_indices"]
+__all__ = ["block_indices", "circular_block_indices", "circular_block_scale"]
 
 
 def block_indices(
@@ -148,3 +155,38 @@ def circular_block_indices(
     n_blocks = int(math.ceil(target / span))
     starts = rng.integers(0, n, n_blocks)
     return ((starts[:, None] + np.arange(span)) % n).ravel()[:target]
+
+
+def circular_block_scale(n: int, block_size: int) -> float:
+    """
+    sqrt(n / (n - block_size)): what a circular block bootstrap's draws are
+    widened by, about their own centre, so that their spread is the
+    sampling spread they estimate.
+
+    A block bootstrap's variance of a mean is the Bartlett sum of the
+    autocovariances taken about the SAMPLE mean, and with no dependence at
+    all its expectation is sigma^2 (1 - b/n) / n: 17% short at n = 120 and
+    b = 20, 4% at the n^(1/3) default block of 5. The factor is Bessel's
+    correction at b = 1. It is derived for a mean and holds to first order
+    for a smooth function of means -- a Sharpe ratio, a standard deviation,
+    a quantile through its influence function.
+
+    Measured on nominal 95% percentile intervals of a mean, 1,000 normal
+    series per cell, IID / AR(0.3), with the n^(1/3) default block:
+
+        n                       60           120          250
+        moving draw          92.9 / 89.6  92.4 / 90.1  93.3 / 91.4  (%)
+        circular, widened    94.0 / 91.2  93.4 / 91.6  94.2 / 92.2
+
+    and with 20-day blocks, a mean or a Sharpe ratio alike:
+
+        moving draw          76 / 73      87 / 86      90 / 90      (%)
+        circular, widened    90 / 88      91 / 90      93 / 93
+
+    What is left is a variance read off n / b blocks, which has few degrees
+    of freedom when the blocks are long, and under AR(0.3) the n^(1/3)
+    block, which is too short to hold all of the dependence.
+
+    1.0 when the block is the whole series: there is nothing to widen.
+    """
+    return math.sqrt(n / (n - block_size)) if block_size < n else 1.0
