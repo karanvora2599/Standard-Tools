@@ -320,6 +320,30 @@ class TestCompareDistributions:
         with pytest.raises(ValidationError, match="at least"):
             compare_distributions([0.1, 0.2], [0.3, 0.4])
 
+    def test_two_identical_samples_are_the_same_distribution(self):
+        """A KS statistic of 0 gave p = 0.0 and "The two samples differ":
+        the series summed for the p-value does not converge there."""
+        sample = np.random.default_rng(5).normal(0, 1, 100)
+        result = compare_distributions(sample, sample)
+        assert result["ks_statistic"] == 0.0
+        assert result["p_value"] == 1.0
+        assert result["same_distribution_at_05"] is True
+        assert not any("samples differ" in w for w in result["warnings"])
+
+    def test_the_same_values_in_another_order_are_the_same_distribution(self):
+        values = [-1.0] * 30 + [0.0] * 40 + [1.0] * 30
+        shuffled = list(np.random.default_rng(6).permutation(values))
+        result = compare_distributions(values, shuffled)
+        assert (result["ks_statistic"], result["p_value"]) == (0.0, 1.0)
+
+    def test_a_large_sample_a_hair_apart_is_not_evidence_either(self):
+        """KS of 1/2000 between 2,000 values and the same values plus 1e-9:
+        the argument is 0.016, where the old sum gave 0.994."""
+        a = np.random.default_rng(7).normal(0, 1, 2000)
+        result = compare_distributions(a, a + 1e-9)
+        assert result["ks_statistic"] == pytest.approx(1 / 2000)
+        assert result["p_value"] == pytest.approx(1.0, abs=1e-12)
+
 
 class TestRollingCorrelationStability:
     @staticmethod

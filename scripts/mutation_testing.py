@@ -202,6 +202,27 @@ MUTATIONS: List[Mutation] = [
         "tests/backtest/test_robustness.py",
     ),
     Mutation(
+        # The alternating series everywhere, as `compare_distributions` had
+        # it: it does not converge near zero and gave two identical samples
+        # a p-value of 0.0.
+        "kolmogorov tail: use the alternating series below the switch too",
+        SRC / "_special.py",
+        "    if x < 1.18:\n        y = math.exp(-(math.pi**2) / (8.0 * x * x))",
+        "    if x < 0.0:\n        y = math.exp(-(math.pi**2) / (8.0 * x * x))",
+        "tests/analysis/test_inference.py tests/test_single_definition.py",
+    ),
+    Mutation(
+        # compare_distributions back on its own 100-term alternating sum.
+        "compare distributions: sum the alternating series for the KS p-value",
+        SRC / "analysis/inference.py",
+        "    p_value = kolmogorov_sf(lam)\n",
+        "    p_value = min(1.0, max(0.0, 2.0 * sum(\n"
+        "        (-1) ** (k - 1) * math.exp(-2.0 * k * k * lam * lam)\n"
+        "        for k in range(1, 101)\n"
+        "    )))\n",
+        "tests/analysis/test_inference.py",
+    ),
+    Mutation(
         # The concentration as it was: the largest share in absolute value,
         # whichever regime it belongs to, under the best regime's name.
         "regime stratified: report the largest absolute share as the best's",

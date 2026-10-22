@@ -77,6 +77,7 @@ class TestSpecialFunctionsAreDefinedOnce:
             "betacf",
             "f_sf",
             "f_sf_array",
+            "kolmogorov_sf",
         ):
             assert callable(getattr(_special, name))
 
@@ -127,6 +128,44 @@ class TestSpecialFunctionsAreStillCorrect:
         assert f_sf(2.0, 3, 0) == 1.0
         assert f_sf(2.0, 0, 50) == 1.0
         assert f_sf(-1.0, 3, 50) == 1.0
+
+
+class TestTheKolmogorovTailConvergesEverywhere:
+    """`compare_distributions` summed the alternating series alone, which
+    does not converge near zero: a KS statistic of 0 -- two identical
+    samples -- gave a p-value of 0.0, and arguments below about 0.02 fell
+    short of 1 (0.40 at 0.005, 0.87 at 0.01)."""
+
+    def test_against_scipy(self):
+        scipy_special = pytest.importorskip("scipy.special")
+        from standard_quant_tools._special import kolmogorov_sf
+
+        for x in np.linspace(0.0, 5.0, 2001):
+            assert kolmogorov_sf(float(x)) == pytest.approx(
+                float(scipy_special.kolmogorov(x)), abs=1e-14
+            )
+
+    def test_known_values_without_scipy(self):
+        """scipy's `kolmogorov` at these points, and the 5% critical value."""
+        from standard_quant_tools._special import kolmogorov_sf
+
+        assert kolmogorov_sf(0.5) == pytest.approx(0.9639452436648751, abs=1e-14)
+        assert kolmogorov_sf(1.0) == pytest.approx(0.26999967167735456, abs=1e-14)
+        assert kolmogorov_sf(1.3580986393225505) == pytest.approx(0.05, abs=1e-12)
+        assert kolmogorov_sf(3.0) == pytest.approx(3.045995948942526e-08, rel=1e-12)
+
+    @pytest.mark.parametrize("x", [0.0, 1e-9, 0.005, 0.01, -1.0])
+    def test_no_distance_is_no_evidence(self, x):
+        from standard_quant_tools._special import kolmogorov_sf
+
+        assert kolmogorov_sf(x) == pytest.approx(1.0, abs=1e-12)
+
+    def test_the_two_series_meet_at_the_switch(self):
+        from standard_quant_tools._special import kolmogorov_sf
+
+        assert kolmogorov_sf(1.18 - 1e-12) == pytest.approx(
+            kolmogorov_sf(1.18), abs=5e-12
+        )
 
 
 class TestTradingDaysIsDefinedOnce:

@@ -53,6 +53,7 @@ import numpy as np
 import pandas as pd
 
 from standard_quant_tools._resampling import block_indices, circular_block_scale
+from standard_quant_tools._special import kolmogorov_sf
 from standard_quant_tools.analysis._series import clean_series
 from standard_quant_tools.constants import TRADING_DAYS_PER_YEAR
 from standard_quant_tools.error import ValidationError
@@ -527,12 +528,14 @@ def compare_distributions(
     cdf_b = np.searchsorted(np.sort(b), pooled, side="right") / b.size
     ks = float(np.max(np.abs(cdf_a - cdf_b)))
     effective = math.sqrt(a.size * b.size / (a.size + b.size))
-    # Kolmogorov's asymptotic distribution.
+    # Kolmogorov's asymptotic distribution, with Stephens' small-sample
+    # adjustment to the argument. Its alternating series alone, summed to
+    # 100 terms, gave p = 0.0 at a KS statistic of 0 -- two identical
+    # samples called different at any level -- and fell short of 1 below
+    # about 0.02 (0.40 at 0.005, 0.87 at 0.01); `kolmogorov_sf` switches to
+    # the series that converges there.
     lam = (effective + 0.12 + 0.11 / effective) * ks
-    p_value = 2.0 * sum(
-        (-1) ** (k - 1) * math.exp(-2.0 * k * k * lam * lam) for k in range(1, 101)
-    )
-    p_value = float(min(max(p_value, 0.0), 1.0))
+    p_value = kolmogorov_sf(lam)
 
     def _moments(values: np.ndarray) -> Dict[str, float]:
         std = float(values.std(ddof=1))

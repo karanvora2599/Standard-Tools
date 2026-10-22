@@ -1,5 +1,27 @@
 # Changelog
 
+## Two identical samples are the same distribution: the KS p-value is computed by the series that converges near zero
+
+- **`compare_distributions` called two identical samples different.** Its
+  KS p-value summed Kolmogorov's alternating series, 2 sum (-1)^(k-1)
+  exp(-2 k^2 x^2), to 100 terms. Near zero that series does not converge
+  -- at x = 0 its terms are 1, -1, 1, ... -- so a KS statistic of 0 gave
+  p = 0.0, `same_distribution_at_05: false` and the warning "The two
+  samples differ (KS p = 0.0000)". Any two samples holding the same
+  values did it, in any order and at any size. Just above zero the sum
+  fell short of 1: 0.40 at an argument of 0.005, 0.87 at 0.01, 0.994 for
+  2,000 values against the same values plus 1e-9.
+- **`_special.kolmogorov_sf` is the distribution's upper tail**, written
+  once: the alternating series above 1.18, the theta-function form
+  1 - sqrt(2 pi) / x sum exp(-(2k - 1)^2 pi^2 / (8 x^2)) below it, as
+  Numerical Recipes splits them. It agrees with scipy's `kolmogorov`
+  within 5e-15 across [0, 5]; at the arguments where the old sum
+  converged, the p-values are unchanged to that precision.
+- Tests: identical samples, the same values reordered, and a large sample
+  a hair apart are all p = 1 and not called different; the tail against
+  scipy, against known values without it, at and near zero, and across
+  the switch. The mutation catalogue gains two entries, both killed.
+
 ## The regime concentration belongs to the regime it names, and a loss is attributed to the regime that lost it
 
 - **The share and the name came from two different regimes.**
