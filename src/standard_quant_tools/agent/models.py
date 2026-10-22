@@ -223,9 +223,11 @@ class BacktestInput(BaseModel):
         ge=0.0,
         le=1.0,
         description=(
-            "Annualized risk-free rate (0.045 = 4.5%) for Sharpe/Sortino. "
-            "0.0 (default) measures total return per unit of risk, not "
-            "EXCESS return."
+            "Annualized risk-free rate (0.045 = 4.5%). Sharpe/Sortino "
+            "measure the excess over it, and the simulated account earns it "
+            "on idle cash and pays it on leverage beyond 1x -- run_strategy's "
+            "cash_rate and financing_rate default to it. 0.0 (default) "
+            "measures total return per unit of risk, not EXCESS return."
         ),
     )
 
@@ -1984,9 +1986,11 @@ class RegimeAdaptiveInput(BaseModel):
         ge=0.0,
         le=1.0,
         description=(
-            "Annualized risk-free rate (0.045 = 4.5%) for Sharpe/Sortino. "
-            "0.0 (default) measures total return per unit of risk, not "
-            "EXCESS return."
+            "Annualized risk-free rate (0.045 = 4.5%). Sharpe/Sortino "
+            "measure the excess over it, and the simulated account earns it "
+            "on idle cash and pays it on leverage beyond 1x -- run_strategy's "
+            "cash_rate and financing_rate default to it. 0.0 (default) "
+            "measures total return per unit of risk, not EXCESS return."
         ),
     )
 
@@ -2230,9 +2234,11 @@ class WalkForwardInput(BaseModel):
         ge=0.0,
         le=1.0,
         description=(
-            "Annualized risk-free rate (0.045 = 4.5%) for Sharpe/Sortino. "
-            "0.0 (default) measures total return per unit of risk, not "
-            "EXCESS return."
+            "Annualized risk-free rate (0.045 = 4.5%). Sharpe/Sortino "
+            "measure the excess over it, and the simulated account earns it "
+            "on idle cash and pays it on leverage beyond 1x -- run_strategy's "
+            "cash_rate and financing_rate default to it. 0.0 (default) "
+            "measures total return per unit of risk, not EXCESS return."
         ),
     )
 
@@ -2398,9 +2404,11 @@ class RegimeAdaptiveWalkForwardInput(BaseModel):
         ge=0.0,
         le=1.0,
         description=(
-            "Annualized risk-free rate (0.045 = 4.5%) for Sharpe/Sortino. "
-            "0.0 (default) measures total return per unit of risk, not "
-            "EXCESS return."
+            "Annualized risk-free rate (0.045 = 4.5%). Sharpe/Sortino "
+            "measure the excess over it, and the simulated account earns it "
+            "on idle cash and pays it on leverage beyond 1x -- run_strategy's "
+            "cash_rate and financing_rate default to it. 0.0 (default) "
+            "measures total return per unit of risk, not EXCESS return."
         ),
     )
 
@@ -2890,9 +2898,11 @@ class BuyAndHoldInput(BaseModel):
         ge=0.0,
         le=1.0,
         description=(
-            "Annualized risk-free rate (0.045 = 4.5%) for Sharpe/Sortino. "
-            "0.0 (default) measures total return per unit of risk, not "
-            "EXCESS return."
+            "Annualized risk-free rate (0.045 = 4.5%). Sharpe/Sortino "
+            "measure the excess over it, and the simulated account earns it "
+            "on idle cash and pays it on leverage beyond 1x -- run_strategy's "
+            "cash_rate and financing_rate default to it. 0.0 (default) "
+            "measures total return per unit of risk, not EXCESS return."
         ),
     )
 
@@ -3004,9 +3014,11 @@ class CompareStrategiesInput(BaseModel):
         ge=0.0,
         le=1.0,
         description=(
-            "Annualized risk-free rate (0.045 = 4.5%) for Sharpe/Sortino. "
-            "0.0 (default) measures total return per unit of risk, not "
-            "EXCESS return."
+            "Annualized risk-free rate (0.045 = 4.5%). Sharpe/Sortino "
+            "measure the excess over it, and the simulated account earns it "
+            "on idle cash and pays it on leverage beyond 1x -- run_strategy's "
+            "cash_rate and financing_rate default to it. 0.0 (default) "
+            "measures total return per unit of risk, not EXCESS return."
         ),
     )
 
@@ -3181,9 +3193,11 @@ class BacktestOptInput(BaseModel):
         ge=0.0,
         le=1.0,
         description=(
-            "Annualized risk-free rate (0.045 = 4.5%) for Sharpe/Sortino. "
-            "0.0 (default) measures total return per unit of risk, not "
-            "EXCESS return."
+            "Annualized risk-free rate (0.045 = 4.5%). Sharpe/Sortino "
+            "measure the excess over it, and the simulated account earns it "
+            "on idle cash and pays it on leverage beyond 1x -- run_strategy's "
+            "cash_rate and financing_rate default to it. 0.0 (default) "
+            "measures total return per unit of risk, not EXCESS return."
         ),
     )
 
@@ -3556,9 +3570,11 @@ class CustomSignalBacktestInput(BaseModel):
         ge=0.0,
         le=1.0,
         description=(
-            "Annualized risk-free rate (0.045 = 4.5%) for Sharpe/Sortino. "
-            "0.0 (default) measures total return per unit of risk, not "
-            "EXCESS return."
+            "Annualized risk-free rate (0.045 = 4.5%). Sharpe/Sortino "
+            "measure the excess over it, and the simulated account earns it "
+            "on idle cash and pays it on leverage beyond 1x -- run_strategy's "
+            "cash_rate and financing_rate default to it. 0.0 (default) "
+            "measures total return per unit of risk, not EXCESS return."
         ),
     )
 
@@ -3669,9 +3685,11 @@ class SignalPanelBacktestInput(BaseModel):
         ge=0.0,
         le=1.0,
         description=(
-            "Annualized risk-free rate (0.045 = 4.5%) for Sharpe/Sortino. "
-            "0.0 (default) measures total return per unit of risk, not "
-            "EXCESS return."
+            "Annualized risk-free rate (0.045 = 4.5%). Sharpe/Sortino "
+            "measure the excess over it, and the simulated account earns it "
+            "on idle cash and pays it on leverage beyond 1x -- run_strategy's "
+            "cash_rate and financing_rate default to it. 0.0 (default) "
+            "measures total return per unit of risk, not EXCESS return."
         ),
     )
 
@@ -3914,15 +3932,53 @@ class PortfolioSimulationInput(BaseModel):
         ge=0,
         description="Annualized basis-point borrow fee accrued daily on any short position's notional.",
     )
-    margin_interest_rate: float = Field(
-        0.0,
+    margin_interest_rate: Optional[float] = Field(
+        None,
         ge=0,
         # The bound every other rate on the surface carries. 1e308 ran and
         # returned a null account -- it is a unit error, not a scenario.
         le=10,
         description="Annualized rate accrued daily on negative cash (implied "
         "margin borrowing), as a decimal: 0.08 is 8%. At most 10 (1,000%); a "
-        "larger value is a unit error.",
+        "larger value is a unit error. None (default) is risk_free_rate plus "
+        "margin_spread_bps, so a levered book pays for what it borrows.",
+    )
+    margin_spread_bps: float = Field(
+        0.0,
+        ge=0,
+        le=10_000,
+        description="Basis points over risk_free_rate charged on negative "
+        "cash when margin_interest_rate is not given.",
+    )
+    cash_rate: Optional[float] = Field(
+        None,
+        ge=-1.0,
+        le=1.0,
+        description="Annualized rate CREDITED on positive cash, as a decimal. "
+        "None (default) is risk_free_rate: idle cash earns the rate the "
+        "Sharpe subtracts, so a book half in cash is scored like the same "
+        "book fully invested rather than as losing the rate on its cash.",
+    )
+    short_proceeds: Literal["net_cash", "segregated"] = Field(
+        "net_cash",
+        description="Where a short sale's proceeds sit. 'net_cash' (default): "
+        "in the account's cash, earning cash_rate. 'segregated': held by the "
+        "lender, earning only short_rebate_rate, and interest accrues on cash "
+        "less the short book.",
+    )
+    short_rebate_rate: Optional[float] = Field(
+        None,
+        ge=-1.0,
+        le=1.0,
+        description="Annualized rate earned on segregated short proceeds. "
+        "Only with short_proceeds='segregated'; None there is 0.0.",
+    )
+    day_count: Literal["ACT/365F", "ACT/360"] = Field(
+        "ACT/365F",
+        description="Day count every accrual (cash credit, margin interest, "
+        "borrow, rebate) and the per-bar risk-free benchmark use: rate x "
+        "balance x calendar days / 365 or / 360. USD margin and money-market "
+        "rates are usually quoted ACT/360. Echoed on the result.",
     )
     max_adv_participation: Optional[float] = Field(
         None,
@@ -3937,9 +3993,12 @@ class PortfolioSimulationInput(BaseModel):
         ge=0.0,
         le=1.0,
         description=(
-            "Annualized risk-free rate (0.045 = 4.5%) for Sharpe/Sortino. "
-            "0.0 (default) measures total return per unit of risk, not "
-            "EXCESS return."
+            "Annualized risk-free rate (0.045 = 4.5%). Sharpe/Sortino measure "
+            "the excess over it as cash accrued it bar by bar on day_count, "
+            "and it is the default cash_rate and (plus margin_spread_bps) the "
+            "default margin_interest_rate, so a rate given here is earned by "
+            "idle cash and paid on borrowing. 0.0 (default) measures total "
+            "return per unit of risk, not EXCESS return."
         ),
     )
 
@@ -4058,6 +4117,51 @@ class RebalanceEvent(BaseModel):
     )
 
 
+class FinancingReport(BaseModel):
+    """The rates a shared-cash simulation accrued at, and what they came to."""
+
+    day_count: str = Field(
+        ..., description="'ACT/365F' or 'ACT/360': every accrual's day count."
+    )
+    cash_rate: float = Field(..., description="Annual rate credited on positive cash.")
+    margin_interest_rate: float = Field(
+        ..., description="Annual rate charged on negative cash."
+    )
+    borrow_fee_bps: float = Field(..., description="Annual bps on short notional.")
+    short_proceeds: str = Field(..., description="'net_cash' or 'segregated'.")
+    short_rebate_rate: float = Field(
+        ..., description="Annual rate on segregated short proceeds."
+    )
+    interest_credited: float = Field(
+        ..., description="Currency credited on positive cash over the run."
+    )
+    interest_charged: float = Field(
+        ..., description="Currency charged on negative cash over the run."
+    )
+    borrow_charged: float = Field(
+        ..., description="Currency of borrow fee paid on shorts over the run."
+    )
+    rebate_credited: float = Field(
+        ..., description="Currency of rebate earned on segregated proceeds."
+    )
+    net_financing: float = Field(
+        ...,
+        description="interest_credited + rebate_credited - interest_charged "
+        "- borrow_charged: what financing added to the account.",
+    )
+    debit_balance_years: float = Field(
+        ...,
+        description="The negative cash balance integrated over time, in "
+        "currency-years on day_count: each 1% of margin rate costs 1% of it.",
+    )
+
+
+def financing_report(raw: Dict[str, Any]) -> Optional["FinancingReport"]:
+    """The engine's financing dict as the result model, or None if absent."""
+    financing = raw.get("financing")
+    return FinancingReport(**financing) if financing else None
+
+
 _ACCOUNT_NOT_FINITE = (
     "the simulated account stopped being a finite number -- an input too "
     "large to represent, such as a financing rate, reached it"
@@ -4164,6 +4268,16 @@ class PortfolioSimulationResult(ExplainsNulls):
         "every return-consuming tool on this surface takes. Published only "
         "when run_id was given.",
     )
+    day_count: str = Field(
+        "ACT/365F",
+        description="The day count every accrual and the Sharpe's per-bar "
+        "risk-free benchmark used, echoed from the input.",
+    )
+    financing: Optional[FinancingReport] = Field(
+        None,
+        description="The cash, margin, borrow and rebate rates the account "
+        "accrued at and the currency each came to over the run.",
+    )
     warnings: List[str] = []
 
 
@@ -4234,10 +4348,63 @@ class PairTradeBacktestInput(BaseModel):
         ge=0.0,
         le=1.0,
         description=(
-            "Annualized risk-free rate (0.045 = 4.5%) for Sharpe/Sortino. "
-            "0.0 (default) measures total return per unit of risk, not "
-            "EXCESS return."
+            "Annualized risk-free rate (0.045 = 4.5%). Sharpe/Sortino measure "
+            "the excess over it as cash accrued it bar by bar on day_count, "
+            "and it is the default cash_rate and (plus margin_spread_bps) the "
+            "default margin_interest_rate. A pair holds its equity plus the "
+            "short leg's proceeds in cash, so without the credit a rate given "
+            "here was subtracted from a book that earned none of it. 0.0 "
+            "(default) measures total return per unit of risk, not EXCESS "
+            "return."
         ),
+    )
+    borrow_fee_bps: float = Field(
+        0.0,
+        ge=0,
+        le=10_000,
+        description="Annualized basis points paid on the short leg's "
+        "notional. A pair is always short one leg; 0.0 borrows it for free, "
+        "and the warnings say so.",
+    )
+    margin_interest_rate: Optional[float] = Field(
+        None,
+        ge=0,
+        le=10,
+        description="Annualized rate on negative cash, as a decimal. None "
+        "(default) is risk_free_rate plus margin_spread_bps.",
+    )
+    margin_spread_bps: float = Field(
+        0.0,
+        ge=0,
+        le=10_000,
+        description="Basis points over risk_free_rate charged on negative "
+        "cash when margin_interest_rate is not given.",
+    )
+    cash_rate: Optional[float] = Field(
+        None,
+        ge=-1.0,
+        le=1.0,
+        description="Annualized rate credited on positive cash, as a decimal. "
+        "None (default) is risk_free_rate.",
+    )
+    short_proceeds: Literal["net_cash", "segregated"] = Field(
+        "net_cash",
+        description="'net_cash' (default): the short leg's proceeds are cash "
+        "and earn cash_rate. 'segregated': the lender holds them, they earn "
+        "only short_rebate_rate, and interest accrues on cash less the short "
+        "leg.",
+    )
+    short_rebate_rate: Optional[float] = Field(
+        None,
+        ge=-1.0,
+        le=1.0,
+        description="Annualized rate on segregated short proceeds. Only with "
+        "short_proceeds='segregated'; None there is 0.0.",
+    )
+    day_count: Literal["ACT/365F", "ACT/360"] = Field(
+        "ACT/365F",
+        description="Day count for every accrual and the per-bar risk-free "
+        "benchmark. Echoed on the result.",
     )
     run_id: Optional[str] = Field(
         None,
@@ -4301,6 +4468,16 @@ class PairTradeBacktestResult(ExplainsNulls):
         None,
         description="An 'analytic_series' reference to gross exposure over "
         "equity per bar. Published only when run_id was given.",
+    )
+    day_count: str = Field(
+        "ACT/365F",
+        description="The day count every accrual and the Sharpe's per-bar "
+        "risk-free benchmark used, echoed from the input.",
+    )
+    financing: Optional[FinancingReport] = Field(
+        None,
+        description="The cash, margin, borrow and rebate rates the pair's "
+        "account accrued at and the currency each came to.",
     )
     warnings: List[str] = []
 
@@ -4387,9 +4564,11 @@ class BacktestDiagnosticsInput(BaseModel):
         ge=0.0,
         le=1.0,
         description=(
-            "Annualized risk-free rate (0.045 = 4.5%) for Sharpe/Sortino. "
-            "0.0 (default) measures total return per unit of risk, not "
-            "EXCESS return."
+            "Annualized risk-free rate (0.045 = 4.5%). Sharpe/Sortino "
+            "measure the excess over it, and the simulated account earns it "
+            "on idle cash and pays it on leverage beyond 1x -- run_strategy's "
+            "cash_rate and financing_rate default to it. 0.0 (default) "
+            "measures total return per unit of risk, not EXCESS return."
         ),
     )
 
@@ -4543,9 +4722,11 @@ class RobustnessDiagnosticsInput(BaseModel):
         ge=0.0,
         le=1.0,
         description=(
-            "Annualized risk-free rate (0.045 = 4.5%) for Sharpe/Sortino. "
-            "0.0 (default) measures total return per unit of risk, not "
-            "EXCESS return."
+            "Annualized risk-free rate (0.045 = 4.5%). Sharpe/Sortino "
+            "measure the excess over it, and the simulated account earns it "
+            "on idle cash and pays it on leverage beyond 1x -- run_strategy's "
+            "cash_rate and financing_rate default to it. 0.0 (default) "
+            "measures total return per unit of risk, not EXCESS return."
         ),
     )
 
@@ -5144,9 +5325,11 @@ class BacktestCompactInput(BaseModel):
         ge=0.0,
         le=1.0,
         description=(
-            "Annualized risk-free rate (0.045 = 4.5%) for Sharpe/Sortino. "
-            "0.0 (default) measures total return per unit of risk, not "
-            "EXCESS return."
+            "Annualized risk-free rate (0.045 = 4.5%). Sharpe/Sortino "
+            "measure the excess over it, and the simulated account earns it "
+            "on idle cash and pays it on leverage beyond 1x -- run_strategy's "
+            "cash_rate and financing_rate default to it. 0.0 (default) "
+            "measures total return per unit of risk, not EXCESS return."
         ),
     )
 
@@ -5774,7 +5957,9 @@ class EstimateTradeCostInput(BaseModel):
         0.0,
         description=(
             "Account cash. Only a NEGATIVE value accrues margin interest — "
-            "there is nothing borrowed to charge on a positive balance."
+            "there is nothing borrowed to charge on a positive balance. It is "
+            "the account's interest, reported as account_margin_interest and "
+            "kept out of this trade's cost."
         ),
     )
     margin_annual_rate: float = Field(
@@ -5827,15 +6012,35 @@ class EstimateTradeCostResult(ExplainsNulls):
     legs: List[TradeCostLeg]
     total_cost: float
     total_bps: float = Field(
-        ..., description="Total one-way cost in basis points of notional."
+        ...,
+        description="The legs' total in basis points of notional: one-way "
+        "execution plus borrow over the holding period.",
+    )
+    execution_bps: float = Field(
+        0.0,
+        description="Commission, spread and impact, one way, in basis points "
+        "-- what entering costs and exiting costs again.",
+    )
+    holding_bps: float = Field(
+        0.0,
+        description="Borrow over holding_days on a short, in basis points: "
+        "accrued once over the hold, not on entry and again on exit.",
     )
     breakeven_move_bps: Stat = Field(
         ...,
         description=(
             "How far the price must move in your favour to cover a ROUND "
-            "TRIP at this cost — two times total_bps. The one-way figure "
-            "understates what an entry actually has to earn."
+            "TRIP held for holding_days: 2 x execution_bps + holding_bps. "
+            "Execution is paid on the way in and again on the way out; the "
+            "holding cost accrues once."
         ),
+    )
+    account_margin_interest: Optional[float] = Field(
+        None,
+        description="Interest on the account's negative margin_cash over "
+        "holding_days, in currency. The account's cost rather than this "
+        "trade's, so it is in neither total_bps nor breakeven_move_bps. None "
+        "when margin_cash is not negative or no rate was given.",
     )
     notes: List[str] = Field(default_factory=list)
 
@@ -5921,9 +6126,11 @@ class CompareCostModelsInput(BaseModel):
         ge=0.0,
         le=1.0,
         description=(
-            "Annualized risk-free rate (0.045 = 4.5%) for Sharpe/Sortino. "
-            "0.0 (default) measures total return per unit of risk, not "
-            "EXCESS return."
+            "Annualized risk-free rate (0.045 = 4.5%). Sharpe/Sortino "
+            "measure the excess over it, and the simulated account earns it "
+            "on idle cash and pays it on leverage beyond 1x -- run_strategy's "
+            "cash_rate and financing_rate default to it. 0.0 (default) "
+            "measures total return per unit of risk, not EXCESS return."
         ),
     )
 
@@ -7589,9 +7796,11 @@ class StrategyMatrixInput(BaseModel):
         ge=0.0,
         le=1.0,
         description=(
-            "Annualized risk-free rate (0.045 = 4.5%) for Sharpe/Sortino. "
-            "0.0 (default) measures total return per unit of risk, not "
-            "EXCESS return."
+            "Annualized risk-free rate (0.045 = 4.5%). Sharpe/Sortino "
+            "measure the excess over it, and the simulated account earns it "
+            "on idle cash and pays it on leverage beyond 1x -- run_strategy's "
+            "cash_rate and financing_rate default to it. 0.0 (default) "
+            "measures total return per unit of risk, not EXCESS return."
         ),
     )
 

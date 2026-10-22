@@ -1557,9 +1557,16 @@ def estimate_trade_cost(
     (`maker_taker_cost`, `pct_of_range_spread`) had no other agent-callable
     path at all.
 
-    The result reports `breakeven_move_bps` as TWICE the one-way total,
-    because an entry has to earn its exit's cost as well as its own, and a
-    one-way figure quietly understates what the trade must make.
+    The result reports `breakeven_move_bps` as the EXECUTION cost twice --
+    an entry has to earn its exit's commission, spread and impact as well
+    as its own -- plus the holding cost once. Borrow accrues over the
+    holding period, once; it was doubled with everything else, so a 90-day
+    short at 7 bps of execution and 300 bps of borrow reported a 161.9 bps
+    breakeven against 2 x 7 + 74.0 = 88.0. Borrow is charged on a SHORT
+    (side='sell') only: a buy borrows no stock, and a 500 bps rate on one
+    used to cost 500 bps. Margin interest on the account's negative cash is
+    the account's, not this trade's: it is reported on its own as
+    `account_margin_interest`, in currency, and is in neither total.
     """
     notional = input_data.notional
     legs: List[TradeCostLeg] = []
@@ -1660,27 +1667,50 @@ def estimate_trade_cost(
                 "rather than cost — see get_capacity_report."
             )
 
+    # Everything above is paid on entry and again on exit; what follows
+    # accrues over the holding period and is paid once.
+    execution_total = float(sum(leg.cost for leg in legs))
+
     if input_data.short_borrow_bps > 0:
-        _add(
-            "borrow",
-            "short_borrow_cost",
-            short_borrow_cost(
-                notional, input_data.short_borrow_bps, input_data.holding_days
-            ),
-        )
+        if input_data.side == "sell":
+            _add(
+                "borrow",
+                "short_borrow_cost",
+                short_borrow_cost(
+                    notional, input_data.short_borrow_bps, input_data.holding_days
+                ),
+            )
+        else:
+            notes.append(
+                f"short_borrow_bps={input_data.short_borrow_bps:g} was not "
+                "charged: side='buy' borrows no stock. Borrow is the cost of "
+                "a short sale; pass side='sell' to price one."
+            )
+    account_margin: Optional[float] = None
     if input_data.margin_cash < 0 and input_data.margin_annual_rate > 0:
-        _add(
-            "margin_interest",
-            "margin_interest",
-            margin_interest(
-                input_data.margin_cash,
-                input_data.margin_annual_rate,
-                input_data.holding_days,
+        account_margin = round(
+            float(
+                margin_interest(
+                    input_data.margin_cash,
+                    input_data.margin_annual_rate,
+                    input_data.holding_days,
+                )
             ),
+            6,
+        )
+        notes.append(
+            f"Margin interest of {account_margin:,.2f} on the account's "
+            f"{input_data.margin_cash:,.2f} of negative cash over "
+            f"{input_data.holding_days:g} day(s) is reported as "
+            "account_margin_interest and kept out of this trade's cost: it is "
+            "charged on the account's debit whatever this trade does, so as "
+            "basis points of this one trade it has no meaning."
         )
 
     total = float(sum(leg.cost for leg in legs))
     total_bps = total / notional * 10_000.0
+    execution_bps = execution_total / notional * 10_000.0
+    holding_bps = (total - execution_total) / notional * 10_000.0
     logger.debug(
         "[estimate_trade_cost] notional=%.2f legs=%d total_bps=%.2f",
         notional,
@@ -1693,7 +1723,10 @@ def estimate_trade_cost(
         legs=legs,
         total_cost=round(total, 6),
         total_bps=round(total_bps, 4),
-        breakeven_move_bps=round(total_bps * 2.0, 4),
+        execution_bps=round(execution_bps, 4),
+        holding_bps=round(holding_bps, 4),
+        breakeven_move_bps=round(execution_bps * 2.0 + holding_bps, 4),
+        account_margin_interest=account_margin,
         notes=notes,
     )
 

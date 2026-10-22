@@ -25,6 +25,31 @@ struct BacktestResult {
 };
 
 /**
+ * What run_strategy's uninvested cash earns and its leverage and shorts
+ * cost. The signal is the position as a fraction of equity, so on each bar
+ * the account holds (1 - held) of its equity in cash: positive cash earns
+ * cash_rate, negative cash (a signal above 1) pays financing_rate, and a
+ * short pays borrow_fee_bps on its size. Each accrues per bar at
+ * rate / periods_per_year -- the same per-bar convention the Sharpe uses
+ * for the risk-free rate -- on the position held at the previous close
+ * (signals[i-1] under a close fill, signals[i-2] under a two-leg fill,
+ * whose change lands at the next open), and nothing accrues on bar 0.
+ *
+ * All zero by default, and with all three zero no bar changes by a bit.
+ * Without them, at a 5% rate a 3x signal read a Sharpe of -0.062 against
+ * -0.258 for the same signal at 1x: the two borrowed units were free.
+ */
+struct StrategyFinancing {
+    double cash_rate      = 0.0;  // annual, credited on positive cash
+    double financing_rate = 0.0;  // annual, charged on exposure beyond 1x
+    double borrow_fee_bps = 0.0;  // annual basis points on the short size
+
+    bool active() const {
+        return cash_rate != 0.0 || financing_rate != 0.0 || borrow_fee_bps != 0.0;
+    }
+};
+
+/**
  * Vectorized backtest kernel — identical algorithm to the Python run_strategy.
  *
  * Execution model (one-bar lag):
@@ -100,11 +125,16 @@ BacktestResult run_strategy(
     // benchmarks and gtest suites among them -- keeps compiling unchanged.
     const double* ref_prices = nullptr,
     // Annualized risk-free rate, as a decimal fraction. Subtracted per
-    // period (rate / periods_per_year) from every return before Sharpe and
-    // Sortino, matching metrics/risk_metrics.py exactly. Defaults to 0.0,
+    // period (rate / periods_per_year) from every return after bar 0 --
+    // over which nothing accrued -- before Sharpe and Sortino, the
+    // convention backtest/financing.py states. Defaults to 0.0,
     // which is what this kernel always assumed -- so an unset value cannot
     // change a number that was already reported.
-    double risk_free_rate = 0.0
+    double risk_free_rate = 0.0,
+    // What uninvested cash earns and leverage and shorts cost -- see
+    // StrategyFinancing. Defaulted to nothing so every earlier call keeps
+    // its numbers.
+    const StrategyFinancing& financing = StrategyFinancing{}
 );
 
 /**
@@ -142,11 +172,16 @@ BacktestResult run_strategy_summary(
     // benchmarks and gtest suites among them -- keeps compiling unchanged.
     const double* ref_prices = nullptr,
     // Annualized risk-free rate, as a decimal fraction. Subtracted per
-    // period (rate / periods_per_year) from every return before Sharpe and
-    // Sortino, matching metrics/risk_metrics.py exactly. Defaults to 0.0,
+    // period (rate / periods_per_year) from every return after bar 0 --
+    // over which nothing accrued -- before Sharpe and Sortino, the
+    // convention backtest/financing.py states. Defaults to 0.0,
     // which is what this kernel always assumed -- so an unset value cannot
     // change a number that was already reported.
-    double risk_free_rate = 0.0
+    double risk_free_rate = 0.0,
+    // What uninvested cash earns and leverage and shorts cost -- see
+    // StrategyFinancing. Defaulted to nothing so every earlier call keeps
+    // its numbers.
+    const StrategyFinancing& financing = StrategyFinancing{}
 );
 
 /**
@@ -198,11 +233,16 @@ std::vector<BacktestResult> batch_backtest_crossover(
     double periods_per_year = 252.0,
     const double* ref_prices = nullptr,
     // Annualized risk-free rate, as a decimal fraction. Subtracted per
-    // period (rate / periods_per_year) from every return before Sharpe and
-    // Sortino, matching metrics/risk_metrics.py exactly. Defaults to 0.0,
+    // period (rate / periods_per_year) from every return after bar 0 --
+    // over which nothing accrued -- before Sharpe and Sortino, the
+    // convention backtest/financing.py states. Defaults to 0.0,
     // which is what this kernel always assumed -- so an unset value cannot
     // change a number that was already reported.
-    double risk_free_rate = 0.0
+    double risk_free_rate = 0.0,
+    // What uninvested cash earns and leverage and shorts cost -- see
+    // StrategyFinancing. Defaulted to nothing so every earlier call keeps
+    // its numbers.
+    const StrategyFinancing& financing = StrategyFinancing{}
 );
 
 /**
@@ -313,6 +353,32 @@ struct PortfolioCosts {
     // <= 0 means no cap. A cap of exactly zero would forbid every trade,
     // which no caller means, so the sentinel costs nothing.
     double max_adv_participation = 0.0;
+
+    // ── financing: what cash earns as well as what borrowing costs ──────
+    //
+    // The kernel charged negative cash and shorts and credited nothing on
+    // positive cash, while every Sharpe computed from it subtracted a
+    // risk-free rate -- so idle cash scored as losing that rate. Each
+    // accrual is rate * balance * (calendar days / day_basis) on the
+    // balance carried into the bar, from the second bar on, in the Python
+    // loop's own expression order. All four default to "accrue nothing",
+    // and with them at their defaults the kernel is bit for bit what it was.
+    double cash_rate                 = 0.0;    // credited on positive free cash
+    double short_rebate_rate         = 0.0;    // earned on segregated proceeds
+    // false: short proceeds are cash and earn cash_rate. true: the lender
+    // holds them, and interest accrues on cash less the short book.
+    bool   segregated_short_proceeds = false;
+    double day_basis                 = 365.0;  // 365 (ACT/365F) or 360 (ACT/360)
+};
+
+// The financing a run accrued, summed over its bars. Filled when the caller
+// passes somewhere to put it; every field stays 0.0 when nothing accrued.
+struct PortfolioFinancing {
+    double interest_credited   = 0.0;  // on positive free cash
+    double interest_charged    = 0.0;  // on negative free cash (margin)
+    double borrow_charged      = 0.0;  // the borrow fee on shorts
+    double rebate_credited     = 0.0;  // on segregated short proceeds
+    double debit_balance_years = 0.0;  // sum of |negative free cash| * days / basis
 };
 
 /**
@@ -329,8 +395,9 @@ struct PortfolioCosts {
  *                    of order is skipped and one past the last bar never
  *                    triggers, both silently, so the binding refuses either.
  * @param day_gaps    (n_bars) calendar days since the previous bar, for
- *                    financing accrual. day_gaps[0] is unused (1.0 by
- *                    convention). A Friday->Monday gap is 3, not 1.
+ *                    financing accrual. day_gaps[0] is unused: nothing
+ *                    accrues on the bar the account opens. A Friday->Monday
+ *                    gap is 3, not 1.
  * @param out_equity, out_cash, out_gross, out_net  (n_bars) each.
  * @param out_rebal   (n_rebal x 3): turnover_pct, gross_leverage_after,
  *                    n_positions. Rows [0, n_executed) hold the rebalances
@@ -377,7 +444,10 @@ std::size_t run_portfolio_simulation(
     // positional call site -- the benchmarks and the C++ tests among them --
     // keeps compiling unchanged.
     const double* dollar_volume = nullptr,
-    const double* volatility    = nullptr);
+    const double* volatility    = nullptr,
+    // The financing totals, or null. Appended and defaulted for the same
+    // reason as the two panels above.
+    PortfolioFinancing* out_financing = nullptr);
 
 
 std::vector<BacktestResult> batch_run_strategy(
@@ -393,11 +463,16 @@ std::vector<BacktestResult> batch_run_strategy(
     // benchmarks and gtest suites among them -- keeps compiling unchanged.
     const double* ref_prices = nullptr,
     // Annualized risk-free rate, as a decimal fraction. Subtracted per
-    // period (rate / periods_per_year) from every return before Sharpe and
-    // Sortino, matching metrics/risk_metrics.py exactly. Defaults to 0.0,
+    // period (rate / periods_per_year) from every return after bar 0 --
+    // over which nothing accrued -- before Sharpe and Sortino, the
+    // convention backtest/financing.py states. Defaults to 0.0,
     // which is what this kernel always assumed -- so an unset value cannot
     // change a number that was already reported.
-    double risk_free_rate = 0.0
+    double risk_free_rate = 0.0,
+    // What uninvested cash earns and leverage and shorts cost -- see
+    // StrategyFinancing. Defaulted to nothing so every earlier call keeps
+    // its numbers.
+    const StrategyFinancing& financing = StrategyFinancing{}
 );
 
 }  // namespace sqt

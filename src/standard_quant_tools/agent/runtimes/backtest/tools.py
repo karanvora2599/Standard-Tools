@@ -207,6 +207,7 @@ from standard_quant_tools.agent.models import (
     WalkForwardInput,
     WalkForwardResult,
     WalkForwardWindow,
+    financing_report,
 )
 from standard_quant_tools.agent.runtimes._shared import (
     FETCH_INTERVAL,
@@ -215,6 +216,10 @@ from standard_quant_tools.agent.runtimes._shared import (
 )
 from standard_quant_tools.backtest.artifacts import load_artifact, save_artifact
 from standard_quant_tools.backtest.engine import backtest_grid, run_strategy
+from standard_quant_tools.backtest.financing import (
+    ratios_over_accrued_rate,
+    resolve_debit_rate,
+)
 from standard_quant_tools.backtest.monte_carlo import simulate_forward_paths
 from standard_quant_tools.backtest.pairs import run_pair_backtest as _pair_backtest_run
 from standard_quant_tools.backtest.panel import (
@@ -1508,6 +1513,34 @@ def _metrics_with_day0_cost(
     return returns, total_return, annualized_return, equity_with_start
 
 
+def _financing_kwargs(input_data: Any) -> Dict[str, Any]:
+    """
+    The shared-cash engine's financing terms from a tool input, resolved.
+
+    A rate left as None takes the risk-free rate: cash earns it, and
+    borrowing costs it plus `margin_spread_bps`. That is the world the
+    reported Sharpe is measured in -- it subtracts the same rate -- and a
+    simulation that charged the rate in the Sharpe while crediting nothing
+    on cash scored a book half in cash at 0.57 against 0.84 for the same
+    asset fully invested. With the risk-free rate at 0 every resolved rate
+    is 0 and the simulation is what it always was.
+    """
+    rf = float(input_data.risk_free_rate)
+    rebate = input_data.short_rebate_rate
+    return {
+        "cash_rate": (
+            rf if input_data.cash_rate is None else float(input_data.cash_rate)
+        ),
+        "margin_interest_rate": resolve_debit_rate(
+            input_data.margin_interest_rate, rf, input_data.margin_spread_bps
+        ),
+        "borrow_fee_bps": float(input_data.borrow_fee_bps),
+        "short_proceeds": input_data.short_proceeds,
+        "short_rebate_rate": 0.0 if rebate is None else float(rebate),
+        "day_count": input_data.day_count,
+    }
+
+
 def _cap_constructed_weights(
     weights: pd.DataFrame, max_position_pct: float
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
@@ -1714,9 +1747,8 @@ def run_portfolio_simulation(
         use_impact_model=input_data.use_impact_model,
         impact_coefficient=input_data.impact_coefficient,
         impact_lookback=input_data.impact_lookback,
-        borrow_fee_bps=input_data.borrow_fee_bps,
-        margin_interest_rate=input_data.margin_interest_rate,
         max_adv_participation=input_data.max_adv_participation,
+        **_financing_kwargs(input_data),
     )
 
     equity_curve = raw["equity_curve"]
@@ -1729,6 +1761,9 @@ def run_portfolio_simulation(
     day0_max_dd = float(max_drawdown(equity_with_start))
     day0_calmar = (
         annualized_return / abs(day0_max_dd) if day0_max_dd != 0.0 else float("inf")
+    )
+    sim_sharpe, sim_sortino = ratios_over_accrued_rate(
+        returns, input_data.risk_free_rate, input_data.day_count
     )
 
     ir: Optional[float] = None
@@ -1840,11 +1875,11 @@ def run_portfolio_simulation(
         annualized_volatility=round(float(annualized_volatility(returns)), 6),
         # Both of these dropped the advertised risk_free_rate, so a caller
         # asking for a 4.5% rate got a Sharpe measured against 0% with no
-        # error and no warning.
-        sharpe_ratio=round(float(sharpe_ratio(returns, input_data.risk_free_rate)), 4),
-        sortino_ratio=round(
-            float(sortino_ratio(returns, input_data.risk_free_rate)), 4
-        ),
+        # error and no warning. They now measure the excess over the rate
+        # as cash accrued it on each bar -- the engine's own credit, on the
+        # declared day count -- so a book sitting in cash scores zero.
+        sharpe_ratio=round(float(sim_sharpe), 4),
+        sortino_ratio=round(float(sim_sortino), 4),
         max_drawdown=round(day0_max_dd, 6),
         calmar_ratio=round(day0_calmar, 4),
         var_95=round(float(var_historical(returns, 0.95)), 6),
@@ -1860,6 +1895,8 @@ def run_portfolio_simulation(
         net_exposure_max=net_exposure_max,
         net_exposure_mean=net_exposure_mean,
         portfolio_returns_ref=portfolio_returns_ref,
+        day_count=input_data.day_count,
+        financing=financing_report(raw),
         warnings=simulation_warnings,
         **state_refs,
     )
@@ -1907,6 +1944,7 @@ def run_pair_trade_backtest(
         slippage_pct=input_data.slippage_pct,
         gross_leverage=input_data.gross_leverage,
         fill_price=input_data.fill_price,
+        **_financing_kwargs(input_data),
     )
 
     equity_curve = raw["equity_curve"]
@@ -1919,6 +1957,9 @@ def run_pair_trade_backtest(
     day0_max_dd = float(max_drawdown(equity_with_start))
     day0_calmar = (
         annualized_return / abs(day0_max_dd) if day0_max_dd != 0.0 else float("inf")
+    )
+    pair_sharpe, pair_sortino = ratios_over_accrued_rate(
+        returns, input_data.risk_free_rate, input_data.day_count
     )
     rebalance_events = [
         RebalanceEvent(
@@ -1979,17 +2020,17 @@ def run_pair_trade_backtest(
         annualized_volatility=round(float(annualized_volatility(returns)), 6),
         # Both of these dropped the advertised risk_free_rate, so a caller
         # asking for a 4.5% rate got a Sharpe measured against 0% with no
-        # error and no warning.
-        sharpe_ratio=round(float(sharpe_ratio(returns, input_data.risk_free_rate)), 4),
-        sortino_ratio=round(
-            float(sortino_ratio(returns, input_data.risk_free_rate)), 4
-        ),
+        # error and no warning. Measured over the rate as cash accrued it.
+        sharpe_ratio=round(float(pair_sharpe), 4),
+        sortino_ratio=round(float(pair_sortino), 4),
         max_drawdown=round(day0_max_dd, 6),
         calmar_ratio=round(day0_calmar, 4),
         final_equity=round(float(raw["final_equity"]), 2),
         final_cash=round(float(raw["final_cash"]), 2),
         equity_curve=equity_curve.tolist(),
         state_ref=state_ref,
+        day_count=input_data.day_count,
+        financing=financing_report(raw),
         warnings=list(raw["warnings"]),
         **state_refs,
     )

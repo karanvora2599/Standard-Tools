@@ -95,7 +95,11 @@ def _before(
     contract_map: Optional[Mapping[Any, str]] = None,
     allow_fractional: bool = False,
     roll_day_prior_prices: Optional[Mapping[Any, float]] = None,
+    # Taken so the tool can pass it; this reference only ever accrued
+    # ACT/365F, which is the argument's default.
+    collateral_day_count: str = "ACT/365F",
 ) -> Dict[str, Any]:
+    assert collateral_day_count == "ACT/365F"
     m = _positive(multiplier, "multiplier")
     capital = _positive(initial_capital, "initial_capital")
     im = _non_negative(initial_margin, "initial_margin")
@@ -918,7 +922,10 @@ class TestRefusals:
             {"multiplier": 0.0},
             {"initial_margin": 100.0, "maintenance_margin": 200.0},
             {"commission_per_contract": -1.0},
-            {"collateral_rate": math.nan},
+            # Not here: a NaN collateral_rate used to run, turning every
+            # equity figure after the first bar into NaN, and is now refused
+            # by name (the CHANGELOG entry of 2026-10-22) -- see
+            # tests/backtest/test_financing.py.
         ],
     )
     def test_the_same_refusal(self, change):

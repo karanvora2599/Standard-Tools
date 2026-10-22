@@ -16,10 +16,14 @@ recorded numbers.
 
 The subtle one is Sortino. Python clips EXCESS returns, so the rate moves
 the denominator as well as the numerator, and in the kernel's
-allocation-free summary path bar 0's implicit strat_ret of 0.0 has an
-excess of -rf/ppy that contributes to the downside sum. That term is
-invisible at rf = 0 and is exactly what would make a grid disagree with a
-single run.
+allocation-free summary path bar 0's implicit strat_ret of 0.0 is seeded
+by hand. Its excess is zero -- nothing accrues over the bar the account
+opens on, the convention of the CHANGELOG entry of 2026-10-22 -- and a seed
+that disagreed with the full kernel's is exactly what would make a grid
+disagree with a single run.
+
+The rate is also EARNED now: idle cash is credited at it and leverage pays
+it, so a total return moves with the rate through the cash and only there.
 """
 
 from typing import Any, Optional, get_args
@@ -38,7 +42,7 @@ from standard_quant_tools.agent.models import (
 from standard_quant_tools.agent.runtimes import resolve
 from standard_quant_tools.agent.tools import _TOOL_DISPATCH
 from standard_quant_tools.backtest import engine
-from standard_quant_tools.metrics.risk_metrics import sharpe_ratio, sortino_ratio
+from standard_quant_tools.backtest.financing import ratios_over_accrued_rate
 
 RATES = [0.0, 0.01, 0.02, 0.045, 0.10]
 
@@ -139,14 +143,22 @@ class TestTheEngineHonoursTheRate:
         ]
         assert ratios == sorted(ratios, reverse=True)
 
-    def test_the_rate_does_not_touch_return_or_drawdown(self, prices, signals):
-        """It is a scoring convention, not a cash flow. A rate that changed
-        the equity curve would be modelling a cash balance nobody asked
-        for."""
+    def test_the_rate_moves_the_curve_only_through_idle_cash(self, prices, signals):
+        """It was a scoring convention only, so the cash a flat bar held was
+        charged the rate in the Sharpe and credited none of it; it is now
+        earned by that cash as well (the CHANGELOG entry of 2026-10-22).
+        With the cash and financing rates pinned to zero the curve is the
+        zero-rate curve exactly, and with them left at the rate the book
+        trades the same and ends richer by its cash's interest."""
         base = engine.run_strategy(prices, signals, risk_free_rate=0.0)
-        high = engine.run_strategy(prices, signals, risk_free_rate=0.10)
+        pinned = engine.run_strategy(
+            prices, signals, risk_free_rate=0.10, cash_rate=0.0, financing_rate=0.0
+        )
         for field in ("total_return", "max_drawdown", "final_equity", "num_trades"):
-            assert base[field] == high[field], field
+            assert base[field] == pinned[field], field
+        earned = engine.run_strategy(prices, signals, risk_free_rate=0.10)
+        assert earned["num_trades"] == base["num_trades"]
+        assert earned["total_return"] > base["total_return"]
 
     def test_zero_is_exactly_what_was_reported_before(self, prices, signals):
         implicit = engine.run_strategy(prices, signals)
@@ -180,17 +192,18 @@ class TestTheTwoExecutionPathsAgree:
     @pytest.mark.parametrize("rf", RATES)
     def test_both_paths_match_the_metric_functions(self, prices, signals, rf):
         """Neither path is allowed to invent its own definition: both must
-        equal metrics/risk_metrics.py applied to the equity curve."""
+        equal the excess over the rate as cash accrued it, applied to the
+        equity curve -- rf / 252 on every bar after the opening one, over
+        which no time passed (the CHANGELOG entry of 2026-10-22)."""
         result = engine.run_strategy(prices, signals, risk_free_rate=rf)
         curve = result["equity_curve"]
         returns = curve.pct_change().fillna(0.0)
         returns.iloc[0] = 0.0
-        assert result["sharpe_ratio"] == pytest.approx(
-            round(sharpe_ratio(returns, rf), 4), abs=1e-4
-        )
-        assert result["sortino_ratio"] == pytest.approx(
-            round(sortino_ratio(returns, rf), 4), abs=1e-4
-        )
+        benchmark = pd.Series(rf / 252, index=returns.index)
+        benchmark.iloc[0] = 0.0
+        sharpe, sortino = ratios_over_accrued_rate(returns, rf, benchmark=benchmark)
+        assert result["sharpe_ratio"] == pytest.approx(round(sharpe, 4), abs=1e-4)
+        assert result["sortino_ratio"] == pytest.approx(round(sortino, 4), abs=1e-4)
 
 
 class TestTheGridHonoursTheRate:
@@ -343,8 +356,11 @@ class TestTheToolSurfaceExposesIt:
             "run_sma_backtest", {**base, "risk_free_rate": 0.05}
         )
         assert at_five["sharpe_ratio"] < at_zero["sharpe_ratio"]
-        # ...and the trading itself is unchanged.
-        assert at_five["total_return"] == at_zero["total_return"]
+        # ...and the trading itself is unchanged: the crossover is long or
+        # flat, so the only new flow is the rate its flat bars' cash now
+        # earns (the CHANGELOG entry of 2026-10-22), which can only add.
+        assert at_five["num_trades"] == at_zero["num_trades"]
+        assert at_five["total_return"] > at_zero["total_return"]
 
     def test_the_three_analysis_inputs_still_carry_it(self):
         for model in (AnalysisInput, PortfolioInput, RiskAttributionInput):
@@ -471,8 +487,12 @@ class TestTheNestedSharpeToolsHonourItInFact:
         )
 
     def test_the_rate_does_not_change_the_trading(self, backtest_runtime, panel_signal):
-        """The counterpart assertion. A rate that moved total_return would
-        mean it had leaked into the fills rather than the ratio."""
+        """The counterpart assertion. The rate is now earned by idle cash
+        (the CHANGELOG entry of 2026-10-22), so a total return may only RISE
+        with it: every signal here is at most one unit long, so nothing is
+        borrowed and the only new flow is interest on cash. A rate that
+        lowered one, or changed which rows exist, would have leaked into
+        the fills rather than the cash."""
         for tool, kwargs in self._cases(panel_signal).items():
             at_zero = backtest_runtime.dispatch(tool, dict(kwargs))
             at_five = backtest_runtime.dispatch(
@@ -485,7 +505,7 @@ class TestTheNestedSharpeToolsHonourItInFact:
                 after
             ), f"{tool} reported a different set of rows at the two rates"
             for field, value in before.items():
-                assert value == pytest.approx(after[field], abs=1e-9), (
-                    f"{tool}{field} changed with the risk-free rate -- it has "
-                    f"leaked into the trading, not just the ratio"
+                assert after[field] >= value - 1e-9, (
+                    f"{tool}{field} fell with the risk-free rate -- it has "
+                    f"leaked into the trading, not just the cash"
                 )

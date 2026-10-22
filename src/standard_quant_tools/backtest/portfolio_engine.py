@@ -20,12 +20,21 @@ import pandas as pd
 
 from standard_quant_tools.backtest.constraints import adv_participation
 from standard_quant_tools.backtest.costs import (
+    DEFAULT_DAY_COUNT,
     _cost_rate,
+    day_count_basis,
     impact_cost,
     margin_interest,
     per_share_commission,
     percentage_commission,
+    require_annual_rate,
     short_borrow_cost,
+)
+from standard_quant_tools.backtest.financing import (
+    SHORT_PROCEEDS,
+    calendar_day_gaps,
+    financing_summary,
+    negative_cash_note,
 )
 from standard_quant_tools.backtest.screens import split_screen_warnings
 from standard_quant_tools.data.adjustment import (
@@ -97,6 +106,10 @@ def _native_portfolio_sim(
     impact_coefficient: float = 1.0,
     dollar_volume_mat: Optional[np.ndarray] = None,
     volatility_mat: Optional[np.ndarray] = None,
+    cash_rate: float = 0.0,
+    short_proceeds: str = "net_cash",
+    short_rebate_rate: float = 0.0,
+    day_count: str = DEFAULT_DAY_COUNT,
 ) -> Optional[
     Tuple[
         List[float],
@@ -105,6 +118,7 @@ def _native_portfolio_sim(
         List[float],
         List[Dict[str, Any]],
         float,
+        Dict[str, float],
     ]
 ]:
     """Run the bar loop natively, or return None if this configuration is not covered.
@@ -153,12 +167,13 @@ def _native_portfolio_sim(
         return None
 
     # Calendar days since the previous bar, so a Friday->Monday gap accrues
-    # three days of financing rather than one.
-    if borrow_fee_bps > 0.0 or margin_interest_rate > 0.0:
-        deltas = np.diff(master_index.to_numpy()).astype("timedelta64[D]")
-        day_gaps = np.empty(n_bars, dtype=np.float64)
-        day_gaps[0] = 1.0
-        day_gaps[1:] = deltas.astype(np.float64)
+    # three days of financing rather than one. Bar 0 accrues nothing: the
+    # account opens there and has carried no balance into it.
+    segregated = short_proceeds == "segregated"
+    if _financing_active(
+        borrow_fee_bps, margin_interest_rate, cash_rate, segregated, short_rebate_rate
+    ):
+        day_gaps = calendar_day_gaps(master_index)
     else:
         day_gaps = np.ones(n_bars, dtype=np.float64)
 
@@ -194,6 +209,10 @@ def _native_portfolio_sim(
         impact_coefficient,
         # The kernel reads <= 0 as "no cap"; None is how Python spells it.
         0.0 if max_adv_participation is None else float(max_adv_participation),
+        cash_rate=float(cash_rate),
+        short_rebate_rate=float(short_rebate_rate),
+        segregated_short_proceeds=segregated,
+        day_basis=day_count_basis(day_count),
     )
 
     status = int(res["status"])
@@ -247,6 +266,36 @@ def _native_portfolio_sim(
         res["net"].tolist(),
         rebalance_log,
         float(res["peak_position"]),
+        {key: float(res[key]) for key in _FINANCING_TOTALS},
+    )
+
+
+#: The running financing totals both the kernel and the loop keep.
+_FINANCING_TOTALS = (
+    "interest_credited",
+    "interest_charged",
+    "borrow_charged",
+    "rebate_credited",
+    "debit_balance_years",
+)
+
+
+def _financing_active(
+    borrow_fee_bps: float,
+    margin_interest_rate: float,
+    cash_rate: float,
+    segregated: bool,
+    short_rebate_rate: float,
+) -> bool:
+    """Whether any balance accrues anything, i.e. whether the financing
+    block has to run at all. With every rate at zero and proceeds in cash it
+    does not, which is what keeps a zero-rate run bit for bit what it was."""
+    return (
+        borrow_fee_bps > 0.0
+        or margin_interest_rate > 0.0
+        or cash_rate != 0.0
+        or segregated
+        or short_rebate_rate != 0.0
     )
 
 
@@ -343,6 +392,10 @@ def run_portfolio_simulation(
     margin_interest_rate: float = 0.0,
     max_adv_participation: Optional[float] = None,
     adjusted: Optional[bool] = None,
+    cash_rate: float = 0.0,
+    short_proceeds: str = "net_cash",
+    short_rebate_rate: float = 0.0,
+    day_count: str = DEFAULT_DAY_COUNT,
 ) -> Dict[str, Any]:
     """
     Simulate a single shared-cash portfolio account rebalanced at the dates
@@ -412,8 +465,25 @@ def run_portfolio_simulation(
             any short position's notional (0.0 = no borrow cost, today's
             existing behavior).
         margin_interest_rate: Annualized rate accrued daily on negative cash
-            (implied margin borrowing); 0.0 = no financing cost charged
-            beyond the existing "cash went negative" warning.
+            (implied margin borrowing); 0.0 = none charged, which the
+            "cash went negative" warning then quantifies.
+        cash_rate: Annualized rate CREDITED on positive cash, any sign, at
+            most 1 in magnitude. 0.0 (the default here) credits nothing,
+            which is what this engine always did; the agent tools default
+            it to their risk-free rate, so idle cash earns the rate their
+            Sharpe subtracts.
+        short_proceeds: "net_cash" (default) -- a short sale's proceeds are
+            cash and earn cash_rate with the rest of it. "segregated" -- the
+            proceeds are held as collateral by the lender: they earn only
+            short_rebate_rate, and interest (credit or margin) accrues on
+            cash less the short book's market value.
+        short_rebate_rate: Annualized rate earned on segregated short
+            proceeds. Refused under "net_cash", where the proceeds earn the
+            cash rate instead.
+        day_count: "ACT/365F" (default, the convention every accrual here
+            always used) or "ACT/360". Every accrual -- credit, margin,
+            borrow and rebate -- is rate * balance * calendar days / basis,
+            on the balance carried into the bar, from the second bar on.
         max_adv_participation: Reject (raise ValidationError) any rebalance
             trade whose notional exceeds this fraction of the ticker's own
             rolling average dollar volume. None (default) = no ADV
@@ -468,10 +538,12 @@ def run_portfolio_simulation(
         net_exposure_curve, leverage_curve (all pd.Series on the master
         trading-calendar index), rebalance_log (pd.DataFrame: date,
         turnover_pct, gross_leverage_after, n_positions), final_equity,
-        final_cash, return_basis ("total_return", "price_return",
-        "mixed" or "unknown": whether the held tickers' returns include
-        dividends, as their providers stamped the frames -- "mixed", with a
-        warning, when they disagree), warnings (list[str]).
+        final_cash, financing (the rates and day count the run accrued at,
+        and the interest credited, interest charged, borrow charged and
+        rebate credited over it), return_basis ("total_return",
+        "price_return", "mixed" or "unknown": whether the held tickers'
+        returns include dividends, as their providers stamped the frames --
+        "mixed", with a warning, when they disagree), warnings (list[str]).
     """
     if fill_price not in _VALID_FILL_PRICES:
         raise ValidationError(
@@ -522,6 +594,28 @@ def run_portfolio_simulation(
     )
     if impact_lookback <= 0:
         raise ValidationError(f"impact_lookback must be > 0, got {impact_lookback}")
+
+    # The financing terms. The cash rate and the rebate may be negative (a
+    # negative policy rate charges deposits); both are decimal fractions.
+    cash_rate = require_annual_rate(cash_rate, "cash_rate")
+    short_rebate_rate = require_annual_rate(short_rebate_rate, "short_rebate_rate")
+    basis = day_count_basis(day_count)
+    if short_proceeds not in SHORT_PROCEEDS:
+        raise ValidationError(
+            f"short_proceeds must be one of {SHORT_PROCEEDS}, got {short_proceeds!r}"
+        )
+    segregated = short_proceeds == "segregated"
+    if short_rebate_rate != 0.0 and not segregated:
+        raise ValidationError(
+            f"short_rebate_rate={short_rebate_rate} with short_proceeds="
+            f"{short_proceeds!r}: net-cash proceeds are cash and earn "
+            "cash_rate, so a rebate on them would be paid twice. Pass "
+            "short_proceeds='segregated' for proceeds held by the lender, or "
+            "drop the rebate."
+        )
+    financing_active = _financing_active(
+        borrow_fee_bps, margin_interest_rate, cash_rate, segregated, short_rebate_rate
+    )
 
     if not math.isfinite(max_gross_leverage) or max_gross_leverage <= 0:
         raise ValidationError(
@@ -1239,6 +1333,10 @@ def run_portfolio_simulation(
             impact_coefficient=impact_coefficient,
             dollar_volume_mat=dollar_volume_mat,
             volatility_mat=volatility_mat,
+            cash_rate=cash_rate,
+            short_proceeds=short_proceeds,
+            short_rebate_rate=short_rebate_rate,
+            day_count=day_count,
         )
     except ValidationError as exc:
         # The kernel REFUSES a trade over the ADV cap; the loop below sizes
@@ -1249,6 +1347,7 @@ def run_portfolio_simulation(
         if "exceeds max_adv_participation" not in str(exc):
             raise
         _native = None
+    financing_totals: Dict[str, float] = {key: 0.0 for key in _FINANCING_TOTALS}
     if _native is not None:
         (
             equity_records,
@@ -1257,28 +1356,33 @@ def run_portfolio_simulation(
             net_records,
             rebalance_log,
             peak_position_value,
+            financing_totals,
         ) = _native
     else:
         # (trigger_date, trigger_bar, weights_arr) awaiting execution at the
         # *next* bar's Open
         # — only used when fill_price == "next_open".
         pending_rebalance: Any = None
-        prev_date: Any = None
+        loop_day_gaps = calendar_day_gaps(master_index) if financing_active else None
 
         for bar, date in enumerate(master_index):
             close_prices = close_mat[bar]
 
-            # Daily-accrued financing costs (borrow fee on shorts, margin
-            # interest on negative cash), based on the position/cash carried
-            # into this bar from the previous one — before today's rebalance,
-            # if any, changes them. Uses the actual elapsed CALENDAR days since
+            # Financing (interest credited on positive cash, margin interest
+            # on negative cash, the borrow fee on shorts, the rebate on
+            # segregated proceeds), on the position and cash carried into
+            # this bar from the previous one — before today's rebalance, if
+            # any, changes them. Uses the actual elapsed CALENDAR days since
             # the prior bar (e.g. 3 for a Friday->Monday gap over a weekend),
             # not a hardcoded 1 — a fixed days=1 would under-accrue financing
             # across every weekend/holiday gap in the trading calendar.
-            if borrow_fee_bps > 0.0 or margin_interest_rate > 0.0:
-                days = float((date - prev_date).days) if prev_date is not None else 1.0
-                daily_cost = margin_interest(cash, margin_interest_rate, days=days)
-                if borrow_fee_bps > 0.0:
+            #
+            # Not on bar 0, where the account opens with nothing carried in.
+            # The kernel runs the same block, expression for expression.
+            if loop_day_gaps is not None and bar > 0:
+                days = float(loop_day_gaps[bar])
+                short_value = 0.0
+                if borrow_fee_bps > 0.0 or segregated:
                     # The borrow fee is LINEAR in notional, so the per-ticker
                     # loop this replaces was scaling each short's notional by
                     # the same rate and adding them up. Summing the short book's
@@ -1286,16 +1390,42 @@ def run_portfolio_simulation(
                     # within floating-point associativity) and avoids 200,000
                     # short_borrow_cost calls on a 100-name, 2,000-bar backtest,
                     # each re-validating the same two scalars.
-                    short_notional = float(
+                    short_value = float(
                         np.abs(
                             np.where(shares_vec < 0, shares_vec * close_prices, 0.0)
                         ).sum()
                     )
-                    if short_notional > 0.0:
-                        daily_cost += short_borrow_cost(
-                            short_notional, borrow_fee_bps, days=days
-                        )
+                # What earns or pays interest: all of the cash, or under
+                # segregated proceeds the cash less the short book the
+                # lender is holding.
+                free_cash = cash - short_value if segregated else cash
+                charged = margin_interest(
+                    free_cash, margin_interest_rate, days=days, day_count=day_count
+                )
+                daily_cost = charged
+                borrow = 0.0
+                if borrow_fee_bps > 0.0 and short_value > 0.0:
+                    borrow = short_borrow_cost(
+                        short_value, borrow_fee_bps, days=days, day_count=day_count
+                    )
+                    daily_cost += borrow
                 cash -= daily_cost
+                credited = 0.0
+                if cash_rate != 0.0 and free_cash > 0.0:
+                    credited = free_cash * cash_rate * (days / basis)
+                    cash += credited
+                rebate = 0.0
+                if segregated and short_rebate_rate != 0.0 and short_value > 0.0:
+                    rebate = short_value * short_rebate_rate * (days / basis)
+                    cash += rebate
+                if free_cash < 0.0:
+                    financing_totals["debit_balance_years"] += abs(free_cash) * (
+                        days / basis
+                    )
+                financing_totals["interest_charged"] += charged
+                financing_totals["borrow_charged"] += borrow
+                financing_totals["interest_credited"] += credited
+                financing_totals["rebate_credited"] += rebate
 
             if fill_price == "next_open" and pending_rebalance is not None:
                 trigger_date, trigger_bar, pending_weights = pending_rebalance
@@ -1347,7 +1477,30 @@ def run_portfolio_simulation(
                 peak_position_value = max(
                     peak_position_value, float(abs_position_values.max())
                 )
-            prev_date = date
+
+    went_negative = any(c < 0 for c in cash_records)
+    if (
+        went_negative
+        and not financing_active
+        and isinstance(master_index, pd.DatetimeIndex)
+    ):
+        # Nothing accrued, so neither path kept the debit's size. It is read
+        # back off the cash curve: the balance carried into each bar, over
+        # the calendar days to it -- what a margin rate would have charged on.
+        carried = np.asarray(cash_records[:-1], dtype=np.float64)
+        gaps = calendar_day_gaps(master_index)[1:]
+        financing_totals["debit_balance_years"] = float(
+            (np.where(carried < 0.0, -carried, 0.0) * (gaps / basis)).sum()
+        )
+    financing = financing_summary(
+        day_count=day_count,
+        cash_rate=cash_rate,
+        margin_interest_rate=margin_interest_rate,
+        borrow_fee_bps=borrow_fee_bps,
+        short_proceeds=short_proceeds,
+        short_rebate_rate=short_rebate_rate,
+        totals=financing_totals,
+    )
 
     warnings: List[str] = list(split_warnings)
     if fill_price == "close" and rebalance_dates:
@@ -1369,10 +1522,12 @@ def run_portfolio_simulation(
             "fill_price='close' is. Intended for exploratory analysis only; use "
             "fill_price='next_open' for a lookahead-free simulation."
         )
-    if any(c < 0 for c in cash_records):
-        warnings.append(
-            "cash went negative at one or more bars — implied margin borrowing"
+    if went_negative:
+        note = negative_cash_note(
+            pd.Series(cash_records, index=master_index, dtype=np.float64), financing
         )
+        if note:
+            warnings.append(note)
     # A SHORT IS BORROWED STOCK AND THE BORROW IS A REAL COST. The
     # financing accrual above is gated on `borrow_fee_bps > 0.0`, which is
     # correct, and the default is 0.0 -- so a market-neutral book shorts
@@ -1444,6 +1599,8 @@ def run_portfolio_simulation(
         "final_cash": (
             float(cash_curve.iloc[-1]) if not cash_curve.empty else initial_capital
         ),
+        # The rates and day count the run accrued at, and what they came to.
+        "financing": financing,
         # ── Peak-exposure diagnostics ────────────────────────────────────
         # The curves above answer "what did this portfolio look like
         # typically"; these four answer "how bad did it get", which is the

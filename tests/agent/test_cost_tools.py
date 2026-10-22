@@ -188,14 +188,25 @@ class TestEstimateTradeCost:
             },
         )
         assert positive["legs"] == []
-        assert negative["legs"][0]["component"] == "margin_interest"
+        assert positive["account_margin_interest"] is None
+        # The account's interest, reported on its own and not as a cost of
+        # this trade (the CHANGELOG entry of 2026-10-22): it is charged on
+        # the debit whatever the trade does.
+        assert negative["legs"] == []
+        assert negative["account_margin_interest"] == pytest.approx(
+            costs.margin_interest(-5_000, 0.08, 30)
+        )
 
     def test_breakeven_move_is_the_round_trip(self):
+        """With no holding cost, execution twice is the whole breakeven."""
         result = dispatch(
             "estimate_trade_cost",
             {"notional": 100_000, "commission_pct": 0.001, "spread_bps": 5.0},
         )
         assert result["breakeven_move_bps"] == pytest.approx(result["total_bps"] * 2)
+        assert result["breakeven_move_bps"] == pytest.approx(
+            result["execution_bps"] * 2
+        )
 
 
 class TestCompareCostModels:

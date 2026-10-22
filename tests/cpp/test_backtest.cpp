@@ -992,8 +992,93 @@ static void test_summary_matches_run_strategy_under_a_rate() {
                                                   10'000.0, commission, slippage,
                                                   252.0, nullptr, rf);
             check_all_fields_match(full, summ);
+
+            // And financed at the same rate, with a borrow fee: the grid
+            // ranks with the summary kernel, so it must still be the full
+            // one's numbers bit for bit.
+            sqt::StrategyFinancing fin;
+            fin.cash_rate = rf;
+            fin.financing_rate = rf;
+            fin.borrow_fee_bps = 25.0;
+            auto full_f = sqt::run_strategy(prices.data(), signals.data(), n,
+                                            10'000.0, commission, slippage,
+                                            252.0, nullptr, rf, fin);
+            auto summ_f = sqt::run_strategy_summary(prices.data(), signals.data(), n,
+                                                    10'000.0, commission, slippage,
+                                                    252.0, nullptr, rf, fin);
+            check_all_fields_match(full_f, summ_f);
         }
     }
+}
+
+
+// ── Financing ─────────────────────────────────────────────────────────────────
+
+static void test_strategy_financing_defaults_change_nothing() {
+    // Zero financing is the kernel as it was: a call that names it and one
+    // that does not agree on every field, at a rate and without one.
+    std::uint64_t state = 77;
+    for (double rf : {0.0, 0.05}) {
+        const int n = 120;
+        std::vector<double> prices(n), signals(n);
+        for (int i = 0; i < n; ++i) {
+            prices[i]  = 50.0 + pseudo_random(state) * 40.0;
+            signals[i] = pseudo_random(state) * 2.0;
+        }
+        auto implicit_fin = sqt::run_strategy(prices.data(), signals.data(), n,
+                                              10'000.0, 0.001, 0.0005, 252.0,
+                                              nullptr, rf);
+        auto explicit_fin = sqt::run_strategy(prices.data(), signals.data(), n,
+                                              10'000.0, 0.001, 0.0005, 252.0,
+                                              nullptr, rf, sqt::StrategyFinancing{});
+        CHECK(same_value(implicit_fin.final_equity, explicit_fin.final_equity));
+        CHECK(same_value(implicit_fin.sharpe_ratio, explicit_fin.sharpe_ratio));
+        CHECK(same_value(implicit_fin.sortino_ratio, explicit_fin.sortino_ratio));
+    }
+}
+
+static void test_strategy_financing_leverage_invariance() {
+    // A constant 3x signal financed at the rate returns 3R - 2f on every
+    // bar after the first, so its Sharpe is the 1x Sharpe. Free, it read
+    // -0.062 against -0.258 at 1x, measured on a 505-bar series at 5%.
+    const std::vector<double> prices = {100.0, 101.0, 99.5, 102.0, 101.0,
+                                        103.5, 102.5, 104.0, 103.0, 105.0};
+    const std::size_t n = prices.size();
+    const std::vector<double> one(n, 1.0), three(n, 3.0);
+    sqt::StrategyFinancing fin;
+    fin.cash_rate = 0.05;
+    fin.financing_rate = 0.05;
+    auto r1 = sqt::run_strategy(prices.data(), one.data(), n, 10'000.0, 0.0, 0.0,
+                                252.0, nullptr, 0.05, fin);
+    auto r3 = sqt::run_strategy(prices.data(), three.data(), n, 10'000.0, 0.0, 0.0,
+                                252.0, nullptr, 0.05, fin);
+    for (std::size_t i = 1; i < n; ++i) {
+        const double g1 = r1.equity_curve[i] / r1.equity_curve[i - 1] - 1.0;
+        const double g3 = r3.equity_curve[i] / r3.equity_curve[i - 1] - 1.0;
+        CHECK_NEAR(g3, 3.0 * g1 - 2.0 * 0.05 / 252.0, 1e-12);
+    }
+    CHECK_NEAR(r3.sharpe_ratio, r1.sharpe_ratio, 1e-2);
+    // The summary kernel the grid ranks with agrees with the full one.
+    auto s3 = sqt::run_strategy_summary(prices.data(), three.data(), n, 10'000.0,
+                                        0.0, 0.0, 252.0, nullptr, 0.05, fin);
+    check_all_fields_match(r3, s3);
+}
+
+static void test_strategy_financing_flat_book_has_no_risk() {
+    // Flat throughout at a 5% rate: every bar after the first earns exactly
+    // rate / periods, the excess is zero, and there is no risk to divide by.
+    const std::vector<double> prices = {100.0, 105.0, 95.0, 110.0, 90.0, 100.0};
+    const std::size_t n = prices.size();
+    const std::vector<double> flat(n, 0.0);
+    sqt::StrategyFinancing fin;
+    fin.cash_rate = 0.05;
+    auto r = sqt::run_strategy(prices.data(), flat.data(), n, 10'000.0, 0.001,
+                               0.0005, 252.0, nullptr, 0.05, fin);
+    CHECK_NEAR(r.final_equity,
+               10'000.0 * std::pow(1.0 + 0.05 / 252.0, static_cast<double>(n - 1)),
+               1e-9);
+    CHECK(std::isnan(r.sharpe_ratio));
+    CHECK(std::isnan(r.sortino_ratio));
 }
 
 
@@ -1170,6 +1255,39 @@ static void test_portfolio_next_open_trigger_on_the_last_bar() {
     CHECK(rebal_rows_nan(r, 1));
 }
 
+static void test_portfolio_cash_book_earns_the_compounded_cash_rate() {
+    // Nothing held, cash credited at 5% on ACT/360 over gaps of 1, 3 and 1
+    // days: the account is the compounded rate, and the totals say so.
+    const std::size_t n_bars = 4, n_tickers = 1;
+    const std::vector<double> close = {100, 90, 120, 80};
+    const std::vector<double> weights = {0.0};
+    const std::vector<long long> rebal = {0};
+    const std::vector<double> gaps = {0.0, 1.0, 3.0, 1.0};
+    auto costs = free_costs();
+    costs.initial_capital = 1'000'000.0;
+    costs.cash_rate = 0.05;
+    costs.day_basis = 360.0;
+    std::vector<double> eq(n_bars), cash(n_bars), gross(n_bars), net(n_bars),
+        reb(3);
+    double peak = 0.0;
+    sqt::PortfolioSimError err;
+    sqt::PortfolioFinancing fin;
+    sqt::run_portfolio_simulation(close.data(), close.data(), weights.data(),
+                                  rebal.data(), gaps.data(), n_bars, n_tickers, 1,
+                                  costs, eq.data(), cash.data(), gross.data(),
+                                  net.data(), reb.data(), &peak, &err, nullptr,
+                                  nullptr, &fin);
+    CHECK(err.status == sqt::kPortfolioOk);
+    double expected = 1'000'000.0;
+    CHECK(eq[0] == expected);  // nothing accrues on the bar the account opens
+    for (std::size_t b = 1; b < n_bars; ++b) {
+        expected += expected * 0.05 * (gaps[b] / 360.0);
+        CHECK(eq[b] == expected);
+    }
+    CHECK_NEAR(fin.interest_credited, eq[n_bars - 1] - 1'000'000.0, 1e-6);
+    CHECK(fin.interest_charged == 0.0);
+}
+
 
 int main() {
     test_flat_signal_zero_return();
@@ -1198,6 +1316,9 @@ int main() {
     test_risk_free_rate_defaults_to_zero();
     test_risk_free_rate_lowers_the_ratios();
     test_summary_matches_run_strategy_under_a_rate();
+    test_strategy_financing_defaults_change_nothing();
+    test_strategy_financing_leverage_invariance();
+    test_strategy_financing_flat_book_has_no_risk();
     test_run_strategy_summary_matches_run_strategy_random();
     test_run_strategy_summary_edge_cases();
     test_no_trade_ratios_are_undefined_not_inf();
@@ -1225,6 +1346,7 @@ int main() {
     test_portfolio_zero_capital_leaves_every_bar_nan();
     test_portfolio_insolvent_at_bar_marks_that_bar_only();
     test_portfolio_next_open_trigger_on_the_last_bar();
+    test_portfolio_cash_book_earns_the_compounded_cash_rate();
 
     std::printf("\n%d / %d tests passed.\n",
                 g_tests_run - g_tests_failed, g_tests_run);

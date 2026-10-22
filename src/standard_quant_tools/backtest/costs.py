@@ -1,6 +1,7 @@
 """
 Pluggable transaction-cost model building blocks: commission, spread,
-market impact, short-borrow fees, and margin interest — each a small pure
+market impact, short-borrow fees, margin interest and interest credited on
+cash, with the day count each accrual is declared in — each a small pure
 function so run_portfolio_simulation (or any caller) can compose exactly
 the subset it needs. Today's existing flat commission_pct/slippage_pct
 behavior is percentage_commission + fixed_bps_spread, kept as the default
@@ -175,24 +176,119 @@ def impact_cost(
     return abs(notional) * (bps / 10_000.0)
 
 
-def short_borrow_cost(notional: float, annual_bps: float, days: float = 1.0) -> float:
-    """Daily-accrued borrow fee on a short position's notional."""
+#: The day counts a financing accrual may be declared in, and the days in
+#: the year each divides by. ACT/365F is what this module always used;
+#: ACT/360 is how USD money-market, margin and repo rates are quoted, so a
+#: rate quoted that way accrues 365/360 times as much over a calendar year.
+#: 30/360 is deliberately absent: it needs the calendar dates themselves,
+#: not a count of days between them.
+DAY_COUNT_BASIS = {"ACT/365F": 365.0, "ACT/360": 360.0}
+
+#: The default, and the convention every accrual here used before the day
+#: count could be declared -- so an undeclared run moves no number.
+DEFAULT_DAY_COUNT = "ACT/365F"
+
+
+def day_count_basis(day_count: str) -> float:
+    """
+    The days in the year `day_count` divides an accrual by.
+
+    Refused by name for anything but the two conventions in
+    DAY_COUNT_BASIS, rather than read as the nearest one: a rate quoted
+    ACT/360 and accrued ACT/365F is 1.4% short of what the account is
+    charged.
+    """
+    try:
+        return DAY_COUNT_BASIS[day_count]
+    except (KeyError, TypeError):
+        raise ValidationError(
+            f"day_count must be one of {sorted(DAY_COUNT_BASIS)}, got "
+            f"{day_count!r}. ACT/360 is how USD margin and money-market "
+            "rates are usually quoted; ACT/365F is the default."
+        ) from None
+
+
+def short_borrow_cost(
+    notional: float,
+    annual_bps: float,
+    days: float = 1.0,
+    day_count: str = DEFAULT_DAY_COUNT,
+) -> float:
+    """Borrow fee on a short position's notional, accrued over `days`
+    calendar days on the declared day count."""
     _cost_rate("annual_bps", annual_bps)
     _cost_rate("days", days)
-    return abs(notional) * (annual_bps / 10_000.0) * (days / 365.0)
+    return abs(notional) * (annual_bps / 10_000.0) * (days / day_count_basis(day_count))
 
 
-def margin_interest(cash: float, annual_rate: float, days: float = 1.0) -> float:
+def margin_interest(
+    cash: float,
+    annual_rate: float,
+    days: float = 1.0,
+    day_count: str = DEFAULT_DAY_COUNT,
+) -> float:
     """
-    Daily-accrued interest on negative cash (implied margin borrowing).
-    Returns 0.0 when cash >= 0 — there's nothing borrowed to accrue
-    interest on.
+    Interest on negative cash (implied margin borrowing), accrued over
+    `days` calendar days on the declared day count. Returns 0.0 when
+    cash >= 0 — there's nothing borrowed to accrue interest on.
     """
     _cost_rate("annual_rate", annual_rate)
     _cost_rate("days", days)
+    basis = day_count_basis(day_count)
     if cash >= 0:
         return 0.0
-    return abs(cash) * annual_rate * (days / 365.0)
+    return abs(cash) * annual_rate * (days / basis)
+
+
+def cash_interest(
+    cash: float,
+    annual_rate: float,
+    days: float = 1.0,
+    day_count: str = DEFAULT_DAY_COUNT,
+) -> float:
+    """
+    Interest CREDITED on a positive cash balance over `days` calendar days.
+
+    The mirror of `margin_interest`, and the reason it exists: an engine
+    that charged negative cash and credited nothing on positive cash, while
+    its Sharpe subtracted a risk-free rate, scored idle cash as losing that
+    rate every year. Returns 0.0 when cash <= 0. The rate may be negative
+    -- a negative policy rate is a charge on deposits -- but must be a
+    finite decimal fraction no larger than 1 in magnitude (0.05 is 5%).
+    """
+    rate = require_annual_rate(annual_rate, "annual_rate")
+    _cost_rate("days", days)
+    basis = day_count_basis(day_count)
+    if cash <= 0:
+        return 0.0
+    return cash * rate * (days / basis)
+
+
+def require_annual_rate(value: float, name: str) -> float:
+    """
+    A finite annual rate given as a decimal fraction, either sign, at most
+    1 (100%) in magnitude.
+
+    The bound is a unit check rather than an economic one: 5 for "5%" is the
+    mistake it exists to catch, and it would otherwise credit or charge 500%
+    a year without a word.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValidationError(
+            f"{name} must be a number, got {type(value).__name__} ({value!r})"
+        )
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValidationError(
+            f"{name} must be finite, got {value!r}; a NaN rate turns every "
+            "balance it accrues on into NaN."
+        )
+    if abs(number) > 1.0:
+        raise ValidationError(
+            f"{name}={number} is more than 100% a year. Rates are decimal "
+            "fractions here: pass 0.05 for 5%."
+        )
+    return number
 
 
 def directional_commission(

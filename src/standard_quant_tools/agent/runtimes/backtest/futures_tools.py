@@ -25,7 +25,10 @@ from standard_quant_tools.agent.runtimes._json_safe import (
     finite_or_none as _finite_or_none,
 )
 from standard_quant_tools.agent.runtimes._shared import parse_date_keys
-from standard_quant_tools.backtest.futures_engine import run_futures_simulation
+from standard_quant_tools.backtest.futures_engine import (
+    COLLATERAL_INTEREST_BASE,
+    run_futures_simulation,
+)
 from standard_quant_tools.backtest.futures_hedge_backtest import (
     run_futures_hedge_backtest as _run_futures_hedge_backtest,
 )
@@ -123,8 +126,15 @@ class FuturesBacktestInput(BaseModel):
         0.0,
         ge=-1,
         le=1,
-        description="Annual rate earned on cash. For a futures account most "
-        "of the balance is cash, unlike an equity book.",
+        description="Annual rate earned on cash NOT posted as margin, when "
+        "positive. For a futures account most of the balance is cash, unlike "
+        "an equity book. Posted margin earns nothing here; the result says so "
+        "in collateral_interest_base.",
+    )
+    collateral_day_count: Literal["ACT/365F", "ACT/360"] = Field(
+        "ACT/365F",
+        description="Day count the collateral interest accrues on: rate x "
+        "cash x calendar days / 365 or / 360. Echoed on the result.",
     )
     contract_map: Optional[Dict[str, str]] = Field(
         None,
@@ -193,6 +203,14 @@ class FuturesBacktestResult(BaseModel):
     total_commission: Stat = None
     total_slippage: Stat = None
     total_collateral_interest: Stat = None
+    collateral_interest_base: str = Field(
+        "cash_excluding_posted_margin",
+        description="What collateral_rate was paid on: positive cash not "
+        "posted as margin. Posted margin earned nothing.",
+    )
+    collateral_day_count: str = Field(
+        "ACT/365F", description="The day count the collateral interest used."
+    )
     n_margin_calls: int = 0
     margin_calls: List[Dict[str, Any]] = Field(default_factory=list)
     n_rolls: int = 0
@@ -302,6 +320,7 @@ def run_futures_backtest(input_data: FuturesBacktestInput) -> FuturesBacktestRes
         contract_map=contract_map,
         allow_fractional=input_data.allow_fractional,
         roll_day_prior_prices=prior_prices,
+        collateral_day_count=input_data.collateral_day_count,
     )
 
     warnings: List[str] = list(out["warnings"])
@@ -357,6 +376,8 @@ def run_futures_backtest(input_data: FuturesBacktestInput) -> FuturesBacktestRes
         total_commission=out["total_commission"],
         total_slippage=out["total_slippage"],
         total_collateral_interest=out["total_collateral_interest"],
+        collateral_interest_base=COLLATERAL_INTEREST_BASE,
+        collateral_day_count=input_data.collateral_day_count,
         n_margin_calls=out["n_margin_calls"],
         margin_calls=out["margin_calls"],
         n_rolls=out["n_rolls"],
@@ -451,7 +472,19 @@ class FuturesHedgeBacktestInput(BaseModel):
     initial_margin: float = Field(0.0, ge=0, le=1e9)
     commission_per_contract: float = Field(0.0, ge=0, le=1e6)
     slippage_points: float = Field(0.0, ge=0, le=1e6)
-    collateral_rate: float = Field(0.0, ge=-1.0, le=1.0)
+    collateral_rate: float = Field(
+        0.0,
+        ge=-1.0,
+        le=1.0,
+        description="Annual rate on the margin the hedge actually posts. "
+        "Reported apart from the hedge's P&L, as "
+        "collateral_interest_on_posted_margin: it is the yield on collateral "
+        "the hedge ties up, not a product of the hedge.",
+    )
+    collateral_day_count: Literal["ACT/365F", "ACT/360"] = Field(
+        "ACT/365F",
+        description="Day count for the collateral interest. Echoed on the result.",
+    )
     contract_map: Optional[Dict[str, str]] = Field(
         None, description="Date -> contract label, to charge the roll."
     )
@@ -495,6 +528,24 @@ class FuturesHedgeBacktestResult(BaseModel):
     total_commission: Stat = None
     total_slippage: Stat = None
     n_rolls: int = 0
+    collateral_rate: Stat = Field(
+        None, description="The annual collateral rate, echoed from the input."
+    )
+    collateral_day_count: str = Field(
+        "ACT/365F", description="The day count the collateral interest used."
+    )
+    collateral_interest_base: str = Field(
+        "posted_initial_margin",
+        description="What the collateral interest was accrued on: the "
+        "initial margin actually posted, bar by bar.",
+    )
+    collateral_interest_on_posted_margin: Stat = Field(
+        None,
+        description="Interest the posted margin would earn at "
+        "collateral_rate. NOT in hedge_pnl or combined_pnl: interest on the "
+        "funding of a hedge is not hedge P&L, and booking it there reported "
+        "+$9.94m on a perfect hedge of a flat $100m book at 5%.",
+    )
     contracts_held: Dict[str, float] = Field(default_factory=dict)
     hedge_effectiveness: Dict[str, Any] = Field(
         default_factory=dict,
@@ -562,6 +613,7 @@ def run_futures_hedge_backtest(
         collateral_rate=input_data.collateral_rate,
         contract_map=input_data.contract_map,
         allow_fractional=input_data.allow_fractional,
+        collateral_day_count=input_data.collateral_day_count,
     )
 
     # A measure that is undefined for this book is null, with the reason.

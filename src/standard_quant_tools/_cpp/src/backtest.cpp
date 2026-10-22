@@ -192,6 +192,60 @@ namespace {
         return (1.0 + exec_prev * overnight) * (1.0 + exec_i * intraday) - 1.0;
     }
 
+    // The per-bar rates StrategyFinancing describes, each annual rate over
+    // periods_per_year. Python computes the same three quotients.
+    struct PerBarFinancing {
+        double cash = 0.0, debit = 0.0, borrow = 0.0;
+        bool   on   = false;
+    };
+
+    inline PerBarFinancing per_bar_financing(const StrategyFinancing& f,
+                                             double periods_per_year) {
+        PerBarFinancing out;
+        out.on     = f.active();
+        out.cash   = f.cash_rate / periods_per_year;
+        out.debit  = f.financing_rate / periods_per_year;
+        out.borrow = (f.borrow_fee_bps / 10'000.0) / periods_per_year;
+        return out;
+    }
+
+    // What bar i's cash earned, its leverage cost and its short paid, as a
+    // fraction of the equity the bar started with: on the position held at
+    // the previous close (signals[i-1] under a close fill, which transacts
+    // there; signals[i-2] under a two-leg fill, whose change lands at bar
+    // i's open). engine.py's Python path is the same two selects.
+    inline double financing_at(
+        const double* signals,
+        const double* ref_prices,
+        std::size_t   i,
+        const PerBarFinancing& f)
+    {
+        const double held = (ref_prices == nullptr)
+            ? signals[i - 1]
+            : ((i >= 2) ? signals[i - 2] : 0.0);
+        const double cash_frac = 1.0 - held;
+        const double interest  = (cash_frac > 0.0) ? cash_frac * f.cash
+                                                   : cash_frac * f.debit;
+        const double borrow    = (held < 0.0) ? (-held) * f.borrow : 0.0;
+        return interest - borrow;
+    }
+
+    // Running range of the returns after bar 0, for the one case financing
+    // creates that the zero-rate kernel never met: a book that sits in cash
+    // earns exactly the cash rate on every bar, so its only dispersion is
+    // bar 0's placeholder 0.0 and its Sharpe would be 0 / (rate / sqrt(n)).
+    // It has no risk to divide by, so it is NaN, the convention
+    // risk_metrics.has_no_dispersion states (the same relative 1e-12 test).
+    struct ReturnRange {
+        double lo = kInf, hi = -kInf;
+        void add(double x) { if (x < lo) lo = x; if (x > hi) hi = x; }
+        bool flat(std::size_t n) const {
+            if (n < 3) return false;
+            const double scale = std::max(std::abs(lo), std::abs(hi));
+            return scale > 0.0 && (hi - lo) <= scale * 1e-12;
+        }
+    };
+
     // A lot still open at the last bar ends at the final equity: marked to
     // the final close, with no exit cost, because no exit event occurred and
     // the curve never deducted one.
@@ -225,7 +279,8 @@ BacktestResult run_strategy(
     double slippage_pct,
     double periods_per_year,
     const double* ref_prices,
-    double risk_free_rate)
+    double risk_free_rate,
+    const StrategyFinancing& financing)
 {
     BacktestResult r{};
     r.equity_curve.resize(n, initial_capital);
@@ -249,6 +304,8 @@ BacktestResult run_strategy(
     if (n == 0) return r;
 
     const double cost_per_unit = commission_pct + slippage_pct;
+    const PerBarFinancing fin = per_bar_financing(financing, periods_per_year);
+    ReturnRange after_bar0;
 
     // ── Strategy returns (vectorized formula) ─────────────────────────────────
     // executed[i] = signals[i-1] for i≥1, 0 for i=0
@@ -282,6 +339,10 @@ BacktestResult run_strategy(
         // 500-bar differential check across all 11 metrics is bit-identical
         // with and without ref_prices); nothing was keeping them that way.
         strat_ret[i] = gross_return_at(prices, signals, ref_prices, i) - tcost;
+        if (fin.on) {
+            strat_ret[i] += financing_at(signals, ref_prices, i, fin);
+            after_bar0.add(strat_ret[i]);
+        }
 
         // ── Equity curve: cumprod(1 + strat_ret) ──────────────────────────
         r.equity_curve[i] = r.equity_curve[i - 1] * (1.0 + strat_ret[i]);
@@ -333,10 +394,21 @@ BacktestResult run_strategy(
         sum_sq += d * d;
     }
 
-    // The risk-free rate enters per period, exactly as
-    // metrics/risk_metrics.py does it.
+    // The risk-free rate enters per period, as metrics/risk_metrics.py
+    // does it, on every bar after bar 0. Bar 0's return is the placeholder
+    // 0.0 of an account that has only just opened: no time passed over it,
+    // so no rate accrued, and charging it a period of the rate gave a book
+    // that held nothing but cash (and earned the rate on every later bar) a
+    // Sharpe of -sqrt(periods_per_year / n) instead of zero. Summed as the
+    // excess itself rather than mean_r less the rate, so a cash book's
+    // excess is exactly zero and its Sortino is 0/0, not +/-inf from the
+    // rounding of two different sums. At a zero rate every term is
+    // strat_ret[i] - 0.0, the same sum as mean_r's, bit for bit.
     const double rf_per_period = risk_free_rate / periods_per_year;
-    const double mean_excess   = mean_r - rf_per_period;
+    double sum_excess = 0.0;
+    for (std::size_t i = 0; i < n; ++i)
+        sum_excess += strat_ret[i] - ((i == 0) ? 0.0 : rf_per_period);
+    const double mean_excess = sum_excess / n_d;
 
     const double sample_std = (n > 1) ? std::sqrt(sum_sq / (n_d - 1.0)) : 0.0;
     r.annualized_vol = sample_std * std::sqrt(periods_per_year);
@@ -354,6 +426,7 @@ BacktestResult run_strategy(
     // bug class was found and fixed for CALMAR in this file and missed here.
     r.sharpe_ratio   = (sample_std > 0.0)
         ? (mean_excess / sample_std) * std::sqrt(periods_per_year) : kNaN;
+    if (fin.on && after_bar0.flat(n)) r.sharpe_ratio = kNaN;
 
     // Sortino: semi-deviation = sqrt(mean(min(excess, 0)^2)) across ALL
     // periods. Sortino & Price (1994) — zero contribution from bars that
@@ -363,7 +436,8 @@ BacktestResult run_strategy(
     {
         double down_sq_sum = 0.0;
         for (std::size_t i = 0; i < n; ++i) {
-            const double d = std::min(strat_ret[i] - rf_per_period, 0.0);
+            const double d = std::min(
+                strat_ret[i] - ((i == 0) ? 0.0 : rf_per_period), 0.0);
             down_sq_sum += d * d;
         }
         const double down_dev = std::sqrt(down_sq_sum / n_d) * std::sqrt(periods_per_year);
@@ -455,7 +529,8 @@ BacktestResult run_strategy_summary(
     double slippage_pct,
     double periods_per_year,
     const double* ref_prices,
-    double risk_free_rate)
+    double risk_free_rate,
+    const StrategyFinancing& financing)
 {
     BacktestResult r{};
     r.final_equity         = initial_capital;
@@ -474,6 +549,10 @@ BacktestResult run_strategy_summary(
     if (n == 0) return r;
 
     const double cost_per_unit = commission_pct + slippage_pct;
+    const PerBarFinancing fin = per_bar_financing(financing, periods_per_year);
+    // Bar 0 accrues no rate -- see run_strategy() -- and every later bar
+    // accrues rf_per_period, so the excess is summed alongside the return.
+    const double rf_per_period = risk_free_rate / periods_per_year;
     // n (size_t) used directly below rather than narrowed to int -- n can
     // exceed INT_MAX for a large series.
     const double n_d = static_cast<double>(n);
@@ -499,6 +578,9 @@ BacktestResult run_strategy_summary(
     double peak   = initial_capital;
     double mdd    = 0.0;
     double sum_r  = 0.0;
+    // Seeded with bar 0's excess, 0.0 - 0.0, as run_strategy()'s sum starts.
+    double sum_excess = 0.0 + (0.0 - 0.0);
+    ReturnRange after_bar0;
 
     auto fold_trade = [&](double tr) {
         ++num_trades;
@@ -517,8 +599,9 @@ BacktestResult run_strategy_summary(
         const double pdiff  = exec_i - prev_exec;
         const double tcost  = std::abs(pdiff) * cost_per_unit;
 
-        const double strat_ret_i =
+        double strat_ret_i =
             gross_return_at(prices, signals, ref_prices, i) - tcost;
+        if (fin.on) strat_ret_i += financing_at(signals, ref_prices, i, fin);
 
         const double equity_before = equity;
         equity *= (1.0 + strat_ret_i);
@@ -529,6 +612,8 @@ BacktestResult run_strategy_summary(
         }
 
         sum_r += strat_ret_i;
+        sum_excess += strat_ret_i - rf_per_period;
+        if (fin.on) after_bar0.add(strat_ret_i);
 
         if (pdiff != 0.0) {
             const auto tc = apply_position_event(
@@ -583,21 +668,16 @@ BacktestResult run_strategy_summary(
     //    iterations -- exec_i/prev_exec are both directly index-derivable)
     //    to get variance and downside deviation now that mean_r is known.
     //    Seeded with index 0's implicit strat_ret[0]=0.0 term. ────────────
-    const double rf_per_period = risk_free_rate / periods_per_year;
-    const double mean_excess   = mean_r - rf_per_period;
+    const double mean_excess = sum_excess / n_d;
 
     double sum_sq = mean_r * mean_r;
-    // Bar 0's strat_ret is identically 0.0, so its EXCESS is -rf_per_period.
-    // The loop below starts at i=1, so that bar's downside term has to be
-    // seeded here -- the one piece of this function that is invisible at
-    // rf = 0 and makes the two execution paths disagree the moment a rate is
-    // set. The term is min(excess, 0)^2, the same expression run_strategy()
-    // and risk_metrics.sortino_ratio use: rf^2 for a positive rate, and 0
-    // for a NEGATIVE one, whose bar-0 excess is a gain and not downside.
-    // Seeding rf^2 unconditionally made the grid, the fused crossover and
-    // walk-forward ranking disagree with the single run under a negative
-    // policy rate.
-    const double bar0_down = std::min(0.0 - rf_per_period, 0.0);
+    // Bar 0's strat_ret is identically 0.0, and so is its EXCESS: nothing
+    // accrues over the bar the account opens on (see run_strategy()). The
+    // loop below starts at i=1, so that bar's downside term is seeded here,
+    // as min(excess, 0)^2 -- the same expression run_strategy() uses, which
+    // is 0 at every rate. It was min(-rf, 0)^2, a period of the rate charged
+    // to a bar over which none accrued.
+    const double bar0_down = std::min(0.0 - 0.0, 0.0);
     double down_sq_sum = bar0_down * bar0_down;
 
     for (std::size_t i = 1; i < n; ++i) {
@@ -605,8 +685,9 @@ BacktestResult run_strategy_summary(
         const double prev_exec_i = (i >= 2) ? signals[i - 2] : 0.0;
         const double pdiff       = exec_i - prev_exec_i;
         const double tcost       = std::abs(pdiff) * cost_per_unit;
-        const double strat_ret_i =
+        double strat_ret_i =
             gross_return_at(prices, signals, ref_prices, i) - tcost;
+        if (fin.on) strat_ret_i += financing_at(signals, ref_prices, i, fin);
 
         const double d = strat_ret_i - mean_r;
         sum_sq += d * d;
@@ -627,6 +708,7 @@ BacktestResult run_strategy_summary(
     // bug class was found and fixed for CALMAR in this file and missed here.
     r.sharpe_ratio   = (sample_std > 0.0)
         ? (mean_excess / sample_std) * std::sqrt(periods_per_year) : kNaN;
+    if (fin.on && after_bar0.flat(n)) r.sharpe_ratio = kNaN;
 
     const double down_dev = std::sqrt(down_sq_sum / n_d) * std::sqrt(periods_per_year);
     r.sortino_ratio = (down_dev > 0.0)
@@ -673,10 +755,19 @@ std::size_t run_portfolio_simulation(
     double* out_peak_position,
     PortfolioSimError* err,
     const double* dollar_volume,
-    const double* volatility)
+    const double* volatility,
+    PortfolioFinancing* out_financing)
 {
     if (err) *err = PortfolioSimError{};
     if (out_peak_position) *out_peak_position = 0.0;
+    // Totals accumulate here and are copied out on every return path, so an
+    // early stop still reports what accrued up to it.
+    PortfolioFinancing fin_totals{};
+    struct FinancingOut {
+        PortfolioFinancing* dst;
+        const PortfolioFinancing& src;
+        ~FinancingOut() { if (dst) *dst = src; }
+    } fin_out{out_financing, fin_totals};
     // Every output element is defined on every return path. The loop below
     // writes a bar only once it is marked and a rebalance row only once it
     // executes, so an early stop left every later bar -- and a next_open
@@ -884,29 +975,65 @@ std::size_t run_portfolio_simulation(
         return true;
     };
 
+    const bool segregated = costs.segregated_short_proceeds;
+    // Whether any balance accrues anything. With every rate at zero and the
+    // proceeds in cash the block below never runs, which is what keeps a
+    // zero-rate run bit for bit what it always was.
+    const bool financing = costs.borrow_fee_bps > 0.0 ||
+                           costs.margin_interest_rate > 0.0 ||
+                           costs.cash_rate != 0.0 || segregated ||
+                           costs.short_rebate_rate != 0.0;
+    const double basis = costs.day_basis;
+
     for (std::size_t bar = 0; bar < n_bars; ++bar) {
         const double* cp = close + bar * n_tickers;
 
         // ── Financing, on the position carried INTO this bar ──────────────
         // Before today's rebalance changes it, and on the actual elapsed
         // calendar days, so a weekend gap accrues three days rather than one.
-        if (costs.borrow_fee_bps > 0.0 || costs.margin_interest_rate > 0.0) {
-            const double days = (bar == 0) ? 1.0 : day_gaps[bar];
-            double daily_cost = 0.0;
-            if (cash < 0.0)
-                daily_cost += std::abs(cash) * costs.margin_interest_rate * (days / 365.0);
-            if (costs.borrow_fee_bps > 0.0) {
+        // Not on bar 0, where the account opens with nothing carried in (the
+        // block always came to zero there). The Python loop's expressions,
+        // in its order.
+        if (financing && bar > 0) {
+            const double days = day_gaps[bar];
+            double short_value = 0.0;
+            if (costs.borrow_fee_bps > 0.0 || segregated) {
                 // The fee is LINEAR in notional, so summing the short book
                 // first and scaling once is the same quantity as scaling
                 // each short separately.
-                double short_notional = 0.0;
                 for (std::size_t i = 0; i < n_tickers; ++i)
-                    if (shares[i] < 0.0) short_notional += std::abs(shares[i] * cp[i]);
-                if (short_notional > 0.0)
-                    daily_cost += short_notional * (costs.borrow_fee_bps / 10'000.0) *
-                                  (days / 365.0);
+                    if (shares[i] < 0.0) short_value += std::abs(shares[i] * cp[i]);
+            }
+            // What earns or pays interest: all of the cash, or under
+            // segregated proceeds the cash less the short book the lender
+            // is holding.
+            const double free_cash = segregated ? cash - short_value : cash;
+            double charged = 0.0;
+            if (free_cash < 0.0)
+                charged = std::abs(free_cash) * costs.margin_interest_rate * (days / basis);
+            double daily_cost = charged;
+            double borrow = 0.0;
+            if (costs.borrow_fee_bps > 0.0 && short_value > 0.0) {
+                borrow = short_value * (costs.borrow_fee_bps / 10'000.0) * (days / basis);
+                daily_cost += borrow;
             }
             cash -= daily_cost;
+            double credited = 0.0;
+            if (costs.cash_rate != 0.0 && free_cash > 0.0) {
+                credited = free_cash * costs.cash_rate * (days / basis);
+                cash += credited;
+            }
+            double rebate = 0.0;
+            if (segregated && costs.short_rebate_rate != 0.0 && short_value > 0.0) {
+                rebate = short_value * costs.short_rebate_rate * (days / basis);
+                cash += rebate;
+            }
+            if (free_cash < 0.0)
+                fin_totals.debit_balance_years += std::abs(free_cash) * (days / basis);
+            fin_totals.interest_charged  += charged;
+            fin_totals.borrow_charged    += borrow;
+            fin_totals.interest_credited += credited;
+            fin_totals.rebate_credited   += rebate;
         }
 
         // ── Deferred next_open execution from the previous bar ────────────
@@ -996,7 +1123,8 @@ std::vector<BacktestResult> batch_backtest_crossover(
     double slippage_pct,
     double periods_per_year,
     const double* ref_prices,
-    double risk_free_rate)
+    double risk_free_rate,
+    const StrategyFinancing& financing)
 {
     std::vector<BacktestResult> results(num_combos);
     if (n == 0 || num_combos == 0) return results;
@@ -1078,7 +1206,7 @@ std::vector<BacktestResult> batch_backtest_crossover(
                 results[ti] = run_strategy_summary(
                     prices, signal.data(), n,
                     initial_capital, commission_pct, slippage_pct,
-                    periods_per_year, ref_prices, risk_free_rate);
+                    periods_per_year, ref_prices, risk_free_rate, financing);
             } catch (...) {
                 region_error = true;
             }
@@ -1097,7 +1225,7 @@ std::vector<BacktestResult> batch_backtest_crossover(
         results[ti] = run_strategy_summary(
             prices, signal.data(), n,
             initial_capital, commission_pct, slippage_pct,
-            periods_per_year, ref_prices, risk_free_rate);
+            periods_per_year, ref_prices, risk_free_rate, financing);
     }
 #endif
     if (region_error) {
@@ -1120,7 +1248,8 @@ std::vector<BacktestResult> batch_run_strategy(
     double slippage_pct,
     double periods_per_year,
     const double* ref_prices,
-    double risk_free_rate)
+    double risk_free_rate,
+    const StrategyFinancing& financing)
 {
     std::vector<BacktestResult> results(num_tests);
 
@@ -1158,7 +1287,8 @@ std::vector<BacktestResult> batch_run_strategy(
             slippage_pct,
             periods_per_year,
             ref_prices,
-            risk_free_rate);
+            risk_free_rate,
+            financing);
     }
     return results;
 }

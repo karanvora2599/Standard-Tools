@@ -1,5 +1,85 @@
 # Changelog
 
+## Idle cash earns the rate the Sharpe subtracts, borrowing pays for itself, and a hedge books no interest on money it never had
+
+- **The engines credit cash and charge financing.** Every Sharpe here
+  subtracted a risk-free rate while the cash behind it earned nothing:
+  the same asset held at 50% read 0.5703 against 0.8375 at 100% (a 4%
+  rate), and a dollar-neutral book, whose cash is its equity plus its
+  short proceeds, went from 0.0444 at a zero rate to -0.6967 at 5%. The
+  shared-cash engine -- Python loop and native kernel, the same
+  expressions in the same order -- now credits positive cash at
+  `cash_rate`, charges negative cash at `margin_interest_rate` and
+  shorts at `borrow_fee_bps`, and with `short_proceeds="segregated"`
+  holds the proceeds out of interest-bearing cash at a
+  `short_rebate_rate`. The portfolio and pair tools and
+  `PortfolioSimSpec` default `cash_rate` to `risk_free_rate` and
+  `margin_interest_rate` to it plus `margin_spread_bps`. The two books
+  now read 0.8499 and 0.8467, and the dollar-neutral one 0.0389 at 5%
+  (0.0444 at zero, 50 bps of borrow in both). A 2x book that borrowed
+  for free at 5% read -0.0462; it pays the rate now and reads -0.1853.
+- **The day count is declared.** Every accrual was `/ 365` in four
+  places. `day_count` ("ACT/365F", the default and the old arithmetic
+  bit for bit, or "ACT/360") is an input of the engine, of the
+  portfolio and pair tools and of `PortfolioSimSpec`, and is echoed on
+  each result beside the rates used and the interest credited, interest
+  charged, borrow charged and rebate credited (`financing`).
+- **The Sharpe measures the excess over what cash accrued.** The
+  portfolio and pair tools and `evaluate_model_portfolio` subtract the
+  rate bar by bar on the declared day count -- the engine's own credit
+  divided by the cash -- so a book holding only cash reports an excess
+  of zero. `run_strategy` subtracts `rate / periods_per_year` from every
+  bar after bar 0, the account's opening, over which no time passed;
+  charging that bar a period of the rate gave a cash book a Sharpe of
+  `-sqrt(periods_per_year / n)`. A book with no risk reports NaN.
+- **`run_strategy` finances leverage and shorts.** A signal is a
+  fraction of equity, so `1 - signal` of it is cash: positive cash earns
+  `cash_rate`, exposure beyond 1x pays `financing_rate` (both default to
+  `risk_free_rate`), and a short pays `borrow_fee_bps` (default 0), each
+  per bar on the position held at the previous close. The native
+  `run_strategy`, summary and batch kernels and the Python path add the
+  same double per bar, and `backtest_grid` passes the three to every
+  path. At 5% the same signal read a Sharpe of -0.0624 at 3x against
+  -0.258 at 1x; both read -0.2574, and a 3x bar returns `3R - 2r/252`.
+  Every run_strategy-based tool given a rate now credits its idle cash,
+  so its total return at a positive rate rises by that interest.
+- **The futures hedge books no synthetic interest.** Its futures account
+  is funded with twice the peak notional so margin never binds, and the
+  collateral rate was paid on all of it and booked as hedge P&L: a
+  perfect hedge of a flat $100m book at 5% reported +$9,936,337. The
+  account now runs at a zero rate, and what the margin actually posted
+  would earn is reported apart as `collateral_interest_on_posted_margin`
+  with its base and day count. The hedge's P&L also includes the cost of
+  putting it on, which the first difference dropped: a flat market now
+  returns exactly minus the costs (with $12,000 of margin and $2.25 a
+  contract: -900.00 and 232,767.12 of interest beside it, where it read
+  +9,697,819.88).
+- **`estimate_trade_cost` counts a holding cost once.** The breakeven
+  doubled the borrow with the commission: a 90-day short at 7 bps of
+  execution and 300 bps of borrow read 161.95 bps against 2 x 7 + 73.97
+  = 87.97. Borrow is charged on a short only (a buy at 500 bps cost 500
+  bps), and margin interest on the account's debit is reported as
+  `account_margin_interest` instead of as bps of a trade it does not
+  depend on (it read 246.58 bps). New fields: `execution_bps`,
+  `holding_bps`.
+- **Smaller corrections.** The pair backtest takes `borrow_fee_bps`,
+  the margin and cash rates, `short_proceeds` and `day_count`: its
+  warning told the caller to set an argument the tool did not have. The
+  "cash went negative" note now gives the bars, the low, the rate, the
+  day count and the interest charged, or at a zero rate the debit in
+  currency-years and what each 1% would have cost. The futures account
+  refuses a NaN or infinite `collateral_rate` by name (it ran and
+  turned every equity figure NaN) and accrues it on a declared
+  `collateral_day_count`; the futures tool states that it is paid on
+  cash not posted as margin.
+- **At a zero rate nothing moves.** With every rate at zero the
+  financing block does not run: across 169 engine configurations (both
+  paths; borrow and margin on; every fill; per-share, impact and the ADV
+  cap; `run_strategy` levered, short and flat; the grid; futures; pairs)
+  every number is bit for bit what it was. Two things change at a zero
+  rate on purpose: the negative-cash note's wording, and a hedge's P&L,
+  which now carries its opening cost.
+
 ## Half-Kelly is sized as a position, the reality check tests the question it names, and a no-skill grid's PBO is one half however many configurations it has
 
 - **Kelly's fraction was a risk, bought as a position.** `get_position_size`

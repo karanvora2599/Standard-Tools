@@ -43,6 +43,7 @@ artifact/provenance plumbing that makes the result auditable.
 """
 
 import logging
+import math
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -50,6 +51,12 @@ import numpy as np
 import pandas as pd
 
 from standard_quant_tools.audit.hashing import canonical_frame_hash
+from standard_quant_tools.backtest.costs import DEFAULT_DAY_COUNT
+from standard_quant_tools.backtest.financing import (
+    accrued_rate_per_bar,
+    ratios_over_accrued_rate,
+    resolve_debit_rate,
+)
 from standard_quant_tools.backtest.portfolio_engine import run_portfolio_simulation
 from standard_quant_tools.backtest.sizing import (
     equal_weight_top_bottom,
@@ -64,12 +71,7 @@ from standard_quant_tools.metrics.return_metrics import (
     cagr,
     cumulative_return,
 )
-from standard_quant_tools.metrics.risk_metrics import (
-    calmar_ratio,
-    max_drawdown,
-    sharpe_ratio,
-    sortino_ratio,
-)
+from standard_quant_tools.metrics.risk_metrics import calmar_ratio, max_drawdown
 from standard_quant_tools.modeling.specs import TASKS
 
 from . import artifacts as _artifacts
@@ -648,11 +650,27 @@ def _summarize_simulation(
     risk_free_rate: float,
     commission_pct: float,
     slippage_pct: float,
+    day_count: str = DEFAULT_DAY_COUNT,
 ) -> Dict[str, float]:
     equity = result["equity_curve"].dropna()
     if equity.empty:
         raise ValidationError("simulation produced an empty equity curve")
     returns = equity.pct_change(fill_method=None).dropna()
+    # The excess is over the rate as the simulation's cash accrued it: the
+    # same rate, day count and calendar days, so a book sitting in cash
+    # scores zero rather than the rate it was charged and never credited.
+    # Built on the equity's own index, so each return is benchmarked on the
+    # days that passed before it.
+    sharpe, sortino = (0.0, 0.0)
+    if not returns.empty:
+        benchmark = (
+            accrued_rate_per_bar(equity.index, risk_free_rate, day_count)
+            if risk_free_rate != 0.0
+            else None
+        )
+        sharpe, sortino = ratios_over_accrued_rate(
+            returns, risk_free_rate, day_count, periods_per_year, benchmark=benchmark
+        )
 
     rebalance_log = result["rebalance_log"]
     turnover = (
@@ -670,16 +688,8 @@ def _summarize_simulation(
             if not returns.empty
             else 0.0
         ),
-        "sharpe_ratio": (
-            float(sharpe_ratio(returns, risk_free_rate, periods_per_year))
-            if not returns.empty
-            else 0.0
-        ),
-        "sortino_ratio": (
-            float(sortino_ratio(returns, risk_free_rate, periods_per_year))
-            if not returns.empty
-            else 0.0
-        ),
+        "sharpe_ratio": float(sharpe),
+        "sortino_ratio": float(sortino),
         "max_drawdown": float(max_drawdown(equity)),
         "calmar_ratio": float(calmar_ratio(equity, periods_per_year)),
         "final_equity": float(result["final_equity"]),
@@ -699,7 +709,8 @@ def _summarize_simulation(
         # does not report a total, so this reconstructs the commission +
         # spread component from realized turnover. It EXCLUDES borrow fees,
         # margin interest and any impact model, so it is a floor on total
-        # cost drag, not the whole of it.
+        # cost drag, not the whole of it; the financing the simulator does
+        # total is in provenance["financing"].
         "estimated_cost_drag_pct": (
             float(turnover.sum() * (commission_pct + slippage_pct))
             if not turnover.empty
@@ -707,6 +718,38 @@ def _summarize_simulation(
         ),
     }
     return metrics
+
+
+def _spec_financing(portfolio: PortfolioSimSpec) -> Dict[str, Any]:
+    """
+    The simulator's financing terms from a spec, resolved: cash earns the
+    risk-free rate unless cash_rate says otherwise, and negative cash pays
+    it plus margin_spread_bps unless margin_interest_rate says otherwise.
+
+    The Sharpe this evaluation reports subtracts that rate, and the cash it
+    charged it on earned nothing, so a model whose book sat partly in cash
+    scored below the same model fully invested. A rate past 100% a year
+    cannot be a cash rate, so one left to default to such a risk-free rate
+    is refused under that name.
+    """
+    rf = float(portfolio.risk_free_rate)
+    if portfolio.cash_rate is None and not (math.isfinite(rf) and abs(rf) <= 1.0):
+        raise ValidationError(
+            f"risk_free_rate={portfolio.risk_free_rate!r} is the default "
+            "cash_rate, and a cash rate must be a finite decimal no larger "
+            "than 1 (100%) in magnitude. Pass 0.05 for 5%, or set cash_rate."
+        )
+    rebate = portfolio.short_rebate_rate
+    return {
+        "cash_rate": rf if portfolio.cash_rate is None else float(portfolio.cash_rate),
+        "margin_interest_rate": resolve_debit_rate(
+            portfolio.margin_interest_rate, rf, portfolio.margin_spread_bps
+        ),
+        "borrow_fee_bps": float(portfolio.borrow_fee_bps),
+        "short_proceeds": portfolio.short_proceeds,
+        "short_rebate_rate": 0.0 if rebate is None else float(rebate),
+        "day_count": portfolio.day_count,
+    }
 
 
 def evaluate_model_portfolio(
@@ -1179,9 +1222,8 @@ def _simulate_predictions_portfolio(
         max_gross_leverage=portfolio.max_gross_leverage,
         max_position_pct=portfolio.max_position_pct,
         fill_price=portfolio.fill_price,
-        borrow_fee_bps=portfolio.borrow_fee_bps,
-        margin_interest_rate=portfolio.margin_interest_rate,
         max_adv_participation=portfolio.max_adv_participation,
+        **_spec_financing(portfolio),
     )
     warnings.extend(simulation.get("warnings", []))
 
@@ -1191,6 +1233,7 @@ def _simulate_predictions_portfolio(
         portfolio.risk_free_rate,
         portfolio.commission_pct,
         portfolio.slippage_pct,
+        day_count=portfolio.day_count,
     )
 
     equity_curve = simulation["equity_curve"]
@@ -1265,6 +1308,9 @@ def _simulate_predictions_portfolio(
             "periods_per_year": int(periods_per_year),
             "transform_spec": transform.model_dump(),
             "portfolio_spec": portfolio.model_dump(),
+            # The rates the account was financed at once None was resolved
+            # to the risk-free rate, and the currency each came to.
+            "financing": dict(simulation.get("financing") or {}),
         },
         "warnings": warnings,
     }

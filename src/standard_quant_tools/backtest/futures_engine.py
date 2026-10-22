@@ -41,11 +41,20 @@ from typing import Any, Dict, List, Mapping, Optional
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools.backtest.costs import (
+    DEFAULT_DAY_COUNT,
+    day_count_basis,
+    require_annual_rate,
+)
 from standard_quant_tools.error import ValidationError
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["run_futures_simulation"]
+__all__ = ["run_futures_simulation", "COLLATERAL_INTEREST_BASE"]
+
+#: What `collateral_rate` is paid on: positive cash that is not posted as
+#: margin. Posted margin earns nothing in this account.
+COLLATERAL_INTEREST_BASE = "cash_excluding_posted_margin"
 
 
 def run_futures_simulation(
@@ -62,6 +71,7 @@ def run_futures_simulation(
     contract_map: Optional[Mapping[Any, str]] = None,
     allow_fractional: bool = False,
     roll_day_prior_prices: Optional[Mapping[Any, float]] = None,
+    collateral_day_count: str = DEFAULT_DAY_COUNT,
 ) -> Dict[str, Any]:
     """
     Simulate a futures account bar by bar.
@@ -89,6 +99,15 @@ def run_futures_simulation(
     A target the account cannot margin is filled to what it can, and
     the shortfall is recorded, rather than filled and liquidated in the
     same bar with both legs charged.
+
+    `collateral_rate` is earned on the cash NOT posted as margin, when it
+    is positive, over the calendar days to each bar on
+    `collateral_day_count` ("ACT/365F", the default and what this always
+    used, or "ACT/360"). Posted margin earns nothing here
+    (COLLATERAL_INTEREST_BASE); the futures tool echoes both on its result,
+    because the same rate on a different base is a different number. A NaN
+    or infinite rate is refused: it passed the `if collateral_rate` test as
+    true and turned every later equity figure into NaN.
     """
     m = _positive(multiplier, "multiplier")
     capital = _positive(initial_capital, "initial_capital")
@@ -105,6 +124,8 @@ def run_futures_simulation(
         )
     commission = _non_negative(commission_per_contract, "commission_per_contract")
     slippage = _non_negative(slippage_points, "slippage_points")
+    collateral_rate = require_annual_rate(collateral_rate, "collateral_rate")
+    basis = day_count_basis(collateral_day_count)
 
     price_series = _series(prices, "prices")
     if (price_series <= 0).any():
@@ -260,10 +281,11 @@ def run_futures_simulation(
 
         # 2. Interest on collateral. Paid on cash, which for a futures
         #    account is most of the balance -- unlike a cash equity book,
-        #    where the money is in the positions.
+        #    where the money is in the positions. Posted margin is not in
+        #    `cash` and earns nothing (COLLATERAL_INTEREST_BASE).
         if i > 0 and collateral_rate and cash > 0:
             days = day_counts[i - 1]
-            interest = cash * collateral_rate * days / 365.0
+            interest = cash * collateral_rate * days / basis
             cash += interest
             total_interest += interest
 

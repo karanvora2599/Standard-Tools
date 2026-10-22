@@ -87,8 +87,9 @@ struct LifetimeCounts {
  * or `filled` in event order and stops the clock, and one of an unstarted
  * order is explained by the snapshot (once) or counted as left-censored.
  *
- * The durations are integers so the caller can turn them into seconds the
- * way pandas' Timedelta.total_seconds() does. A difference outside int64
+ * The durations are integers so the caller can turn them into seconds as
+ * whole seconds plus the exact fraction, from the integer itself, with no
+ * dependence on any library's conversion. A difference outside int64
  * sets `overflowed` and stops, where pandas raises; the caller then runs
  * the Python loop, which raises as it always did.
  */

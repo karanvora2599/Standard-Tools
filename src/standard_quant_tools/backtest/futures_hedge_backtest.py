@@ -36,6 +36,11 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools.backtest.costs import (
+    DEFAULT_DAY_COUNT,
+    day_count_basis,
+    require_annual_rate,
+)
 from standard_quant_tools.backtest.futures_engine import run_futures_simulation
 from standard_quant_tools.delta_one.hedging import futures_hedge, hedge_effectiveness
 from standard_quant_tools.error import ValidationError
@@ -91,6 +96,7 @@ def run_futures_hedge_backtest(
     rehedge: str = "monthly",
     drift_band: float = 0.05,
     allow_fractional: bool = False,
+    collateral_day_count: str = DEFAULT_DAY_COUNT,
 ) -> Dict[str, Any]:
     """
     Carry a cash book and its futures hedge together, bar by bar.
@@ -107,7 +113,19 @@ def run_futures_hedge_backtest(
     Returns the two P&L streams separately -- that is the entire point.
     A hedged book that made money because the hedge lost less than the cash
     leg is a different outcome from one where the hedge worked, and a single
-    net number cannot tell them apart.
+    net number cannot tell them apart. The hedge's P&L includes what it cost
+    to put on: the first bar's commission and slippage used to fall before
+    the first difference was taken, so a hedge put on once in a flat market
+    reported zero instead of minus its costs.
+
+    `collateral_rate` is NOT in the hedge's P&L. The futures account here
+    is funded with a synthetic twice-peak-notional of cash so margin never
+    binds (see below), and interest on that cash is the yield on money the
+    book never had: on a flat market, a perfect hedge and a $100m book at 5%
+    it reported +$9.94m of "hedge P&L". The account is simulated at a zero
+    rate, and the interest the margin ACTUALLY POSTED would have earned --
+    the collateral a hedge really ties up -- is reported on its own as
+    `collateral_interest_on_posted_margin`, on `collateral_day_count`.
 
     Raises:
         ValidationError: fewer than two bars, a rehedge rule that is not one
@@ -125,6 +143,8 @@ def run_futures_hedge_backtest(
     drift_band = require_finite_scalar(
         drift_band, "drift_band", "run_futures_hedge_backtest", minimum=0.0
     )
+    collateral_rate = require_annual_rate(collateral_rate, "collateral_rate")
+    basis = day_count_basis(collateral_day_count)
 
     book = pd.Series(dict(portfolio_values), dtype=float).sort_index()
     futures = pd.Series(dict(future_prices), dtype=float).sort_index()
@@ -242,18 +262,24 @@ def run_futures_hedge_backtest(
     # `total_variation_margin` and `n_margin_calls` are still reported, so a
     # hedge whose funding requirement is implausible is visible rather than
     # hidden by this choice.
+    #
+    # AT A ZERO COLLATERAL RATE, for the same reason: interest on this
+    # synthetic cash is not something the hedge earned. What the hedge's
+    # collateral earns is computed below, on the margin actually posted,
+    # and reported beside the P&L rather than inside it.
     peak_notional = float(
         (np.abs(np.asarray(held, dtype=float)) * futures.to_numpy() * multiplier).max()
     )
+    account_capital = max(peak_notional * 2.0, 1.0)
     hedge = run_futures_simulation(
         prices={k: float(v) for k, v in futures.items()},
         target_contracts=targets,
         multiplier=multiplier,
-        initial_capital=max(peak_notional * 2.0, 1.0),
+        initial_capital=account_capital,
         initial_margin=initial_margin,
         commission_per_contract=commission_per_contract,
         slippage_points=slippage_points,
-        collateral_rate=collateral_rate,
+        collateral_rate=0.0,
         contract_map=contract_map,
         allow_fractional=allow_fractional,
     )
@@ -261,8 +287,26 @@ def run_futures_hedge_backtest(
     # ── the two streams, kept apart ──────────────────────────────────────
     cash_pnl = book.diff().fillna(0.0)
     hedge_equity = pd.Series(hedge["equity_curve"], index=index, dtype=float)
-    hedge_pnl = hedge_equity.diff().fillna(0.0)
+    hedge_pnl = hedge_equity.diff()
+    # The first bar's change is from the account's opening capital: what
+    # putting the hedge on cost. `diff` dropped it.
+    hedge_pnl.iloc[0] = float(hedge_equity.iloc[0]) - account_capital
     combined_pnl = cash_pnl + hedge_pnl
+
+    # What the collateral the hedge actually ties up would earn: the margin
+    # posted at each bar's close, over the calendar days to the next, at
+    # collateral_rate on collateral_day_count. Not in hedge_pnl.
+    posted = pd.Series(hedge["margin_curve"], dtype=float).to_numpy()
+    stamps = pd.DatetimeIndex(pd.Series(hedge["margin_curve"]).index)
+    gaps = (
+        np.diff(stamps.to_numpy()).astype("timedelta64[D]").astype(np.float64)
+        if len(stamps) > 1
+        else np.zeros(0)
+    )
+    carried = np.where(posted[:-1] > 0.0, posted[:-1], 0.0)
+    collateral_interest = float(
+        (carried * collateral_rate * (gaps / basis)).sum() if gaps.size else 0.0
+    )
 
     unhedged_returns = (cash_pnl / book.shift(1)).fillna(0.0)
     hedged_returns = (combined_pnl / book.shift(1)).fillna(0.0)
@@ -301,6 +345,16 @@ def run_futures_hedge_backtest(
     )
 
     warnings: List[str] = list(hedge.get("warnings", []))
+    if collateral_rate != 0.0:
+        warnings.append(
+            f"collateral_rate={collateral_rate:g} is reported apart from the "
+            f"hedge's P&L: {collateral_interest:,.2f} on the margin actually "
+            f"posted ({collateral_day_count}), in "
+            "collateral_interest_on_posted_margin. It is the yield on "
+            "collateral the hedge ties up, not a product of the hedge, and "
+            "the account this simulation funds to keep margin from binding "
+            "earns nothing."
+        )
     n_rehedges = int(flags.sum())
     if n_rehedges <= 1:
         warnings.append(
@@ -358,5 +412,11 @@ def run_futures_hedge_backtest(
         "total_commission": float(hedge.get("total_commission", 0.0)),
         "total_slippage": float(hedge.get("total_slippage", 0.0)),
         "n_rolls": int(hedge.get("n_rolls", 0)),
+        # Interest the posted margin would earn, kept OUT of hedge_pnl and
+        # combined_pnl, with the base and day count it was accrued on.
+        "collateral_rate": collateral_rate,
+        "collateral_day_count": collateral_day_count,
+        "collateral_interest_base": "posted_initial_margin",
+        "collateral_interest_on_posted_margin": collateral_interest,
         "warnings": warnings,
     }

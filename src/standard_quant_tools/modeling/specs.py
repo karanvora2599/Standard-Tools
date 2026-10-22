@@ -2129,7 +2129,46 @@ class PortfolioSimSpec(BaseModel):
         "long/short model evaluated at 0.0 is being credited with free "
         "shorting.",
     )
-    margin_interest_rate: float = Field(0.0, ge=0.0)
+    margin_interest_rate: Optional[float] = Field(
+        None,
+        ge=0.0,
+        le=10.0,
+        description="Annualized rate on negative cash, as a decimal. None "
+        "(default) is risk_free_rate plus margin_spread_bps, so a model "
+        "evaluated with leverage pays for what it borrows.",
+    )
+    margin_spread_bps: float = Field(
+        0.0,
+        ge=0.0,
+        le=10_000.0,
+        description="Basis points over risk_free_rate charged on negative "
+        "cash when margin_interest_rate is not given.",
+    )
+    cash_rate: Optional[float] = Field(
+        None,
+        ge=-1.0,
+        le=1.0,
+        description="Annualized rate credited on positive cash, as a decimal. "
+        "None (default) is risk_free_rate, so a model whose book is partly "
+        "in cash is not scored as losing the rate on it.",
+    )
+    short_proceeds: Literal["net_cash", "segregated"] = Field(
+        "net_cash",
+        description="'net_cash' (default): short proceeds are cash and earn "
+        "cash_rate. 'segregated': the lender holds them and they earn only "
+        "short_rebate_rate.",
+    )
+    short_rebate_rate: Optional[float] = Field(
+        None,
+        ge=-1.0,
+        le=1.0,
+        description="Annualized rate on segregated short proceeds; None is 0.0.",
+    )
+    day_count: Literal["ACT/365F", "ACT/360"] = Field(
+        "ACT/365F",
+        description="Day count for every accrual and the per-bar risk-free "
+        "benchmark the Sharpe and Sortino subtract.",
+    )
     max_adv_participation: Optional[float] = Field(
         None,
         gt=0.0,
@@ -2140,6 +2179,25 @@ class PortfolioSimSpec(BaseModel):
     )
     risk_free_rate: float = Field(
         0.0,
-        description="Annualized rate used for the reported Sharpe/Sortino "
-        "only — it does not enter the simulation itself.",
+        description="Annualized rate the reported Sharpe/Sortino measure the "
+        "excess over, as cash accrued it bar by bar on day_count. It also "
+        "enters the simulation: it is the default cash_rate, and with "
+        "margin_spread_bps the default margin_interest_rate, so the cash the "
+        "Sharpe charges the rate on earns it.",
     )
+
+    @model_validator(mode="after")
+    def _rebate_needs_segregated_proceeds(self) -> "PortfolioSimSpec":
+        # Refused here rather than at evaluation, so `validate_model_spec`
+        # catches it: net-cash proceeds already earn cash_rate, and a rebate
+        # on top of that would pay the same balance twice.
+        if self.short_rebate_rate not in (None, 0.0) and (
+            self.short_proceeds != "segregated"
+        ):
+            raise ValueError(
+                f"short_rebate_rate={self.short_rebate_rate} needs "
+                "short_proceeds='segregated'; net-cash proceeds are cash and "
+                "earn cash_rate already. Set short_proceeds='segregated' or "
+                "drop the rebate."
+            )
+        return self

@@ -12,6 +12,7 @@ from typing import Any, Dict, Optional
 import pandas as pd
 
 from standard_quant_tools.analysis.cointegration import compute_spread, spread_zscore
+from standard_quant_tools.backtest.costs import DEFAULT_DAY_COUNT
 from standard_quant_tools.backtest.portfolio_engine import run_portfolio_simulation
 from standard_quant_tools.error import ValidationError
 
@@ -113,6 +114,12 @@ def run_pair_backtest(
     slippage_pct: float = 0.0005,
     gross_leverage: float = 1.0,
     fill_price: str = "next_open",
+    borrow_fee_bps: float = 0.0,
+    margin_interest_rate: float = 0.0,
+    cash_rate: float = 0.0,
+    short_proceeds: str = "net_cash",
+    short_rebate_rate: float = 0.0,
+    day_count: str = DEFAULT_DAY_COUNT,
 ) -> Dict[str, Any]:
     """
     Backtest a cointegrated pair as one synchronized two-leg trade: long the
@@ -161,6 +168,14 @@ def run_pair_backtest(
             apart over time.
         initial_capital, commission_pct, slippage_pct: passed through to
             run_portfolio_simulation.
+        borrow_fee_bps, margin_interest_rate, cash_rate, short_proceeds,
+            short_rebate_rate, day_count: the financing terms, passed through
+            to run_portfolio_simulation. A pair is always short one leg, so
+            borrow_fee_bps is what its short pays -- the simulation's own
+            warning when it is 0 named this argument while this function
+            could not take it. cash_rate is what the account's cash earns:
+            a dollar-neutral pair holds its equity plus the short leg's
+            proceeds in cash.
         fill_price: passed through to run_portfolio_simulation; defaults to
             "next_open" (not "close") because the z-score signal used to
             decide a transition is itself computed from that same bar's
@@ -253,6 +268,12 @@ def run_pair_backtest(
         max_gross_leverage=gross_leverage + 1e-6,
         max_position_pct=max_leg_weight + 1e-6,
         fill_price=fill_price,
+        borrow_fee_bps=borrow_fee_bps,
+        margin_interest_rate=margin_interest_rate,
+        cash_rate=cash_rate,
+        short_proceeds=short_proceeds,
+        short_rebate_rate=short_rebate_rate,
+        day_count=day_count,
     )
 
     n_round_trips = int(sum(1 for d in transition_dates if state.loc[d] == 0.0))

@@ -10,6 +10,7 @@ logger = logging.getLogger(__name__)
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools.backtest.financing import ratios_over_accrued_rate
 from standard_quant_tools.backtest.ranking import rank_rows, unrankable_note
 from standard_quant_tools.backtest.screens import (  # noqa: F401
     SPLIT_SCREEN_THRESHOLD,
@@ -397,6 +398,112 @@ def _turnover_and_cost(signals: pd.Series, cost_per_unit: float) -> Dict[str, fl
     }
 
 
+def _strategy_financing(
+    risk_free_rate: float,
+    cash_rate: Optional[float],
+    financing_rate: Optional[float],
+    borrow_fee_bps: float,
+    where: str,
+) -> Tuple[float, float, float]:
+    """The three financing terms, resolved: a rate left as None is the
+    risk-free rate, which is what idle cash earns and borrowed money costs
+    in the world the Sharpe is measured in."""
+    cash = risk_free_rate if cash_rate is None else cash_rate
+    debit = risk_free_rate if financing_rate is None else financing_rate
+    cash = require_finite_scalar(cash, "cash_rate", where)
+    debit = require_finite_scalar(debit, "financing_rate", where)
+    borrow = require_finite_scalar(borrow_fee_bps, "borrow_fee_bps", where, minimum=0.0)
+    return float(cash), float(debit), float(borrow)
+
+
+def _with_financing(
+    strategy_returns: pd.Series,
+    executed: pd.Series,
+    *,
+    two_leg: bool,
+    cash_rate: float,
+    financing_rate: float,
+    borrow_fee_bps: float,
+    periods_per_year: int,
+) -> pd.Series:
+    """
+    Each bar's return plus what its cash earned, its leverage cost and its
+    short paid, as fractions of the equity it started with.
+
+    The account holds `1 - held` of its equity in cash, where `held` is the
+    position at the previous close: positive cash earns cash_rate, negative
+    cash (a position above 1x) pays financing_rate, and a short pays the
+    borrow fee on its size, each per bar at rate / periods_per_year. Nothing
+    accrues on bar 0. backtest.cpp's financing_at is the same two selects in
+    the same order, so a bar's return is the same double on both paths.
+
+    With every rate zero this returns `strategy_returns` itself, untouched.
+    """
+    if cash_rate == 0.0 and financing_rate == 0.0 and borrow_fee_bps == 0.0:
+        return strategy_returns
+    cash_pp = cash_rate / periods_per_year
+    debit_pp = financing_rate / periods_per_year
+    borrow_pp = borrow_fee_bps / 10_000.0 / periods_per_year
+    held_series = executed.shift(1).fillna(0.0) if two_leg else executed
+    held = held_series.to_numpy(dtype=np.float64)
+    cash_frac = 1.0 - held
+    financing = np.where(
+        cash_frac > 0.0, cash_frac * cash_pp, cash_frac * debit_pp
+    ) - np.where(held < 0.0, -held * borrow_pp, 0.0)
+    if financing.size:
+        financing[0] = 0.0
+    return strategy_returns + financing
+
+
+def _ratios_after_bar_zero(
+    strategy_returns: pd.Series,
+    risk_free_rate: float,
+    periods_per_year: int,
+    financed: bool = False,
+) -> Tuple[float, float]:
+    """
+    Sharpe and Sortino over the risk-free rate as it accrued: rate /
+    periods_per_year on every bar after bar 0, and nothing on bar 0, the
+    account's opening, over which no time passed. Charging that bar a
+    period of the rate gave a book that only held cash -- and earned the
+    rate on every other bar -- a Sharpe of -sqrt(periods_per_year / n)
+    rather than zero. backtest.cpp sums the same excess.
+
+    At a zero rate this is `sharpe_ratio` and `sortino_ratio` themselves,
+    so a rate-free run reports exactly what it always did.
+
+    `financed`: whether cash earned or leverage paid a rate. A book that
+    then sits in cash earns exactly the rate on every bar after bar 0, so
+    its only dispersion is bar 0's placeholder; its Sharpe is NaN, as
+    backtest.cpp reports it, because there is no risk to divide by.
+    """
+    if risk_free_rate == 0.0:
+        sharpe, sortino = (
+            sharpe_ratio(strategy_returns, 0.0, periods_per_year),
+            sortino_ratio(strategy_returns, 0.0, periods_per_year),
+        )
+    else:
+        benchmark = pd.Series(
+            risk_free_rate / periods_per_year,
+            index=strategy_returns.index,
+            dtype=float,
+        )
+        if len(benchmark):
+            benchmark.iloc[0] = 0.0
+        sharpe, sortino = ratios_over_accrued_rate(
+            strategy_returns,
+            risk_free_rate,
+            periods_per_year=periods_per_year,
+            benchmark=benchmark,
+        )
+    after = strategy_returns.to_numpy(dtype=np.float64)[1:]
+    if financed and after.size >= 2:
+        scale = float(np.max(np.abs(after)))
+        if scale > 0.0 and float(after.max() - after.min()) <= scale * 1e-12:
+            sharpe = float("nan")
+    return sharpe, sortino
+
+
 def _undefined_ratios_as_nan(
     sortino: Any,
     calmar: Any,
@@ -457,6 +564,9 @@ def run_strategy(
     adjusted: Optional[bool] = None,
     periods_per_year: Optional[int] = None,
     interval: Optional[str] = None,
+    cash_rate: Optional[float] = None,
+    financing_rate: Optional[float] = None,
+    borrow_fee_bps: float = 0.0,
 ) -> Dict[str, Any]:
     """
     Vectorized backtesting engine with transaction costs.
@@ -483,12 +593,34 @@ def run_strategy(
         slippage_pct: Slippage per unit of position changed (default 0.05%).
         include_trade_log: If True, build and return per-trade log.
         risk_free_rate: Annualized risk-free rate as a decimal fraction
-            (0.045 = 4.5%), subtracted per period before Sharpe and
-            Sortino. Defaults to 0.0 — the value this engine always
-            assumed — so an unset rate cannot move a number that was
-            already reported. Passed identically to the native kernel and
-            the Python fallback: a machine with the C++ extension built
-            must not report a different ratio from one without it.
+            (0.045 = 4.5%), subtracted per period (rate / periods_per_year)
+            from every bar after the first before Sharpe and Sortino -- bar
+            0 is the account opening, over which nothing accrued. Defaults
+            to 0.0 — the value this engine always assumed — so an unset
+            rate cannot move a number that was already reported. It is also
+            the default for cash_rate and financing_rate below, so a rate
+            given here is EARNED by idle cash and PAID by leverage, as the
+            Sharpe that subtracts it assumes. Passed identically to the
+            native kernel and the Python fallback: a machine with the C++
+            extension built must not report a different ratio from one
+            without it.
+        cash_rate: Annual rate earned by the uninvested fraction of equity,
+            1 - signal, when positive -- a flat bar, a 0.5 position's other
+            half, and a short's proceeds on top of the equity. None (default)
+            is risk_free_rate. Accrued per bar at cash_rate /
+            periods_per_year, the convention the Sharpe uses.
+        financing_rate: Annual rate paid on exposure beyond 1x, signal - 1,
+            when positive. None (default) is risk_free_rate. With both at
+            the rate, a constant k-times signal returns k*R - (k - 1)*r on
+            every bar, so its Sharpe is the 1x Sharpe -- at 5% the same
+            signal read -0.062 at 3x against -0.258 at 1x, because the two
+            borrowed units were free.
+        borrow_fee_bps: Annual basis points paid on a short's size, |signal|
+            when the signal is negative. 0.0 (default) borrows for free.
+            All three accrue on the position held at the previous close
+            (the lagged signal under a close fill, the one before it under
+            a two-leg fill, whose change lands at the next open), from the
+            second bar on; with all three zero no bar changes.
         adjusted: whether the bars are split-adjusted, when the caller
             knows (a provider's DataSetMetadata.split_adjusted). Read from
             `price_data.attrs` when not passed (`split_adjusted`, else the
@@ -568,6 +700,9 @@ def run_strategy(
     # returned a NaN Sharpe beside a +inf Sortino. Any sign is allowed:
     # negative policy rates are real.
     require_finite_scalar(risk_free_rate, "risk_free_rate", "run_strategy")
+    cash_rate, financing_rate, borrow_fee_bps = _strategy_financing(
+        risk_free_rate, cash_rate, financing_rate, borrow_fee_bps, "run_strategy"
+    )
 
     # Columns each fill mode actually reads — checked up front so a missing
     # one is a clear error naming the mode that needs it, not a raw KeyError
@@ -775,6 +910,9 @@ def run_strategy(
             float(ppy),
             ref_arr,
             risk_free_rate,
+            cash_rate=cash_rate,
+            financing_rate=financing_rate,
+            borrow_fee_bps=borrow_fee_bps,
         )
         equity_curve = pd.Series(r["equity_curve"], index=idx)
 
@@ -923,6 +1061,18 @@ def run_strategy(
         # (only used for the trade log below; the return calc above is
         # already correct as-is).
         ref_prices = prices.shift(1)
+    # What the cash earned and the leverage and shorts cost, on the position
+    # held at the previous close -- backtest.cpp's financing_at, expression
+    # for expression, so the two paths agree bit for bit per bar.
+    strategy_returns = _with_financing(
+        strategy_returns,
+        executed,
+        two_leg=fill_price != "close",
+        cash_rate=cash_rate,
+        financing_rate=financing_rate,
+        borrow_fee_bps=borrow_fee_bps,
+        periods_per_year=ppy,
+    )
     # A BAR RETURN AT OR BELOW -100% WIPES THE ACCOUNT OUT; it does not
     # take equity negative. An unguarded cumprod does exactly that, and
     # then keeps compounding: a 1x short (signal -1.0, inside the
@@ -951,8 +1101,12 @@ def run_strategy(
 
     total_ret = cumulative_return(equity_curve)
     annual_vol = annualized_volatility(strategy_returns, ppy)
-    sr = sharpe_ratio(strategy_returns, risk_free_rate, ppy)
-    srt = sortino_ratio(strategy_returns, risk_free_rate, ppy)
+    sr, srt = _ratios_after_bar_zero(
+        strategy_returns,
+        risk_free_rate,
+        ppy,
+        financed=bool(cash_rate or financing_rate or borrow_fee_bps),
+    )
     mdd = max_drawdown(equity_curve)
     cal = calmar_ratio(equity_curve, ppy)
     final_eq = (
@@ -1017,6 +1171,7 @@ def _fused_crossover_metrics(
     ref_arr: Optional[np.ndarray],
     risk_free_rate: float = 0.0,
     periods_per_year: int = 252,
+    financing: Tuple[float, float, float] = (0.0, 0.0, 0.0),
 ) -> Optional[np.ndarray]:
     """
     Fused path for two-moving-average crossover grids.
@@ -1073,6 +1228,9 @@ def _fused_crossover_metrics(
         float(periods_per_year),
         ref_arr,
         risk_free_rate,
+        cash_rate=financing[0],
+        financing_rate=financing[1],
+        borrow_fee_bps=financing[2],
     )
 
 
@@ -1104,6 +1262,11 @@ def _run_grid_job(job: Dict[str, Any]) -> Dict[str, Any]:
         # Resolved once by backtest_grid for the whole grid, so every row is
         # annualized alike and the per-row run does not re-infer (or re-warn).
         periods_per_year=job.get("periods_per_year"),
+        # Resolved once by backtest_grid, so every row is financed alike and
+        # alike with the native batch path.
+        cash_rate=job.get("cash_rate", 0.0),
+        financing_rate=job.get("financing_rate", 0.0),
+        borrow_fee_bps=job.get("borrow_fee_bps", 0.0),
     )
     result.pop("equity_curve", None)
     result.pop("trade_log", None)
@@ -1144,6 +1307,7 @@ def _run_signal_fn_job(
     fill_price: str = "close",
     risk_free_rate: float = 0.0,
     periods_per_year: Optional[int] = None,
+    financing: Tuple[float, float, float] = (0.0, 0.0, 0.0),
 ) -> Dict[str, Any]:
     """
     Sequential-only counterpart to _run_grid_job for a user-supplied signal
@@ -1164,6 +1328,9 @@ def _run_signal_fn_job(
         fill_price=fill_price,
         risk_free_rate=risk_free_rate,
         periods_per_year=periods_per_year,
+        cash_rate=financing[0],
+        financing_rate=financing[1],
+        borrow_fee_bps=financing[2],
     )
     result.pop("equity_curve", None)
     result.pop("trade_log", None)
@@ -1271,6 +1438,9 @@ def backtest_grid(
     risk_free_rate: float = 0.0,
     periods_per_year: Optional[int] = None,
     interval: Optional[str] = None,
+    cash_rate: Optional[float] = None,
+    financing_rate: Optional[float] = None,
+    borrow_fee_bps: float = 0.0,
 ) -> pd.DataFrame:
     """
     Run a backtest across every parameter combination in param_grid in parallel.
@@ -1328,6 +1498,11 @@ def backtest_grid(
                         run_strategy resolves them (explicit, then the
                         interval, then the bar spacing, then 252 with a
                         warning), and applied to every path.
+        cash_rate, financing_rate, borrow_fee_bps: what idle cash earns and
+                        leverage and shorts cost -- see run_strategy. The
+                        two rates default to risk_free_rate, and every path
+                        (fused, batch and Python) is financed alike, so a
+                        grid row is the single run with the same arguments.
 
     Returns:
         pd.DataFrame with one row per distinct parameter combination, ranked
@@ -1376,6 +1551,9 @@ def backtest_grid(
                 f"{name} must be non-negative and finite, got {value!r}"
             )
     require_finite_scalar(risk_free_rate, "risk_free_rate", "backtest_grid")
+    financing = _strategy_financing(
+        risk_free_rate, cash_rate, financing_rate, borrow_fee_bps, "backtest_grid"
+    )
     # Before either path, and before the bars are read for anything: the
     # native path used to backtest a reversed frame (signals computed on the
     # reversed series) and a duplicated bar without a word, where run_strategy
@@ -1479,6 +1657,7 @@ def backtest_grid(
                     grid_ref_arr,
                     risk_free_rate,
                     ppy,
+                    financing,
                 )
 
             if metrics_arr is None:
@@ -1522,6 +1701,9 @@ def backtest_grid(
                     float(ppy),
                     grid_ref_arr,
                     risk_free_rate,
+                    cash_rate=financing[0],
+                    financing_rate=financing[1],
+                    borrow_fee_bps=financing[2],
                 )
             metrics_df = pd.DataFrame(metrics_arr, columns=_BATCH_METRIC_COLUMNS)
             metrics_df["num_trades"] = metrics_df["num_trades"].astype(int)
@@ -1623,6 +1805,7 @@ def backtest_grid(
                 fill_price=fill_price,
                 risk_free_rate=risk_free_rate,
                 periods_per_year=ppy,
+                financing=financing,
             )
             for combo in combos
         ]
@@ -1638,6 +1821,9 @@ def backtest_grid(
                 "fill_price": fill_price,
                 "risk_free_rate": risk_free_rate,
                 "periods_per_year": ppy,
+                "cash_rate": financing[0],
+                "financing_rate": financing[1],
+                "borrow_fee_bps": financing[2],
             }
             for combo in combos
         ]

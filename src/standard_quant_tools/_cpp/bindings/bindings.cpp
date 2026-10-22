@@ -248,6 +248,22 @@ static void require_backtest_scalars(
     require_finite(risk_free_rate, "risk_free_rate", fn);
 }
 
+// run_strategy's financing terms. Either sign for the two rates (a negative
+// policy rate is real) but finite; the borrow fee is a cost and so >= 0.
+static sqt::StrategyFinancing strategy_financing(
+    double cash_rate, double financing_rate, double borrow_fee_bps,
+    const char* fn)
+{
+    require_finite(cash_rate, "cash_rate", fn);
+    require_finite(financing_rate, "financing_rate", fn);
+    require_non_negative(borrow_fee_bps, "borrow_fee_bps", fn);
+    sqt::StrategyFinancing f;
+    f.cash_rate      = cash_rate;
+    f.financing_rate = financing_rate;
+    f.borrow_fee_bps = borrow_fee_bps;
+    return f;
+}
+
 // The same lesson for the portfolio account, which shipped with fifteen
 // scalars and no call at all. Measured on that build: slippage_pct=-0.5 tripled
 // the final equity, a NaN max_gross_leverage silently switched the limit off
@@ -276,6 +292,20 @@ static void require_portfolio_scalars(const sqt::PortfolioCosts& c, const char* 
     // 0 is the kernel's "no cap" (Python sends 0.0 for None); a negative,
     // NaN or infinite cap used to switch the cap off just as silently.
     require_non_negative(c.max_adv_participation, "max_adv_participation", fn);
+    // Either sign -- a negative policy rate charges deposits -- but finite,
+    // and a decimal fraction: the Python engine refuses |rate| > 1 by name.
+    require_finite(c.cash_rate, "cash_rate", fn);
+    require_finite(c.short_rebate_rate, "short_rebate_rate", fn);
+    if (!(std::abs(c.cash_rate) <= 1.0))
+        throw std::invalid_argument(std::string(fn) +
+            ": cash_rate must be a decimal fraction at most 1 in magnitude");
+    if (!(std::abs(c.short_rebate_rate) <= 1.0))
+        throw std::invalid_argument(std::string(fn) +
+            ": short_rebate_rate must be a decimal fraction at most 1 in magnitude");
+    if (c.day_basis != 365.0 && c.day_basis != 360.0)
+        throw std::invalid_argument(std::string(fn) +
+            ": day_basis must be 365 (ACT/365F) or 360 (ACT/360), got " +
+            std::to_string(c.day_basis));
 }
 
 static void require_simulation_scalars(
@@ -552,7 +582,8 @@ PYBIND11_MODULE(_sqt_core, m) {
            double periods_per_year,
            std::optional<py::array_t<double, py::array::c_style | py::array::forcecast>>
                ref_prices,
-           double risk_free_rate)
+           double risk_free_rate,
+           double cash_rate, double financing_rate, double borrow_fee_bps)
         -> py::dict {
             require_1d(prices, "prices");
             require_1d(signals, "signals");
@@ -560,6 +591,8 @@ PYBIND11_MODULE(_sqt_core, m) {
                 throw std::invalid_argument("prices and signals must have equal length");
             require_backtest_scalars(initial_capital, commission_pct, slippage_pct,
                                      periods_per_year, risk_free_rate, "run_strategy");
+            const sqt::StrategyFinancing fin = strategy_financing(
+                cash_rate, financing_rate, borrow_fee_bps, "run_strategy");
             const double* prices_ptr  = prices.data();
             const double* signals_ptr = signals.data();
             const auto    n           = prices.size();
@@ -580,7 +613,7 @@ PYBIND11_MODULE(_sqt_core, m) {
                 r = sqt::run_strategy(
                     prices_ptr, signals_ptr, n,
                     initial_capital, commission_pct, slippage_pct, periods_per_year,
-                    ref_ptr, risk_free_rate);
+                    ref_ptr, risk_free_rate, fin);
             }
 
             py::array_t<double> eq(static_cast<py::ssize_t>(r.equity_curve.size()));
@@ -622,6 +655,13 @@ PYBIND11_MODULE(_sqt_core, m) {
         // metrics/risk_metrics.py. Defaults to 0.0 -- the value this
         // kernel always assumed -- so no existing result moves.
         py::arg("risk_free_rate") = 0.0,
+        // What uninvested cash earns and leverage and shorts cost, each
+        // annual and accrued per bar at rate / periods_per_year (see
+        // sqt::StrategyFinancing). Zero by default, so no earlier call
+        // moves.
+        py::arg("cash_rate")      = 0.0,
+        py::arg("financing_rate") = 0.0,
+        py::arg("borrow_fee_bps") = 0.0,
         "Vectorized backtest kernel — identical algorithm to run_strategy in engine.py.\n\n"
         "One-bar lag execution: executed[i] = signals[i-1].\n"
         "Returns a dict with keys: final_equity, total_return, annualized_volatility,\n"
@@ -639,13 +679,16 @@ PYBIND11_MODULE(_sqt_core, m) {
            double periods_per_year,
            std::optional<py::array_t<double, py::array::c_style | py::array::forcecast>>
                ref_prices,
-           double risk_free_rate)
+           double risk_free_rate,
+           double cash_rate, double financing_rate, double borrow_fee_bps)
         -> py::array_t<double>
         {
             constexpr const char* fn = "batch_backtest_crossover";
             require_1d(prices, "prices");
             require_backtest_scalars(initial_capital, commission_pct, slippage_pct,
                                      periods_per_year, risk_free_rate, fn);
+            const sqt::StrategyFinancing fin = strategy_financing(
+                cash_rate, financing_rate, borrow_fee_bps, fn);
             auto ind_buf  = indicators.request();
             const IndexArray pair_idx = exact_int64(pair_idx_obj, "pair_idx", fn);
             if (ind_buf.ndim != 2)
@@ -689,7 +732,7 @@ PYBIND11_MODULE(_sqt_core, m) {
                 const auto results = sqt::batch_backtest_crossover(
                     p_ptr, i_ptr, n, n_unique, pair_ptr, num_combos,
                     initial_capital, commission_pct, slippage_pct,
-                    periods_per_year, ref_ptr, risk_free_rate);
+                    periods_per_year, ref_ptr, risk_free_rate, fin);
                 for (std::size_t i = 0; i < results.size(); ++i) {
                     const auto& r = results[i];
                     double* row = out_ptr + i * static_cast<std::size_t>(kNumCols);
@@ -721,6 +764,13 @@ PYBIND11_MODULE(_sqt_core, m) {
         // metrics/risk_metrics.py. Defaults to 0.0 -- the value this
         // kernel always assumed -- so no existing result moves.
         py::arg("risk_free_rate") = 0.0,
+        // What uninvested cash earns and leverage and shorts cost, each
+        // annual and accrued per bar at rate / periods_per_year (see
+        // sqt::StrategyFinancing). Zero by default, so no earlier call
+        // moves.
+        py::arg("cash_rate")      = 0.0,
+        py::arg("financing_rate") = 0.0,
+        py::arg("borrow_fee_bps") = 0.0,
         "Fused crossover grid: builds each combination's signal from two rows "
         "of `indicators` and backtests it immediately, so no (num_combos x "
         "n_bars) signal matrix is ever materialized. pair_idx is a "
@@ -739,13 +789,16 @@ PYBIND11_MODULE(_sqt_core, m) {
            double periods_per_year,
            std::optional<py::array_t<double, py::array::c_style | py::array::forcecast>>
                ref_prices,
-           double risk_free_rate)
+           double risk_free_rate,
+           double cash_rate, double financing_rate, double borrow_fee_bps)
         -> py::array_t<double>
         {
             require_1d(prices, "prices");
             require_backtest_scalars(initial_capital, commission_pct, slippage_pct,
                                      periods_per_year, risk_free_rate,
                                      "batch_run_strategy");
+            const sqt::StrategyFinancing fin = strategy_financing(
+                cash_rate, financing_rate, borrow_fee_bps, "batch_run_strategy");
             auto prices_buf  = prices.request();
             auto signals_buf = signals_2d.request();
 
@@ -785,7 +838,7 @@ PYBIND11_MODULE(_sqt_core, m) {
                 const auto results = sqt::batch_run_strategy(
                     p_ptr, s_ptr, n, num_tests,
                     initial_capital, commission_pct, slippage_pct, periods_per_year,
-                    ref_ptr, risk_free_rate);
+                    ref_ptr, risk_free_rate, fin);
                 for (std::size_t i = 0; i < results.size(); ++i) {
                     const auto& r = results[i];
                     double* row = out_ptr + i * static_cast<std::size_t>(kNumCols);
@@ -825,6 +878,13 @@ PYBIND11_MODULE(_sqt_core, m) {
         // metrics/risk_metrics.py. Defaults to 0.0 -- the value this
         // kernel always assumed -- so no existing result moves.
         py::arg("risk_free_rate") = 0.0,
+        // What uninvested cash earns and leverage and shorts cost, each
+        // annual and accrued per bar at rate / periods_per_year (see
+        // sqt::StrategyFinancing). Zero by default, so no earlier call
+        // moves.
+        py::arg("cash_rate")      = 0.0,
+        py::arg("financing_rate") = 0.0,
+        py::arg("borrow_fee_bps") = 0.0,
         "Batch vectorized backtest — run all parameter combinations in one C++ call.\n\n"
         "signals must be a 2-D float64 array of shape (num_tests, n_bars).\n"
         "Returns a 2-D float64 array of shape (num_tests, 11), one row per\n"
@@ -849,7 +909,9 @@ PYBIND11_MODULE(_sqt_core, m) {
            py::object dollar_volume, py::object volatility,
            int commission_model, double per_share_rate, double min_commission,
            bool use_impact_model, double impact_coefficient,
-           double max_adv_participation) -> py::dict
+           double max_adv_participation,
+           double cash_rate, double short_rebate_rate,
+           bool segregated_short_proceeds, double day_basis) -> py::dict
         {
             constexpr const char* fn = "run_portfolio_simulation";
             const IndexArray rebal_bars = exact_int64(rebal_bars_obj, "rebal_bars", fn);
@@ -898,6 +960,10 @@ PYBIND11_MODULE(_sqt_core, m) {
             costs.use_impact_model      = use_impact_model;
             costs.impact_coefficient    = impact_coefficient;
             costs.max_adv_participation = max_adv_participation;
+            costs.cash_rate                 = cash_rate;
+            costs.short_rebate_rate         = short_rebate_rate;
+            costs.segregated_short_proceeds = segregated_short_proceeds;
+            costs.day_basis                 = day_basis;
             require_portfolio_scalars(costs, fn);
 
             // The two arrays that are configuration rather than data, held
@@ -981,6 +1047,7 @@ PYBIND11_MODULE(_sqt_core, m) {
             double* reb_ptr = n_rebal ? reb.mutable_data() : nullptr;
 
             sqt::PortfolioSimError err;
+            sqt::PortfolioFinancing fin;
             std::size_t n_executed = 0;
             double peak_position = 0.0;
             {
@@ -989,7 +1056,7 @@ PYBIND11_MODULE(_sqt_core, m) {
                     c_ptr, x_ptr, w_ptr, r_ptr, g_ptr,
                     n_bars, n_tickers, n_rebal, costs,
                     eq_ptr, csh_ptr, grs_ptr, net_ptr, reb_ptr,
-                    &peak_position, &err, dv_ptr, vol_ptr);
+                    &peak_position, &err, dv_ptr, vol_ptr, &fin);
             }
 
             py::dict d;
@@ -1004,6 +1071,11 @@ PYBIND11_MODULE(_sqt_core, m) {
             d["bar"]         = static_cast<py::ssize_t>(err.bar);
             d["ticker"]      = err.ticker;
             d["value"]       = err.value;
+            d["interest_credited"]   = fin.interest_credited;
+            d["interest_charged"]    = fin.interest_charged;
+            d["borrow_charged"]      = fin.borrow_charged;
+            d["rebate_credited"]     = fin.rebate_credited;
+            d["debit_balance_years"] = fin.debit_balance_years;
             return d;
         },
         py::arg("close"),
@@ -1031,6 +1103,12 @@ PYBIND11_MODULE(_sqt_core, m) {
         py::arg("use_impact_model")     = false,
         py::arg("impact_coefficient")   = 1.0,
         py::arg("max_adv_participation") = 0.0,
+        // Financing, defaulted to "accrue nothing" so every earlier call
+        // keeps its exact numbers.
+        py::arg("cash_rate")                 = 0.0,
+        py::arg("short_rebate_rate")         = 0.0,
+        py::arg("segregated_short_proceeds") = false,
+        py::arg("day_basis")                 = 365.0,
         "Shared-cash multi-asset portfolio simulation.\n\n"
         "Runs every configuration backtest/portfolio_engine.py accepts: the\n"
         "pct and per_share commission models (commission_model 0 / 1), the\n"
@@ -1043,13 +1121,21 @@ PYBIND11_MODULE(_sqt_core, m) {
         "[0, n_bars); day_gaps is calendar days since the previous bar, for\n"
         "financing accrual, each finite and >= 0.\n\n"
         "fill: 0 = Close, 1 = next Open, 2 = (High+Low)/2.\n\n"
+        "Financing accrues from the second bar on, on the balance carried\n"
+        "in, over day_gaps[bar] / day_basis years (day_basis 365 = ACT/365F,\n"
+        "360 = ACT/360): positive free cash earns cash_rate, negative free\n"
+        "cash pays margin_interest_rate, shorts pay borrow_fee_bps, and with\n"
+        "segregated_short_proceeds the short book's value is excluded from\n"
+        "free cash and earns short_rebate_rate instead.\n\n"
         "Every scalar is held to the Python engine's bounds (capital,\n"
         "leverage and position limits finite and > 0; rates, fees and the\n"
         "impact coefficient finite and >= 0; fill and commission_model one of\n"
         "their codes) and a violation raises ValueError.\n\n"
         "Returns a dict with equity/cash/gross/net (n_bars each), rebalances\n"
         "(n_rebal, 3) of turnover_pct/gross_leverage_after/n_positions,\n"
-        "n_executed, and a status/bar/ticker/value quartet describing why the\n"
+        "n_executed, the financing totals (interest_credited,\n"
+        "interest_charged, borrow_charged, rebate_credited,\n"
+        "debit_balance_years), and a status/bar/ticker/value quartet describing why the\n"
         "simulation stopped -- status 0 means it ran to the end. Rebalance\n"
         "rows from n_executed on are NaN (a next_open trigger on the last bar\n"
         "never executes). After an early stop, bars the simulation never\n"
