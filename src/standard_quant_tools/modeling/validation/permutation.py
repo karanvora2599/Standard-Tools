@@ -102,9 +102,7 @@ def permutation_importance(
     names = list(X.columns if columns is None else columns)
     unknown = [name for name in names if name not in X.columns]
     if unknown:
-        raise ValidationError(
-            f"permutation_importance: no such column(s) {unknown}."
-        )
+        raise ValidationError(f"permutation_importance: no such column(s) {unknown}.")
 
     baseline = float(score(X))
     if not np.isfinite(baseline):
@@ -135,7 +133,9 @@ def permutation_importance(
     return {"baseline": baseline, "columns": out}
 
 
-def summarize_permutation(per_fold: Sequence[Dict[str, object]]) -> Dict[str, Dict[str, float]]:
+def summarize_permutation(
+    per_fold: Sequence[Dict[str, object]],
+) -> Dict[str, Dict[str, float]]:
     """
     One importance per feature across the folds that measured it.
 

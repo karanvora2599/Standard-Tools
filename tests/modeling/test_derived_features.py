@@ -41,9 +41,7 @@ def _frame():
 
 
 def _spec(name, op, inputs, lags=None):
-    return DerivedFeatureSpec(
-        name=name, op=op, inputs=inputs, lags=lags or []
-    )
+    return DerivedFeatureSpec(name=name, op=op, inputs=inputs, lags=lags or [])
 
 
 class TestTheOperators:
@@ -89,7 +87,9 @@ class TestItChains:
     def test_a_forward_reference_is_refused_by_the_spec(self):
         """Inputs may name only what already exists, which is what makes a
         cycle inexpressible rather than detected."""
-        with pytest.raises(PydanticValidationError, match="not available where it is defined"):
+        with pytest.raises(
+            PydanticValidationError, match="not available where it is defined"
+        ):
             DatasetSpec(
                 universe=["AAA"],
                 start="2022-01-01",
@@ -109,7 +109,9 @@ class TestItChains:
                 start="2022-01-01",
                 end="2023-01-01",
                 features=[FeatureSpec(id="technical.rsi")],
-                derived=[_spec("technical.rsi", "sum", ["technical.rsi", "technical.rsi"])],
+                derived=[
+                    _spec("technical.rsi", "sum", ["technical.rsi", "technical.rsi"])
+                ],
                 target=TargetSpec(horizon=5),
             )
 
@@ -147,9 +149,7 @@ class TestItCostsNoWarmUp:
 
 
 class TestThroughTheBuilder:
-    def test_the_panel_carries_it_and_the_dataset_names_it(
-        self, patched_multi_factory
-    ):
+    def test_the_panel_carries_it_and_the_dataset_names_it(self, patched_multi_factory):
         from standard_quant_tools.modeling.dataset.builder import build_dataset
 
         from .test_scoring import _dataset_spec
@@ -167,9 +167,7 @@ class TestThroughTheBuilder:
         assert "mom_per_rsi" in built["feature_ids"]
         assert "mom_per_rsi" in built["panel"].columns
 
-    def test_a_derived_column_can_be_lagged_like_any_other(
-        self, patched_multi_factory
-    ):
+    def test_a_derived_column_can_be_lagged_like_any_other(self, patched_multi_factory):
         """The derivation runs before the lag expansion, so the lag is of
         the DERIVED value and not of its inputs."""
         from standard_quant_tools.modeling.dataset.builder import build_dataset

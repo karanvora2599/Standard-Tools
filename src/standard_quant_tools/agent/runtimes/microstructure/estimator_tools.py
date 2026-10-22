@@ -88,7 +88,7 @@ def _referenced(ref: str, expect: str, who: str) -> pd.DataFrame:
         expect=expect,
         who=who,
         produced_by="fetch_tick_tape and fetch_quote_panel in the `data` runtime are "
-    "what produce these.",
+        "what produce these.",
     )
 
 

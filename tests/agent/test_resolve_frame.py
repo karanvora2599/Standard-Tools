@@ -32,11 +32,13 @@ def runs_dir(tmp_path, monkeypatch):
 
 def _tape(rows: int = 40) -> pd.DataFrame:
     stamps = pd.date_range("2024-03-05 14:30:00", periods=rows, freq="1s", tz="UTC")
-    return pd.DataFrame({
-        "timestamp": stamps,
-        "price": [100.0 + i * 0.01 for i in range(rows)],
-        "size": [100] * rows,
-    })
+    return pd.DataFrame(
+        {
+            "timestamp": stamps,
+            "price": [100.0 + i * 0.01 for i in range(rows)],
+            "size": [100] * rows,
+        }
+    )
 
 
 @pytest.fixture
@@ -85,7 +87,9 @@ class TestBothStoragesReachTheSameConsumer:
         """
         from standard_quant_tools.data.external import ExternalDataset
 
-        assert isinstance(handoff.resolve(external_ref, expect="tick_tape"), ExternalDataset)
+        assert isinstance(
+            handoff.resolve(external_ref, expect="tick_tape"), ExternalDataset
+        )
 
     def test_a_rebuilt_frame_says_where_it_came_from(self, external_ref):
         """A registration records the vendor on the sidecar, not in the bytes,
@@ -142,9 +146,9 @@ class TestRefusalsNameTheCause:
     @pytest.mark.parametrize(
         "ref",
         [
-            "sqt://tick_tape/gone/missing",   # a cleared runs directory
-            "not-a-reference",               # a malformed string
-            "sqt://tick_tape/r1/never",      # a name nothing published
+            "sqt://tick_tape/gone/missing",  # a cleared runs directory
+            "not-a-reference",  # a malformed string
+            "sqt://tick_tape/r1/never",  # a name nothing published
         ],
     )
     def test_every_bad_reference_names_what_produces_a_good_one(self, ref):
@@ -205,6 +209,8 @@ class TestRefusalsNameTheCause:
         """Why the test above takes the external route."""
         with pytest.raises(ValidationError):
             handoff.publish(_tape(0), kind="tick_tape", run_id="r1", name="void")
+
+
 class TestTheTimeIndexIsRestored:
     """The layer a column check could not see.
 
@@ -343,9 +349,7 @@ class TestTheTwoStoragesGiveTheSameAnswer:
             bids.append(round(mid - 0.01, 4))
             asks.append(round(mid + 0.01, 4))
             prices.append(round(mid + (0.01 if i % 2 else -0.01), 4))
-        trades = pd.DataFrame(
-            {"timestamp": stamps, "price": prices, "size": [100] * n}
-        )
+        trades = pd.DataFrame({"timestamp": stamps, "price": prices, "size": [100] * n})
         quotes = pd.DataFrame(
             {"timestamp": stamps, "bid_price": bids, "ask_price": asks}
         )
@@ -373,13 +377,15 @@ class TestTheTwoStoragesGiveTheSameAnswer:
             kyle = estimator_tools.estimate_kyle_lambda(
                 estimator_tools.KyleLambdaInput(trades_ref=tref, quotes_ref=qref)
             )
-            answers.append((
-                signed.method,
-                signed.n_trades,
-                signed.n_buys,
-                kyle.n_observations,
-                kyle.kyle_lambda,
-            ))
+            answers.append(
+                (
+                    signed.method,
+                    signed.n_trades,
+                    signed.n_buys,
+                    kyle.n_observations,
+                    kyle.kyle_lambda,
+                )
+            )
         return answers
 
     def test_a_registered_tape_and_a_published_one_agree_exactly(self, tmp_path):

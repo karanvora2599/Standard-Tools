@@ -1,5 +1,19 @@
 # Changelog
 
+## The source passes its formatter again, and names no particular downstream application
+
+- **Lint passes.** The lint job had failed on `main` for three commits:
+  32 files were not as black 26.5.1 writes them and seven had imports
+  isort 9 sorts differently. Both have been run across `src`, `tests` and
+  `scripts`; nothing changed beyond layout and import order. The suite
+  passes with the extension required (16,601 passed on Python 3.12; the
+  one load-dependent kernel timing test, run while the machine was busy,
+  passes alone).
+- **No downstream application is named.** Two CHANGELOG lines, three
+  comments or docstrings and two test docstrings named one particular
+  application that consumes the library; they now describe the role: a
+  downstream bridge, a promotion gate, any caller.
+
 ## A decision record names the vendor it read, not the cache layer that answered
 
 - **`source` is the vendor and `tier` is the layer, and they were one field.**
@@ -94,7 +108,7 @@
   at `describe_reference`, `read_reference` and `list_artifacts`; one door, so
   the next tool to take a path does not rediscover it.
 - **An unpriced window is judged by density, and all four prices are
-  checked.** Two rules ported from Carbon's modeling bridge, which is retired
+  checked.** Two rules ported from a downstream modeling bridge, retired
   now that the library's own provider serves bars. `drop_unusable_closes`
   dropped any number of holes and refused only a window with no Close at all,
   so a feed that half-failed came back as a short clean series with a warning
@@ -1719,7 +1733,7 @@
 - **The refusal's structure is unchanged.** The same
   `pydantic.ValidationError`, title and errors in the same order, each
   error's `type` and `loc` pydantic's own — pinned for all 238 tools. Only
-  those two messages change. MCP and Carbon forward the text as it is. An
+  those two messages change. MCP clients forward the text as it is. An
   accepted call costs 0.07 µs more per construction (0.99 → 1.06 µs); a
   refusal 0.01–0.07 ms before, 0.01–0.39 ms after, the top of the range
   being the dispatch-table scan for an id.

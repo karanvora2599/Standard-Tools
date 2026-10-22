@@ -31,9 +31,7 @@ def returns() -> list:
 
 def _interval(values, statistic):
     return it.get_bootstrap_interval(
-        it.BootstrapInput(
-            values=values, statistic=statistic, n_bootstrap=300, seed=3
-        )
+        it.BootstrapInput(values=values, statistic=statistic, n_bootstrap=300, seed=3)
     )
 
 
@@ -51,9 +49,7 @@ class TestTheLibrarysSpellingIsAccepted:
         assert (aliased.lower, aliased.upper) == (canon.lower, canon.upper)
 
     @pytest.mark.parametrize("alias", ["sharpe_ratio", "sortino_ratio"])
-    def test_the_aliases_are_exactly_the_names_the_other_tool_answers_with(
-        self, alias
-    ):
+    def test_the_aliases_are_exactly_the_names_the_other_tool_answers_with(self, alias):
         """The reason these two and not others.
 
         If `calculate_series_metrics` ever stops using one of these names, the
@@ -123,8 +119,17 @@ class TestTheTwoVocabulariesAreAccountedFor:
         spellings is a new split and should fail here.
         """
         here = {
-            "mean", "median", "std", "sharpe", "sortino", "skew", "kurtosis",
-            "max_drawdown", "win_rate", "var_95", "cvar_95",
+            "mean",
+            "median",
+            "std",
+            "sharpe",
+            "sortino",
+            "skew",
+            "kurtosis",
+            "max_drawdown",
+            "win_rate",
+            "var_95",
+            "cvar_95",
         }
         aliased = set(it._STATISTIC_ALIASES)
         explained = set(it._STATISTIC_NEAR_MISSES)
@@ -142,7 +147,16 @@ class TestTheTwoVocabulariesAreAccountedFor:
 
     def test_no_alias_points_at_a_name_that_is_not_here(self):
         here = {
-            "mean", "median", "std", "sharpe", "sortino", "skew", "kurtosis",
-            "max_drawdown", "win_rate", "var_95", "cvar_95",
+            "mean",
+            "median",
+            "std",
+            "sharpe",
+            "sortino",
+            "skew",
+            "kurtosis",
+            "max_drawdown",
+            "win_rate",
+            "var_95",
+            "cvar_95",
         }
         assert set(it._STATISTIC_ALIASES.values()) <= here

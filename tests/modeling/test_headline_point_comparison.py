@@ -8,8 +8,8 @@ no standard error, no p-value. An AUC of 0.5000001 "beat its null" exactly
 as 0.75 did.
 
 THAT True BECAME LOAD-BEARING, which is why this is a fix and not a note:
-Carbon's promotion gate refuses `staging`/`production` on
-`beats_null=False` and allows on True, so the weakest possible evidence
+a promotion gate that refuses `staging`/`production` on
+`beats_null=False` allows on True, so the weakest possible evidence
 opened the strongest door. On this install's own registry,
 mdl_f7a88c30e0ca reports auc=0.5049 with beats_null=True while its accuracy
 is 0.4929 against a majority-class baseline of 0.6167 — worse than always
@@ -79,9 +79,7 @@ class TestItRefusesToInventOne:
 
 
 class TestThroughARun:
-    def test_a_classification_run_carries_a_p_value_now(
-        self, patched_multi_factory
-    ):
+    def test_a_classification_run_carries_a_p_value_now(self, patched_multi_factory):
         """It carried a bare True before, with nothing behind it."""
         from standard_quant_tools.modeling.dataset.builder import build_dataset
         from standard_quant_tools.modeling.engine import run_experiment
@@ -157,11 +155,19 @@ class TestAVerdictAlreadyOnDisk:
         """The live case: mdl_f7a88c30e0ca, in production, reporting True."""
         from standard_quant_tools.modeling.agent.tools import headline_test
 
-        block = headline_test(self._manifest({
-            "metric": "auc", "null": 0.5, "value": 0.5048538266416421,
-            "n_dates": None, "t_stat": None, "p_value": None,
-            "beats_null": True,
-        }))
+        block = headline_test(
+            self._manifest(
+                {
+                    "metric": "auc",
+                    "null": 0.5,
+                    "value": 0.5048538266416421,
+                    "n_dates": None,
+                    "t_stat": None,
+                    "p_value": None,
+                    "beats_null": True,
+                }
+            )
+        )
         assert block["beats_null"] is None
         assert "verdict_withdrawn" in block
         # The measurement itself is untouched -- only the claim about it.
@@ -173,11 +179,19 @@ class TestAVerdictAlreadyOnDisk:
         gate's sentences for them are different."""
         from standard_quant_tools.modeling.agent.tools import headline_test
 
-        block = headline_test(self._manifest({
-            "metric": "auc", "null": 0.5, "value": 0.5048538266416421,
-            "n_dates": 420, "t_stat": 0.17144314636641872,
-            "p_value": 0.8638753310688991, "beats_null": False,
-        }))
+        block = headline_test(
+            self._manifest(
+                {
+                    "metric": "auc",
+                    "null": 0.5,
+                    "value": 0.5048538266416421,
+                    "n_dates": 420,
+                    "t_stat": 0.17144314636641872,
+                    "p_value": 0.8638753310688991,
+                    "beats_null": False,
+                }
+            )
+        )
         assert block["beats_null"] is False
         assert "verdict_withdrawn" not in block
 
@@ -185,11 +199,19 @@ class TestAVerdictAlreadyOnDisk:
         """A real pass is not collateral damage."""
         from standard_quant_tools.modeling.agent.tools import headline_test
 
-        block = headline_test(self._manifest({
-            "metric": "auc", "null": 0.5, "value": 0.72,
-            "n_dates": 420, "t_stat": 6.1, "p_value": 1e-9,
-            "beats_null": True,
-        }))
+        block = headline_test(
+            self._manifest(
+                {
+                    "metric": "auc",
+                    "null": 0.5,
+                    "value": 0.72,
+                    "n_dates": 420,
+                    "t_stat": 6.1,
+                    "p_value": 1e-9,
+                    "beats_null": True,
+                }
+            )
+        )
         assert block["beats_null"] is True
 
     def test_an_empty_block_is_still_empty(self):
@@ -205,8 +227,16 @@ class TestAVerdictAlreadyOnDisk:
         is a test and keeps its verdict."""
         from standard_quant_tools.modeling.agent.tools import headline_test
 
-        block = headline_test(self._manifest({
-            "metric": "cs_rank_ic_mean", "null": 0.0, "value": 0.03,
-            "t_stat": 2.4, "p_value": None, "beats_null": True,
-        }))
+        block = headline_test(
+            self._manifest(
+                {
+                    "metric": "cs_rank_ic_mean",
+                    "null": 0.0,
+                    "value": 0.03,
+                    "t_stat": 2.4,
+                    "p_value": None,
+                    "beats_null": True,
+                }
+            )
+        )
         assert block["beats_null"] is True

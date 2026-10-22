@@ -646,6 +646,8 @@ class TestPolygonAndBloombergFollowTheSameRule:
         kept = drop_unusable_closes(parsed, "AAPL", provider="bloomberg")
         assert list(kept["Close"]) == [1.5, 1.6]
         assert kept.attrs[MISSING_KEY] == ["2023-01-04"]
+
+
 def _window(n: int, *, missing=(), placeholder_tail: int = 0, column: str = "Close"):
     """A daily frame of `n` bars with chosen holes, for the hygiene rule.
 

@@ -185,9 +185,7 @@ class TestTheQuantileKnots:
         """The reason the grouping exists: np.interp needs a strictly
         increasing axis."""
         frame = pd.DataFrame({"f": [1.0] * 50 + [2.0] * 50})
-        state = QuantileTransform(n_quantiles=100).fit(
-            frame, FoldContext(dates=None)
-        )
+        state = QuantileTransform(n_quantiles=100).fit(frame, FoldContext(dates=None))
         knots = state["quantiles"]["f"]
         assert len(knots) == len(set(knots))
         assert knots == sorted(knots)

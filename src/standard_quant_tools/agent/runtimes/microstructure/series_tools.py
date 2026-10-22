@@ -58,7 +58,7 @@ def _frame(ref: str, expect: str, what: str) -> pd.DataFrame:
         expect=expect,
         who=what,
         produced_by="fetch_tick_tape and fetch_quote_panel in the `data` runtime are "
-    "what produce these.",
+        "what produce these.",
     )
 
 

@@ -282,9 +282,7 @@ def construct_weights_from_scores(
             # half exposed, and the gross number alone does not say so.
             if abs(diagnostics.get("realized_net", net) - net) > 1e-9:
                 net_misses += 1
-        weights = pd.DataFrame(
-            values, index=weights.index, columns=weights.columns
-        )
+        weights = pd.DataFrame(values, index=weights.index, columns=weights.columns)
         if shortfalls or net_misses:
             # The same silence the evaluator's diagnostics had to break: a
             # one-sided book cannot fill both halves, so the targets are

@@ -16,7 +16,7 @@ nothing in the refusal pointing there.
 WHAT IS KEPT. The exception is still a `pydantic.ValidationError` with the
 same title and the same errors in the same order, each with its `type` and
 `loc` unchanged, so anything that branches on them -- `validate_tool_call`'s
-missing/unknown/invalid classification, an MCP client, Carbon -- sees the
+missing/unknown/invalid classification, an MCP client, any caller -- sees the
 same structure. Only two messages change: an `extra_forbidden` error says
 what the tool takes, the nearest argument name, and which tools take the
 argument instead; a `missing` error that has a curated sibling names it. An

@@ -113,9 +113,7 @@ class TestItRefusesRatherThanGuess:
             GroupDemean(groups=GROUPS).transform(
                 pd.DataFrame({"mom": [1.0, 2.0]}),
                 {},
-                FoldContext(
-                    dates=np.array(["2024-01-01"] * 2, dtype="datetime64[ns]")
-                ),
+                FoldContext(dates=np.array(["2024-01-01"] * 2, dtype="datetime64[ns]")),
             )
 
     def test_without_a_map_it_will_not_invent_one(self):
@@ -195,10 +193,13 @@ class TestItIsRegistered:
 
     def test_it_is_stateless(self):
         assert GroupDemean.stateless is True
-        assert GroupDemean(groups=GROUPS).fit(
-            pd.DataFrame({"mom": [1.0]}),
-            FoldContext(
-                dates=np.array(["2024-01-01"], dtype="datetime64[ns]"),
-                entities=np.array(["BANK_A"]),
-            ),
-        ) == {}
+        assert (
+            GroupDemean(groups=GROUPS).fit(
+                pd.DataFrame({"mom": [1.0]}),
+                FoldContext(
+                    dates=np.array(["2024-01-01"], dtype="datetime64[ns]"),
+                    entities=np.array(["BANK_A"]),
+                ),
+            )
+            == {}
+        )

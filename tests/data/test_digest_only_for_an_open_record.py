@@ -54,7 +54,9 @@ from .test_databento_provider import (
 from .test_point_in_time_records import EPS, PAGE_ONE, PAGE_TWO
 
 
-def _reference_record(symbol, start_date, end_date, what, dataset, frame, tier=None) -> None:
+def _reference_record(
+    symbol, start_date, end_date, what, dataset, frame, tier=None
+) -> None:
     """Databento's `_record` without the question: the digest taken first,
     unconditionally, then handed to a report that may discard it."""
     audit.record_data_access(

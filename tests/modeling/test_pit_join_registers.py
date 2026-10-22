@@ -19,19 +19,17 @@ using a joined column as a feature. Everything else is a step towards it.
 import pytest
 
 from standard_quant_tools.modeling.agent.models import (
+    BuildModelDatasetInput,
+    InspectDatasetInput,
     JoinPointInTimeInput,
     RunModelExperimentInput,
 )
 from standard_quant_tools.modeling.agent.tools import (
+    build_model_dataset,
     inspect_dataset,
     join_point_in_time,
     run_model_experiment,
 )
-from standard_quant_tools.modeling.agent.models import (
-    BuildModelDatasetInput,
-    InspectDatasetInput,
-)
-from standard_quant_tools.modeling.agent.tools import build_model_dataset
 
 from .test_scoring import _dataset_spec
 
@@ -117,14 +115,20 @@ class TestTheArtifactIsContentAddressed:
         """
         first = join_point_in_time(
             JoinPointInTimeInput(
-                dataset_id=dataset_id, records=RECORDS, entity_scoped=True,
-                fields=["eps"], prefix="a.",
+                dataset_id=dataset_id,
+                records=RECORDS,
+                entity_scoped=True,
+                fields=["eps"],
+                prefix="a.",
             )
         )
         second = join_point_in_time(
             JoinPointInTimeInput(
-                dataset_id=dataset_id, records=RECORDS, entity_scoped=True,
-                fields=["eps"], prefix="b.",
+                dataset_id=dataset_id,
+                records=RECORDS,
+                entity_scoped=True,
+                fields=["eps"],
+                prefix="b.",
             )
         )
         assert first.joined_uri != second.joined_uri
@@ -138,8 +142,11 @@ class TestTheArtifactIsContentAddressed:
     def test_the_same_join_twice_is_the_same_artifact(self, dataset_id):
         """The digest is in the name, so identical bytes rewrite in place."""
         kwargs = dict(
-            dataset_id=dataset_id, records=RECORDS, entity_scoped=True,
-            fields=["eps"], prefix="same.",
+            dataset_id=dataset_id,
+            records=RECORDS,
+            entity_scoped=True,
+            fields=["eps"],
+            prefix="same.",
         )
         first = join_point_in_time(JoinPointInTimeInput(**kwargs))
         second = join_point_in_time(JoinPointInTimeInput(**kwargs))
@@ -162,8 +169,11 @@ class TestAPanelWithNoLabel:
         monkeypatch.setattr(tools, "_load_dataset_panel", unlabelled)
         result = join_point_in_time(
             JoinPointInTimeInput(
-                dataset_id=dataset_id, records=RECORDS, entity_scoped=True,
-                fields=["eps"], prefix="event.",
+                dataset_id=dataset_id,
+                records=RECORDS,
+                entity_scoped=True,
+                fields=["eps"],
+                prefix="event.",
             )
         )
         assert result.joined_dataset_id is None

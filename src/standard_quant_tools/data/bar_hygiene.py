@@ -97,7 +97,7 @@ _DATES_NAMED = 5
 #: them is conditioned on which names happened to have a clean pre-market
 #: print on one bad morning.
 #:
-#: The fraction alone is not enough, and a fraction is all Carbon's rule was:
+#: The fraction alone is not enough, and a fraction is all the ported rule was:
 #: one per cent of an 87-session daily window is under one bar, so the FIRST
 #: hole tripped it -- the same refusal-on-a-single-NaN the paragraph above
 #: records having been wrong, arriving by another route. It was measured on
@@ -199,10 +199,7 @@ def drop_unusable_closes(
     # edge can be all placeholder.
     n_missing = int(missing.sum())
     fraction = n_missing / len(frame)
-    if (
-        n_missing > MAX_MISSING_BARS_ALWAYS_DROPPED
-        and fraction > MAX_MISSING_FRACTION
-    ):
+    if n_missing > MAX_MISSING_BARS_ALWAYS_DROPPED and fraction > MAX_MISSING_FRACTION:
         raise NonRetryableAPIError(
             f"{provider} bars for {symbol} are {fraction:.1%} unpriced inside "
             f"the window ({n_missing} of {len(frame)}), past both the "

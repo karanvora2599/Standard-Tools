@@ -338,6 +338,8 @@ class TestDrawdownTable:
     def test_time_underwater_is_a_fraction_of_bars(self, equity_curve_uri):
         result = dispatch("get_drawdown_table", {"equity_curve_uri": equity_curve_uri})
         assert 0.0 < result["time_underwater_pct"] < 1.0
+
+
 class TestAReferenceIsNotAPath:
     r"""Two addressing systems, and the refusal for confusing them.
 

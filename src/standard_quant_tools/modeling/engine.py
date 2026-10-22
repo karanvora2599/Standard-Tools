@@ -66,10 +66,6 @@ from .validation.comparison import (
 )
 from .validation.conformal import conformal_radius, held_out_residuals
 from .validation.diagnostics import fold_feature_importance, summarize_importance
-from .validation.permutation import (
-    permutation_importance,
-    summarize_permutation,
-)
 from .validation.distributional import distributional_metrics, quantile_column
 from .validation.metrics import (
     aggregate_cross_sectional_ic,
@@ -81,6 +77,10 @@ from .validation.metrics import (
     positive_class_proba,
     regression_metrics,
     summarize_cross_sectional_ic,
+)
+from .validation.permutation import (
+    permutation_importance,
+    summarize_permutation,
 )
 from .validation.ranking import (
     fold_ic_series,
@@ -632,7 +632,7 @@ def _headline_report(
         # A POINT COMPARISON IS NOT A TEST. This read `value > null`, so an
         # AUC of 0.5000001 "beat its null" exactly as 0.75 did, with no
         # sample size and no p-value behind the True. That True is now
-        # load-bearing -- Carbon's promotion gate opens on it -- so the
+        # load-bearing -- a promotion gate can open on it -- so the
         # weakest possible evidence opened the strongest door.
         where = "out of sample" if scope == "out-of-sample" else f"on the {scope} rows"
         what = (

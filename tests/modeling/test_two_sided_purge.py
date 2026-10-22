@@ -137,9 +137,7 @@ def test_block_label_end_falls_back_to_the_last_date(panel):
     )
     # And a block with no rows at all in the panel.
     empty = np.array([], dtype="datetime64[ns]")
-    assert (
-        block_label_end(empty, empty, row_dates[20], row_dates[39]) == row_dates[39]
-    )
+    assert block_label_end(empty, empty, row_dates[20], row_dates[39]) == row_dates[39]
 
 
 def test_a_row_whose_label_never_resolves_is_not_purged(panel):
@@ -153,7 +151,5 @@ def test_a_row_whose_label_never_resolves_is_not_purged(panel):
     ends[10] = np.datetime64("NaT")
     train_mask = np.zeros(N_DATES, dtype=bool)
     train_mask[:20] = True
-    mask = label_overlap_mask(
-        train_mask, row_dates, ends, row_dates[20], row_dates[39]
-    )
+    mask = label_overlap_mask(train_mask, row_dates, ends, row_dates[20], row_dates[39])
     assert not mask[10]

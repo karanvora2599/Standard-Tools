@@ -37,7 +37,9 @@ NAMES = [f"N{i}" for i in range(10)]
 def churning_scores():
     """Signs that flip often, so an undamped book churns."""
     rng = np.random.default_rng(0)
-    return pd.DataFrame(rng.normal(size=(len(DATES), len(NAMES))), index=DATES, columns=NAMES)
+    return pd.DataFrame(
+        rng.normal(size=(len(DATES), len(NAMES))), index=DATES, columns=NAMES
+    )
 
 
 def _weights(scores, cap=None):
@@ -65,9 +67,7 @@ class TestTheCapHolds:
         plain, _ = _weights(churning_scores)
         assert _turnover(plain).max() > 0.5
 
-    def test_a_cap_above_the_natural_turnover_changes_nothing(
-        self, churning_scores
-    ):
+    def test_a_cap_above_the_natural_turnover_changes_nothing(self, churning_scores):
         plain, _ = _weights(churning_scores)
         loose, diagnostics = _weights(churning_scores, cap=100.0)
         assert np.allclose(plain.to_numpy(), loose.to_numpy(), equal_nan=True)
@@ -114,9 +114,7 @@ class TestTheCostIsReported:
         actually is, not what it was aiming at."""
         damped, diagnostics = _weights(churning_scores, cap=0.5)
         measured = float(np.abs(damped.to_numpy()).sum(axis=1).mean())
-        assert diagnostics["mean_realized_gross"] == pytest.approx(
-            measured, rel=1e-6
-        )
+        assert diagnostics["mean_realized_gross"] == pytest.approx(measured, rel=1e-6)
 
     def test_nothing_is_claimed_when_nothing_was_asked(self, churning_scores):
         """None is not zero: a run that damped nothing and a run that was

@@ -146,13 +146,14 @@ class TestUncertaintyScaledRefusesByTask:
 
     def test_a_classifier_cannot_be_given_intervals(self):
         """The other half of the closed loop."""
+        from pydantic import ValidationError as PydanticValidationError
+
         from standard_quant_tools.modeling.specs import (
             ConformalSpec,
             EstimatorSpec,
             ModelSpec,
             ValidationSpec,
         )
-        from pydantic import ValidationError as PydanticValidationError
 
         with pytest.raises(PydanticValidationError, match="task='regression' only"):
             ModelSpec(

@@ -221,9 +221,7 @@ def apply_pipeline(
         return apply_preprocessing(X, stats)
 
     entries = state["steps"]
-    span = _fused_span(
-        [(e["type"], e.get("params") or {}) for e in entries]
-    )
+    span = _fused_span([(e["type"], e.get("params") or {}) for e in entries])
     current = X
     index = 0
     while index < len(entries):

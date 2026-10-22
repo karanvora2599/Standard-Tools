@@ -45,7 +45,9 @@ def recording():
 def test_a_frame_access_records_the_vendor_and_the_layer(recording):
     import pandas as pd
 
-    frame = pd.DataFrame({"Close": [1.0, 2.0]}, index=pd.date_range("2024-01-02", periods=2))
+    frame = pd.DataFrame(
+        {"Close": [1.0, 2.0]}, index=pd.date_range("2024-01-02", periods=2)
+    )
     context.record_frame_access(
         "AAPL", "2024-01-02", "2024-01-03", "1d", "yfinance", frame, tier="disk_cache"
     )
@@ -106,7 +108,12 @@ class TestTheRevisionDetectorReadsItCorrectly:
     def test_two_vendors_are_two_sources_though_both_fetched_live(self, recording):
         for vendor, digest in (("yfinance", "h1"), ("bloomberg", "h2")):
             context.record_data_access(
-                "AAPL", "2024-01-02", "2024-01-31", "1d", vendor, digest,
+                "AAPL",
+                "2024-01-02",
+                "2024-01-31",
+                "1d",
+                vendor,
+                digest,
                 tier="live_fetch",
             )
         (sources,) = self._grouped(recording()).values()
@@ -124,8 +131,13 @@ class TestTheRevisionDetectorReadsItCorrectly:
         """
         for dataset, digest in (("EQUS.SUMMARY", "h1"), ("XNAS.ITCH", "h2")):
             context.record_data_access(
-                "AAPL", "2024-01-02", "2024-01-31", "1d",
-                f"databento:{dataset}", digest, tier="live_fetch",
+                "AAPL",
+                "2024-01-02",
+                "2024-01-31",
+                "1d",
+                f"databento:{dataset}",
+                digest,
+                tier="live_fetch",
             )
         (sources,) = self._grouped(recording()).values()
         assert sorted(sources) == ["databento:EQUS.SUMMARY", "databento:XNAS.ITCH"]
@@ -133,8 +145,13 @@ class TestTheRevisionDetectorReadsItCorrectly:
     def test_one_databento_feed_read_twice_is_one_source(self, recording):
         for tier, digest in (("live_fetch", "h1"), ("session_cache", "h2")):
             context.record_data_access(
-                "AAPL", "2024-01-02", "2024-01-31", "1d",
-                "databento:EQUS.SUMMARY", digest, tier=tier,
+                "AAPL",
+                "2024-01-02",
+                "2024-01-31",
+                "1d",
+                "databento:EQUS.SUMMARY",
+                digest,
+                tier=tier,
             )
         (sources,) = self._grouped(recording()).values()
         assert list(sources) == ["databento:EQUS.SUMMARY"]
@@ -163,9 +180,9 @@ class TestEveryProviderNamesItself:
 
         source = inspect.getsource(getattr(data_package, module))
         for layer in ("live_fetch", "session_cache", "disk_cache"):
-            assert f'source="{layer}"' not in source, (
-                f"{module} passes {layer!r} as its source; it is a tier"
-            )
+            assert (
+                f'source="{layer}"' not in source
+            ), f"{module} passes {layer!r} as its source; it is a tier"
         assert f'source="{vendor}"' in source
 
     def test_databento_does_not_glue_a_layer_onto_its_dataset(self):
@@ -175,5 +192,5 @@ class TestEveryProviderNamesItself:
 
         source = inspect.getsource(databento_provider)
         for layer in ("session_cache", "disk_cache"):
-            assert f'{{dataset}}:{layer}' not in source
-            assert f'{{first}}:{layer}' not in source
+            assert f"{{dataset}}:{layer}" not in source
+            assert f"{{first}}:{layer}" not in source

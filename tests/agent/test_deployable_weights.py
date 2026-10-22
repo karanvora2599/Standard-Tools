@@ -133,9 +133,7 @@ class TestTheTwoWaysToSayNeutral:
         """Two ways to set the same thing, where the second would silently
         undo the first."""
         with pytest.raises(ValidationError, match="two ways to set the same"):
-            _build(
-                scores_ref, "both", dollar_neutral=True, net_exposure=0.0
-            )
+            _build(scores_ref, "both", dollar_neutral=True, net_exposure=0.0)
 
     def test_dollar_neutral_still_works_and_says_what_it_costs(self, scores_ref):
         built = _build(scores_ref, "shifted", dollar_neutral=True)

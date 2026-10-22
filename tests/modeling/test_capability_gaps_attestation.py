@@ -490,9 +490,7 @@ class TestAHashCannotBeDisarmedByDeletingIt:
         assert report.missing == []
         assert report.predates_hashing is False
 
-    def test_the_pickle_is_not_deserialized_unverified(
-        self, patched_multi_factory
-    ):
+    def test_the_pickle_is_not_deserialized_unverified(self, patched_multi_factory):
         """The consequence that matters. `joblib.load` executes code from
         the file, so a skipped digest here is an arbitrary-code-execution
         path and not merely a wrong-answer one."""

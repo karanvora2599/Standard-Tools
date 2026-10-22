@@ -469,9 +469,11 @@ def plan_experiment(
     n_columns = len(feature_ids) if feature_ids else None
     max_fold_bytes = None
     if n_columns and panel is not None:
-        widest = max(
-            (int(f.n_train_rows or 0) + int(f.n_test_rows or 0)) for f in folds
-        ) if folds else 0
+        widest = (
+            max((int(f.n_train_rows or 0) + int(f.n_test_rows or 0)) for f in folds)
+            if folds
+            else 0
+        )
         max_fold_bytes = int(widest * n_columns * 8)
 
     return ExperimentPlan(

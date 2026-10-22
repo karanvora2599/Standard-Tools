@@ -40,9 +40,9 @@ def _dates(*counts):
 
 
 def _rank(values, dates):
-    return STEP.transform(
-        pd.DataFrame({"f": values}), {}, FoldContext(dates=dates)
-    )["f"]
+    return STEP.transform(pd.DataFrame({"f": values}), {}, FoldContext(dates=dates))[
+        "f"
+    ]
 
 
 class TestItAgreesWithTheLabel:
@@ -56,9 +56,7 @@ class TestItAgreesWithTheLabel:
 
         values = [10.0, 20.0, 30.0, 1000.0]
         dates = _dates(4)
-        panel = pd.DataFrame(
-            {"date": dates, "entity": list("ABCD"), "target": values}
-        )
+        panel = pd.DataFrame({"date": dates, "entity": list("ABCD"), "target": values})
         labelled = _stage_rank(panel, None, "target")["target"]
         assert list(_rank(values, dates)) == pytest.approx(list(labelled))
 
@@ -132,7 +130,9 @@ class TestTheEdges:
 
     def test_an_empty_frame_passes_through(self):
         empty = pd.DataFrame({"f": []})
-        out = STEP.transform(empty, {}, FoldContext(dates=np.array([], dtype="datetime64[ns]")))
+        out = STEP.transform(
+            empty, {}, FoldContext(dates=np.array([], dtype="datetime64[ns]"))
+        )
         assert out.empty
 
 
@@ -142,7 +142,10 @@ class TestItIsStatelessAndRegistered:
         contemporaneous information a live model also has — so nothing
         crosses the fold boundary."""
         assert CrossSectionalRank.stateless is True
-        assert STEP.fit(pd.DataFrame({"f": [1.0, 2.0]}), FoldContext(dates=_dates(2))) == {}
+        assert (
+            STEP.fit(pd.DataFrame({"f": [1.0, 2.0]}), FoldContext(dates=_dates(2)))
+            == {}
+        )
 
     def test_the_transform_does_not_depend_on_the_training_fold(self):
         """The property behind `stateless`, asserted rather than trusted:
@@ -150,7 +153,13 @@ class TestItIsStatelessAndRegistered:
         dates = _dates(3)
         values = [3.0, 1.0, 2.0]
         assert list(_rank(values, dates)) == pytest.approx(
-            list(STEP.transform(pd.DataFrame({"f": values}), {"anything": 1}, FoldContext(dates=dates))["f"])
+            list(
+                STEP.transform(
+                    pd.DataFrame({"f": values}),
+                    {"anything": 1},
+                    FoldContext(dates=dates),
+                )["f"]
+            )
         )
 
     def test_it_is_in_the_registry_with_no_parameters(self):

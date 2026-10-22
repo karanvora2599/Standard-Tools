@@ -50,9 +50,7 @@ def panel():
         },
         index=dates,
     )
-    scores = pd.DataFrame(
-        rng.normal(0, 1, (N_DATES, 4)), index=dates, columns=names
-    )
+    scores = pd.DataFrame(rng.normal(0, 1, (N_DATES, 4)), index=dates, columns=names)
     return scores, returns
 
 
@@ -71,7 +69,9 @@ class TestTheMethodStillRuns:
         """The composition, stated as an equality against the two
         functions run in order."""
         scores, returns = panel
-        weights, _ = transform_predictions_to_weights(scores, _spec("cross_sectional_zscore"), returns)
+        weights, _ = transform_predictions_to_weights(
+            scores, _spec("cross_sectional_zscore"), returns
+        )
         expected = zscore_normalized(
             vol_adjusted_scores(scores, returns, lookback=LOOKBACK),
             gross_leverage=1.0,
@@ -85,7 +85,9 @@ class TestTheMethodStillRuns:
 
     def test_rank_is_applied_to_the_adjusted_scores(self, panel):
         scores, returns = panel
-        weights, _ = transform_predictions_to_weights(scores, _spec("cross_sectional_rank"), returns)
+        weights, _ = transform_predictions_to_weights(
+            scores, _spec("cross_sectional_rank"), returns
+        )
         expected = rank_weighted(
             vol_adjusted_scores(scores, returns, lookback=LOOKBACK),
             gross_leverage=1.0,
@@ -95,14 +97,14 @@ class TestTheMethodStillRuns:
             expected.iloc[-1].sort_values().index
         )
 
-    def test_the_composed_book_differs_from_the_replacement_it_used_to_be(
-        self, panel
-    ):
+    def test_the_composed_book_differs_from_the_replacement_it_used_to_be(self, panel):
         """The regression has to be observable, or neither behaviour is
         pinned. `rank_weighted` discretises the scores and the uncentred
         divide-by-volatility does not, so the two cannot agree."""
         scores, returns = panel
-        weights, _ = transform_predictions_to_weights(scores, _spec("cross_sectional_rank"), returns)
+        weights, _ = transform_predictions_to_weights(
+            scores, _spec("cross_sectional_rank"), returns
+        )
         replaced = vol_scaled(
             scores, returns_df=returns, lookback=LOOKBACK, gross_leverage=1.0
         )
@@ -115,13 +117,9 @@ class TestTheMethodStillRuns:
         """The property the flag exists for, which composing must not
         cost. Scored alike, CALM takes the larger position."""
         scores, returns = panel
-        alike = pd.DataFrame(
-            1.0, index=scores.index, columns=scores.columns
-        )
+        alike = pd.DataFrame(1.0, index=scores.index, columns=scores.columns)
         for method in ("cross_sectional_zscore", "cross_sectional_rank"):
-            weights, _ = transform_predictions_to_weights(
-                alike, _spec(method), returns
-            )
+            weights, _ = transform_predictions_to_weights(alike, _spec(method), returns)
             last = weights.iloc[-1]
             assert last["CALM"] > last["WILD"], method
 
@@ -153,7 +151,9 @@ class TestTheDivisionOnItsOwn:
         gross = adjusted.abs().sum(axis=1)
         gross_safe = gross.where(gross > 1e-12, other=1.0)
         pd.testing.assert_frame_equal(
-            vol_scaled(scores, returns_df=returns, lookback=LOOKBACK, gross_leverage=1.0),
+            vol_scaled(
+                scores, returns_df=returns, lookback=LOOKBACK, gross_leverage=1.0
+            ),
             adjusted.div(gross_safe, axis=0) * 1.0,
         )
 
@@ -169,4 +169,6 @@ class TestTheDivisionOnItsOwn:
 
         scores, returns = panel
         with pytest.raises(ValidationError, match="WILD"):
-            vol_adjusted_scores(scores, returns.drop(columns=["WILD"]), lookback=LOOKBACK)
+            vol_adjusted_scores(
+                scores, returns.drop(columns=["WILD"]), lookback=LOOKBACK
+            )

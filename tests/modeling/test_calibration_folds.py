@@ -67,9 +67,7 @@ def _spec(folds=3, embargo=EMBARGO, calibration="isotonic"):
             calibration=calibration,
             calibration_folds=folds,
         ),
-        validation=ValidationSpec(
-            train_window=150, test_window=30, embargo=embargo
-        ),
+        validation=ValidationSpec(train_window=150, test_window=30, embargo=embargo),
         random_seed=0,
     )
 
@@ -115,8 +113,9 @@ class TestTheFoldsRespectTime:
             first = int(np.searchsorted(axis, held[0]))
             last = int(np.searchsorted(axis, held[-1]))
             banned = set(
-                axis[max(0, first - EMBARGO) : min(len(axis), last + EMBARGO + 1)]
-                .tolist()
+                axis[
+                    max(0, first - EMBARGO) : min(len(axis), last + EMBARGO + 1)
+                ].tolist()
             )
             assert not (set(row_dates[train_mask].tolist()) & banned)
 
@@ -129,11 +128,7 @@ class TestTheFoldsRespectTime:
         ):
             held = np.unique(row_dates[test_mask])
             reach = label_end[test_mask].max()
-            inside = (
-                train_mask
-                & (row_dates >= held[0])
-                & (row_dates <= reach)
-            )
+            inside = train_mask & (row_dates >= held[0]) & (row_dates <= reach)
             assert not inside.any(), (
                 f"{int(inside.sum())} training rows sit inside the block's "
                 "label span"

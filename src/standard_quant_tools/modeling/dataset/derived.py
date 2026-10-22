@@ -59,9 +59,7 @@ FITTED_OPERATORS = {
 }
 
 
-def apply_derived(
-    frame: pd.DataFrame, derived: Sequence[Any]
-) -> pd.DataFrame:
+def apply_derived(frame: pd.DataFrame, derived: Sequence[Any]) -> pd.DataFrame:
     """
     Add each derived column to one entity's feature frame, in order.
 
@@ -81,7 +79,11 @@ def apply_derived(
             reason = FITTED_OPERATORS.get(spec.op)
             raise ValidationError(
                 f"derived feature {spec.name!r}: unknown operator {spec.op!r}"
-                + (f" -- {reason}" if reason else f"; expected one of {sorted(OPERATORS)}")
+                + (
+                    f" -- {reason}"
+                    if reason
+                    else f"; expected one of {sorted(OPERATORS)}"
+                )
             )
         missing = [name for name in spec.inputs if name not in out.columns]
         if missing:

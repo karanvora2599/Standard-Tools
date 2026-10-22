@@ -113,12 +113,16 @@ class TestTheDrop:
             calls["n"] += 1
             return 0.0 if calls["n"] == 1 else 1.0
 
-        result = permutation_importance(score, X, dates, columns=["noise"], n_repeats=2, seed=0)
+        result = permutation_importance(
+            score, X, dates, columns=["noise"], n_repeats=2, seed=0
+        )
         assert result["columns"]["noise"]["mean_drop"] < 0
 
     def test_the_spread_across_repeats_comes_back(self):
         X, y, dates = self._panel()
-        score = lambda frame: -float(np.mean((frame["signal"].to_numpy() * 2.0 - y) ** 2))  # noqa: E731
+        score = lambda frame: -float(
+            np.mean((frame["signal"].to_numpy() * 2.0 - y) ** 2)
+        )  # noqa: E731
         result = permutation_importance(score, X, dates, n_repeats=4, seed=1)
         record = result["columns"]["signal"]
         assert record["n_repeats"] == 4
@@ -126,7 +130,9 @@ class TestTheDrop:
 
     def test_the_same_seed_gives_the_same_answer(self):
         X, y, dates = self._panel()
-        score = lambda frame: -float(np.mean((frame["signal"].to_numpy() * 2.0 - y) ** 2))  # noqa: E731
+        score = lambda frame: -float(
+            np.mean((frame["signal"].to_numpy() * 2.0 - y) ** 2)
+        )  # noqa: E731
         first = permutation_importance(score, X, dates, n_repeats=3, seed=7)
         second = permutation_importance(score, X, dates, n_repeats=3, seed=7)
         assert first == second
@@ -160,9 +166,7 @@ class TestItRefusesRatherThanGuess:
         """No drop from it would mean anything."""
         X = pd.DataFrame({"f": [1.0, 2.0]})
         with pytest.raises(ValidationError, match="baseline score is not finite"):
-            permutation_importance(
-                lambda f: float("nan"), X, _codes(2), n_repeats=1
-            )
+            permutation_importance(lambda f: float("nan"), X, _codes(2), n_repeats=1)
 
 
 class TestTheSummary:
@@ -170,14 +174,23 @@ class TestTheSummary:
         """A feature that mattered in one fold and not the others mattered
         in one regime; a mean alone hides that."""
         folds = [
-            {"baseline": 1.0, "columns": {"a": {"mean_drop": 1.0}, "b": {"mean_drop": 0.5}}},
-            {"baseline": 1.0, "columns": {"a": {"mean_drop": 0.0}, "b": {"mean_drop": 0.5}}},
+            {
+                "baseline": 1.0,
+                "columns": {"a": {"mean_drop": 1.0}, "b": {"mean_drop": 0.5}},
+            },
+            {
+                "baseline": 1.0,
+                "columns": {"a": {"mean_drop": 0.0}, "b": {"mean_drop": 0.5}},
+            },
         ]
         summary = summarize_permutation(folds)
         assert summary["a"]["mean_drop"] == pytest.approx(0.5)
         assert summary["b"]["mean_drop"] == pytest.approx(0.5)
         # Same mean, and only one of them is stable.
-        assert summary["a"]["std_drop_across_folds"] > summary["b"]["std_drop_across_folds"]
+        assert (
+            summary["a"]["std_drop_across_folds"]
+            > summary["b"]["std_drop_across_folds"]
+        )
 
     def test_a_feature_missing_from_a_fold_is_not_counted_against_it(self):
         folds = [
@@ -212,7 +225,7 @@ class TestItAnswersADifferentQuestionFromAblation:
         def score(frame):
             # A model that averages the two, which is what a fit on
             # perfectly collinear inputs tends to produce.
-            blended = (frame["a"].to_numpy() + frame["twin"].to_numpy())
+            blended = frame["a"].to_numpy() + frame["twin"].to_numpy()
             return -float(np.mean((blended - y) ** 2))
 
         result = permutation_importance(score, X, dates, n_repeats=3, seed=0)
@@ -242,9 +255,7 @@ class TestThroughTheEngine:
             assert record["n_folds"] >= 1
             assert "std_drop_across_folds" in record
 
-    def test_it_is_absent_rather_than_empty_when_not_asked(
-        self, patched_multi_factory
-    ):
+    def test_it_is_absent_rather_than_empty_when_not_asked(self, patched_multi_factory):
         """An absent measurement and a measured zero are different."""
         from standard_quant_tools.modeling.dataset.builder import build_dataset
         from standard_quant_tools.modeling.engine import run_experiment

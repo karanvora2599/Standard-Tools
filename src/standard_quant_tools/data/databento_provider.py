@@ -2120,7 +2120,12 @@ class DatabentoProvider(DataProvider):
             frame.attrs["dataset"] = dataset
             frame.attrs["provider"] = "databento"
             _record(
-                symbol, start_date, end_date, interval, dataset, frame,
+                symbol,
+                start_date,
+                end_date,
+                interval,
+                dataset,
+                frame,
                 tier="disk_cache",
             )
             served[dataset] = frame
@@ -2362,7 +2367,12 @@ class DatabentoProvider(DataProvider):
         # A stitched answer: the settled part from the store and the rest
         # fetched. One tier name, because it is one frame.
         _record(
-            symbol, start_date, end_date, interval, first, out,
+            symbol,
+            start_date,
+            end_date,
+            interval,
+            first,
+            out,
             tier="disk_cache+live",
         )
         if part_day < settle_through and self._store_settled_part(

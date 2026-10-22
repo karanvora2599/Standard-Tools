@@ -41,9 +41,7 @@ ROBUST = ("robust_scale", {})
 @pytest.fixture
 def frame():
     rng = np.random.default_rng(0)
-    return pd.DataFrame(
-        {name: rng.normal(size=400) for name in ("a", "b", "c")}
-    )
+    return pd.DataFrame({name: rng.normal(size=400) for name in ("a", "b", "c")})
 
 
 @pytest.fixture

@@ -9,7 +9,6 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-
 #: The artifacts `register_model` writes UNCONDITIONALLY, hashed together
 #: in one dict literal. A manifest that hashes anything at all must hash
 #: all three; one of them absent from a non-empty `content_hashes` is a key

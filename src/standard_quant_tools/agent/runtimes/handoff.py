@@ -809,9 +809,7 @@ def resolve_frame(
     return data
 
 
-def _external_frame(
-    handle: Any, *, ref: str, who: str, max_rows: int
-) -> pd.DataFrame:
+def _external_frame(handle: Any, *, ref: str, who: str, max_rows: int) -> pd.DataFrame:
     """Read a registered dataset into memory, bounded, or refuse by size."""
     rows = handle.rows
     if rows is not None and int(rows) > max_rows:

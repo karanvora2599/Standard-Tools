@@ -341,7 +341,7 @@ class TestTheBuildScreen:
         )
 
     def test_the_frames_stamp_answers_when_the_metadata_cannot(self, serve):
-        """Carbon's bridge can lose the metadata; frames that all say
+        """A caller's bridge can lose the metadata; frames that all say
         adjusted=False still settle the flag."""
         serve(_frames(), adjusted=None, attrs=False)
         built = build_dataset(_spec())
