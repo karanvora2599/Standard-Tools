@@ -1558,7 +1558,8 @@ class TestPositionSizer:
         )
         result = get_position_size(inp)
         assert result.recommended_sizing == "fixed_risk"
-        assert result.kelly_fraction is None
+        assert result.kelly_notional_fraction is None
+        assert result.kelly_risk_fraction is None
 
     def test_with_kelly_inputs_populated(self, patched_long):
         inp = PositionSizerInput(
@@ -1571,12 +1572,20 @@ class TestPositionSizer:
             avg_loss_pct=0.03,
         )
         result = get_position_size(inp)
-        assert result.kelly_fraction is not None
-        assert result.kelly_fraction >= 0.0
+        # f* = 0.55 / 0.03 - 0.45 / 0.05 = 9.333 times equity, and its
+        # risk fraction f* x L = 0.28 is the number this field used to hold.
+        assert result.kelly_notional_fraction == pytest.approx(28 / 3, abs=1e-6)
+        assert result.kelly_risk_fraction == pytest.approx(0.28, abs=1e-6)
         assert result.shares_half_kelly is not None
-        assert result.recommended_sizing in ("half_kelly", "fixed_risk")
+        assert result.recommended_sizing == "half_kelly"
+        # Half of 9.33x is above the default 1x cap, which binds and says so.
+        assert result.kelly_capped_by_max_leverage is True
+        assert any("caps the position" in w for w in result.warnings)
 
-    def test_negative_edge_falls_back_to_fixed_risk(self, patched_long):
+    def test_negative_edge_sizes_zero_shares_and_says_why(self, patched_long):
+        """It used to fall back to the fixed-risk position without a word,
+        recommending a trade its own statistics said loses money. See the
+        CHANGELOG entry of 2026-10-22."""
         inp = PositionSizerInput(
             symbol="AAPL",
             start_date=START,
@@ -1587,8 +1596,10 @@ class TestPositionSizer:
             avg_loss_pct=0.05,
         )
         result = get_position_size(inp)
-        assert result.kelly_fraction == 0.0
-        assert result.recommended_sizing == "fixed_risk"
+        assert result.kelly_notional_fraction == pytest.approx(-29.0)
+        assert result.recommended_sizing == "half_kelly"
+        assert result.recommended_shares == 0
+        assert any("give no edge" in w for w in result.warnings)
 
     def test_recommended_shares_is_int(self, patched_long):
         inp = PositionSizerInput(
@@ -2778,10 +2789,11 @@ class TestCapacityReport:
             start_date=START,
             end_date=END,
             target_weights={"AAPL": 0.0, "MSFT": 1.0},
+            account_size=1_000_000.0,
         )
         result = get_capacity_report(inp)
         assert result.per_ticker_max_account_size["AAPL"] is None
-        assert result.days_to_liquidate_at_capacity["AAPL"] == 0.0
+        assert result.days_to_liquidate["AAPL"] == 0.0
 
     def test_sector_exposure_included_by_default(self, patched_factory):
         inp = CapacityReportInput(
@@ -2826,6 +2838,104 @@ class TestCapacityReport:
         )
         assert result["tickers"] == ["AAPL", "MSFT"]
         assert "max_account_size" in result
+
+
+class TestDaysToLiquidateAreMeasuredAtTheCallersAccountSize:
+    """
+    Every bar trades 1,000,000 shares at $50, so a ticker's average dollar
+    volume is $50m. At max_participation 0.1 and weights 0.5 / 0.25 the
+    capacity is 0.1 x 50m / 0.5 = $10m, set by AAA.
+
+    The report used to give days to liquidate AT that capacity -- which is
+    one day for the binding name by construction (capacity is defined as one
+    day of max_participation) and less for the rest: AAA 1.0, BBB 0.5, at
+    any volume and any price. Since the CHANGELOG entry of 2026-10-22 the
+    days are measured at an account_size the caller names.
+    """
+
+    @pytest.fixture
+    def flat_market(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        from standard_quant_tools.data.factory import DataFactory
+
+        dates = pd.bdate_range("2022-01-03", periods=60)
+        frame = pd.DataFrame(
+            {
+                "Open": 50.0,
+                "High": 50.5,
+                "Low": 49.5,
+                "Close": 50.0,
+                "Volume": 1_000_000.0,
+            },
+            index=dates,
+        )
+        provider = MagicMock()
+        provider.get_ohlcv.return_value = frame
+        monkeypatch.setattr(DataFactory, "get_provider", lambda *a, **kw: provider)
+
+    def _report(self, **overrides):
+        args = dict(
+            tickers=["AAA", "BBB"],
+            start_date="2022-01-03",
+            end_date="2022-03-31",
+            target_weights={"AAA": 0.5, "BBB": 0.25},
+            max_participation=0.1,
+            include_sector_exposure=False,
+        )
+        args.update(overrides)
+        return get_capacity_report(CapacityReportInput(**args))
+
+    def test_the_days_at_an_account_size_are_the_arithmetic(self, flat_market):
+        """$100m: AAA holds $50m = 1,000,000 shares, and 10% of 1,000,000
+        a day is 10 days; BBB holds half that, 5 days."""
+        result = self._report(account_size=100_000_000.0)
+        assert result.max_account_size == pytest.approx(10_000_000.0)
+        assert result.account_size == 100_000_000.0
+        assert result.days_to_liquidate == {
+            "AAA": pytest.approx(10.0),
+            "BBB": pytest.approx(5.0),
+        }
+        assert any("above the capacity" in w for w in result.warnings)
+
+    def test_at_the_capacity_the_binding_name_takes_one_day(self, flat_market):
+        """The tautology the old field reported, now visible as what it is."""
+        result = self._report(account_size=10_000_000.0)
+        assert result.days_to_liquidate == {
+            "AAA": pytest.approx(1.0),
+            "BBB": pytest.approx(0.5),
+        }
+        assert not any("above the capacity" in w for w in result.warnings)
+
+    def test_no_account_size_reports_no_days(self, flat_market):
+        result = self._report()
+        assert result.days_to_liquidate is None
+        assert result.account_size is None
+        assert "days_to_liquidate_at_capacity" not in result.model_dump()
+
+    def test_a_ticker_that_never_traded_is_null_with_a_reason(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        from standard_quant_tools.data.factory import DataFactory
+
+        dates = pd.bdate_range("2022-01-03", periods=30)
+        traded = pd.DataFrame(
+            {"Open": 50.0, "High": 51.0, "Low": 49.0, "Close": 50.0, "Volume": 1e6},
+            index=dates,
+        )
+        silent = traded.assign(Volume=0.0)
+        provider = MagicMock()
+        provider.get_ohlcv.side_effect = lambda t, *a, **k: (
+            silent if t == "BBB" else traded
+        )
+        monkeypatch.setattr(DataFactory, "get_provider", lambda *a, **kw: provider)
+        result = self._report(account_size=1_000_000.0)
+        assert result.days_to_liquidate["BBB"] is None
+        assert any(
+            line.startswith("days_to_liquidate.BBB is null")
+            and "traded no volume" in line
+            for line in result.warnings
+        ), result.warnings
 
 
 class TestCapacityReportInputsAreBounded:

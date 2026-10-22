@@ -47,7 +47,6 @@ from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
-from standard_quant_tools._resampling import block_indices
 from standard_quant_tools._special import (
     norm_cdf,
     norm_ppf,
@@ -277,7 +276,10 @@ def probability_of_backtest_overfitting(
     period into S chunks. For every way of splitting those chunks into equal
     halves, fit on one half and evaluate on the other: pick the strategy that
     ranked best in-sample, then look up where it ranked out-of-sample. PBO is
-    the fraction of splits where that winner landed in the BOTTOM half.
+    the fraction of splits where that winner landed in the BOTTOM half, a
+    split that puts it exactly on the median counting as half -- with an odd
+    number of configurations the middle rank is neither half, and leaving it
+    out made a no-skill grid of three read 0.33 rather than 0.5.
 
     WHAT THE NUMBER MEANS, and it is not "the probability the strategy is
     bad". It is the probability that your SELECTION PROCEDURE has no skill --
@@ -323,6 +325,14 @@ def probability_of_backtest_overfitting(
 
     logits: List[float] = []
     ranks_out: List[float] = []
+    # Each split's vote that the winner landed in the bottom half: 1 below
+    # the median, 0 above it, and 1/2 exactly ON it. With an odd number of
+    # configurations the middle rank is exactly 0.5, and counting it as
+    # "not below" put the no-skill PBO at (N - 1) / 2N -- 0.33 for three
+    # configurations, which reads as skill there is none of (see the
+    # CHANGELOG entry of 2026-10-22). With an even number no rank is 0.5
+    # and nothing changes.
+    below_median: List[float] = []
     for combination in itertools.combinations(range(n_splits), half):
         train_rows = np.concatenate([chunks[c] for c in combination])
         test_rows = np.concatenate(
@@ -341,8 +351,15 @@ def probability_of_backtest_overfitting(
         if finite.sum() < 2 or not finite[best]:
             continue
         # Relative rank of the in-sample winner, out of sample.
-        rank = float((out_sample[finite] < out_sample[best]).sum()) / (finite.sum() - 1)
+        beaten = int((out_sample[finite] < out_sample[best]).sum())
+        others = int(finite.sum()) - 1
+        rank = float(beaten) / others
         ranks_out.append(rank)
+        # Compared in integers: 2 x beaten against the others, so a rank of
+        # exactly one half is found without a float equality.
+        below_median.append(
+            1.0 if 2 * beaten < others else 0.5 if 2 * beaten == others else 0.0
+        )
         # Guard the logit at the endpoints, where the winner ranked first or
         # last out of sample and the log would diverge.
         clipped = min(max(rank, 1e-6), 1 - 1e-6)
@@ -355,7 +372,7 @@ def probability_of_backtest_overfitting(
             "configuration or too little data per chunk."
         )
 
-    pbo = float(np.mean([r < 0.5 for r in ranks_out]))
+    pbo = float(np.mean(below_median))
     correlations = frame.corr().to_numpy()
     off_diagonal = correlations[~np.eye(len(correlations), dtype=bool)]
     median_correlation = float(np.nanmedian(off_diagonal))
@@ -569,25 +586,177 @@ def _purged_paths(
 
 # ── is this better than the alternatives ────────────────────────────────
 
+#: The hypotheses `reality_check` tests. Each is a different question, and
+#: the caller names the one they mean.
+REALITY_CHECK_QUESTIONS: Tuple[str, ...] = (
+    "best_candidate_vs_benchmark",
+    "beats_every_alternative",
+)
+
+#: How `best_candidate_vs_benchmark` builds its statistic.
+REALITY_CHECK_METHODS: Tuple[str, ...] = ("white", "hansen_spa")
+
+
+def _rc_frame(values: Any, name: str) -> pd.DataFrame:
+    frame = pd.DataFrame(values).astype(float)
+    if frame.empty or frame.shape[1] < 1:
+        raise ValidationError(
+            f"reality_check: {name} has no series. It is a frame (or a "
+            "mapping) of return series, one column each."
+        )
+    return frame
+
+
+def _rc_series(values: Any, name: str) -> pd.Series:
+    if isinstance(values, pd.DataFrame):
+        if values.shape[1] != 1:
+            raise ValidationError(
+                f"reality_check: {name} has {values.shape[1]} columns and is "
+                "ONE series. Several series to compare against are "
+                "alternative_returns under question='beats_every_alternative'."
+            )
+        values = values.iloc[:, 0]
+    return pd.Series(values).astype(float)
+
+
+def _rc_refuse_unread(question: str, **given: Any) -> None:
+    unread = [name for name, value in given.items() if value is not None]
+    if unread:
+        raise ValidationError(
+            f"reality_check: {', '.join(unread)} is not read under "
+            f"question={question!r}. best_candidate_vs_benchmark reads "
+            "candidate_returns and an optional benchmark_returns; "
+            "beats_every_alternative reads strategy_returns and "
+            "alternative_returns. Pass the inputs of the question you mean."
+        )
+
+
+def _rc_aligned(columns: Dict[str, Any]) -> pd.DataFrame:
+    aligned = pd.concat(columns, axis=1).dropna()
+    if len(aligned) < 30:
+        raise ValidationError(
+            f"reality_check: only {len(aligned)} observations remain where "
+            "every series has a value, and the test needs at least 30."
+        )
+    return aligned
+
+
+def _rc_bootstrap_means(
+    differences: np.ndarray,
+    n_bootstrap: int,
+    block_size: int,
+    seed: int,
+    *,
+    studentise: bool = False,
+) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+    """
+    Each bootstrap draw's mean of every column, minus the sample mean --
+    the null distribution of each mean outperformance, centred at zero.
+    One set of block resamples serves every column, so the columns keep
+    their correlation inside a draw.
+
+    With `studentise`, also each draw's own standard error of that mean,
+    from the spread of the whole blocks it drew (`_rc_standard_errors` on
+    the sample). A studentised statistic divided by ONE standard error
+    estimated from the sample ignores that the estimate is itself noisy,
+    and with a few dozen blocks the noise is large: dividing every draw by
+    the sample's error rejected a no-edge best-of-ten 9% of the time at
+    500 days, against 6% when each draw carries its own.
+
+    THE RESAMPLE IS `block_indices`'s, summed rather than gathered. Each
+    draw takes the same block starts from the same generator calls -- ceil(n
+    / block_size) blocks, the last cut to n rows -- but adds up precomputed
+    block sums instead of gathering n rows per column, which is what makes
+    20,000 draws over a few hundred candidates affordable. The tests hold it
+    to the row-by-row resample.
+    """
+    n, k = differences.shape
+    centred = differences - differences.mean(axis=0)
+    running = np.vstack([np.zeros((1, k)), np.cumsum(centred, axis=0)])
+    n_starts = n - block_size + 1
+    # Sum of rows s .. s+block_size-1, and of the cut last block's rows.
+    block_sums = running[block_size:] - running[:-block_size]
+    n_blocks = -(-n // block_size)
+    tail = n - (n_blocks - 1) * block_size
+    tail_sums = running[tail : tail + n_starts] - running[:n_starts]
+    whole = n // block_size
+
+    rng = np.random.default_rng(int(seed))
+    draws = np.empty((n_bootstrap, k))
+    errors = np.empty((n_bootstrap, k)) if studentise else None
+    chunk = max(1, 4_000_000 // (n_blocks * k))
+    for low in range(0, n_bootstrap, chunk):
+        high = min(low + chunk, n_bootstrap)
+        starts = np.stack(
+            [rng.integers(0, n_starts, n_blocks) for _ in range(high - low)]
+        )
+        totals = block_sums[starts[:, :-1]].sum(axis=1) + tail_sums[starts[:, -1]]
+        draws[low:high] = totals / n
+        if errors is not None:
+            means = block_sums[starts[:, :whole]] / block_size
+            errors[low:high] = np.sqrt(means.var(axis=1, ddof=1) * block_size / n)
+    return draws, errors
+
+
+def _rc_standard_errors(differences: np.ndarray, block_size: int) -> np.ndarray:
+    """
+    The standard error of each column's mean from the variance of its
+    overlapping block means, var(block mean) x block_size / n -- the
+    estimator the block bootstrap itself implies, so the sample and every
+    draw are studentised the same way.
+    """
+    n = differences.shape[0]
+    running = np.vstack([np.zeros((1, differences.shape[1])), differences.cumsum(0)])
+    block_means = (running[block_size:] - running[:-block_size]) / block_size
+    return np.sqrt(block_means.var(axis=0, ddof=1) * block_size / n)
+
 
 def reality_check(
-    strategy_returns: pd.Series,
-    benchmark_returns: pd.DataFrame,
-    *,
+    *positional: Any,
+    question: str = "best_candidate_vs_benchmark",
+    candidate_returns: Optional[pd.DataFrame] = None,
+    benchmark_returns: Optional[pd.Series] = None,
+    strategy_returns: Optional[pd.Series] = None,
+    alternative_returns: Optional[pd.DataFrame] = None,
+    method: str = "white",
     n_bootstrap: int = 1000,
     block_size: int = 20,
     seed: int = 0,
 ) -> Dict[str, Any]:
     """
-    White's Reality Check: is the best strategy better than the best of the
-    alternatives, or just the luckiest?
+    Is a result better than luck after a search -- under the hypothesis the
+    caller names in `question`.
 
-    THE QUESTION IT ANSWERS is subtly different from a t-test on the
-    strategy's returns. A t-test asks "is this strategy's mean return
-    positive". The Reality Check asks "is this strategy's outperformance
-    larger than the largest outperformance you would expect from the best of
-    this many candidates under the null that none of them has any edge". The
-    second question is the one that matters after a search.
+    TWO QUESTIONS, AND THEY ARE NOT THE SAME TEST.
+
+    `best_candidate_vs_benchmark` (the default) is White's (2000) Reality
+    Check. `candidate_returns` holds every candidate the search looked at,
+    the one it kept among them; `benchmark_returns` is the one series they
+    must beat (omitted, zero). The statistic is the LARGEST mean
+    outperformance over the benchmark, max_k mean(c_k - b), and the block
+    bootstrap gives its distribution under the null that no candidate beats
+    the benchmark -- so the p-value pays for having picked the best of K.
+    `method='hansen_spa'` is Hansen's (2005) test for superior predictive
+    ability instead: each candidate's outperformance is divided by its
+    bootstrap standard error, and a candidate far below the benchmark is
+    not allowed to widen the null. White's form is conservative when the
+    search included poor candidates; Hansen's is not.
+
+    `beats_every_alternative` asks whether ONE strategy beats EVERY one of
+    `alternative_returns`. It is an intersection-union test (Berger 1982):
+    each pair gets a one-sided block-bootstrap test of mean(s - a_k) > 0,
+    the statistic is the smallest margin, min_k mean(s - a_k), and the
+    p-value is the LARGEST pairwise p-value -- the strategy beats them all
+    only if it beats the hardest one, and needs no multiplicity correction
+    for that.
+
+    WHAT THIS USED TO TEST. Until the CHANGELOG entry of 2026-10-22 the
+    statistic was max_k mean(s - a_k) over the alternatives: the strategy's
+    margin over its WEAKEST alternative, bootstrapped as if it were the
+    best. Its docstring said "better than the best of the alternatives". A
+    strategy earning 5% a year against alternatives at -20% and +30% came
+    back significant at p = 0.018 -- it beat the -20% one. Neither question
+    above can say that.
 
     THE BOOTSTRAP IS BLOCKED, and it has to be. Resampling individual days
     destroys the serial correlation that drives drawdowns and volatility
@@ -602,68 +771,273 @@ def reality_check(
     throughout. A strategy whose edge genuinely existed until 2018 and
     vanished afterwards violates that, and the bootstrap will happily mix
     both regimes into one null.
-    """
-    strategy = _clean_returns(strategy_returns, "reality_check", minimum=30)
-    benchmarks = pd.DataFrame(benchmark_returns).astype(float)
-    if benchmarks.empty or benchmarks.shape[1] < 1:
-        raise ValidationError(
-            "reality_check: no benchmark columns. The test compares against "
-            "the alternatives you considered; with none, use a t-test."
-        )
-    aligned = pd.concat([strategy.rename("__strategy__"), benchmarks], axis=1).dropna()
-    if len(aligned) < 30:
-        raise ValidationError(
-            f"reality_check: only {len(aligned)} overlapping observations "
-            "after aligning the strategy with the benchmarks."
-        )
 
-    strategy_values = aligned["__strategy__"].to_numpy()
-    benchmark_values = aligned.drop(columns="__strategy__").to_numpy()
-    n = len(aligned)
-    block_size = max(1, min(int(block_size), n // 4))
+    Every input is keyword-only: the two questions read different series,
+    and a positional call written for the old statistic is refused rather
+    than read as one of them.
+    """
+    if positional:
+        raise ValidationError(
+            "reality_check takes its series by keyword, because the question "
+            "decides what they are: candidate_returns= (every candidate the "
+            "search considered) and an optional benchmark_returns= for "
+            "question='best_candidate_vs_benchmark', the default; or "
+            "strategy_returns= and alternative_returns= for "
+            "question='beats_every_alternative'. The positional "
+            "(strategy, alternatives) form tested the strategy against its "
+            "WEAKEST alternative and was withdrawn -- see the CHANGELOG entry "
+            "of 2026-10-22."
+        )
+    if question not in REALITY_CHECK_QUESTIONS:
+        raise ValidationError(
+            f"reality_check: question={question!r} is not one of "
+            f"{list(REALITY_CHECK_QUESTIONS)}."
+        )
+    if method not in REALITY_CHECK_METHODS:
+        raise ValidationError(
+            f"reality_check: method={method!r} is not one of "
+            f"{list(REALITY_CHECK_METHODS)}."
+        )
     n_bootstrap = max(100, int(n_bootstrap))
 
-    # Performance is excess mean return over each benchmark.
-    excess = strategy_values[:, None] - benchmark_values
-    observed = float(np.max(excess.mean(axis=0)) * TRADING_DAYS)
+    if question == "beats_every_alternative":
+        _rc_refuse_unread(
+            question,
+            candidate_returns=candidate_returns,
+            benchmark_returns=benchmark_returns,
+        )
+        if method != "white":
+            raise ValidationError(
+                f"reality_check: method={method!r} applies to "
+                "question='best_candidate_vs_benchmark'. Under "
+                "beats_every_alternative each pair is tested on its own, "
+                "with no maximum over candidates for Hansen's correction to "
+                "act on; leave method at 'white'."
+            )
+        if strategy_returns is None or alternative_returns is None:
+            raise ValidationError(
+                "reality_check: question='beats_every_alternative' needs "
+                "strategy_returns (the one strategy) and alternative_returns "
+                "(every alternative it must beat)."
+            )
+        return _beats_every_alternative(
+            _clean_returns(strategy_returns, "reality_check", minimum=30),
+            _rc_frame(alternative_returns, "alternative_returns"),
+            n_bootstrap,
+            block_size,
+            seed,
+        )
 
-    rng = np.random.default_rng(int(seed))
-    centred = excess - excess.mean(axis=0)
+    _rc_refuse_unread(
+        question,
+        strategy_returns=strategy_returns,
+        alternative_returns=alternative_returns,
+    )
+    if candidate_returns is None:
+        raise ValidationError(
+            "reality_check: question='best_candidate_vs_benchmark' needs "
+            "candidate_returns -- every candidate the search considered, the "
+            "one it kept among them. The comparison is against "
+            "benchmark_returns, or zero when that is omitted."
+        )
+    return _best_candidate_vs_benchmark(
+        _rc_frame(candidate_returns, "candidate_returns"),
+        (
+            None
+            if benchmark_returns is None
+            else _rc_series(benchmark_returns, "benchmark_returns")
+        ),
+        method,
+        n_bootstrap,
+        block_size,
+        seed,
+    )
 
-    maxima = np.empty(n_bootstrap)
-    for b in range(n_bootstrap):
-        rows = block_indices(n, block_size, rng)
-        maxima[b] = np.max(centred[rows].mean(axis=0))
-    p_value = float((maxima >= observed / TRADING_DAYS).mean())
+
+def _rc_common_warnings(block_size: int) -> List[str]:
+    return [
+        f"Block bootstrap with blocks of {block_size} days, which preserves "
+        "serial correlation. Resampling individual days would make the null "
+        "too narrow and the p-value too small -- volatility clustering and "
+        "drawdowns both live in the dependence structure.",
+        "Assumes the return process is STATIONARY across the sample. A "
+        "strategy whose edge genuinely existed and then vanished violates "
+        "that, and the bootstrap mixes both regimes into one null.",
+    ]
+
+
+def _best_candidate_vs_benchmark(
+    candidates: pd.DataFrame,
+    benchmark: Optional[pd.Series],
+    method: str,
+    n_bootstrap: int,
+    block_size: int,
+    seed: int,
+) -> Dict[str, Any]:
+    """White's Reality Check, or Hansen's SPA test, of the best candidate
+    against one benchmark."""
+    columns = {f"c{j}": candidates.iloc[:, j] for j in range(candidates.shape[1])}
+    if benchmark is not None:
+        columns["__benchmark__"] = benchmark
+    aligned = _rc_aligned(columns)
+    names = [str(name) for name in candidates.columns]
+    values = aligned[[f"c{j}" for j in range(len(names))]].to_numpy()
+    if benchmark is not None:
+        values = values - aligned["__benchmark__"].to_numpy()[:, None]
+    n, k = values.shape
+    block_size = max(1, min(int(block_size), n // 4))
+
+    means = values.mean(axis=0)
+    draws, draw_errors = _rc_bootstrap_means(
+        values, n_bootstrap, block_size, seed, studentise=method == "hansen_spa"
+    )
+    errors = _rc_standard_errors(values, block_size)
+    distinct = errors > 0
+    # Hansen's line between a candidate that may be on the null's boundary
+    # and one so far below the benchmark it cannot be: sqrt(2 ln ln n)
+    # standard errors.
+    far = -errors * math.sqrt(2.0 * math.log(math.log(n)))
+    warnings: List[str] = []
+
+    if method == "white":
+        best = int(np.argmax(means))
+        statistic = float(means[best])
+        null = draws.max(axis=1)
+        p_value = float((null >= statistic).mean())
+        statistic_units = TRADING_DAYS
+        far_below = int(np.sum(distinct & (means < far)))
+        if far_below:
+            warnings.append(
+                f"{far_below} of {k} candidates are far below the benchmark. "
+                "In White's form they still widen the null and make the test "
+                "conservative; method='hansen_spa' does not let them."
+            )
+    else:
+        assert draw_errors is not None
+        if not distinct.any():
+            raise ValidationError(
+                "reality_check: every candidate's outperformance has zero "
+                "variance -- each one IS the benchmark -- so Hansen's "
+                "studentised statistic is 0/0. Use method='white'."
+            )
+        # Hansen (2005): studentise, and recentre the null only for the
+        # candidates that are not far below the benchmark (the consistent
+        # p-value, SPA_c). A candidate with no variance is the benchmark
+        # itself and contributes zero.
+        t_values = np.divide(means, errors, out=np.zeros_like(means), where=distinct)
+        best = int(np.argmax(np.where(distinct, t_values, -np.inf)))
+        statistic = max(float(t_values[best]), 0.0)
+        recentre = np.where(means >= far, means, 0.0)
+        shifted = draws + means - recentre
+        studentised = np.divide(
+            shifted,
+            draw_errors,
+            out=np.zeros_like(shifted),
+            where=draw_errors > 0,
+        )
+        null = np.maximum(studentised.max(axis=1), 0.0)
+        p_value = float((null >= statistic).mean())
+        statistic_units = 1.0
+
+    if p_value > 0.10:
+        warnings.append(
+            f"p = {p_value:.3f}. The best of {k} candidate(s) outperforms the "
+            "benchmark by no more than the best of that many would under the "
+            "null that none of them beats it."
+        )
+    if benchmark is None:
+        warnings.append(
+            "No benchmark_returns: outperformance is measured against zero, "
+            "so this asks whether the best candidate's mean return is above "
+            "zero after the search."
+        )
+    if k == 1:
+        warnings.append(
+            "One candidate: this is a block-bootstrap test of its "
+            "outperformance alone. The correction for a search needs every "
+            "candidate the search looked at in candidate_returns."
+        )
+    warnings += _rc_common_warnings(block_size)
+
+    return {
+        "question": "best_candidate_vs_benchmark",
+        "method": method,
+        "n_observations": int(n),
+        "n_candidates": int(k),
+        "benchmark_given": benchmark is not None,
+        "best_candidate": names[best],
+        "n_bootstrap": n_bootstrap,
+        "block_size": block_size,
+        "observed_outperformance": float(means[best] * TRADING_DAYS),
+        "observed_statistic": float(statistic * statistic_units),
+        "p_value": p_value,
+        "significant_at_05": bool(p_value < 0.05),
+        "bootstrap_p95": float(np.percentile(null, 95) * statistic_units),
+        "warnings": warnings,
+    }
+
+
+def _beats_every_alternative(
+    strategy: pd.Series,
+    alternatives: pd.DataFrame,
+    n_bootstrap: int,
+    block_size: int,
+    seed: int,
+) -> Dict[str, Any]:
+    """The intersection-union test that one strategy beats every
+    alternative."""
+    columns: Dict[str, Any] = {"__strategy__": strategy}
+    columns.update(
+        {f"a{j}": alternatives.iloc[:, j] for j in range(alternatives.shape[1])}
+    )
+    aligned = _rc_aligned(columns)
+    names = [str(name) for name in alternatives.columns]
+    differences = (
+        aligned["__strategy__"].to_numpy()[:, None]
+        - aligned[[f"a{j}" for j in range(len(names))]].to_numpy()
+    )
+    n, k = differences.shape
+    block_size = max(1, min(int(block_size), n // 4))
+
+    margins = differences.mean(axis=0)
+    draws, _ = _rc_bootstrap_means(differences, n_bootstrap, block_size, seed)
+    # One-sided, per pair: how often a null centred at zero reaches the
+    # observed margin.
+    p_values = (draws >= margins).mean(axis=0)
+    binding = int(np.argmax(p_values))
+    p_value = float(p_values[binding])
+    tightest = int(np.argmin(margins))
 
     warnings: List[str] = []
     if p_value > 0.10:
         warnings.append(
-            f"p = {p_value:.3f}. This strategy's outperformance is within "
-            f"what the best of {benchmarks.shape[1]} candidates would show "
-            "under the null that none of them has an edge."
+            f"p = {p_value:.3f}. The strategy does not beat {names[binding]!r} "
+            f"(mean margin {margins[binding] * TRADING_DAYS:+.2%} a year) by "
+            "more than luck would produce, so it is not shown to beat every "
+            "alternative."
         )
-    warnings.append(
-        f"Block bootstrap with blocks of {block_size} days, which preserves "
-        "serial correlation. Resampling individual days would make the null "
-        "too narrow and the p-value too small -- volatility clustering and "
-        "drawdowns both live in the dependence structure."
-    )
-    warnings.append(
-        "Assumes the return process is STATIONARY across the sample. A "
-        "strategy whose edge genuinely existed and then vanished violates "
-        "that, and the bootstrap mixes both regimes into one null."
-    )
+    warnings += _rc_common_warnings(block_size)
 
     return {
+        "question": "beats_every_alternative",
+        "method": "white",
         "n_observations": int(n),
-        "n_benchmarks": int(benchmarks.shape[1]),
+        "n_alternatives": int(k),
+        "binding_alternative": names[binding],
+        "per_alternative": {
+            name: {
+                "outperformance": float(margins[j] * TRADING_DAYS),
+                "p_value": float(p_values[j]),
+            }
+            for j, name in enumerate(names)
+        },
         "n_bootstrap": n_bootstrap,
         "block_size": block_size,
-        "observed_outperformance": observed,
+        "observed_outperformance": float(margins[tightest] * TRADING_DAYS),
+        "observed_statistic": float(margins[tightest] * TRADING_DAYS),
         "p_value": p_value,
         "significant_at_05": bool(p_value < 0.05),
-        "bootstrap_p95": float(np.percentile(maxima, 95) * TRADING_DAYS),
+        "bootstrap_p95": float(np.percentile(draws[:, binding], 95) * TRADING_DAYS),
         "warnings": warnings,
     }
 

@@ -598,12 +598,12 @@ class TestItIsNotATerminalNode:
 
     It returned parquet PATHS only. `handoff.register` refuses to adopt a
     path for a non-external kind, so an agent holding the result could not
-    mint a reference, and everything downstream takes one: re-simulating
-    under different costs, `get_deflated_sharpe_ratio`, the PBO procedure,
-    the reality check, capacity estimation.
-
-    So the one number that answers "would this have made money" was the one
-    number that could never be deflated. Both kinds already existed.
+    mint a reference, and the tools downstream that take one could not be
+    reached: `convert_reference` turns the curve into the returns
+    `calculate_series_metrics` reads. Both kinds already existed. (The
+    deflated Sharpe, PBO and reality-check tools read returns inline and
+    take no reference; the field's description says so since the CHANGELOG
+    entry of 2026-10-22.)
     """
 
     def test_both_refs_come_back(self, registered_model):

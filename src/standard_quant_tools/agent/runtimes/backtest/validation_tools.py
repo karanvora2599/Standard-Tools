@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Annotated, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Literal, Optional
 
 import numpy as np
 import pandas as pd
@@ -180,12 +180,47 @@ class PurgedCVInput(BaseModel):
 class RealityCheckInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    strategy_returns: List[float] = Field(..., min_length=30)
-    benchmark_returns: Dict[str, List[float]] = Field(
-        ...,
-        description="The ALTERNATIVES you considered, name -> return series. "
-        "The test asks whether this strategy beats the best of these by more "
-        "than luck would produce.",
+    question: Literal["best_candidate_vs_benchmark", "beats_every_alternative"] = Field(
+        "best_candidate_vs_benchmark",
+        description="The hypothesis. 'best_candidate_vs_benchmark' "
+        "(White's Reality Check): does the best of candidate_returns beat "
+        "benchmark_returns by more than the best of that many would by "
+        "luck? 'beats_every_alternative': does strategy_returns beat EVERY "
+        "series in alternative_returns? Each reads only its own inputs.",
+    )
+    candidate_returns: Optional[Dict[str, List[float]]] = Field(
+        None,
+        description="best_candidate_vs_benchmark: EVERY candidate the search "
+        "considered, name -> return series, the one it kept among them. "
+        "Leaving out the discarded ones removes the correction the test "
+        "exists for.",
+    )
+    benchmark_returns: Optional[List[float]] = Field(
+        None,
+        min_length=30,
+        description="best_candidate_vs_benchmark: the ONE series the "
+        "candidates must beat, aligned with them. Omitted, the benchmark is "
+        "zero.",
+    )
+    strategy_returns: Optional[List[float]] = Field(
+        None,
+        min_length=30,
+        description="beats_every_alternative: the one strategy.",
+    )
+    alternative_returns: Optional[Dict[str, List[float]]] = Field(
+        None,
+        description="beats_every_alternative: every alternative the strategy "
+        "must beat, name -> return series aligned with it. The p-value is "
+        "the largest pairwise one: beating every alternative means beating "
+        "the hardest.",
+    )
+    method: Literal["white", "hansen_spa"] = Field(
+        "white",
+        description="best_candidate_vs_benchmark only. 'hansen_spa' divides "
+        "each candidate's outperformance by its standard error and keeps "
+        "candidates far below the benchmark from widening the null (Hansen "
+        "2005); White's form is conservative when the search held poor "
+        "candidates.",
     )
     n_bootstrap: int = Field(1000, ge=100, le=20000)
     block_size: int = Field(
@@ -196,6 +231,60 @@ class RealityCheckInput(BaseModel):
         "narrow and the p-value too small.",
     )
     seed: Seed = Field(0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _benchmark_is_one_series(cls, data: Any) -> Any:
+        # The shape this field had before the question was explicit: a map
+        # of alternatives, tested against the WEAKEST of them. Refused with
+        # where each series belongs now, rather than as a type error.
+        if isinstance(data, dict) and isinstance(data.get("benchmark_returns"), dict):
+            raise ValueError(
+                "benchmark_returns is ONE return series now, not a map of "
+                "alternatives. To ask whether a strategy beats every "
+                "alternative, pass question='beats_every_alternative' with "
+                "strategy_returns and alternative_returns={name: series}. To "
+                "ask whether the best of a search beats a benchmark, pass "
+                "candidate_returns={name: series} and benchmark_returns as "
+                "one series (or omit it for zero). The map form tested the "
+                "strategy against its weakest alternative -- see the "
+                "CHANGELOG entry of 2026-10-22."
+            )
+        return data
+
+    @model_validator(mode="after")
+    def _inputs_of_the_question(self) -> "RealityCheckInput":
+        if self.question == "best_candidate_vs_benchmark":
+            needed, unread = ["candidate_returns"], [
+                "strategy_returns",
+                "alternative_returns",
+            ]
+        else:
+            needed, unread = ["strategy_returns", "alternative_returns"], [
+                "candidate_returns",
+                "benchmark_returns",
+            ]
+        missing = [name for name in needed if getattr(self, name) is None]
+        if missing:
+            raise ValueError(
+                f"question={self.question!r} needs {' and '.join(missing)}."
+            )
+        given = [name for name in unread if getattr(self, name) is not None]
+        if given:
+            raise ValueError(
+                f"{', '.join(given)} is not read under question="
+                f"{self.question!r}; best_candidate_vs_benchmark reads "
+                "candidate_returns and benchmark_returns, "
+                "beats_every_alternative reads strategy_returns and "
+                "alternative_returns."
+            )
+        if self.question == "beats_every_alternative" and self.method != "white":
+            raise ValueError(
+                f"method={self.method!r} applies to question="
+                "'best_candidate_vs_benchmark'; under beats_every_alternative "
+                "each pair is tested on its own. Leave method at 'white'."
+            )
+        return self
 
 
 class RegimeStratifiedInput(BaseModel):
@@ -294,14 +383,56 @@ class PurgedCVResult(_Result):
 
 
 class RealityCheckResult(_Result):
+    question: str = Field(
+        "", description="The hypothesis tested, as the input named it."
+    )
+    method: str = ""
     n_observations: int = 0
-    n_benchmarks: int = 0
+    n_candidates: Optional[int] = Field(
+        None, description="best_candidate_vs_benchmark: candidates searched."
+    )
+    benchmark_given: Optional[bool] = Field(
+        None,
+        description="best_candidate_vs_benchmark: False when the benchmark "
+        "was zero.",
+    )
+    best_candidate: Optional[str] = Field(
+        None,
+        description="best_candidate_vs_benchmark: the candidate the "
+        "statistic is taken at -- the largest mean outperformance, or under "
+        "hansen_spa the largest studentised one.",
+    )
+    n_alternatives: Optional[int] = None
+    binding_alternative: Optional[str] = Field(
+        None,
+        description="beats_every_alternative: the alternative with the "
+        "largest pairwise p-value, which is the test's p-value.",
+    )
+    per_alternative: Optional[Dict[str, Dict[str, Stat]]] = Field(
+        None,
+        description="beats_every_alternative: each alternative's annualised "
+        "mean margin (outperformance) and one-sided p-value.",
+    )
     n_bootstrap: int = 0
     block_size: int = 0
-    observed_outperformance: Stat = None
+    observed_outperformance: Stat = Field(
+        None,
+        description="Annualised mean return over the benchmark of "
+        "best_candidate, or under beats_every_alternative the smallest "
+        "margin over any alternative.",
+    )
+    observed_statistic: Stat = Field(
+        None,
+        description="The test statistic: the annualised outperformance "
+        "above, or under hansen_spa the studentised maximum (no units).",
+    )
     p_value: Stat = None
     significant_at_05: bool = False
-    bootstrap_p95: Stat = None
+    bootstrap_p95: Stat = Field(
+        None,
+        description="The 95th percentile of the statistic under the null, "
+        "in observed_statistic's units.",
+    )
 
 
 class RegimeRow(BaseModel):
@@ -453,15 +584,48 @@ def build_purged_cv_splits(input_data: PurgedCVInput) -> PurgedCVResult:
 
 
 def run_reality_check(input_data: RealityCheckInput) -> RealityCheckResult:
-    return RealityCheckResult(
-        **lib.reality_check(
-            pd.Series(input_data.strategy_returns),
-            _aligned_frame(input_data.benchmark_returns, "run_reality_check"),
+    who = "run_reality_check"
+    if input_data.question == "best_candidate_vs_benchmark":
+        assert input_data.candidate_returns is not None
+        candidates = _aligned_frame(input_data.candidate_returns, who)
+        benchmark = None
+        if input_data.benchmark_returns is not None:
+            if len(input_data.benchmark_returns) != len(candidates):
+                raise ValidationError(
+                    f"{who}: benchmark_returns has "
+                    f"{len(input_data.benchmark_returns)} values and each "
+                    f"candidate {len(candidates)}. They must be aligned in "
+                    "time, one value per period."
+                )
+            benchmark = pd.Series(input_data.benchmark_returns)
+        result = lib.reality_check(
+            question=input_data.question,
+            candidate_returns=candidates,
+            benchmark_returns=benchmark,
+            method=input_data.method,
             n_bootstrap=input_data.n_bootstrap,
             block_size=input_data.block_size,
             seed=input_data.seed,
         )
-    )
+    else:
+        assert input_data.strategy_returns is not None
+        assert input_data.alternative_returns is not None
+        alternatives = _aligned_frame(input_data.alternative_returns, who)
+        if len(input_data.strategy_returns) != len(alternatives):
+            raise ValidationError(
+                f"{who}: strategy_returns has {len(input_data.strategy_returns)} "
+                f"values and each alternative {len(alternatives)}. They must "
+                "be aligned in time, one value per period."
+            )
+        result = lib.reality_check(
+            question=input_data.question,
+            strategy_returns=pd.Series(input_data.strategy_returns),
+            alternative_returns=alternatives,
+            n_bootstrap=input_data.n_bootstrap,
+            block_size=input_data.block_size,
+            seed=input_data.seed,
+        )
+    return RealityCheckResult(**result)
 
 
 def get_regime_stratified_performance(
@@ -535,9 +699,13 @@ VALIDATION_TOOL_DEFS = [
     ),
     (
         "run_reality_check",
-        "White's Reality Check: is this strategy better than the best of the "
-        "alternatives, or the luckiest of them? Different from a t-test on "
-        "its returns, and it is the question that matters after a search. The "
+        "Is a result better than luck after a search, under the hypothesis "
+        "named in question. The default, best_candidate_vs_benchmark, is "
+        "White's Reality Check: does the best of every candidate searched "
+        "beat one benchmark by more than the best of that many would by "
+        "luck (method='hansen_spa' for Hansen's studentised form). "
+        "beats_every_alternative asks whether one strategy beats EVERY "
+        "alternative, and its p-value is the largest pairwise one. The "
         "bootstrap is BLOCKED because resampling individual days destroys the "
         "serial correlation that drives drawdowns and volatility clustering, "
         "making the null too narrow and the p-value too small.",

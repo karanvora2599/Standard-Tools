@@ -98,8 +98,8 @@ _INLINE_SAMPLERS = {
     "compare_against_random": lambda: {"trade_returns": _returns(40)},
     "run_monte_carlo_trade_paths": lambda: {"trade_returns": _returns(40)},
     "run_reality_check": lambda: {
-        "strategy_returns": _returns(80, 1),
-        "benchmark_returns": {"alt": _returns(80, 2)},
+        "candidate_returns": {"a": _returns(80, 1), "b": _returns(80, 2)},
+        "benchmark_returns": _returns(80, 4),
     },
     "get_bootstrap_interval": lambda: {"values": _returns(80)},
     "run_terminal_monte_carlo": lambda: {

@@ -116,12 +116,15 @@ TOOL_DEFS = [
         "correct direction sized wrong loses money. Kelly is optional and "
         "is a CEILING rather than a target -- full Kelly maximizes "
         "long-run growth and produces drawdowns almost nobody holds "
-        "through, which is why half-Kelly is the common practice.",
+        "through, which is why half-Kelly is the common practice. Kelly's "
+        "fraction is a POSITION, a multiple of equity, so the half-Kelly "
+        "size is capped at max_leverage times equity (1 by default) and a "
+        "warning says when the cap binds.",
         PositionSizerInput,
     ),
     (
         "get_capacity_report",
-        "How much account size a target-weight portfolio can support before positions become too large relative to each ticker's own trading volume. It also reports days-to-liquidate and sector exposure.",
+        "How much account size a target-weight portfolio can support before positions become too large relative to each ticker's own trading volume. It also reports sector exposure and, given an account_size, the days each position takes to liquidate at it.",
         CapacityReportInput,
     ),
     (

@@ -95,6 +95,73 @@ def days_to_liquidate(
     return abs(shares) / tradeable_per_day
 
 
+def liquidation_days(
+    account_size: float,
+    target_weights: Dict[str, float],
+    prices: Dict[str, float],
+    avg_daily_volumes: Dict[str, float],
+    max_participation: float,
+) -> Dict[str, float]:
+    """
+    Trading days each position of a book takes to unwind at
+    `max_participation` of its ticker's average daily share volume, when
+    the account is `account_size` dollars:
+
+        days = |weight| x account_size / price
+               / (avg_daily_volume x max_participation)
+
+    A zero weight is 0 days -- there is nothing to sell. A ticker with no
+    positive volume or price is NaN, "not estimable", as in
+    `adv_participation`: no number of days unwinds a position in a name that
+    did not trade, and a number would read as a measurement.
+
+    WHY THE ACCOUNT SIZE IS THE CALLER'S. `capacity_report` sizes the
+    account so that the binding position is exactly `max_participation` of
+    one day's dollar volume, so the days to unwind it AT that capacity are
+    one by construction (and every other position's are the ratio of the
+    capacity to its own). That was reported as a measurement until the
+    CHANGELOG entry of 2026-10-22. At an account size the caller names, the
+    days say something the capacity does not.
+
+    Raises:
+        ValidationError: account_size or max_participation not finite and
+        > 0, a weight that is not finite, or a weighted ticker missing a
+        price or a volume.
+    """
+    if not math.isfinite(account_size) or account_size <= 0:
+        raise ValidationError(
+            f"liquidation_days: account_size must be a finite number of "
+            f"dollars > 0, got {account_size}"
+        )
+    if not math.isfinite(max_participation) or max_participation <= 0:
+        raise ValidationError(
+            f"max_participation must be finite and > 0, got {max_participation}"
+        )
+    _finite_weights(target_weights, "target_weights", "liquidation_days")
+    weighted = [t for t, w in target_weights.items() if w != 0]
+    missing = [t for t in weighted if t not in prices or t not in avg_daily_volumes]
+    if missing:
+        raise ValidationError(
+            f"liquidation_days: no price or average volume for {missing}; "
+            "every weighted ticker needs both."
+        )
+    days: Dict[str, float] = {}
+    for ticker, weight in target_weights.items():
+        if weight == 0:
+            days[ticker] = 0.0
+            continue
+        price = prices[ticker]
+        volume = avg_daily_volumes[ticker]
+        if not (math.isfinite(price) and price > 0) or not (
+            math.isfinite(volume) and volume > 0
+        ):
+            days[ticker] = float("nan")
+            continue
+        shares = abs(weight) * account_size / price
+        days[ticker] = days_to_liquidate(shares, volume, max_participation)
+    return days
+
+
 def sector_exposure(
     weights: Dict[str, float], sectors: Dict[str, str]
 ) -> Dict[str, float]:

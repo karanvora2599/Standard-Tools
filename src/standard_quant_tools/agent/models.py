@@ -2706,13 +2706,36 @@ class PositionSizerInput(BaseModel):
         2.0, gt=0, description="Stop distance = atr_multiplier × ATR (default 2.0)."
     )
     win_rate: Optional[float] = Field(
-        None, description="Strategy win rate [0,1]. Required for Kelly sizing."
+        None,
+        description="Strategy win rate [0,1]. Kelly sizing needs it with "
+        "avg_win_pct and avg_loss_pct -- all three or none.",
     )
     avg_win_pct: Optional[float] = Field(
-        None, description="Average winning trade return (e.g. 0.05 = 5%)."
+        None,
+        description="Average winning trade's return ON THE POSITION (e.g. "
+        "0.05 = the position gained 5%), not on the account.",
     )
     avg_loss_pct: Optional[float] = Field(
-        None, description="Average losing trade return magnitude (e.g. 0.02 = 2%)."
+        None,
+        description="Average losing trade's loss ON THE POSITION, as a "
+        "magnitude (e.g. 0.02 = the position lost 2%), not on the account.",
+    )
+    max_leverage: float = Field(
+        1.0,
+        gt=0,
+        description="Largest half-Kelly position, as a multiple of "
+        "account_equity (1.0 = no leverage, the default). Kelly's notional "
+        "for an ordinary edge is several times equity -- a trade that loses "
+        "3% of the position risks 3% of it -- so the cap usually binds, and "
+        "a warning names it when it does.",
+    )
+    n_trades: Optional[int] = Field(
+        None,
+        ge=1,
+        description="How many trades win_rate was measured on. Given, the "
+        "win rate's 95% Wilson interval and the Kelly fraction it implies "
+        "are reported (avg_win_pct and avg_loss_pct held fixed, so the true "
+        "range is wider).",
     )
 
     @field_validator("risk_per_trade_pct")
@@ -2759,18 +2782,70 @@ class PositionSizerResult(ExplainsNulls):
     position_value_fixed_risk: float
     portfolio_pct_fixed_risk: float
     max_loss_fixed_risk: Stat  # worst-case $ loss if stop is hit
-    # Kelly sizing (populated when win_rate/avg_win/avg_loss are provided)
-    kelly_fraction: Optional[float] = None
-    shares_half_kelly: Optional[int] = None
+    max_leverage: float = Field(
+        1.0, description="The cap on the half-Kelly position, echoed."
+    )
+    # Kelly sizing: populated when win_rate, avg_win_pct and avg_loss_pct are
+    # all given. Null otherwise, or -- with a warning saying which -- when
+    # the statistics leave a figure with no finite value.
+    kelly_notional_fraction: Stat = Field(
+        None,
+        description="Full Kelly as a POSITION: f* = p/L - q/W times "
+        "account_equity maximises the expected log growth of equity per "
+        "trade. Negative when the trade has no edge.",
+    )
+    kelly_risk_fraction: Stat = Field(
+        None,
+        description="f* x avg_loss_pct: the fraction of equity an average "
+        "losing trade costs at full Kelly. This is the number reported as "
+        "kelly_fraction before the CHANGELOG entry of 2026-10-22, which "
+        "also bought it as a position -- 1/avg_loss_pct times too small.",
+    )
+    half_kelly_notional_fraction: Stat = Field(
+        None, description="f* / 2, before the max_leverage cap."
+    )
+    kelly_position_fraction: Stat = Field(
+        None,
+        description="The fraction of account_equity the half-Kelly position "
+        "is sized at: f* / 2 capped at max_leverage, and 0 without an edge.",
+    )
+    kelly_capped_by_max_leverage: Optional[bool] = None
+    shares_half_kelly: Optional[int] = Field(
+        None,
+        description="Shares of the half-Kelly position, capped at "
+        "max_leverage; 0 when the statistics give no edge.",
+    )
     position_value_half_kelly: Optional[float] = None
     portfolio_pct_half_kelly: Optional[float] = None
+    log_growth_per_trade_full_kelly: Stat = Field(
+        None,
+        description="Expected log growth of equity per trade at f*, "
+        "p ln(1 + f W) + q ln(1 - f L).",
+    )
+    log_growth_per_trade_half_kelly: Stat = Field(
+        None,
+        description="The same at f* / 2: about three quarters of full "
+        "Kelly's growth for a modest edge, at half the position.",
+    )
+    log_growth_per_trade_recommended: Stat = Field(
+        None, description="The same at the recommended position."
+    )
+    win_rate_interval_95: Optional[List[Stat]] = Field(
+        None, description="95% Wilson interval on win_rate, given n_trades."
+    )
+    kelly_notional_fraction_interval_95: Optional[List[Stat]] = Field(
+        None,
+        description="f* at the two ends of win_rate_interval_95, with "
+        "avg_win_pct and avg_loss_pct held fixed.",
+    )
     # Recommendation
     recommended_sizing: str  # "fixed_risk" | "half_kelly"
     recommended_shares: int
     recommended_position_value: float
     warnings: List[str] = Field(
         default_factory=list,
-        description="Why a sizing figure above is null, when one is.",
+        description="Why a sizing figure above is null, when one is; when "
+        "max_leverage binds; and when the statistics give no edge.",
     )
 
 
@@ -4638,6 +4713,14 @@ class CapacityReportInput(BaseModel):
         True,
         description="If True, fetch each ticker's sector via the data provider's get_ticker_info and report exposure by sector (best-effort — 'Unknown' when unavailable).",
     )
+    account_size: Optional[float] = Field(
+        None,
+        gt=0,
+        description="Account size in dollars at which to report the days "
+        "each position takes to unwind at max_participation of its volume. "
+        "Omitted, no days are reported: at max_account_size they are one "
+        "day or less by construction.",
+    )
 
     @field_validator("tickers")
     @classmethod
@@ -4669,7 +4752,11 @@ class CapacityReportResult(ExplainsNulls):
     null_reasons = {
         "per_ticker_max_account_size": _CAPACITY_UNDEFINED,
         "max_account_size": _CAPACITY_UNDEFINED,
-        "days_to_liquidate_at_capacity": _CAPACITY_UNDEFINED,
+        "days_to_liquidate": (
+            "the ticker traded no volume over the ADV window, or has no "
+            "positive price, so no number of days unwinds it at "
+            "max_participation -- not estimable rather than zero"
+        ),
         "sector_exposure": _CAPACITY_UNDEFINED,
     }
 
@@ -4679,7 +4766,19 @@ class CapacityReportResult(ExplainsNulls):
     ]  # None = unbounded (zero target weight), unless a warning says otherwise
     binding_ticker: Optional[str] = None
     max_account_size: Stat = None  # None = unbounded (every weight is zero)
-    days_to_liquidate_at_capacity: Dict[str, Stat]
+    account_size: Stat = Field(
+        None, description="The account_size the days below are measured at."
+    )
+    days_to_liquidate: Optional[Dict[str, Stat]] = Field(
+        None,
+        description="Trading days to unwind each position of an account of "
+        "account_size at max_participation of the ticker's average daily "
+        "share volume: |weight| x account_size / price / (volume x "
+        "max_participation). 0 for a zero weight. Null when account_size "
+        "was not given. Replaces days_to_liquidate_at_capacity, which was "
+        "at most one by construction (see the CHANGELOG entry of "
+        "2026-10-22).",
+    )
     sector_exposure: Optional[Dict[str, Stat]] = None
     warnings: List[str] = []
 

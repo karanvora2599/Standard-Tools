@@ -24,6 +24,7 @@ import math
 
 import numpy as np
 import pandas as pd
+import pydantic
 import pytest
 
 from standard_quant_tools.backtesting.overfitting import (
@@ -247,6 +248,32 @@ class TestPBO:
             probability_of_backtest_overfitting(_noise_grid(n=30), n_splits=8)
 
 
+class TestPBOHasNoSkillAtOneHalfForAnyGrid:
+    """
+    With an odd number of configurations the in-sample winner can land
+    exactly on the out-of-sample median, a relative rank of 0.5. Counting
+    only ranks strictly below 0.5 put the no-skill PBO at (N - 1) / 2N:
+    0.33 for three configurations, which reads as a selection procedure
+    with skill when it has none. A rank of exactly one half now counts as
+    half a split. See the CHANGELOG entry of 2026-10-22.
+    """
+
+    @pytest.mark.parametrize("n_configurations", [3, 4, 5])
+    def test_a_no_skill_grid_averages_one_half(self, n_configurations):
+        """Old answers: 1/3 for three and 2/5 for five; four could never
+        rank exactly 0.5 and is the control."""
+        values = [
+            probability_of_backtest_overfitting(
+                pd.DataFrame(
+                    np.random.default_rng(seed).normal(0, 0.01, (300, n_configurations))
+                ),
+                n_splits=6,
+            )["pbo"]
+            for seed in range(200)
+        ]
+        assert np.mean(values) == pytest.approx(0.5, abs=0.04)
+
+
 class TestCombinatorialPurgedCV:
     def test_no_training_label_window_touches_the_test_set(self):
         """
@@ -464,41 +491,353 @@ class TestTheSplitterAgreesWithItsRules:
         assert elapsed < 10.0, f"took {elapsed:.1f}s"
 
 
-class TestRealityCheck:
-    def test_the_false_positive_rate_is_near_nominal(self):
+def _planted_alternatives():
+    """
+    The planted case: a strategy earning 5% a year against alternatives at
+    -20% and +30%, each with 10% annual noise, over five years. The
+    reality check used to test max_k mean(s - a_k) -- the margin over the
+    WEAKEST alternative -- and reported this strategy significant at
+    p = 0.018 while its docstring said "better than the best". See the
+    CHANGELOG entry of 2026-10-22.
+    """
+    rng = np.random.default_rng(1)
+    n, sigma = 1260, 0.10 / np.sqrt(252)
+    strategy = pd.Series(0.05 / 252 + rng.normal(0, sigma, n))
+    alternatives = pd.DataFrame(
+        {
+            "A_bad": -0.20 / 252 + rng.normal(0, sigma, n),
+            "B_best": 0.30 / 252 + rng.normal(0, sigma, n),
+        }
+    )
+    return strategy, alternatives
+
+
+def _rejection_rate(question, make, reps=200):
+    """How often a no-edge configuration is called significant, over
+    `reps` independent draws."""
+    fires = 0
+    for seed in range(reps):
+        fires += reality_check(
+            question=question, n_bootstrap=500, seed=seed, **make(seed)
+        )["significant_at_05"]
+    return fires / reps
+
+
+#: 5% plus two standard errors of a rate measured over 200 draws.
+_SIZE_BOUND = 0.05 + 2 * math.sqrt(0.05 * 0.95 / 200)
+
+
+class TestRealityCheckAsksTheQuestionItNames:
+    def test_the_planted_case_does_not_beat_every_alternative(self):
+        """The strategy beats A by 25% a year and loses to B by 25%: it does
+        not beat every alternative, and the test must not say it does."""
+        strategy, alternatives = _planted_alternatives()
+        result = reality_check(
+            question="beats_every_alternative",
+            strategy_returns=strategy,
+            alternative_returns=alternatives,
+        )
+        assert not result["significant_at_05"]
+        assert result["p_value"] > 0.5
+        assert result["binding_alternative"] == "B_best"
+        assert result["observed_outperformance"] < 0
+        assert result["per_alternative"]["A_bad"]["outperformance"] > 0
+        assert result["per_alternative"]["B_best"]["outperformance"] < 0
+
+    def test_the_best_of_the_three_does_beat_a_zero_benchmark(self):
+        """Asked the other question -- does the best of these three beat
+        zero after the search -- the answer is yes, and the best is B."""
+        strategy, alternatives = _planted_alternatives()
+        candidates = alternatives.assign(strategy=strategy)
+        result = reality_check(candidate_returns=candidates)
+        assert result["question"] == "best_candidate_vs_benchmark"
+        assert result["best_candidate"] == "B_best"
+        assert result["significant_at_05"]
+        assert not result["benchmark_given"]
+
+    def test_against_a_benchmark_the_outperformance_is_relative_to_it(self):
+        """The same candidates against B itself: nothing beats B."""
+        strategy, alternatives = _planted_alternatives()
+        result = reality_check(
+            candidate_returns=pd.DataFrame(
+                {"strategy": strategy, "A_bad": alternatives["A_bad"]}
+            ),
+            benchmark_returns=alternatives["B_best"],
+        )
+        assert result["benchmark_given"]
+        assert result["observed_outperformance"] < 0
+        assert not result["significant_at_05"]
+
+
+class TestRealityCheckCalibration:
+    """
+    Measured as a RATE over 200 independent no-edge draws, three years of
+    daily returns each, against 5% plus two standard errors (8.1%). The
+    test this replaces allowed 20% over 40 draws.
+    """
+
+    @pytest.mark.parametrize("method", ["white", "hansen_spa"])
+    def test_the_best_of_ten_no_edge_candidates_is_rarely_significant(self, method):
+        def make(seed):
+            rng = np.random.default_rng(seed)
+            return {
+                "candidate_returns": pd.DataFrame(rng.normal(0, 0.01, (750, 10))),
+                "benchmark_returns": pd.Series(rng.normal(0, 0.01, 750)),
+                "method": method,
+            }
+
+        rate = _rejection_rate("best_candidate_vs_benchmark", make)
+        assert rate <= _SIZE_BOUND, f"{rate:.3f} against a nominal 5%"
+
+    def test_a_strategy_equal_to_its_one_alternative_is_rarely_significant(self):
+        """One alternative with the same mean is the intersection-union
+        test's least favourable case: more alternatives only make it
+        harder to reject."""
+
+        def make(seed):
+            rng = np.random.default_rng(seed)
+            return {
+                "strategy_returns": pd.Series(rng.normal(0, 0.01, 750)),
+                "alternative_returns": pd.DataFrame(rng.normal(0, 0.01, (750, 1))),
+            }
+
+        rate = _rejection_rate("beats_every_alternative", make)
+        assert rate <= _SIZE_BOUND, f"{rate:.3f} against a nominal 5%"
+
+    @pytest.mark.parametrize(
+        "question, method",
+        [
+            ("best_candidate_vs_benchmark", "white"),
+            ("best_candidate_vs_benchmark", "hansen_spa"),
+            ("beats_every_alternative", "white"),
+        ],
+    )
+    def test_a_strategy_ten_percent_a_year_better_is_found(self, question, method):
         """
-        Measured as a RATE over independent draws. A single seed cannot tell
-        a broken test from an unlucky one.
+        Power. Every series shares a market return; the strategy earns 10%
+        a year more than each of five alternatives and the benchmark, with
+        4% a year of tracking error each, over four years.
         """
         fires = 0
-        trials = 40
-        for seed in range(trials):
-            rng = np.random.default_rng(seed)
-            strategy = pd.Series(rng.normal(0, 0.01, 500))
-            benchmarks = pd.DataFrame(rng.normal(0, 0.01, (500, 10)))
-            fires += reality_check(strategy, benchmarks, n_bootstrap=300, seed=seed)[
-                "significant_at_05"
-            ]
-        assert fires / trials < 0.20, (
-            f"{fires}/{trials} no-edge strategies came back significant "
-            "against a nominal 5%"
+        for seed in range(100):
+            rng = np.random.default_rng(1000 + seed)
+            n, noise = 1000, 0.04 / np.sqrt(252)
+            market = rng.normal(0.0003, 0.01, n)
+            alternatives = pd.DataFrame(
+                {f"a{j}": market + rng.normal(0, noise, n) for j in range(5)}
+            )
+            strategy = pd.Series(market + 0.10 / 252 + rng.normal(0, noise, n))
+            if question == "best_candidate_vs_benchmark":
+                inputs = {
+                    "candidate_returns": alternatives.assign(strategy=strategy),
+                    "benchmark_returns": pd.Series(market + rng.normal(0, noise, n)),
+                    "method": method,
+                }
+            else:
+                inputs = {
+                    "strategy_returns": strategy,
+                    "alternative_returns": alternatives,
+                }
+            fires += reality_check(
+                question=question, n_bootstrap=500, seed=seed, **inputs
+            )["significant_at_05"]
+        assert fires >= 80, f"found in {fires} of 100"
+
+    def test_hansen_does_not_let_poor_candidates_widen_the_null(self):
+        """One candidate 8% a year above the benchmark, and twenty far
+        below it. White's maximum still carries the twenty's noise into the
+        null; Hansen's does not, so its p-value is smaller -- and White's
+        result says why it is conservative."""
+        rng = np.random.default_rng(21)
+        n = 750
+        benchmark = pd.Series(rng.normal(0.0002, 0.01, n))
+        candidates = pd.DataFrame(
+            {
+                f"poor{j}": benchmark - 0.5 / 252 + rng.normal(0, 0.004, n)
+                for j in range(20)
+            }
         )
+        candidates["good"] = benchmark + 0.08 / 252 + rng.normal(0, 0.004, n)
+        white = reality_check(candidate_returns=candidates, benchmark_returns=benchmark)
+        hansen = reality_check(
+            candidate_returns=candidates,
+            benchmark_returns=benchmark,
+            method="hansen_spa",
+        )
+        assert white["best_candidate"] == hansen["best_candidate"] == "good"
+        assert hansen["p_value"] < white["p_value"]
+        assert any("20 of 21 candidates are far below" in w for w in white["warnings"])
 
-    def test_a_genuine_edge_is_detected(self):
-        rng = np.random.default_rng(9)
-        strategy = pd.Series(rng.normal(0.0015, 0.01, 500))
-        benchmarks = pd.DataFrame(rng.normal(0, 0.01, (500, 10)))
-        result = reality_check(strategy, benchmarks, n_bootstrap=1000, seed=1)
-        assert result["significant_at_05"]
-        assert result["p_value"] < 0.05
 
+class TestTheSummedBootstrapIsTheResample:
+    """The bootstrap adds precomputed block sums instead of gathering rows;
+    it must give what resampling the rows with `block_indices` gives, draw
+    for draw, including the cut last block and the per-draw errors."""
+
+    @pytest.mark.parametrize("n, block", [(500, 20), (503, 20), (97, 7), (60, 1)])
+    def test_draw_for_draw(self, n, block):
+        from standard_quant_tools._resampling import block_indices
+        from standard_quant_tools.backtesting.overfitting import _rc_bootstrap_means
+
+        values = np.random.default_rng(n).normal(0, 0.01, (n, 3))
+        draws, errors = _rc_bootstrap_means(values, 50, block, 7, studentise=True)
+        centred = values - values.mean(axis=0)
+        rng = np.random.default_rng(7)
+        whole = n // block
+        for b in range(50):
+            sample = centred[block_indices(n, block, rng)]
+            np.testing.assert_allclose(draws[b], sample.mean(axis=0), atol=1e-15)
+            blocks = sample[: whole * block].reshape(whole, block, 3).mean(axis=1)
+            np.testing.assert_allclose(
+                errors[b], np.sqrt(blocks.var(axis=0, ddof=1) * block / n), rtol=1e-9
+            )
+
+
+class TestRealityCheckRefusals:
+    def test_the_positional_form_is_refused_with_the_keywords(self):
+        """It tested the strategy against its weakest alternative."""
+        strategy, alternatives = _planted_alternatives()
+        with pytest.raises(ValidationError, match="by keyword"):
+            reality_check(strategy, alternatives)
+
+    def test_inputs_of_the_other_question_are_refused(self):
+        strategy, alternatives = _planted_alternatives()
+        with pytest.raises(ValidationError, match="strategy_returns.*not read"):
+            reality_check(strategy_returns=strategy, candidate_returns=alternatives)
+        with pytest.raises(ValidationError, match="candidate_returns.*not read"):
+            reality_check(
+                question="beats_every_alternative",
+                strategy_returns=strategy,
+                alternative_returns=alternatives,
+                candidate_returns=alternatives,
+            )
+
+    def test_a_question_without_its_inputs_is_refused(self):
+        with pytest.raises(ValidationError, match="needs candidate_returns"):
+            reality_check()
+        with pytest.raises(ValidationError, match="needs strategy_returns"):
+            reality_check(question="beats_every_alternative")
+
+    def test_an_unknown_question_or_method_is_refused(self):
+        _, alternatives = _planted_alternatives()
+        with pytest.raises(ValidationError, match="question='beats_the_best'"):
+            reality_check(question="beats_the_best", candidate_returns=alternatives)
+        with pytest.raises(ValidationError, match="method='stepwise'"):
+            reality_check(candidate_returns=alternatives, method="stepwise")
+
+    def test_hansen_under_beats_every_alternative_is_refused(self):
+        strategy, alternatives = _planted_alternatives()
+        with pytest.raises(ValidationError, match="method='hansen_spa' applies"):
+            reality_check(
+                question="beats_every_alternative",
+                strategy_returns=strategy,
+                alternative_returns=alternatives,
+                method="hansen_spa",
+            )
+
+    def test_a_benchmark_of_several_columns_is_refused(self):
+        _, alternatives = _planted_alternatives()
+        with pytest.raises(ValidationError, match="ONE series"):
+            reality_check(
+                candidate_returns=alternatives, benchmark_returns=alternatives
+            )
+
+    def test_no_candidates_is_refused(self):
+        with pytest.raises(ValidationError, match="candidate_returns has no series"):
+            reality_check(candidate_returns=pd.DataFrame())
+
+
+class TestTheRealityCheckTool:
+    """`run_reality_check` takes the question as an input; its old shape --
+    a strategy and a MAP of benchmarks, tested against the weakest -- is
+    refused with where each series goes now."""
+
+    @staticmethod
+    def _dispatch(arguments):
+        from standard_quant_tools.agent.runtimes import resolve
+
+        return resolve("backtest").dispatch("run_reality_check", arguments)
+
+    def test_the_planted_case_is_not_significant_through_the_tool(self):
+        strategy, alternatives = _planted_alternatives()
+        result = self._dispatch(
+            {
+                "question": "beats_every_alternative",
+                "strategy_returns": strategy.tolist(),
+                "alternative_returns": {
+                    name: alternatives[name].tolist() for name in alternatives
+                },
+            }
+        )
+        assert result["significant_at_05"] is False
+        assert result["binding_alternative"] == "B_best"
+        assert set(result["per_alternative"]) == {"A_bad", "B_best"}
+
+    def test_the_default_question_is_whites(self):
+        strategy, alternatives = _planted_alternatives()
+        result = self._dispatch(
+            {
+                "candidate_returns": {"s": strategy.tolist()},
+                "benchmark_returns": alternatives["A_bad"].tolist(),
+            }
+        )
+        assert result["question"] == "best_candidate_vs_benchmark"
+        assert result["method"] == "white"
+        assert result["best_candidate"] == "s"
+
+    def test_the_old_map_of_benchmarks_is_refused_with_the_new_inputs(self):
+        strategy, alternatives = _planted_alternatives()
+        with pytest.raises(pydantic.ValidationError) as exc:
+            self._dispatch(
+                {
+                    "strategy_returns": strategy.tolist(),
+                    "benchmark_returns": {"B_best": alternatives["B_best"].tolist()},
+                }
+            )
+        message = str(exc.value)
+        assert "alternative_returns" in message
+        assert "candidate_returns" in message
+
+    def test_the_other_questions_inputs_are_refused(self):
+        strategy, _ = _planted_alternatives()
+        with pytest.raises(pydantic.ValidationError, match="not read under"):
+            self._dispatch(
+                {
+                    "candidate_returns": {"s": strategy.tolist()},
+                    "strategy_returns": strategy.tolist(),
+                }
+            )
+
+    def test_hansen_under_beats_every_alternative_is_refused(self):
+        strategy, alternatives = _planted_alternatives()
+        with pytest.raises(pydantic.ValidationError, match="applies to question"):
+            self._dispatch(
+                {
+                    "question": "beats_every_alternative",
+                    "method": "hansen_spa",
+                    "strategy_returns": strategy.tolist(),
+                    "alternative_returns": {"A": alternatives["A_bad"].tolist()},
+                }
+            )
+
+    def test_a_benchmark_of_another_length_is_refused(self):
+        strategy, alternatives = _planted_alternatives()
+        with pytest.raises(ValidationError, match="must be aligned in time"):
+            self._dispatch(
+                {
+                    "candidate_returns": {"s": strategy.tolist()},
+                    "benchmark_returns": alternatives["A_bad"].tolist()[:-5],
+                }
+            )
+
+
+class TestRealityCheckReports:
     def test_the_bootstrap_is_blocked_and_says_so(self):
         """Resampling individual days destroys the serial correlation that
         drives drawdowns, making the null too narrow."""
         rng = np.random.default_rng(10)
         result = reality_check(
-            pd.Series(rng.normal(0, 0.01, 400)),
-            pd.DataFrame(rng.normal(0, 0.01, (400, 5))),
+            candidate_returns=pd.DataFrame(rng.normal(0, 0.01, (400, 5))),
             block_size=20,
             n_bootstrap=200,
         )
@@ -508,26 +847,32 @@ class TestRealityCheck:
     def test_the_stationarity_assumption_is_declared(self):
         rng = np.random.default_rng(11)
         result = reality_check(
-            pd.Series(rng.normal(0, 0.01, 400)),
-            pd.DataFrame(rng.normal(0, 0.01, (400, 5))),
+            question="beats_every_alternative",
+            strategy_returns=pd.Series(rng.normal(0, 0.01, 400)),
+            alternative_returns=pd.DataFrame(rng.normal(0, 0.01, (400, 5))),
             n_bootstrap=200,
         )
         assert any("STATIONARY" in w for w in result["warnings"])
 
-    def test_it_is_reproducible_from_the_seed(self):
+    def test_a_zero_benchmark_is_named(self):
         rng = np.random.default_rng(12)
-        strategy = pd.Series(rng.normal(0.0005, 0.01, 400))
-        benchmarks = pd.DataFrame(rng.normal(0, 0.01, (400, 5)))
-        a = reality_check(strategy, benchmarks, n_bootstrap=200, seed=42)
-        b = reality_check(strategy, benchmarks, n_bootstrap=200, seed=42)
-        assert a["p_value"] == b["p_value"]
+        result = reality_check(
+            candidate_returns=pd.DataFrame(rng.normal(0, 0.01, (400, 3))),
+            n_bootstrap=200,
+        )
+        assert any("measured against zero" in w for w in result["warnings"])
 
-    def test_no_benchmarks_is_refused(self):
-        with pytest.raises(ValidationError, match="no benchmark"):
-            reality_check(
-                pd.Series(np.random.default_rng(13).normal(0, 0.01, 400)),
-                pd.DataFrame(),
-            )
+    @pytest.mark.parametrize("method", ["white", "hansen_spa"])
+    def test_it_is_reproducible_from_the_seed(self, method):
+        rng = np.random.default_rng(12)
+        candidates = pd.DataFrame(rng.normal(0.0005, 0.01, (400, 5)))
+        a = reality_check(
+            candidate_returns=candidates, method=method, n_bootstrap=200, seed=42
+        )
+        b = reality_check(
+            candidate_returns=candidates, method=method, n_bootstrap=200, seed=42
+        )
+        assert a["p_value"] == b["p_value"]
 
 
 class TestRegimeStratified:

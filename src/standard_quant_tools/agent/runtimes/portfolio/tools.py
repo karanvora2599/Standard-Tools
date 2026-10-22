@@ -71,7 +71,7 @@ from standard_quant_tools.backtest.constraints import (
     capacity_report as _capacity_report,
 )
 from standard_quant_tools.backtest.constraints import (
-    days_to_liquidate as _days_to_liquidate,
+    liquidation_days as _liquidation_days,
 )
 from standard_quant_tools.backtest.constraints import (
     sector_exposure as _sector_exposure,
@@ -874,8 +874,10 @@ def get_position_size(input_data: PositionSizerInput) -> PositionSizerResult:
     and optionally Kelly criterion when strategy statistics are provided.
 
     Fixed-risk sizing: shares = (account × risk_pct) / (atr_multiplier × ATR)
-    Kelly sizing:      f = (b×p − q) / b  where b = avg_win/avg_loss,
-                       p = win_rate, q = 1−win_rate. Half-Kelly is recommended.
+    Kelly sizing:      f* = p/L − q/W, the growth-optimal POSITION as a
+                       multiple of equity, with W = avg_win_pct and
+                       L = avg_loss_pct returns on the position. Half of it
+                       is recommended, capped at max_leverage × equity.
 
     The arithmetic, and its refusals of a stop, a share count or a position
     value past the float range, live in `portfolio.position_sizing`, so a
@@ -910,6 +912,8 @@ def get_position_size(input_data: PositionSizerInput) -> PositionSizerResult:
         win_rate=input_data.win_rate,
         avg_win_pct=input_data.avg_win_pct,
         avg_loss_pct=input_data.avg_loss_pct,
+        max_leverage=input_data.max_leverage,
+        n_trades=input_data.n_trades,
     )
     logger.debug(
         "[position_size] close=%.4f  ATR=%.4f  stop=%.4f  sizing=%s  shares=%d  value=%.2f  kelly=%s",
@@ -919,11 +923,16 @@ def get_position_size(input_data: PositionSizerInput) -> PositionSizerResult:
         sized["recommended_sizing"],
         sized["recommended_shares"],
         sized["recommended_position_value"],
-        str(sized["kelly_fraction"]),
+        str(sized["kelly_notional_fraction"]),
     )
 
     def _rounded_or_none(value: Optional[float], digits: int) -> Optional[float]:
         return round(value, digits) if value is not None else None
+
+    def _rounded_pair(pair: Optional[list], digits: int) -> Optional[list]:
+        if pair is None:
+            return None
+        return [_rounded_or_none(value, digits) for value in pair]
 
     return PositionSizerResult(
         symbol=input_data.symbol,
@@ -935,15 +944,36 @@ def get_position_size(input_data: PositionSizerInput) -> PositionSizerResult:
         position_value_fixed_risk=round(sized["position_value_fixed_risk"], 2),
         portfolio_pct_fixed_risk=round(sized["portfolio_pct_fixed_risk"], 4),
         max_loss_fixed_risk=round(sized["max_loss_fixed_risk"], 2),
-        kelly_fraction=sized["kelly_fraction"],
+        max_leverage=sized["max_leverage"],
+        kelly_notional_fraction=_rounded_or_none(sized["kelly_notional_fraction"], 6),
+        kelly_risk_fraction=_rounded_or_none(sized["kelly_risk_fraction"], 6),
+        half_kelly_notional_fraction=_rounded_or_none(
+            sized["half_kelly_notional_fraction"], 6
+        ),
+        kelly_position_fraction=_rounded_or_none(sized["kelly_position_fraction"], 6),
+        kelly_capped_by_max_leverage=sized["kelly_capped_by_max_leverage"],
         shares_half_kelly=sized["shares_half_kelly"],
         position_value_half_kelly=_rounded_or_none(
             sized["position_value_half_kelly"], 2
         ),
         portfolio_pct_half_kelly=_rounded_or_none(sized["portfolio_pct_half_kelly"], 4),
+        log_growth_per_trade_full_kelly=_rounded_or_none(
+            sized["log_growth_per_trade_full_kelly"], 8
+        ),
+        log_growth_per_trade_half_kelly=_rounded_or_none(
+            sized["log_growth_per_trade_half_kelly"], 8
+        ),
+        log_growth_per_trade_recommended=_rounded_or_none(
+            sized["log_growth_per_trade_recommended"], 8
+        ),
+        win_rate_interval_95=_rounded_pair(sized["win_rate_interval_95"], 6),
+        kelly_notional_fraction_interval_95=_rounded_pair(
+            sized["kelly_notional_fraction_interval_95"], 6
+        ),
         recommended_sizing=sized["recommended_sizing"],
         recommended_shares=sized["recommended_shares"],
         recommended_position_value=round(sized["recommended_position_value"], 2),
+        warnings=list(sized["warnings"]),
     )
 
 
@@ -952,7 +982,7 @@ def get_capacity_report(input_data: CapacityReportInput) -> CapacityReportResult
     How much account size a target-weight portfolio can support before
     positions become too large relative to each ticker's own trading
     volume. Reuses backtest/constraints.py's capacity_report/
-    days_to_liquidate — no new math, just data fetching and formatting for
+    liquidation_days — no new math, just data fetching and formatting for
     JSON tool-calling.
     """
     logger.debug(
@@ -995,24 +1025,41 @@ def get_capacity_report(input_data: CapacityReportInput) -> CapacityReportResult
         None if max_account_size == float("inf") else round(max_account_size, 2)
     )
 
-    days_to_liquidate_out: Dict[str, float] = {}
-    for t in input_data.tickers:
-        weight = abs(input_data.target_weights[t])
-        if weight <= 0 or max_account_size_out is None or avg_share_volumes[t] <= 0:
-            days_to_liquidate_out[t] = 0.0
-            continue
-        notional_at_capacity = max_account_size_out * weight
-        shares_at_capacity = (
-            notional_at_capacity / last_close[t] if last_close[t] > 0 else 0.0
-        )
-        days_to_liquidate_out[t] = round(
-            _days_to_liquidate(
-                shares_at_capacity, avg_share_volumes[t], input_data.max_participation
-            ),
-            2,
-        )
-
+    # Days to unwind at the caller's account size. At max_account_size they
+    # were one day or less by construction -- the capacity IS one day of
+    # max_participation for the binding name -- and were reported as a
+    # measurement until the CHANGELOG entry of 2026-10-22.
     warnings: List[str] = []
+    days_to_liquidate_out: Optional[Dict[str, float]] = None
+    if input_data.account_size is not None:
+        days = _liquidation_days(
+            input_data.account_size,
+            {t: input_data.target_weights[t] for t in input_data.tickers},
+            last_close,
+            avg_share_volumes,
+            input_data.max_participation,
+        )
+        days_to_liquidate_out = {
+            t: round(v, 4) if math.isfinite(v) else v for t, v in days.items()
+        }
+        if max_account_size_out is not None and (
+            input_data.account_size > max_account_size_out
+        ):
+            slowest = max(
+                (t for t in days if math.isfinite(days[t])),
+                key=lambda t: days[t],
+                default=None,
+            )
+            warnings.append(
+                f"account_size={input_data.account_size:,.0f} is above the "
+                f"capacity of {max_account_size_out:,.0f}: at it, "
+                f"{slowest} takes {days[slowest]:.2f} days to unwind at "
+                f"max_participation={input_data.max_participation:g}."
+                if slowest is not None
+                else f"account_size={input_data.account_size:,.0f} is above "
+                f"the capacity of {max_account_size_out:,.0f}."
+            )
+
     sector_exp: Optional[Dict[str, float]] = None
     if input_data.include_sector_exposure:
         sectors: Dict[str, str] = {}
@@ -1036,7 +1083,8 @@ def get_capacity_report(input_data: CapacityReportInput) -> CapacityReportResult
         per_ticker_max_account_size=per_ticker_out,
         binding_ticker=raw["binding_ticker"],
         max_account_size=max_account_size_out,
-        days_to_liquidate_at_capacity=days_to_liquidate_out,
+        account_size=input_data.account_size,
+        days_to_liquidate=days_to_liquidate_out,
         sector_exposure=sector_exp,
         warnings=warnings,
     )

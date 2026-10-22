@@ -1,5 +1,93 @@
 # Changelog
 
+## Half-Kelly is sized as a position, the reality check tests the question it names, and a no-skill grid's PBO is one half however many configurations it has
+
+- **Kelly's fraction was a risk, bought as a position.** `get_position_size`
+  computed (b p - q) / b with b = avg_win_pct / avg_loss_pct. That is
+  f* x L: the fraction of equity an average losing trade costs at full
+  Kelly. It then bought half of it as a position. With W and L returns on
+  the position, the growth-optimal position is f* = p/L - q/W, the argmax
+  of p ln(1 + f W) + q ln(1 - f L); the tests find it numerically and match
+  the closed form to 1e-6. At p = 0.55, W = 6%, L = 3% the tool sized 162
+  shares of a $100 stock on $100,000, 16.2% of equity, where half-Kelly is
+  5.42 times equity -- 33 times more.
+- **Both fractions are reported, and half-Kelly notional is sized under a
+  cap.** `kelly_notional_fraction` is f* (10.83 above) and
+  `kelly_risk_fraction` is f* x L (0.325, the number `kelly_fraction` held;
+  that field is gone). The position is f*/2 of equity capped by a new
+  `max_leverage`, 1 (no leverage) by default, with a warning naming the cap
+  whenever it binds. It binds above: 1,000 shares, or 5,416 at
+  `max_leverage=10`. `log_growth_per_trade_full_kelly`, `_half_kelly` and
+  `_recommended` give p ln(1 + f W) + q ln(1 - f L) at f*, f*/2 and the
+  size held (0.0986, 0.0750, 0.0183). An optional `n_trades` adds the win
+  rate's 95% Wilson interval and f* at its ends ([0.398, 0.693] and
+  [3.25, 17.98] at 40 trades), with a warning when the low end has no edge;
+  W and L are held fixed, which the description says.
+- **No edge is zero shares, said out loud.** f* <= 0 used to fall back to
+  the fixed-risk position without a word: 250 shares of a trade its own
+  statistics said loses 2.9% a trade. It is now 0 Kelly shares, 0
+  recommended, and a warning; the fixed-risk figures are still reported. A
+  win rate of 1 leaves f* unbounded: null with a warning, sized at the
+  cap. Kelly's three statistics are taken together or not at all (one
+  alone used to be dropped silently), and `n_trades` needs them.
+- **`run_reality_check` tested "beats the weakest alternative".** Its
+  statistic was max_k mean(s - a_k): the strategy's margin over its WEAKEST
+  alternative, bootstrapped as if it were the best, under a docstring that
+  said "better than the best". A strategy earning 5% a year against
+  alternatives at -20% and +30% came back significant at p = 0.018. The
+  hypothesis is now an explicit `question`. `best_candidate_vs_benchmark`,
+  the default, is White's (2000) Reality Check: every candidate of a search
+  in `candidate_returns`, one `benchmark_returns` (zero when omitted), and
+  max_k mean(c_k - b) against its block-bootstrap null; `method=
+  "hansen_spa"` gives Hansen's (2005) studentised, recentred form.
+  `beats_every_alternative` takes `strategy_returns` and
+  `alternative_returns`, tests each pair one-sided and reports the largest
+  pairwise p-value, an intersection-union test. The planted case reads
+  p = 1.000 under it, bound by the +30% alternative; asked the other
+  question, the best of the three beats zero, and it is the +30% one.
+- **Calibrated at the rate it claims.** Over 200 no-edge draws of three
+  years each, the best of ten candidates is significant 4.5% of the time
+  under White's form and 4.5% under Hansen's, and a strategy equal to its
+  one alternative 6.0%, against 5% plus two standard errors (8.1%); the
+  test this replaces allowed 20% over 40 draws. A strategy 10% a year
+  better than five alternatives and the benchmark, at 4% tracking error, is
+  found in 85, 85 and 92 of 100 four-year draws. Hansen's form divides each
+  bootstrap draw by its own block-based standard error: dividing every draw
+  by the sample's error rejected 9% of no-edge best-of-tens at 500 days.
+- **The old inputs are refused with the new ones named.**
+  `benchmark_returns` is one series; the old map of benchmarks is refused
+  naming `alternative_returns` and `candidate_returns`, and the library's
+  `reality_check` takes its series by keyword only, refusing the old
+  positional call. `n_benchmarks` gives way to `n_candidates` and
+  `n_alternatives`, beside `question`, `method`, `best_candidate`,
+  `binding_alternative`, `per_alternative` and `observed_statistic`. The
+  bootstrap adds precomputed block sums rather than gathering rows -- the
+  same draws as `block_indices`, tested draw for draw, four times faster.
+- **PBO's no-skill value is one half for an odd grid too.** A split whose
+  in-sample winner lands exactly on the out-of-sample median, possible only
+  with an odd number of configurations, counted as not below it, so the
+  no-skill PBO was (N - 1) / 2N: 0.337 for three configurations and 0.380
+  for five (200 draws, eight chunks). That split now counts as half: 0.501
+  and 0.477. Even grids cannot rank exactly at the median and are
+  unchanged.
+- **`equity_curve_ref` says what takes it.** Its description on
+  `evaluate_model_portfolio`'s result named the deflated Sharpe, the PBO
+  procedure, the reality check and a re-simulation under different costs
+  as consumers; none takes a reference. It now names the route that exists
+  -- `convert_reference` to `returns_panel`, then `calculate_series_metrics`
+  or `run_terminal_monte_carlo` -- and says the three validation tools read
+  returns inline. A test holds the description to the tools' input models.
+- **Days to liquidate are measured where they say something.**
+  `get_capacity_report`'s `days_to_liquidate_at_capacity` was one day or
+  less by construction: capacity is one day of `max_participation` for the
+  binding name, so it read 1.0 there, and each other name's capacity ratio,
+  at any volume. It is replaced by `days_to_liquidate` at a caller-given
+  `account_size`, |weight| x account_size / price / (volume x
+  max_participation), with a warning when the account is above capacity.
+  Without `account_size` no days are reported; a ticker that traded no
+  volume is null with the reason, where it read 0.0.
+  `backtest.constraints.liquidation_days` is the arithmetic.
+
 ## Adjustment is two flags, a trailing ratio is a year, and a dividend gap is a present value
 
 - **`adjusted=True` meant three things.** yfinance requests

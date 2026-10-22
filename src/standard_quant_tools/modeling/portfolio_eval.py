@@ -1207,10 +1207,9 @@ def _simulate_predictions_portfolio(
     # reference-taking tool in every runtime accepts. Without them this
     # function was a terminal node: `handoff.register` refuses to adopt a
     # path for a non-external kind, so an agent holding the URI could not
-    # mint a reference, and the equity curve of the one simulation that
-    # answers "would this have made money" could not be handed to
-    # `get_deflated_sharpe_ratio`, the PBO procedure, the reality check or
-    # a re-simulation under different costs.
+    # mint a reference. The equity curve converts to a returns reference
+    # (`convert_reference` to `returns_panel`); the deflated Sharpe, PBO
+    # and reality-check tools read returns inline and take no reference.
     #
     # `overwrite=True` for the same reason the artifacts above use it: the
     # name carries the frame's own digest, so re-evaluating the same
