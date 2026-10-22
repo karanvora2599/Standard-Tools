@@ -5,10 +5,18 @@ from .diagnostics import (
     trade_excursions,
     trade_expectancy,
 )
-from .return_metrics import annualized_volatility, cagr, cumulative_return
+from .return_metrics import (
+    annualized_volatility,
+    cagr,
+    cumulative_return,
+    equity_from_returns,
+)
 from .risk_metrics import (
+    CVAR_MIN_TAIL_OBSERVATIONS,
     calmar_ratio,
     cvar,
+    cvar_tail_observations,
+    cvar_tail_warning,
     drawdown_series,
     evt_tail_risk,
     information_ratio,

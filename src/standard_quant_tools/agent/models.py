@@ -320,12 +320,19 @@ class AnalysisResult(BaseModel):
     max_drawdown: float
     var_95: float
     cvar_95: float
+    cvar_95_tail_observations: Optional[int] = Field(
+        None,
+        description="How many returns cvar_95 is the mean of -- the "
+        "days at or beyond the 95% VaR. Below 10 the shortfall describes "
+        "those few days rather than the tail, and `warnings` says so.",
+    )
     information_ratio: float
     warnings: List[str] = Field(
         default_factory=list,
         description="What the provider dropped from or flagged on the bars "
         "these figures were computed from: bars with no Close, and a last "
-        "bar whose session had not closed.",
+        "bar whose session had not closed; and an expected shortfall that "
+        "rests on fewer than 10 returns.",
     )
 
 
@@ -445,9 +452,19 @@ class PortfolioResult(BaseModel):
     calmar_ratio: float
     var_95: float
     cvar_95: float
+    cvar_95_tail_observations: Optional[int] = Field(
+        None,
+        description="How many returns cvar_95 is the mean of -- the "
+        "days at or beyond the 95% VaR. Below 10 the shortfall describes "
+        "those few days rather than the tail, and `warnings` says so.",
+    )
     information_ratio: float
     total_return: float
     correlation_matrix: Dict[str, Any]
+    warnings: List[str] = Field(
+        default_factory=list,
+        description="An expected shortfall that rests on fewer than 10 returns.",
+    )
 
 
 # ──────────────────────────────────────────────
@@ -2481,6 +2498,12 @@ class RiskAttributionResult(BaseModel):
     max_drawdown: float
     var_95: float
     cvar_95: float
+    cvar_95_tail_observations: Optional[int] = Field(
+        None,
+        description="How many returns cvar_95 is the mean of -- the "
+        "days at or beyond the 95% VaR. Below 10 the shortfall describes "
+        "those few days rather than the tail, and `warnings` says so.",
+    )
     information_ratio: float
     # Asset risk decomposition
     asset_risk_contributions: Dict[
@@ -2496,7 +2519,8 @@ class RiskAttributionResult(BaseModel):
     warnings: List[str] = Field(
         default_factory=list,
         description="What the numbers do not guarantee, when a factor "
-        "model was fitted.",
+        "model was fitted, and an expected shortfall that rests on fewer "
+        "than 10 returns.",
     )
 
 
@@ -2559,6 +2583,14 @@ class StressTestResult(BaseModel):
     scenario_end_date: str
     tickers_used: List[str]
     tickers_missing_data: List[str]
+    weight_coverage: Optional[float] = Field(
+        None,
+        description="The share of the portfolio's gross weight held by "
+        "`tickers_used`. The replay renormalises the weights over those "
+        "tickers, so below 1.0 it describes a different portfolio from the "
+        "one asked about -- `warnings` names the missing tickers and their "
+        "weight.",
+    )
     portfolio_return_pct: float
     max_drawdown_pct: float
     worst_day_return_pct: float
@@ -2566,6 +2598,12 @@ class StressTestResult(BaseModel):
     best_day_return_pct: float
     best_day_date: str
     n_trading_days: int
+    warnings: List[str] = Field(
+        default_factory=list,
+        description="Tickers left out of the replay for want of data, with "
+        "the weight the replay redistributed over the rest; and days dropped "
+        "because a ticker in the replay had no return on them.",
+    )
 
 
 # ──────────────────────────────────────────────
@@ -3169,7 +3207,18 @@ class ExtendedRiskResult(BaseModel):
     var_parametric_99: float
     var_historical_99: float
     cvar_99: float
+    cvar_99_tail_observations: Optional[int] = Field(
+        None,
+        description="How many returns cvar_99 is the mean of -- the "
+        "days at or beyond the 99% VaR. Below 10 the shortfall describes "
+        "those few days rather than the tail, and `warnings` says so.",
+    )
     beta: float
+    warnings: List[str] = Field(
+        default_factory=list,
+        description="An expected shortfall that rests on fewer than 10 "
+        "returns: a year of daily returns at 99% leaves three.",
+    )
 
 
 # ──────────────────────────────────────────────

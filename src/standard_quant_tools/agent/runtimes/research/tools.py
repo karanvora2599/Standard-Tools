@@ -150,10 +150,16 @@ from standard_quant_tools.indicators.volatility import (
     wilder_atr,
 )
 from standard_quant_tools.indicators.volume import mfi, obv, vwap
-from standard_quant_tools.metrics.return_metrics import annualized_volatility, cagr
+from standard_quant_tools.metrics.return_metrics import (
+    annualized_volatility,
+    cagr,
+    equity_from_returns,
+)
 from standard_quant_tools.metrics.risk_metrics import (
     calmar_ratio,
     cvar,
+    cvar_tail_observations,
+    cvar_tail_warning,
     evt_tail_risk,
     information_ratio,
     max_drawdown,
@@ -245,7 +251,15 @@ def analyze_stock_risk(input_data: AnalysisInput) -> AnalysisResult:
     bench_ret = bench_df["Close"].pct_change(fill_method=None).dropna()
 
     beta_metrics = calculate_beta(asset_ret, bench_ret)
-    equity_curve = (1 + asset_ret).cumprod()
+    # From the first CLOSE, not the first return: the drawdown's running
+    # peak has to include the level the first return was earned on, or a
+    # first-day loss is no drawdown at all.
+    equity_curve = equity_from_returns(asset_ret)
+    tail_count = cvar_tail_observations(asset_ret, 0.95)
+    warnings = served.warnings()
+    caution = cvar_tail_warning("cvar_95", tail_count, len(asset_ret), 0.95)
+    if caution:
+        warnings.append(caution)
 
     result = AnalysisResult(
         symbol=input_data.symbol,
@@ -258,8 +272,9 @@ def analyze_stock_risk(input_data: AnalysisInput) -> AnalysisResult:
         max_drawdown=round(max_drawdown(equity_curve), 6),
         var_95=round(var_historical(asset_ret, 0.95), 6),
         cvar_95=round(cvar(asset_ret, 0.95), 6),
+        cvar_95_tail_observations=tail_count,
         information_ratio=round(information_ratio(asset_ret, bench_ret), 4),
-        warnings=served.warnings(),
+        warnings=warnings,
     )
     logger.debug(
         "[analyze_risk] beta=%.4f  alpha=%.6f  sharpe=%.3f  VaR95=%.3f%%  maxdd=%.2f%%",
@@ -504,6 +519,12 @@ def get_portfolio_analysis(input_data: PortfolioInput) -> PortfolioResult:
         risk_free_rate=input_data.risk_free_rate,
         benchmark_returns=aligned_bench,
     )
+    caution = cvar_tail_warning(
+        "cvar_95",
+        metrics["cvar_95_tail_observations"],
+        metrics["n_observations"],
+        0.95,
+    )
 
     return PortfolioResult(
         tickers=input_data.tickers,
@@ -516,9 +537,11 @@ def get_portfolio_analysis(input_data: PortfolioInput) -> PortfolioResult:
         calmar_ratio=metrics["calmar_ratio"],
         var_95=metrics["var_95"],
         cvar_95=metrics["cvar_95"],
+        cvar_95_tail_observations=metrics["cvar_95_tail_observations"],
         information_ratio=metrics.get("information_ratio", 0.0),
         total_return=metrics["total_return"],
         correlation_matrix=correlation_matrix_to_dict(aligned_returns),
+        warnings=[caution] if caution else [],
     )
 
 
@@ -1695,7 +1718,10 @@ def get_extended_risk_metrics(input_data: ExtendedRiskInput) -> ExtendedRiskResu
 
     asset_ret = asset_df["Close"].pct_change(fill_method=None).dropna()
     bench_ret = bench_df["Close"].pct_change(fill_method=None).dropna()
-    equity_curve = (1 + asset_ret).cumprod()
+    # Starts at 1.0, before the first return. Without it cagr divided by the
+    # first bar's close-to-close growth and counted one period too few, and
+    # the Calmar ratio's drawdown never saw the first return.
+    equity_curve = equity_from_returns(asset_ret)
 
     ann_ret = cagr(equity_curve)
     cal = calmar_ratio(equity_curve)
@@ -1705,6 +1731,11 @@ def get_extended_risk_metrics(input_data: ExtendedRiskInput) -> ExtendedRiskResu
     vp99 = var_parametric(asset_ret, confidence=0.99)
     vh99 = var_historical(asset_ret, 0.99)
     cv99 = cvar(asset_ret, 0.99)
+    cv99_tail = cvar_tail_observations(asset_ret, 0.99)
+    warnings: List[str] = []
+    caution = cvar_tail_warning("cvar_99", cv99_tail, len(asset_ret), 0.99)
+    if caution:
+        warnings.append(caution)
 
     logger.debug(
         "[extended_risk] calmar=%.4f  treynor=%.4f  VaR_p95=%.4f  VaR_p99=%.4f",
@@ -1723,7 +1754,9 @@ def get_extended_risk_metrics(input_data: ExtendedRiskInput) -> ExtendedRiskResu
         var_parametric_99=round(vp99, 6),
         var_historical_99=round(vh99, 6),
         cvar_99=round(cv99, 6),
+        cvar_99_tail_observations=cv99_tail,
         beta=round(beta_val, 4),
+        warnings=warnings,
     )
 
 

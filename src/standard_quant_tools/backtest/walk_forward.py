@@ -22,7 +22,10 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 
 from standard_quant_tools.metrics.annualization import resolve_periods_per_year
-from standard_quant_tools.metrics.return_metrics import cumulative_return
+from standard_quant_tools.metrics.return_metrics import (
+    cumulative_return,
+    equity_from_returns,
+)
 from standard_quant_tools.metrics.risk_metrics import (
     calmar_ratio,
     max_drawdown,
@@ -85,7 +88,12 @@ def compute_stitched_metrics(
         interval=interval,
         where="compute_stitched_metrics",
     )
-    equity_curve = initial_capital * (1 + oos_returns).cumprod()
+    # The curve starts AT initial_capital, before the first out-of-sample
+    # return. `initial_capital * (1 + r).cumprod()` started after it, so the
+    # total return, drawdown and Calmar all dropped the first bar: a -20%
+    # first bar followed by sixty at +0.1% reported +6.2% and no drawdown
+    # against a true -15.1% and -20%.
+    equity_curve = equity_from_returns(oos_returns, start=initial_capital)
     return {
         "total_return": float(cumulative_return(equity_curve)),
         "sharpe_ratio": float(sharpe_ratio(oos_returns, 0.0, ppy)),

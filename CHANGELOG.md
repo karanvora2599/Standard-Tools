@@ -1,5 +1,72 @@
 # Changelog
 
+## Every growth rate and drawdown counts the first period, and an expected shortfall says how many days it is the mean of
+
+- **The first period's return was dropped from CAGR, maximum drawdown and
+  Calmar across nine doors.** Each built its curve as `(1 + r).cumprod()`,
+  which is the curve AFTER the first return and never contains the 1.0 it
+  was earned on; `cumulative_return` and `cagr` divide by a curve's first
+  point and `max_drawdown` seeds its running peak there. Planted
+  r = [-0.20, 0 x 40, +0.30, +0.001 x 40]: a true total return of +8.24%,
+  a CAGR of 27.6% a year (82 daily returns at 252 a year), a maximum
+  drawdown of -20% and a Calmar ratio of 1.378. Reported before:
+  `calculate_series_metrics` CAGR 1.5616, drawdown 0.0, Calmar null;
+  `get_drawdown_profile` no drawdowns and 0% underwater (now one 41-day
+  episode, 50% underwater); `analyze_stock_risk` drawdown 0.0;
+  `get_extended_risk_metrics` annualized return 1.5616 and Calmar null;
+  `get_portfolio_risk_attribution` 1.5616 and 0.0; `get_portfolio_analysis`
+  1.5616, 0.0 and null beside a correct +8.24% total return;
+  `compute_stitched_metrics` +35.3%, 0.0 and infinity (on -20% then sixty
+  days at +0.1%: +6.2% against a true -15.1%); the bootstrap's
+  `max_drawdown` point estimate and every resample 0.0; and
+  `hedge_effectiveness`'s drawdown before and after 0.0. Every one now
+  reports +8.24%, 27.6% and -20% on that series. The signal-panel
+  backtest's portfolio metrics and the futures hedge backtest's
+  effectiveness block read through two of these and change with them; a
+  strategy's first bar earns nothing, so in the panel the change is the
+  one period the CAGR's elapsed time had been short.
+- **One primitive, `metrics.equity_from_returns(returns, start=1.0)`.** It
+  prepends the start, so n returns give n + 1 levels and every level
+  metric is right without a change of its own: the denominator is the
+  level the first return was earned on, the peak begins there, and the
+  elapsed time is n periods. A Series keeps its labels, the start one bar
+  before the first (a business-day series starting on a Monday starts on
+  the Friday); an array gets one start per row, which is how the
+  bootstrap's resamples get theirs. A missing return is refused rather
+  than carried, and a start that is not positive is refused. The stress
+  replay and the trade Monte Carlo already seeded their peaks this way.
+- **`calculate_series_metrics(metrics=["cumulative_return"])` compounds the
+  returns.** Registered as a return metric, it divided the last return by
+  the first: [0.01, 0, 0.02] came back 1.0 against a true 0.0302, and a
+  series whose first return was negative was refused as one that "starts
+  at -0.2".
+- **`calculate_series_metrics` annualizes `cagr` and `calmar_ratio` at the
+  `periods_per_year` it is given.** The branch that passed it sat after
+  the one that did not, so both were annualized at 252 whatever was asked:
+  twelve monthly returns of 1% at 12 a year reported a CAGR of 11.27
+  against 0.1268. The published `drawdown_series` is on the returns' own
+  bars, its first value the first return's drawdown.
+- **An expected shortfall reports its tail count.** `cvar` keeps its
+  estimator, the mean of the returns at or below the empirical VaR
+  quantile, and on a short sample that is very few points: a year of
+  daily returns at 99% leaves three. `cvar_tail_observations` counts them
+  from the same tail `cvar` averages, and `analyze_stock_risk`,
+  `get_extended_risk_metrics`, `get_portfolio_analysis`,
+  `get_portfolio_risk_attribution` and `calculate_series_metrics` report
+  it beside the number (`cvar_95_tail_observations`,
+  `cvar_99_tail_observations`, `cvar_tail_observations`). Below ten a
+  warning names the count, as does the bootstrap of `cvar_95`.
+  `get_extended_risk_metrics` and `get_portfolio_analysis` gained a
+  `warnings` field to carry it.
+- **`run_stress_test` says how much of the book it replayed.** It replays
+  the tickers with data and scales their weights up to stand in for the
+  rest -- the right choice, since booking a missing ticker at 0% would
+  understate any crash -- but it said so only by listing the name. A book
+  40% in a ticker with no data reported the other 60%'s loss as its own.
+  `weight_coverage` is the share of gross weight replayed, and a warning
+  names each missing ticker with its weight; another names the days
+  dropped because a ticker in the replay had no return on them.
+
 ## A publishing call is no longer advertised as safe to repeat, a thinned tool reads as a whole sentence, and a covariance or a dated return stream passes from one tool to the next
 
 - **`idempotentHint` is false for the 32 tools that publish at a

@@ -8,10 +8,11 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 from standard_quant_tools._blas import single_threaded_blas
 from standard_quant_tools.error import ValidationError
-from standard_quant_tools.metrics.return_metrics import cagr
+from standard_quant_tools.metrics.return_metrics import cagr, equity_from_returns
 from standard_quant_tools.metrics.risk_metrics import (
     calmar_ratio,
     cvar,
+    cvar_tail_observations,
     information_ratio,
     max_drawdown,
     sharpe_ratio,
@@ -131,7 +132,12 @@ def portfolio_metrics(
     """
     w = np.asarray(weights, dtype=np.float64)
     port_returns = build_portfolio(returns_df, w)
-    equity_curve = (1 + port_returns).cumprod()
+    # Starts at 1.0, before the first return. Built as `(1 + r).cumprod()`
+    # it began after it, so `annualized_return`, `max_drawdown` and
+    # `calmar_ratio` all dropped the first day while `total_return` -- read
+    # against 1.0 -- kept it: a -20% first day reported a 156% CAGR and no
+    # drawdown beside a correct +8.24% total return.
+    equity_curve = equity_from_returns(port_returns)
 
     # Covariance (annualized): single O(n·k²) BLAS call via numpy, on one
     # BLAS thread (see `_blas`) so its bits do not follow the core count.
@@ -168,6 +174,10 @@ def portfolio_metrics(
         "calmar_ratio": round(calmar_ratio(equity_curve, periods_per_year), 4),
         "var_95": round(var_historical(port_returns, 0.95), 6),
         "cvar_95": round(cvar(port_returns, 0.95), 6),
+        # How many days that shortfall is the mean of: at 95% on a quarter of
+        # daily returns (63) it is four.
+        "cvar_95_tail_observations": cvar_tail_observations(port_returns, 0.95),
+        "n_observations": int(len(port_returns)),
         "total_return": round(float(equity_curve.iloc[-1] - 1), 6),
         "tickers": list(returns_df.columns),
         "weights": w.tolist(),

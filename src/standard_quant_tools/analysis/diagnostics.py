@@ -53,6 +53,7 @@ from standard_quant_tools._special import (
 from standard_quant_tools.analysis._series import clean_series
 from standard_quant_tools.constants import TRADING_DAYS_PER_YEAR
 from standard_quant_tools.error import ValidationError
+from standard_quant_tools.metrics.return_metrics import equity_from_returns
 from standard_quant_tools.metrics.risk_metrics import (
     annualized_sharpe as _annualized_sharpe,
 )
@@ -791,9 +792,14 @@ def drawdown_profile(
     by test_drawdown_start_conventions.
     """
     values = _clean(returns, "drawdown_profile")
-    equity = (1.0 + values).cumprod()
-    peak = equity.cummax()
-    drawdown = equity / peak - 1.0
+    # The peak STARTS AT 1.0, the level before the first return. Seeded
+    # from `(1 + r).cumprod()` instead, it began at the first bar's close,
+    # so a first-bar loss sat at its own peak: a -20% first day followed by
+    # forty flat ones was reported as 0 drawdowns, 0% underwater. The start
+    # point is then dropped, so every row below is one of the returns'
+    # bars and keeps its label.
+    equity = equity_from_returns(values)
+    drawdown = (equity / equity.cummax() - 1.0).iloc[1:]
 
     episodes: List[Dict[str, Any]] = []
     in_drawdown = False

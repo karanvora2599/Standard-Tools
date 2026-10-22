@@ -42,6 +42,7 @@ from standard_quant_tools._blas import single_threaded_blas
 from standard_quant_tools.analysis.regression import calculate_beta, rolling_beta
 from standard_quant_tools.constants import TRADING_DAYS_PER_YEAR
 from standard_quant_tools.error import ValidationError
+from standard_quant_tools.metrics.return_metrics import equity_from_returns
 from standard_quant_tools.metrics.risk_metrics import max_drawdown
 
 from ._numbers import finite
@@ -277,8 +278,10 @@ def hedge_effectiveness(
     beta_before = calculate_beta(unhedged, hedge)
     beta_after = calculate_beta(hedged, hedge)
 
-    dd_before = float(max_drawdown((1.0 + unhedged).cumprod()))
-    dd_after = float(max_drawdown((1.0 + hedged).cumprod()))
+    # Both curves start at 1.0, before the first return, so a first-bar
+    # loss is a drawdown on either side of the comparison.
+    dd_before = float(max_drawdown(equity_from_returns(unhedged)))
+    dd_after = float(max_drawdown(equity_from_returns(hedged)))
 
     rolling = None
     ratio_stability: Dict[str, Any] = {}

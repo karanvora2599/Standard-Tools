@@ -103,9 +103,15 @@ from standard_quant_tools.data.databento import print_counts as _print_counts
 from standard_quant_tools.data.factory import DataFactory
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.indicators.volatility import atr
-from standard_quant_tools.metrics.return_metrics import annualized_volatility, cagr
+from standard_quant_tools.metrics.return_metrics import (
+    annualized_volatility,
+    cagr,
+    equity_from_returns,
+)
 from standard_quant_tools.metrics.risk_metrics import (
     cvar,
+    cvar_tail_observations,
+    cvar_tail_warning,
     information_ratio,
     max_drawdown,
     sharpe_ratio,
@@ -570,7 +576,10 @@ def get_portfolio_risk_attribution(
 
     port_arr: np.ndarray = returns_df.values @ weights
     port_ret = pd.Series(port_arr, index=returns_df.index)
-    port_equity = (1 + port_ret).cumprod()
+    # Starts at 1.0, before the first return, so the CAGR and the drawdown
+    # both see the first day: from `(1 + r).cumprod()` a -20% first day was
+    # a 156% CAGR and no drawdown at all.
+    port_equity = equity_from_returns(port_ret)
 
     common = port_ret.index.intersection(bench_ret.index)
     bench_aligned = bench_ret.loc[common]
@@ -584,6 +593,8 @@ def get_portfolio_risk_attribution(
     mdd = float(max_drawdown(port_equity))
     v95 = float(var_historical(port_ret, 0.95))
     cv95 = float(cvar(port_ret, 0.95))
+    cv95_tail = cvar_tail_observations(port_ret, 0.95)
+    cv95_caution = cvar_tail_warning("cvar_95", cv95_tail, len(port_ret), 0.95)
     ir = float(information_ratio(port_aligned, bench_aligned))
 
     # ── Marginal Risk Contribution (fraction of portfolio variance) ─
@@ -663,6 +674,8 @@ def get_portfolio_risk_attribution(
                 f"had no return on them; it uses the {mfr['n_obs']} dates they "
                 "all share."
             )
+    if cv95_caution:
+        warnings.append(cv95_caution)
 
     return RiskAttributionResult(
         warnings=warnings,
@@ -675,6 +688,7 @@ def get_portfolio_risk_attribution(
         max_drawdown=round(mdd, 6),
         var_95=round(v95, 6),
         cvar_95=round(cv95, 6),
+        cvar_95_tail_observations=cv95_tail,
         information_ratio=round(ir, 4),
         asset_risk_contributions=asset_risk_contribs,
         pca_variance_explained=evr,
@@ -740,7 +754,8 @@ def run_stress_test(input_data: StressTestInput) -> StressTestResult:
         )
 
     tickers_used = list(returns_by_ticker.keys())
-    returns_df = pd.DataFrame(returns_by_ticker).dropna()
+    every_day = pd.DataFrame(returns_by_ticker)
+    returns_df = every_day.dropna()
 
     if input_data.weights is None:
         weights = np.full(len(input_data.tickers), 1.0 / len(input_data.tickers))
@@ -757,7 +772,37 @@ def run_stress_test(input_data: StressTestInput) -> StressTestResult:
             "the tickers with available data for this scenario carry zero "
             "total weight — cannot replay."
         )
+    # THE RENORMALISATION IS REPORTED. It is a choice -- the alternative,
+    # booking a missing ticker at 0%, would understate any crash -- but it
+    # replays a different portfolio from the one asked about, and nothing in
+    # the result said so: a book 40% in a ticker with no data for the window
+    # reported the other 60%'s loss as the portfolio's, renormalised to
+    # 100%, beside nothing but the ticker's name. Gross weight, so a short
+    # leg counts by its size. Never zero here: the used weights sum above 0.
+    weight_coverage = float(np.abs(used_weights).sum() / np.abs(weights).sum())
     used_weights = used_weights / used_weights_sum
+
+    stress_warnings: List[str] = []
+    if tickers_missing_data:
+        missing = ", ".join(
+            f"{t} ({weight_by_ticker[t]:.1%})" for t in tickers_missing_data
+        )
+        stress_warnings.append(
+            f"{len(tickers_missing_data)} of {len(input_data.tickers)} tickers "
+            f"had no data for {scenario_start} → {scenario_end} and are not in "
+            f"the replay: {missing}. The other tickers' weights were scaled up "
+            f"to stand in for them, so the replay covers "
+            f"{weight_coverage:.1%} of the portfolio's gross weight and its "
+            "return and drawdown are those of a portfolio without them."
+        )
+    if len(returns_df) < len(every_day):
+        partial = [str(c) for c in every_day.columns if every_day[c].isna().any()]
+        stress_warnings.append(
+            f"{len(every_day) - len(returns_df)} of {len(every_day)} days in "
+            f"the window were dropped because {', '.join(partial)} had no "
+            "return on them; the replay runs only on the days every ticker "
+            "used has a return."
+        )
 
     result = replay_stress_scenario(returns_df, used_weights)
 
@@ -767,6 +812,8 @@ def run_stress_test(input_data: StressTestInput) -> StressTestResult:
         scenario_end_date=scenario_end,
         tickers_used=tickers_used,
         tickers_missing_data=tickers_missing_data,
+        weight_coverage=round(weight_coverage, 6),
+        warnings=stress_warnings,
         portfolio_return_pct=round(result["portfolio_return_pct"], 6),
         max_drawdown_pct=round(result["max_drawdown_pct"], 6),
         worst_day_return_pct=round(result["worst_day_return_pct"], 6),

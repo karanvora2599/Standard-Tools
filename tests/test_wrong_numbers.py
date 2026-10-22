@@ -125,7 +125,10 @@ class TestSeriesMetricsGetTheSeriesTheyDocument:
             SeriesMetricsInput,
             calculate_series_metrics,
         )
-        from standard_quant_tools.metrics.return_metrics import cagr
+        from standard_quant_tools.metrics.return_metrics import (
+            cagr,
+            equity_from_returns,
+        )
         from standard_quant_tools.metrics.risk_metrics import (
             calmar_ratio,
             max_drawdown,
@@ -133,7 +136,9 @@ class TestSeriesMetricsGetTheSeriesTheyDocument:
 
         returns = pd.Series(np.random.default_rng(3).normal(0.0002, 0.013, 504))
 
-        equity = (1.0 + returns).cumprod()
+        # From 1.0, before the first return (the CHANGELOG entry of
+        # 2026-10-22): the library's curve, not `(1 + r).cumprod()`.
+        equity = equity_from_returns(returns)
 
         got = calculate_series_metrics(
             SeriesMetricsInput(

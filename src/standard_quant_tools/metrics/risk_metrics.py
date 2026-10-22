@@ -253,6 +253,22 @@ def var_parametric(returns: pd.Series, confidence: float = 0.95) -> float:
     return float(-(mu + z * sigma))
 
 
+#: Below this many tail observations an expected shortfall is the mean of a
+#: handful of returns rather than an estimate of the tail, and the result
+#: that reports one says so. A year of daily returns at 99% leaves three.
+CVAR_MIN_TAIL_OBSERVATIONS = 10
+
+
+def _cvar_tail(returns: pd.Series, confidence: float) -> Tuple[float, np.ndarray]:
+    """The VaR threshold and the returns at or below it -- the tail `cvar`
+    averages. One function, so a tail count reported beside an expected
+    shortfall is the count of the points that shortfall was taken over."""
+    _check_confidence(confidence)
+    arr = returns.dropna().to_numpy(dtype=np.float64)
+    threshold = float(np.percentile(arr, (1 - confidence) * 100))
+    return threshold, arr[arr <= threshold]
+
+
 @validate_series()
 def cvar(returns: pd.Series, confidence: float = 0.95) -> float:
     """
@@ -260,14 +276,53 @@ def cvar(returns: pd.Series, confidence: float = 0.95) -> float:
     The expected loss given that the loss exceeds the VaR threshold.
     More conservative and coherent than VaR.
 
+    The estimator is the mean of the returns at or below the empirical VaR
+    quantile. On a short sample that is very few points --
+    `cvar_tail_observations` says how many, and a result reporting this
+    number should report that one beside it.
+
     Raises:
         ValidationError: confidence is not strictly between 0 and 1.
     """
-    _check_confidence(confidence)
-    arr = returns.dropna().to_numpy(dtype=np.float64)
-    threshold = np.percentile(arr, (1 - confidence) * 100)
-    tail = arr[arr <= threshold]
+    threshold, tail = _cvar_tail(returns, confidence)
     return float(-tail.mean()) if len(tail) > 0 else float(-threshold)
+
+
+@validate_series()
+def cvar_tail_observations(returns: pd.Series, confidence: float = 0.95) -> int:
+    """
+    How many returns `cvar(returns, confidence)` is the mean of.
+
+    An expected shortfall is an average over the tail, and the tail of a
+    short sample is a few points: 252 daily returns at 99% leave 3, so the
+    reported number is the mean of the three worst days and moves with any
+    one of them. The estimator is kept; this is the count that has to
+    travel with it.
+
+    Raises:
+        ValidationError: confidence is not strictly between 0 and 1.
+    """
+    _, tail = _cvar_tail(returns, confidence)
+    return int(len(tail))
+
+
+def cvar_tail_warning(
+    field: str, n_tail: int, n_obs: int, confidence: float
+) -> Optional[str]:
+    """
+    The warning a result carries when its expected shortfall `field` rests
+    on fewer than CVAR_MIN_TAIL_OBSERVATIONS returns, or None when it does
+    not.
+    """
+    if n_tail >= CVAR_MIN_TAIL_OBSERVATIONS:
+        return None
+    return (
+        f"{field} is the mean of the worst {n_tail} of {n_obs} returns at "
+        f"{confidence:.0%} confidence -- fewer than "
+        f"{CVAR_MIN_TAIL_OBSERVATIONS}, so it describes those few days rather "
+        "than the tail, and one more bad day moves it. Read it with its tail "
+        "count; a longer history or a lower confidence gives it more points."
+    )
 
 
 @validate_series()

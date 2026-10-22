@@ -56,9 +56,12 @@ from standard_quant_tools._resampling import block_indices
 from standard_quant_tools.analysis._series import clean_series
 from standard_quant_tools.constants import TRADING_DAYS_PER_YEAR
 from standard_quant_tools.error import ValidationError
+from standard_quant_tools.metrics.return_metrics import equity_from_returns
 from standard_quant_tools.metrics.risk_metrics import (
     DISPERSION_RTOL,
     cvar,
+    cvar_tail_observations,
+    cvar_tail_warning,
     has_no_dispersion,
     sharpe_ratio,
     sortino_ratio,
@@ -132,7 +135,9 @@ def _statistic(values: np.ndarray, name: str, periods: int = TRADING_DAYS) -> fl
         centred = (values - values.mean()) / std
         return float((centred**3).mean() if name == "skew" else (centred**4).mean())
     if name == "max_drawdown":
-        equity = np.cumprod(1.0 + values)
+        # From 1.0, before the first return: a curve that began after it
+        # took a first-bar loss as its own peak and called it no drawdown.
+        equity = equity_from_returns(values)
         return float((equity / np.maximum.accumulate(equity) - 1.0).min())
     if name == "win_rate":
         return float((values > 0).mean())
@@ -224,7 +229,8 @@ def _statistic_rows(sample: np.ndarray, name: str, periods: int) -> np.ndarray:
     if name == "std":
         return sample.std(axis=1, ddof=1)
     if name == "max_drawdown":
-        equity = np.cumprod(1.0 + sample, axis=1)
+        # One start of 1.0 per resample, as `_statistic` has.
+        equity = equity_from_returns(sample)
         return (equity / np.maximum.accumulate(equity, axis=1) - 1.0).min(axis=1)
     if name == "win_rate":
         return (sample > 0).mean(axis=1)
@@ -386,6 +392,14 @@ def bootstrap_statistic(
             "maximum drawdown is a minimum over the sample and is biased "
             "toward zero in short ones."
         )
+    if statistic == "cvar_95":
+        # The point estimate is the mean of this many returns, and every
+        # resample's is the mean of about as many.
+        caution = cvar_tail_warning(
+            "cvar_95", cvar_tail_observations(pd.Series(array), 0.95), n, 0.95
+        )
+        if caution:
+            warnings.append(caution)
     warnings.append(
         f"Block bootstrap with blocks of {block_size} observations, which "
         "preserves local serial correlation. The interval is a statement "

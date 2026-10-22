@@ -435,12 +435,17 @@ class TestTheOriginalContractIsUnchanged:
     stay exactly as they were fixed."""
 
     def test_an_equity_curve_metric_still_receives_the_equity_curve(self):
-        from standard_quant_tools.metrics.return_metrics import cagr
+        from standard_quant_tools.metrics.return_metrics import (
+            cagr,
+            equity_from_returns,
+        )
 
         returns = pd.Series(np.random.default_rng(3).normal(0.0002, 0.013, 504))
         got = _metrics(returns, ["cagr"])
+        # The curve starts at 1.0, before the first return (the CHANGELOG
+        # entry of 2026-10-22).
         assert got.values["cagr"] == pytest.approx(
-            float(cagr((1.0 + returns).cumprod())), rel=1e-9
+            float(cagr(equity_from_returns(returns))), rel=1e-9
         )
         assert got.values["cagr"] > 0
 

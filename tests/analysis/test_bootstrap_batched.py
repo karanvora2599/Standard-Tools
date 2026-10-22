@@ -18,6 +18,7 @@ import math
 from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from standard_quant_tools._resampling import block_indices
@@ -31,6 +32,10 @@ from standard_quant_tools.analysis.inference import (
     bootstrap_statistic,
 )
 from standard_quant_tools.error import ValidationError
+from standard_quant_tools.metrics.risk_metrics import (
+    cvar_tail_observations,
+    cvar_tail_warning,
+)
 
 
 def _reference_bootstrap_statistic(
@@ -44,7 +49,7 @@ def _reference_bootstrap_statistic(
     seed: int = 0,
 ) -> Dict[str, Any]:
     """`bootstrap_statistic` as it was before the resamples were batched,
-    verbatim but for this docstring."""
+    verbatim but for this docstring and the tail-count warning added since."""
     array = _clean(values, "bootstrap_statistic")
     if statistic not in STATISTICS:
         raise ValidationError(
@@ -116,6 +121,15 @@ def _reference_bootstrap_statistic(
             "maximum drawdown is a minimum over the sample and is biased "
             "toward zero in short ones."
         )
+    # Added with the tail count (the CHANGELOG entry of 2026-10-22). It
+    # reads the series, not the resamples, so it is no part of what the
+    # batching changed; it is here so the two return the same warnings.
+    if statistic == "cvar_95":
+        caution = cvar_tail_warning(
+            "cvar_95", cvar_tail_observations(pd.Series(array), 0.95), n, 0.95
+        )
+        if caution:
+            warnings.append(caution)
     warnings.append(
         f"Block bootstrap with blocks of {block_size} observations, which "
         "preserves local serial correlation. The interval is a statement "

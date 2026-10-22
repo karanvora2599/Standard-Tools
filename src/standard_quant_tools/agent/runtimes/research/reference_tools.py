@@ -47,7 +47,11 @@ Stat = Annotated[Optional[float], BeforeValidator(_finite_or_none)]
 #: arbitrary expression would be a remote-code path wearing a statistics
 #: costume.
 _METRICS = {
-    "cumulative_return": (M.cumulative_return, False),
+    # A LEVEL metric -- last over first, minus one. Registered False, it was
+    # handed the RETURNS and divided the last return by the first: [0.01, 0,
+    # 0.02] came back 1.0 against a true 0.0302, and any series whose first
+    # return was negative was refused as "starts at -0.2".
+    "cumulative_return": (M.cumulative_return, True),
     # `cagr` calls `cumulative_return`, and `calmar_ratio`'s own parameter
     # is named `equity_curve`. Registered False, they were handed a RETURN
     # series: cagr came back -0.4876 where the truth is +0.2337, sign
@@ -182,6 +186,12 @@ class SeriesMetricsResult(BaseModel):
         "different number from `var_historical`, which cannot see past the "
         "worst observation there is. Null unless the metric was requested.",
     )
+    cvar_tail_observations: Optional[int] = Field(
+        None,
+        description="How many returns `cvar` (at 95%) is the mean of. An "
+        "expected shortfall over a few points describes those days, not the "
+        "tail; below 10 a warning says so. Null unless `cvar` was requested.",
+    )
     warnings: List[str] = Field(default_factory=list)
 
 
@@ -227,7 +237,13 @@ def calculate_series_metrics(input_data: SeriesMetricsInput) -> SeriesMetricsRes
         )
 
     returns = resolve_source(input_data.series, what="calculate_series_metrics")
-    equity = (1.0 + returns).cumprod()
+    # The curve STARTS AT 1.0, before the first return. `(1 + r).cumprod()`
+    # began after it, so every level metric dropped the first period: a -20%
+    # first day was no drawdown at all and the CAGR came back 1.5616 against
+    # a true 0.2756. Built only when a level metric asks for it, because it
+    # refuses a missing return that a Sharpe would simply skip.
+    wants_levels = any(_METRICS[name][1] for name in input_data.metrics)
+    equity = M.equity_from_returns(returns) if wants_levels else None
 
     warnings: List[str] = []
     benchmark = None
@@ -301,8 +317,11 @@ def calculate_series_metrics(input_data: SeriesMetricsInput) -> SeriesMetricsRes
                 )
             continue
         if name == _SERIES_METRIC:
+            # On the RETURNS' bars: the start level is at its own peak by
+            # definition, so its drawdown is zero and says nothing, and
+            # without it every bar keeps the label it came with.
             drawdown_ref = _publish_if_requested(
-                fn(equity),
+                fn(equity).iloc[1:],
                 kind="analytic_series",
                 run_id=input_data.run_id,
                 name=input_data.name,
@@ -340,18 +359,32 @@ def calculate_series_metrics(input_data: SeriesMetricsInput) -> SeriesMetricsRes
                     risk_free_rate=input_data.risk_free_rate,
                     periods_per_year=input_data.periods_per_year,
                 )
+            elif name in ("cagr", "calmar_ratio"):
+                # Before the level branch below, which calls without
+                # `periods_per_year`: sitting after it, this branch was
+                # unreachable and both were annualized at 252 whatever the
+                # caller passed -- twelve monthly returns of 1% at
+                # periods_per_year=12 reported a CAGR of 11.27 (1,127%).
+                values[name] = fn(equity, periods_per_year=input_data.periods_per_year)
             elif wants_equity:
                 values[name] = fn(equity)
             elif name == "annualized_volatility":
                 values[name] = fn(returns, periods_per_year=input_data.periods_per_year)
-            elif name in ("cagr", "calmar_ratio"):
-                values[name] = fn(equity, periods_per_year=input_data.periods_per_year)
             else:
                 values[name] = fn(returns)
         except TypeError:
             # A metric whose signature does not take the annualization
             # arguments; call it plainly rather than guessing at kwargs.
             values[name] = fn(equity if wants_equity else returns)
+
+    cvar_tail: Optional[int] = None
+    if "cvar" in input_data.metrics:
+        cvar_tail = M.cvar_tail_observations(returns)
+        caution = M.cvar_tail_warning(
+            "cvar", cvar_tail, int(returns.notna().sum()), 0.95
+        )
+        if caution:
+            warnings.append(caution)
 
     return SeriesMetricsResult(
         n_observations=int(len(returns)),
@@ -360,6 +393,7 @@ def calculate_series_metrics(input_data: SeriesMetricsInput) -> SeriesMetricsRes
         benchmark_observations=(None if benchmark is None else int(len(benchmark))),
         drawdown_ref=drawdown_ref,
         evt=evt,
+        cvar_tail_observations=cvar_tail,
         warnings=warnings,
     )
 
