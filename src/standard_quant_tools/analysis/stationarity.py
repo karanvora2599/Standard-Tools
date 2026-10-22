@@ -190,7 +190,9 @@ def kpss_statistic(values: np.ndarray, lags: Optional[int] = None) -> float:
     return float((partial_sums**2).sum() / (n**2 * variance))
 
 
-def variance_ratio(values: np.ndarray, period: int = 2) -> Dict[str, float]:
+def variance_ratio(
+    values: np.ndarray, period: int = 2, *, increments: bool = False
+) -> Dict[str, float]:
     """
     Lo-MacKinlay variance ratio, heteroskedasticity-robust.
 
@@ -198,6 +200,13 @@ def variance_ratio(values: np.ndarray, period: int = 2) -> Dict[str, float]:
     means they trend. It fails differently from ADF, which is why both are
     here: a series can be a unit root in level while its increments are
     strongly mean-reverting, and only this sees that.
+
+    `values` is the LEVEL of the walk -- a price or a spread -- and its
+    differences are the increments the ratio is about. Pass
+    `increments=True` when `values` already ARE the increments, returns
+    above all: they are then used as given, and `differencing` reads
+    "none". Differencing returns a second time turns white noise into an
+    MA(1) with theta = -1, whose VR(2) is exactly 0.5.
 
     `z_statistic` is Lo and MacKinlay's heteroskedasticity-robust z*,
     asymptotically N(0, 1) under a random walk with uncorrelated but
@@ -220,7 +229,10 @@ def variance_ratio(values: np.ndarray, period: int = 2) -> Dict[str, float]:
     # that touches or crosses zero gets simple differences, which is the
     # Lo-MacKinlay statistic on the level and is what a spread needs.
     array = np.asarray(values, dtype=float)
-    if np.all(array > 0):
+    if increments:
+        returns = array
+        differencing = "none"
+    elif np.all(array > 0):
         returns = np.diff(np.log(array))
         differencing = "log"
     else:
@@ -293,6 +305,7 @@ def run_stationarity_tests(
     lags: int = 1,
     vr_periods: Sequence[int] = (2, 4, 8),
     kpss_lags: Optional[int] = None,
+    increments: bool = False,
 ) -> Dict[str, Any]:
     """
     ADF, KPSS and the variance ratio, with the four-way verdict spelled out.
@@ -307,6 +320,13 @@ def run_stationarity_tests(
     reported as `kpss_lags_used` either way, because a KPSS statistic is
     not comparable across bandwidths and one quoted without its own is not
     reproducible.
+
+    `increments=True` says `series` is already the steps of a walk --
+    returns rather than a price. ADF and KPSS test it as given either way;
+    the flag changes only the variance ratio, which is about the steps and
+    so differences a level but must not difference returns again. Measured
+    on 2,000 i.i.d. returns without it: VR(2) = 0.514 and VR(8) = 0.128,
+    every p-value 0.0 -- strong mean reversion read off a random walk.
     """
     values = _clean(series, "run_stationarity_tests")
 
@@ -351,14 +371,21 @@ def run_stationarity_tests(
             "either verdict.",
         )
 
+    # The variance ratio is a statement about the INCREMENTS of a walk. A
+    # level is differenced to get them; returns already are them, and used
+    # to be differenced again -- the second difference of white noise is an
+    # MA(1) with theta = -1, so every random walk tested on its returns came
+    # back VR(2) near 0.5 with a p-value of zero.
     ratios = []
     for period in vr_periods:
         try:
-            ratios.append(variance_ratio(values, period=period))
+            ratios.append(variance_ratio(values, period=period, increments=increments))
         except ValidationError:
             continue
 
-    warnings = _stationarity_warnings(verdict, len(values), ratios)
+    warnings = _stationarity_warnings(
+        verdict, len(values), ratios, increments=increments
+    )
     if kpss_used != requested:
         warnings.append(
             f"The KPSS bandwidth was clamped from {requested} to "
@@ -395,7 +422,7 @@ def run_stationarity_tests(
     }
 
 
-def _stationarity_warnings(verdict, n, ratios) -> List[str]:
+def _stationarity_warnings(verdict, n, ratios, *, increments=False) -> List[str]:
     out = []
     if verdict == "inconclusive":
         out.append(
@@ -413,7 +440,10 @@ def _stationarity_warnings(verdict, n, ratios) -> List[str]:
         for r in ratios
         if np.isfinite(r["variance_ratio"]) and r["variance_ratio"] < 0.8
     ]
-    if reverting and verdict == "non_stationary":
+    # Only for a level. On returns the verdict and the ratio are about ONE
+    # series, so there is no "level" and "increments" pair to reconcile and
+    # the sentence below would describe objects the caller never passed.
+    if reverting and verdict == "non_stationary" and not increments:
         out.append(
             "the level looks like a unit root while the INCREMENTS revert "
             f"(variance ratio {reverting[0]['variance_ratio']:.2f} at period "
@@ -450,7 +480,6 @@ def detect_regimes(
     if n_regimes < 2 or n_regimes > 5:
         raise ValidationError("detect_regimes: n_regimes must be between 2 and 5")
 
-    n = len(values)
     # Initialize on quantiles rather than at random: a random start on
     # financial data converges to the same answer most of the time and to a
     # degenerate one occasionally, and reproducibility matters more here

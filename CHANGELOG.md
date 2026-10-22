@@ -1,5 +1,37 @@
 # Changelog
 
+## A variance ratio of returns reads the returns as the walk's steps, so a random walk tested on its returns reads one
+
+- **Returns were differenced a second time.** `run_stationarity_tests`
+  handed the series under test to `variance_ratio`, which differences its
+  input. That is right for a price or a spread, whose differences are the
+  steps the ratio describes, and wrong for returns, which already are the
+  steps -- what the research tool passes for `on="returns"`. The
+  difference of white noise is an MA(1) with theta = -1, whose VR(2) is
+  exactly 0.5. Measured on 2,000 i.i.d. returns: VR(2) = 0.514, VR(4) =
+  0.253, VR(8) = 0.128, every p-value 0.0 and the verdict `stationary`
+  beside them -- strong mean reversion read off a random walk, where the
+  price of the same walk gave 1.021, 1.029 and 1.064.
+- **`increments=True`** on `variance_ratio` and `run_stationarity_tests`
+  says the values are the steps, and they are used as given; the row's
+  `differencing` reads `"none"`. The tool sets it for `on="returns"`, and
+  the same returns now read 1.020, 1.029 and 1.064 with p = 0.36, 0.48
+  and 0.33. ADF and KPSS are unchanged in both modes. The default still
+  differences, so a price or a spread gives the numbers it gave before.
+- **`differencing` reaches the wire.** The library's row always carried
+  it and `VarianceRatio` dropped it, so a caller could not see which
+  object the ratio described. It is a new optional field.
+- The "level is a unit root while the increments revert" warning is not
+  raised on the increments path, where there is one series rather than a
+  level and its steps.
+- Tests: white-noise returns read VR near 1 and not significant; 300
+  walks of 500 returns reject within 2-9%; the
+  price and its returns agree within 0.01; reverting returns (MA(1),
+  theta = -0.5) and a reverting AR(1) spread still read below one; and
+  the tool's two modes give one walk one ratio. The 300 walks reject 23
+  times at VR(2) (7.7%, about two standard errors above 5% on 300 draws)
+  and rejected all 300 before.
+
 ## The documentation says what the six changes below do, and its generated pages and measured sizes follow the code
 
 - **Each change is described where its tools are.** Metrics (03) build

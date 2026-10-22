@@ -8543,7 +8543,9 @@ class StationarityInput(BaseModel):
     on: Literal["price", "returns"] = Field(
         "price",
         description="'price' tests the level for a unit root — the usual "
-        "question for a spread. 'returns' tests the increments.",
+        "question for a spread. 'returns' tests the increments, and the "
+        "variance ratio reads them as the walk's steps rather than "
+        "differencing them again, so both modes give one walk one ratio.",
     )
     lags: int = Field(
         1,
@@ -8581,6 +8583,15 @@ class VarianceRatio(BaseModel):
     variance_ratio: float
     z_statistic: Optional[float] = None
     p_value: Optional[float] = None
+    differencing: Optional[Literal["log", "level", "none"]] = Field(
+        None,
+        description="How the increments the ratio describes were formed: "
+        "'log' differences of a strictly positive price, 'level' "
+        "differences of a series that touches or crosses zero, or 'none' "
+        "when the series already was the increments (`on='returns'`). "
+        "Returns used to be differenced a second time, which reads any "
+        "random walk at VR(2) near 0.5.",
+    )
 
 
 class StationarityResult(BaseModel):

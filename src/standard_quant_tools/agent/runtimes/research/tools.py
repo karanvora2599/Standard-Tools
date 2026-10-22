@@ -2334,11 +2334,15 @@ def run_stationarity_tests(input_data: StationarityInput) -> StationarityResult:
     series = _price_series(
         input_data.symbol, input_data.start_date, input_data.end_date, input_data.on
     )
+    # Returns are already the steps of the walk, so the variance ratio reads
+    # them as given. Differenced again, a random walk's returns read VR(2)
+    # near 0.5 with a p-value of zero: mean reversion that is not there.
     result = _tests(
         series,
         lags=input_data.lags,
         vr_periods=tuple(input_data.vr_periods),
         kpss_lags=input_data.kpss_lags,
+        increments=input_data.on == "returns",
     )
     return StationarityResult(
         symbol=input_data.symbol,

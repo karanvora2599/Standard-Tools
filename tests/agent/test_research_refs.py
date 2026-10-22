@@ -725,3 +725,28 @@ class TestKpssBandwidthIsChosenAndReported:
             StationarityInput(symbol="AAA", start_date=START, end_date=END)
         )
         assert [v.period for v in default.variance_ratios] == [2, 4, 8]
+
+    def test_both_modes_read_one_walk_as_a_walk(self, provider):
+        """
+        AAA is a random walk: i.i.d. returns compounded. `on="returns"` used
+        to difference the returns a second time, and read this walk at
+        VR(2) near 0.5 with a p-value of zero. Both modes ask the variance
+        ratio of the same walk, so they now agree, near one, and each says
+        what it differenced.
+        """
+        from standard_quant_tools.agent.models import StationarityInput
+        from standard_quant_tools.agent.runtimes.research.tools import (
+            run_stationarity_tests,
+        )
+
+        price, returns = (
+            run_stationarity_tests(
+                StationarityInput(symbol="AAA", start_date=START, end_date=END, on=on)
+            )
+            for on in ("price", "returns")
+        )
+        assert [v.differencing for v in price.variance_ratios] == ["log"] * 3
+        assert [v.differencing for v in returns.variance_ratios] == ["none"] * 3
+        for a, b in zip(price.variance_ratios, returns.variance_ratios):
+            assert abs(b.variance_ratio - 1.0) < 0.2, b
+            assert b.variance_ratio == pytest.approx(a.variance_ratio, abs=0.02)

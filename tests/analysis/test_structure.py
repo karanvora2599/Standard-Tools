@@ -676,6 +676,111 @@ class TestTheVarianceRatioStatistic:
         assert 0.9 <= float(np.std(zs)) <= 1.1
 
 
+class TestTheVarianceRatioOfReturnsIsNotDifferencedTwice:
+    """
+    THE BUG. `run_stationarity_tests` handed the series under test to
+    `variance_ratio`, which differences its input. On a price that is the
+    right object: the variance ratio is a statement about the steps of the
+    walk, and the differences are the steps. On RETURNS -- what the research
+    tool passes for `on="returns"` -- the returns were differenced again,
+    and the difference of white noise is an MA(1) with theta = -1, whose
+    VR(2) is exactly 0.5. Measured on 2,000 i.i.d. returns: VR(2) = 0.514,
+    VR(4) = 0.253, VR(8) = 0.128, every p-value 0.0, and the verdict
+    `stationary` beside them -- "strong mean reversion" read off a pure
+    random walk. The price of the same walk gave 1.021, 1.029 and 1.064.
+
+    `increments=True` says the values ARE the steps, so they are used as
+    given. The default still differences, so a price or a spread reads as
+    before.
+    """
+
+    @staticmethod
+    def _white_noise(n=2000, seed=3):
+        return np.random.default_rng(seed).normal(0.0003, 0.01, n)
+
+    def test_white_noise_returns_read_as_a_random_walk(self):
+        returns = pd.Series(self._white_noise())
+        result = run_stationarity_tests(returns, increments=True)
+        for row in result["variance_ratios"]:
+            assert row["differencing"] == "none"
+            assert abs(row["variance_ratio"] - 1.0) < 0.1, row
+            assert row["p_value"] > 0.05, row
+
+    def test_increments_given_are_the_differences_of_their_level(self):
+        """The two spellings of one question give one answer: a level that
+        starts at zero is differenced by level, and its differences are the
+        increments back again, up to the rounding of a cumulative sum."""
+        increments = self._white_noise(n=600, seed=11)
+        for period in (2, 4, 8):
+            given = variance_ratio(increments, period=period, increments=True)
+            from_level = variance_ratio(_level(increments), period=period)
+            assert given["variance_ratio"] == pytest.approx(
+                from_level["variance_ratio"], rel=1e-12
+            )
+            assert given["z_statistic"] == pytest.approx(
+                from_level["z_statistic"], rel=1e-12
+            )
+
+    def test_the_null_is_rejected_at_the_nominal_rate_on_returns(self):
+        """300 random walks of 500 returns, through the whole function. It
+        rejected every one of them before: the second difference makes the
+        null false by construction."""
+        rejected = sum(
+            run_stationarity_tests(
+                pd.Series(np.random.default_rng(seed).normal(0.0, 0.01, 500)),
+                vr_periods=(2,),
+                increments=True,
+            )["variance_ratios"][0]["p_value"]
+            < 0.05
+            for seed in range(300)
+        )
+        assert 0.02 <= rejected / 300 <= 0.09, rejected
+
+    def test_a_random_walk_price_still_reads_one(self):
+        returns = self._white_noise()
+        price = pd.Series(100.0 * np.cumprod(np.concatenate([[1.0], 1.0 + returns])))
+        result = run_stationarity_tests(price)
+        for row in result["variance_ratios"]:
+            assert row["differencing"] == "log"
+            assert abs(row["variance_ratio"] - 1.0) < 0.1, row
+
+    def test_the_price_and_its_returns_agree(self):
+        """The variance ratio of a walk is one number whichever of its two
+        descriptions the caller holds. Log and simple returns differ in the
+        second order, so they agree closely rather than exactly."""
+        returns = self._white_noise()
+        price = 100.0 * np.cumprod(np.concatenate([[1.0], 1.0 + returns]))
+        from_price = run_stationarity_tests(pd.Series(price))
+        from_returns = run_stationarity_tests(pd.Series(returns), increments=True)
+        for a, b in zip(from_price["variance_ratios"], from_returns["variance_ratios"]):
+            assert a["variance_ratio"] == pytest.approx(b["variance_ratio"], abs=0.01)
+
+    def test_reverting_returns_still_read_below_one(self):
+        """Read without differencing, the reversion is still found: an MA(1)
+        with theta = -0.5 has VR(2) = 1 + rho_1 = 0.6."""
+        returns = pd.Series(_ma1(2000, -0.5, seed=9))
+        result = run_stationarity_tests(returns, increments=True)
+        two = result["variance_ratios"][0]
+        assert two["period"] == 2
+        assert two["variance_ratio"] < 0.7
+        assert two["p_value"] < 1e-6
+
+    def test_a_reverting_spread_still_reads_below_one(self):
+        """The default path is unchanged: a stationary AR(1) level has
+        increments that revert, and the level is what is differenced."""
+        spread = pd.Series(_ar1(0.5, n=2000, seed=4))
+        result = run_stationarity_tests(spread)
+        for row in result["variance_ratios"]:
+            assert row["differencing"] == "level"
+            assert row["variance_ratio"] < 0.8
+            assert row["p_value"] < 1e-3
+
+    def test_the_default_still_differences(self):
+        level = _level(self._white_noise(n=600, seed=12))
+        result = run_stationarity_tests(pd.Series(level), vr_periods=(4,))
+        assert result["variance_ratios"][0] == variance_ratio(level, period=4)
+
+
 class TestRegimes:
     def test_it_separates_a_calm_half_from_a_volatile_one(self):
         rng = np.random.default_rng(0)
