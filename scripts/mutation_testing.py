@@ -223,6 +223,55 @@ MUTATIONS: List[Mutation] = [
         "tests/analysis/test_inference.py",
     ),
     Mutation(
+        # Change points by level only, as before: a volatility jump with no
+        # change in level is no change point at all.
+        "change points: skip the variance search",
+        SRC / "analysis/structure.py",
+        "    variance_breaks = _variance_breaks(values, array, breaks, max_breaks, min_segment)\n",
+        "    variance_breaks = []\n",
+        "tests/analysis/test_structure.py",
+    ),
+    Mutation(
+        # The squares' variance as normal tails give it (Inclan and Tiao):
+        # t(4) noise with a constant variance was flagged 62 times in 100.
+        "change points: assume normal tails in the variance search",
+        SRC / "analysis/structure.py",
+        "    omega = float(deviation @ deviation) / n\n",
+        "    omega = 2.0 * float(squares.mean()) ** 2\n",
+        "tests/analysis/test_structure.py",
+    ),
+    Mutation(
+        # The squares treated as independent: short-lived volatility
+        # states were flagged 41 times in 100 against 15.
+        "change points: drop the long-run variance of the squares",
+        SRC / "analysis/structure.py",
+        "    for lag in range(1, min(bandwidth, n - 1) + 1):\n",
+        "    for lag in range(1, 1):\n",
+        "tests/analysis/test_structure.py",
+    ),
+    Mutation(
+        # The break placed at the CUSUM's own argmax: 515 for a jump at 500,
+        # and the true change's tail then read as a second break at 495.
+        "change points: place a variance break at the CUSUM's argmax",
+        SRC / "analysis/structure.py",
+        "    return int(positions[int(np.argmin(cost))]), statistic, kolmogorov_sf(statistic)\n",
+        "    return (\n"
+        "        int(positions[int(np.argmax(cusum[positions - 1]))]),\n"
+        "        statistic,\n"
+        "        kolmogorov_sf(statistic),\n"
+        "    )\n",
+        "tests/analysis/test_structure.py",
+    ),
+    Mutation(
+        # The variance searched on the series about its overall mean: a
+        # step in the level is then a jump in the squares.
+        "change points: search the variance about the overall mean",
+        SRC / "analysis/structure.py",
+        "        residuals[lo:hi] = array[lo:hi] - array[lo:hi].mean()\n",
+        "        residuals[lo:hi] = array[lo:hi] - array.mean()\n",
+        "tests/analysis/test_structure.py",
+    ),
+    Mutation(
         # The concentration as it was: the largest share in absolute value,
         # whichever regime it belongs to, under the best regime's name.
         "regime stratified: report the largest absolute share as the best's",

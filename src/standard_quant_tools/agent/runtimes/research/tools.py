@@ -85,6 +85,7 @@ from standard_quant_tools.agent.models import (
     TechnicalPanelInput,
     TechnicalPanelResult,
     TechnicalResult,
+    VarianceChangePoint,
     VarianceRatio,
     VolatilityEstimatorsInput,
     VolatilityEstimatorsResult,
@@ -2184,6 +2185,9 @@ def detect_change_points(input_data: ChangePointInput) -> ChangePointResult:
     an equal step down — and that is the known cost rather than a surprise.
     Read `gain` on each break: it is how much the split actually bought, so
     a marginal call looks marginal instead of looking like a boundary.
+
+    `breaks` are shifts in LEVEL; a change in volatility alone is in
+    `variance_breaks`, from a CUSUM of squares on the residuals.
     """
     from standard_quant_tools.analysis.structure import detect_change_points as _detect
 
@@ -2205,7 +2209,20 @@ def detect_change_points(input_data: ChangePointInput) -> ChangePointResult:
         penalty_was_derived=result["penalty_was_derived"],
         breaks=[ChangePoint(**b) for b in result["breaks"]],
         segments=[RegimeSegment(**s) for s in result["segments"]],
-        warnings=result["warnings"],
+        n_variance_breaks=result["n_variance_breaks"],
+        variance_breaks=[VarianceChangePoint(**b) for b in result["variance_breaks"]],
+        variance_break_alpha=result["variance_break_alpha"],
+        warnings=result["warnings"]
+        + (
+            [
+                "On prices a variance break is the level wandering about its "
+                "segment means, not volatility: on 100 random-walk prices with "
+                "a constant volatility, 76 showed one. Ask on='returns' for a "
+                "change in volatility."
+            ]
+            if input_data.on == "price" and result["variance_breaks"]
+            else []
+        ),
     )
 
 

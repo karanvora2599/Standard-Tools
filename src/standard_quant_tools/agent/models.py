@@ -8402,6 +8402,26 @@ class ChangePoint(BaseModel):
     std_after: Optional[float] = None
 
 
+class VarianceChangePoint(BaseModel):
+    index: int
+    date: str
+    std_before: float
+    std_after: float
+    std_ratio: Optional[float] = Field(
+        None, description="std_after / std_before; null when before is zero."
+    )
+    statistic: float = Field(
+        ...,
+        description="CUSUM-of-squares statistic, adjusted for fat tails and "
+        "short memory in the squares.",
+    )
+    p_value: float = Field(
+        ...,
+        description="Against a constant variance, from the largest absolute "
+        "value of a Brownian bridge.",
+    )
+
+
 class RegimeSegment(BaseModel):
     segment: int
     start: str
@@ -8426,6 +8446,17 @@ class ChangePointResult(BaseModel):
     )
     breaks: List[ChangePoint] = Field(default_factory=list)
     segments: List[RegimeSegment] = Field(default_factory=list)
+    n_variance_breaks: int = Field(
+        0,
+        description="Changes in VOLATILITY, which `breaks` -- a search on the "
+        "level -- does not see.",
+    )
+    variance_breaks: List[VarianceChangePoint] = Field(default_factory=list)
+    variance_break_alpha: float = Field(
+        0.05,
+        description="The level each variance break's p-value cleared, at each "
+        "step of the segmentation.",
+    )
     warnings: List[str] = Field(default_factory=list)
 
 

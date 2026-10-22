@@ -1,5 +1,50 @@
 # Changelog
 
+## A volatility jump is a change point: `detect_change_points` searches the variance as well as the level
+
+- **The search was on the level only.** `detect_change_points` (and the
+  tool over it) minimises squared error about each side's mean, so a
+  change in volatility with no change in level bought it nothing. 1,000
+  returns whose daily sd went from 0.5% to 3% halfway came back with no
+  break and the warning "evidence the series is homogeneous". The
+  docstring said "binary segmentation on the mean and variance", and the
+  tool's `on` argument said 'returns' "finds volatility and drift
+  regimes"; the cost function said, correctly, that it found neither.
+- **`variance_breaks` is the volatility search.** The residuals about the
+  level segments are segmented again by a CUSUM of squares adjusted for
+  fat tails and short memory in the squares (Sanso, Arago and Carrion
+  2004): the largest partial sum of e^2 - mean(e^2) over sqrt(n * omega),
+  omega the Bartlett long-run variance of the squares, with p-values from
+  the Brownian-bridge supremum (`kolmogorov_sf`). A break is kept at 5% per
+  step, up to `max_breaks`, and placed where the Gaussian likelihood of two
+  variances is largest -- the CUSUM's own argmax placed the 6x jump at 515
+  for 500, and the true change's tail then read as a second break at 495.
+  Each break reports the sd either side, their ratio, the statistic and
+  the p-value. The case above: one break at 501, sd 0.49% -> 3.10%,
+  p = 1e-20.
+- **Measured** on 200 series per cell at n = 250 / 500 / 1000: with no
+  change, 2 / 2 / 3% (normal), 2 / 3 / 4% (t(5)) and 2 / 2 / 2% (AR(0.3))
+  report one; an sd up by half is found 97 / 100 / 100% of the time (64 /
+  88 / 98% under t(5) tails). Volatility that clusters for months moves it
+  too, and that is stated rather than tuned away: a stationary GARCH(1,1)
+  at persistence 0.98 is flagged 48 / 60 / 74%, a stretch of genuinely
+  different volatility in the sample but not a change in the process. The
+  plain Inclan-Tiao statistic, which assumes normal tails, flagged 62 of
+  100 t(4) series with a constant variance.
+- **What else changed.** `breaks`, `segments` and the penalty are
+  untouched. With no level break but a variance break, the warning says
+  the level did not shift and points at the volatility instead of calling
+  the series homogeneous, and every variance break is listed with that
+  caveat. On `on='price'` a variance break is the level wandering about
+  its segments (76 of 100 random-walk prices showed one), and the tool
+  says so. `ChangePointResult` gains `n_variance_breaks`,
+  `variance_breaks` and `variance_break_alpha`; the tool description and
+  `Documentation/20_tool_index.md` say what each list is.
+- Tests: the volatility jump found where it is, a moderate jump found,
+  normal and t(4) noise and short-lived volatility states not flagged, a
+  level shift not read as a variance change, and the fields on the wire.
+  The mutation catalogue gains five entries, all killed.
+
 ## Two identical samples are the same distribution: the KS p-value is computed by the series that converges near zero
 
 - **`compare_distributions` called two identical samples different.** Its

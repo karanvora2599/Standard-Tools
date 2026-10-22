@@ -249,6 +249,125 @@ class TestAConstantHasNoChangePoint:
         assert found <= 2
 
 
+class TestAVolatilityJumpIsAChangePoint:
+    """
+    The level search minimises squared error about each side's mean, so a
+    volatility jump with no change in level bought it nothing: 1,000
+    returns whose sd went from 0.5% to 3% halfway came back with no break
+    and a warning calling the series homogeneous. The variance search on
+    the residuals is `variance_breaks`.
+    """
+
+    IDX = pd.bdate_range("2015-01-01", periods=1000)
+
+    def _series(self, values):
+        return pd.Series(values, index=self.IDX[: len(values)])
+
+    def test_a_jump_in_volatility_alone_is_found_where_it_is(self):
+        rng = np.random.default_rng(11)
+        returns = np.r_[rng.normal(0, 0.005, 500), rng.normal(0, 0.03, 500)]
+        result = detect_change_points(self._series(returns))
+        assert result["n_variance_breaks"] >= 1
+        first, *_ = sorted(result["variance_breaks"], key=lambda b: b["p_value"])
+        assert abs(first["index"] - 500) <= 10
+        assert first["std_ratio"] > 4
+        assert first["p_value"] < 1e-6
+        assert not any("homogeneous" in w for w in result["warnings"])
+        assert any("change(s) in variance" in w for w in result["warnings"])
+
+    def test_a_moderate_jump_is_found(self):
+        """sd up by half: found in 100 of 100 such series at n = 500."""
+        found = 0
+        for seed in range(20):
+            rng = np.random.default_rng(seed)
+            returns = np.r_[rng.normal(0, 0.01, 250), rng.normal(0, 0.015, 250)]
+            found += (
+                detect_change_points(self._series(returns))["n_variance_breaks"] > 0
+            )
+        assert found >= 18
+
+    @pytest.mark.parametrize(
+        "draw, ceiling",
+        [
+            # Independent normal noise: 2 of 100.
+            (lambda rng: rng.normal(0, 0.01, 500), 8),
+            # t(4): 2 of 100. A CUSUM of squares that assumes normal tails
+            # (Inclan and Tiao's) flags 62.
+            (lambda rng: rng.standard_t(4, 500) * 0.01, 8),
+        ],
+        ids=["normal", "t4"],
+    )
+    def test_noise_has_no_variance_break(self, draw, ceiling):
+        found = sum(
+            detect_change_points(self._series(draw(np.random.default_rng(seed))))[
+                "n_variance_breaks"
+            ]
+            > 0
+            for seed in range(100)
+        )
+        assert found <= ceiling, f"{found}/100 constant-variance series flagged"
+
+    def test_short_lived_volatility_states_are_not_breaks(self):
+        """The sd switches between 1 and 2 with probability 5% a day: the
+        squares remember for about twenty days and the variance never
+        changes for good. 15 of 100 flagged; without the long-run variance
+        of the squares, 41."""
+        found = 0
+        for seed in range(100):
+            rng = np.random.default_rng(seed)
+            state, values = 0, np.empty(500)
+            for t in range(500):
+                if rng.random() < 0.05:
+                    state = 1 - state
+                values[t] = rng.standard_normal() * (2.0 if state else 1.0)
+            found += detect_change_points(self._series(values))["n_variance_breaks"] > 0
+        assert found <= 25
+
+    def test_a_shift_in_level_is_not_read_as_a_change_in_volatility(self):
+        """The variance search runs on the residuals about the level
+        segments. About the overall mean, a step three quarters of the way
+        through is a jump in the squares -- deviations of about -1 before
+        it and +3 after -- and was found at the step with p = 3e-10. (A
+        step halfway would not show it: the deviations are +-2 either
+        side and their squares the same.)"""
+        rng = np.random.default_rng(0)
+        series = self._series(np.r_[rng.normal(0, 1, 300), rng.normal(4, 1, 100)])
+        result = detect_change_points(series, max_breaks=2)
+        assert [b["index"] for b in result["breaks"]] == [300]
+        assert result["n_variance_breaks"] == 0
+
+    def test_the_variance_breaks_reach_the_wire(self, monkeypatch):
+        from standard_quant_tools.agent.models import ChangePointInput
+        from standard_quant_tools.agent.runtimes.research import tools
+
+        rng = np.random.default_rng(11)
+        returns = self._series(
+            np.r_[rng.normal(0, 0.005, 500), rng.normal(0, 0.03, 500)]
+        )
+        monkeypatch.setattr(tools, "_price_series", lambda *a, **k: returns)
+        wire = tools.detect_change_points(
+            ChangePointInput(symbol="X", start_date="2015-01-01", end_date="2019-01-01")
+        ).model_dump(mode="json")
+        assert wire["n_variance_breaks"] >= 1
+        assert wire["variance_breaks"][0]["std_ratio"] > 4
+        assert wire["variance_break_alpha"] == 0.05
+
+    def test_on_prices_a_variance_break_is_said_not_to_be_volatility(self, monkeypatch):
+        from standard_quant_tools.agent.models import ChangePointInput
+        from standard_quant_tools.agent.runtimes.research import tools
+
+        rng = np.random.default_rng(3)
+        prices = self._series(100 * np.cumprod(1 + rng.normal(0.0003, 0.01, 1000)))
+        monkeypatch.setattr(tools, "_price_series", lambda *a, **k: prices)
+        result = tools.detect_change_points(
+            ChangePointInput(
+                symbol="X", start_date="2015-01-01", end_date="2019-01-01", on="price"
+            )
+        )
+        if result.variance_breaks:
+            assert any("on='returns'" in w for w in result.warnings)
+
+
 class TestPartialCorrelation:
     def test_a_common_factor_is_removed_entirely(self):
         """Two series that are ONLY a shared factor must have essentially no

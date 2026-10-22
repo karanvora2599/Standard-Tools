@@ -39,6 +39,7 @@ from standard_quant_tools._special import (
     betacf,
     betainc,
     f_sf,
+    kolmogorov_sf,
 )
 from standard_quant_tools.analysis._series import clean_series
 from standard_quant_tools.error import ValidationError
@@ -78,6 +79,11 @@ def _clean(series: pd.Series, name: str) -> pd.Series:
 BIC_PENALTY_K = 3.0
 
 
+#: The level a variance break's p-value has to clear, at each step of the
+#: segmentation. See `_variance_split` for what it buys.
+VARIANCE_BREAK_ALPHA = 0.05
+
+
 def detect_change_points(
     series: pd.Series,
     *,
@@ -87,7 +93,7 @@ def detect_change_points(
 ) -> Dict[str, Any]:
     """
     When the process generating this series changed, by binary segmentation
-    on the mean and variance.
+    on the mean and, separately, on the variance.
 
     `hurst` answers "what kind of process is this". This answers "and when
     did it stop being that one". A single Hurst exponent over a sample that
@@ -121,6 +127,16 @@ def detect_change_points(
     usual BIC form for a mean shift. An explicit float keeps its absolute
     meaning, and one no split could ever clear is refused rather than
     answered with a confident "no breaks".
+
+    THE LEVEL SEARCH DOES NOT SEE VOLATILITY, and the variance search is
+    there for it. `breaks` minimises squared error about each side's mean,
+    so a volatility jump with no change in level bought it nothing: on
+    1,000 returns whose daily sd went from 0.5% to 3% halfway, it reported
+    no break and the warning called the series homogeneous. The residuals
+    about the level segments are now segmented again by a CUSUM of squares
+    (`_variance_split`), and what it finds is `variance_breaks`, each with
+    the sd either side, their ratio and a p-value. `penalty` does not apply
+    to it; `VARIANCE_BREAK_ALPHA` does, at each step. `breaks` is unchanged.
     """
     values = _clean(series, "detect_change_points")
     n = len(values)
@@ -191,6 +207,7 @@ def detect_change_points(
         segments.extend([(segment[0], position), (position, segment[1])])
 
     breaks.sort(key=lambda b: b["index"])
+    variance_breaks = _variance_breaks(values, array, breaks, max_breaks, min_segment)
     return {
         "n_observations": int(n),
         "n_breaks": len(breaks),
@@ -199,8 +216,134 @@ def detect_change_points(
         "min_segment": int(min_segment),
         "segments": _describe_segments(values, breaks),
         "penalty_was_derived": bool(derived),
-        "warnings": _change_point_warnings(breaks, n, float(penalty), derived),
+        "n_variance_breaks": len(variance_breaks),
+        "variance_breaks": variance_breaks,
+        "variance_break_alpha": VARIANCE_BREAK_ALPHA,
+        "warnings": _change_point_warnings(
+            breaks, n, float(penalty), derived, variance_breaks
+        ),
     }
+
+
+def _variance_split(residuals: np.ndarray, min_segment: int):
+    """
+    The strongest change in variance in a segment of residuals about their
+    level, and its p-value: `(index, statistic, p_value)`, or None when the
+    segment is too short to hold one or its squares do not vary.
+
+    TESTED BY ONE STATISTIC, PLACED BY ANOTHER. Whether there is a change is
+    the CUSUM below; where it is, the split that maximises the Gaussian
+    likelihood of two variances, k log s1^2 + (n - k) log s2^2 at its
+    least. The CUSUM's own argmax weighs every square alike, and the squares
+    on the volatile side are the noisy ones: across 300 series with the sd
+    up 6x halfway its 90th-percentile error was 8-10 observations against
+    2, and up 2x, 14-16 against 8. A misplaced first break also left the
+    true change's tail inside its neighbour, which the next step then
+    reported as a second break.
+
+    A CUSUM OF SQUARES, adjusted the way Sanso, Arago and Carrion (2004)
+    adjust Inclan and Tiao's: the largest |sum_{t<=k} (e_t^2 - mean e^2)|
+    over the split points, divided by sqrt(n * omega), where omega is the
+    long-run variance of the squares with a Bartlett kernel and the
+    bandwidth floor(4 (n / 100)^(2/9)). Under a constant variance it is
+    asymptotically the largest absolute value of a Brownian bridge, whose
+    tail is `kolmogorov_sf`. The plain Inclan-Tiao statistic assumes normal
+    tails and independent squares; returns have neither, and dividing by
+    omega is what keeps fat tails and short memory from reading as breaks.
+
+    MEASURED through `detect_change_points`, at 5% per step and up to three
+    breaks, 200 series per cell at n = 250 / 500 / 1000 -- the share that
+    report a variance break, and in brackets one within n/20 of the change:
+
+        no change, normal            2 /   2 /   3%
+        no change, t(5)              2 /   3 /   4
+        no change, AR(0.3)           2 /   2 /   2
+        sd x1.5 halfway, normal     97 / 100 / 100   (76 / 92 / 98)
+        sd x1.5 halfway, t(5)       64 /  88 /  98   (41 / 64 / 82)
+        sd x2 halfway, normal      100 / 100 / 100   (94 / 100 / 100)
+
+    VOLATILITY CLUSTERING MOVES IT TOO, and that is stated rather than
+    tuned away. A stationary GARCH(1,1) has no break, but its volatility
+    wanders for months: at alpha + beta = 0.9 the test flags 13 / 10 / 16%
+    of series, and at 0.98 -- typical of daily equity returns -- 48 / 60 /
+    74%. A variance break there marks a stretch of genuinely different
+    volatility in the sample, not a change in the generating process. A
+    wider bandwidth trades this for power and was measured to buy little
+    (35 / 45 / 64% at a bandwidth of 10).
+    """
+    n = residuals.size
+    if n < 2 * min_segment:
+        return None
+    squares = residuals * residuals
+    deviation = squares - squares.mean()
+    omega = float(deviation @ deviation) / n
+    bandwidth = int(math.floor(4.0 * (n / 100.0) ** (2.0 / 9.0)))
+    for lag in range(1, min(bandwidth, n - 1) + 1):
+        weight = 1.0 - lag / (bandwidth + 1.0)
+        omega += 2.0 * weight * float(deviation[lag:] @ deviation[:-lag]) / n
+    if not omega > 0.0 or has_no_dispersion(squares):
+        return None
+    cusum = np.abs(np.cumsum(deviation))
+    positions = np.arange(min_segment, n - min_segment + 1)
+    if positions.size == 0:
+        return None
+    statistic = float(cusum[positions - 1].max() / math.sqrt(n * omega))
+    running = np.cumsum(squares)
+    before = running[positions - 1] / positions
+    after = (running[-1] - running[positions - 1]) / (n - positions)
+    with np.errstate(divide="ignore"):
+        cost = positions * np.log(before) + (n - positions) * np.log(after)
+    return int(positions[int(np.argmin(cost))]), statistic, kolmogorov_sf(statistic)
+
+
+def _variance_breaks(
+    values: pd.Series,
+    array: np.ndarray,
+    breaks: List[Dict[str, Any]],
+    max_breaks: int,
+    min_segment: int,
+) -> List[Dict[str, Any]]:
+    """
+    Binary segmentation of the variance, on the residuals about the level
+    segments `breaks` found, so a shift in level is not also read as a
+    change in volatility. Each step splits the segment whose strongest
+    change has the smallest p-value, if it clears `VARIANCE_BREAK_ALPHA`.
+    """
+    edges = [0] + [b["index"] for b in breaks] + [len(array)]
+    residuals = np.empty_like(array)
+    for lo, hi in zip(edges, edges[1:]):
+        residuals[lo:hi] = array[lo:hi] - array[lo:hi].mean()
+
+    found: List[Dict[str, Any]] = []
+    segments = [(0, len(array))]
+    for _ in range(max_breaks):
+        best = None
+        for start, stop in segments:
+            candidate = _variance_split(residuals[start:stop], min_segment)
+            if candidate is None or not candidate[2] < VARIANCE_BREAK_ALPHA:
+                continue
+            if best is None or candidate[1] > best[1]:
+                best = (start + candidate[0], candidate[1], candidate[2], start, stop)
+        if best is None:
+            break
+        position, statistic, p_value, start, stop = best
+        before = float(np.sqrt(np.mean(residuals[start:position] ** 2)))
+        after = float(np.sqrt(np.mean(residuals[position:stop] ** 2)))
+        found.append(
+            {
+                "index": int(position),
+                "date": str(values.index[position]),
+                "std_before": before,
+                "std_after": after,
+                "std_ratio": after / before if before > 0 else None,
+                "statistic": statistic,
+                "p_value": p_value,
+            }
+        )
+        segments.remove((start, stop))
+        segments.extend([(start, position), (position, stop)])
+    found.sort(key=lambda b: b["index"])
+    return found
 
 
 def _best_split(segment: np.ndarray, min_segment: int, penalty: float):
@@ -272,15 +415,37 @@ def _describe_segments(values: pd.Series, breaks) -> List[Dict[str, Any]]:
     return out
 
 
-def _change_point_warnings(breaks, n, penalty: float, derived: bool) -> List[str]:
+def _change_point_warnings(
+    breaks, n, penalty: float, derived: bool, variance_breaks=()
+) -> List[str]:
     out = []
-    if not breaks:
+    if not breaks and not variance_breaks:
         out.append(
             f"no break cleared the penalty ({penalty:.6g}"
             f"{', scaled to this series' if derived else ', which you set'}"
             "). That is evidence the series is homogeneous at this "
             "threshold, not proof -- binary segmentation also misses two "
             "offsetting breaks, a step up followed by an equal step down."
+        )
+    elif not breaks:
+        out.append(
+            f"no shift in LEVEL cleared the penalty ({penalty:.6g}), but the "
+            "volatility changed: see `variance_breaks`. The level search "
+            "minimises squared error about each side's mean and does not "
+            "see a change in variance."
+        )
+    if variance_breaks:
+        moves = ", ".join(
+            f"{b['date']} (sd {b['std_before']:.4g} -> {b['std_after']:.4g}, "
+            f"p = {b['p_value']:.2g})"
+            for b in variance_breaks
+        )
+        out.append(
+            f"{len(variance_breaks)} change(s) in variance: {moves}. Found by a "
+            "CUSUM of squares adjusted for fat tails and short memory; "
+            "volatility that clusters for months (GARCH) also moves it, so "
+            "read one as a stretch of different volatility in this sample, "
+            "not proof the process changed."
         )
     # Against the penalty ACTUALLY used. This compared every gain to a
     # hardcoded 30.0, so with a penalty scaled to a returns series -- around

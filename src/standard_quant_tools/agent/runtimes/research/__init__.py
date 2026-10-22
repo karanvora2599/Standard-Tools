@@ -123,7 +123,7 @@ TOOL_DEFS = [
     ),
     (
         "detect_change_points",
-        "When the process generating a series CHANGED, by binary segmentation on the mean. run_hurst_analysis says what KIND of process a series is; this says when it stopped being that one, which the first cannot -- a single Hurst exponent over a sample containing a break describes neither regime. Read `gain` on each break: a marginal call then looks marginal instead of looking like a boundary.",
+        "When the process generating a series CHANGED, by binary segmentation on the mean, and separately on the variance. run_hurst_analysis says what KIND of process a series is; this says when it stopped being that one, which the first cannot -- a single Hurst exponent over a sample containing a break describes neither regime. Read `gain` on each break: a marginal call then looks marginal instead of looking like a boundary. `breaks` are shifts in level; a volatility jump with no change in level is in `variance_breaks`, with the sd either side and a p-value.",
         ChangePointInput,
     ),
     (
