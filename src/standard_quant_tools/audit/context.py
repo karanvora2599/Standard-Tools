@@ -90,9 +90,7 @@ def caller(*, tenant: Optional[str]) -> Iterator[None]:
     attributed to nobody while looking attributed.
     """
     if tenant is not None and (not isinstance(tenant, str) or not tenant.strip()):
-        raise ValueError(
-            f"tenant must be a non-blank string or None, got {tenant!r}"
-        )
+        raise ValueError(f"tenant must be a non-blank string or None, got {tenant!r}")
     token = _tenant_var.set(tenant)
     try:
         yield

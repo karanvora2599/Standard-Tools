@@ -1,5 +1,12 @@
 # Changelog
 
+## Lint passes again: the audit caller's refusal is one line, as the pinned black writes it
+
+- **`audit/context.py` is formatted.** The tenant check's refusal was
+  wrapped over three lines where the pinned black 26.5.1 keeps it on one,
+  so the lint job failed on the commit that added it and on every commit
+  after. Nothing else changes.
+
 ## The documentation describes return streams, the covariance reference, positions and the financing terms where their tools are, and its generated pages follow the code
 
 - **Each change is described beside its tools.** The module reference
