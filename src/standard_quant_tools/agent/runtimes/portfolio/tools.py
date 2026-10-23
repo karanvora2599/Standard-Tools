@@ -28,6 +28,7 @@ from standard_quant_tools.agent.models import (
     EstimateCovarianceResult,
     EstimateTradeCostInput,
     EstimateTradeCostResult,
+    FrontierCorner,
     FrontierPoint,
     LiquidityAnalysisInput,
     LiquidityAnalysisResult,
@@ -118,6 +119,7 @@ from standard_quant_tools.metrics.risk_metrics import (
     sortino_ratio,
     var_historical,
 )
+from standard_quant_tools.portfolio import _active_set
 from standard_quant_tools.portfolio.optimize import (
     _check_covariance_estimable,
     _condition_number,
@@ -126,6 +128,7 @@ from standard_quant_tools.portfolio.optimize import (
     _verify_solution,
     annualized_mean_cov,
     black_litterman,
+    bounded_frontier,
     build_bl_views,
     frontier_stats,
     frontier_weights,
@@ -407,11 +410,115 @@ def _frontier_point(
     )
 
 
+def _bounded_frontier_result(
+    input_data: EfficientFrontierInput,
+    mu: np.ndarray,
+    cov: np.ndarray,
+    tickers: List[str],
+    warnings: List[str],
+    condition_number: float,
+    n_observations: int,
+) -> EfficientFrontierResult:
+    """
+    The frontier inside `allow_short` / `max_weight`, from its corners.
+
+    `bounded_frontier` traces the corner portfolios with Markowitz's
+    critical line algorithm; every requested point is the mix of the two
+    corners whose returns bracket it, and the tangency portfolio is the
+    exact maximum of the Sharpe ratio over the pieces between corners. The
+    same bounds as `run_portfolio_optimization`, so a corner's return asked
+    of its target_return gives the corner back.
+    """
+    frontier = bounded_frontier(
+        mu, cov, input_data.allow_short, input_data.max_weight, tickers
+    )
+    low, high = frontier.return_range()
+    if input_data.return_range is not None:
+        first, last = (float(v) for v in input_data.return_range)
+        slack = 1e-12 * max(abs(low), abs(high), 1e-300)
+        if first < low - slack or last > high + slack:
+            raise ValidationError(
+                f"return_range={input_data.return_range} reaches outside "
+                f"[{low:.6f}, {high:.6f}], the returns of the efficient "
+                "portfolios inside these bounds: the minimum-variance "
+                "portfolio's and the highest attainable. A bounded frontier "
+                "has no points beyond them (below, the portfolios are "
+                "inefficient; above, none is inside the bounds). Pass a range "
+                "inside it, or omit return_range."
+            )
+        first, last = max(first, low), min(last, high)
+    else:
+        first, last = low, high
+        if not high > low:
+            warnings.append(
+                "every portfolio inside these bounds on the frontier earns the "
+                f"same expected return ({high:.6f}), so the bounded frontier "
+                "is one portfolio, the minimum-variance one; the points repeat "
+                "it."
+            )
+    points = []
+    for target in np.linspace(first, last, input_data.n_points):
+        portfolio = frontier.at_return(min(max(float(target), low), high))
+        points.append(_frontier_point(portfolio.weights, mu, cov, tickers))
+
+    corners = [
+        FrontierCorner(
+            **_frontier_point(corner.weights, mu, cov, tickers).model_dump(),
+            risk_tolerance=corner.lam,
+            event="; ".join(e.describe(tickers) for e in corner.events)
+            or "the minimum-variance end",
+        )
+        for corner in frontier.corners
+    ]
+    if corners and frontier.corners[-1].events:
+        corners[-1] = corners[-1].model_copy(
+            update={"event": corners[-1].event + "; the minimum-variance end"}
+        )
+
+    tangency: Optional[FrontierPoint] = None
+    best = frontier.max_sharpe(input_data.risk_free_rate)
+    if best is None:
+        warnings.append(
+            f"no maximum-Sharpe (tangency) portfolio at risk_free_rate="
+            f"{input_data.risk_free_rate:.6f}: the highest return any portfolio "
+            f"inside these bounds earns is {high:.6f}, so none has a positive "
+            "excess return, and maximizing a negative Sharpe ratio rewards "
+            "volatility. `tangency` is null; use a risk_free_rate below "
+            f"{high:.6f}, or read `min_variance`, which needs no rate."
+        )
+    else:
+        tangency = _frontier_point(best.weights, mu, cov, tickers)
+
+    if not frontier.certified:
+        warnings.append(
+            f"a corner of this frontier did not pass its KKT certificate: the "
+            f"largest residual is {frontier.worst_residual:.1e} against "
+            f"{_active_set.CERTIFICATE_TOLERANCE:.0e}. Treat the curve as "
+            "approximate."
+        )
+    return EfficientFrontierResult(
+        tickers=tickers,
+        method="critical_line",
+        points=points,
+        corners=corners,
+        certified=frontier.certified,
+        largest_kkt_residual=frontier.worst_residual,
+        tangency=tangency,
+        min_variance=_frontier_point(frontier.min_variance.weights, mu, cov, tickers),
+        condition_number=condition_number,
+        periods_per_year=input_data.periods_per_year,
+        n_observations=n_observations,
+        warnings=warnings,
+    )
+
+
 def get_efficient_frontier(
     input_data: EfficientFrontierInput,
 ) -> EfficientFrontierResult:
     """
-    The whole efficient frontier in one call, from the closed form.
+    The whole efficient frontier in one call: from the closed form when
+    weights are unbounded, by the critical line algorithm when they are
+    long-only or capped.
 
     `run_portfolio_optimization(method="target_return")` answers for ONE
     target return, so a forty-point curve was forty tool calls and forty
@@ -427,18 +534,24 @@ def get_efficient_frontier(
     them publishes. That agreement is pinned by test, and it is what makes
     this a shape rather than a second implementation.
 
-    WHAT THE CURVE ASSUMES. sum(w) = 1 and nothing else: weights may go
-    negative and may exceed 1. That is not a relaxation added for
+    WHAT THE CURVE ASSUMES. By default sum(w) = 1 and nothing else: weights
+    may go negative and may exceed 1. That is not a relaxation added for
     convenience, it is the condition under which the Merton constants
-    describe the frontier at all. A bounded frontier (long-only, or
-    capped) is a different curve with no closed form, and it is
-    `run_portfolio_optimization` point by point.
+    describe the frontier at all. A bounded frontier (`allow_short=False`,
+    or a `max_weight`) is a different curve with no closed form. It is a
+    chain of straight pieces in the weights, joined at CORNER portfolios
+    where an asset reaches or leaves a bound, and Markowitz's critical line
+    algorithm finds the corners exactly (`portfolio.critical_line`); each
+    point asked for is the mix of the two corners around it. That curve was
+    `run_portfolio_optimization` point by point before, and its
+    target_volatility points could be dominated ones.
 
     `tangency` is the maximum-Sharpe portfolio at `risk_free_rate`. It is
     null, with a warning, when no such portfolio exists on the efficient
     branch -- a rate at or above the minimum-variance portfolio's own
-    return -- rather than being approximated into a plausible-looking
-    number on the inefficient branch.
+    return, or with bounds at or above the highest attainable return --
+    rather than being approximated into a plausible-looking number on the
+    inefficient branch.
     """
     logger.debug(
         "[efficient_frontier] tickers=%s  points=%d  %s → %s",
@@ -464,6 +577,17 @@ def get_efficient_frontier(
     mu, cov = _mean_cov_for_tools(returns_df, input_data.periods_per_year)
     conditioning, condition_number = _conditioning_warnings(cov, solved_tickers)
     warnings.extend(conditioning)
+
+    if not input_data.allow_short or input_data.max_weight is not None:
+        return _bounded_frontier_result(
+            input_data,
+            mu,
+            cov,
+            solved_tickers,
+            warnings,
+            condition_number,
+            int(returns_df.shape[0]),
+        )
 
     sigma_inv, ones, A, B, C, D = frontier_stats(mu, cov)
 

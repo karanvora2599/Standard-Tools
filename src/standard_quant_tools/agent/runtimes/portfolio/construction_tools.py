@@ -870,11 +870,25 @@ class MaxDiversificationInput(NamedCovarianceInput):
     )
     covariance: Optional[NamedCovariance] = Field(None, description=_COVARIANCE_FORMS)
     covariance_ref: Optional[str] = Field(None, description=COVARIANCE_REF_DESCRIPTION)
+    long_only: bool = Field(False, description="No weight below 0.")
+    max_weight: Optional[float] = Field(
+        None, gt=0, le=1, allow_inf_nan=False, description="Long-only cap."
+    )
 
     @field_validator("assets")
     @classmethod
     def _assets_once(cls, v: Optional[List[str]]) -> Optional[List[str]]:
         return _distinct_assets(v)
+
+    @model_validator(mode="after")
+    def _cap_needs_long_only(self) -> "MaxDiversificationInput":
+        if self.max_weight is not None and not self.long_only:
+            raise ValueError(
+                f"max_weight={self.max_weight} caps the long-only maximum; the "
+                "default is a closed form with no bounds. Set long_only=True "
+                "with it, or omit it."
+            )
+        return self
 
 
 class MarginalRiskInput(NamedCovarianceInput):
@@ -956,6 +970,7 @@ class MaxDiversificationResult(_Result):
         "diversification_ratio": (
             "the portfolio's volatility is zero, so the ratio divides by zero"
         ),
+        "kkt_residual": "the closed form has no bounds to certify against",
     }
 
     n_assets: int = 0
@@ -970,6 +985,24 @@ class MaxDiversificationResult(_Result):
     condition_number: Stat = None
     n_negative_weights: int = 0
     negative_weights: Dict[str, float] = Field(default_factory=dict)
+    long_only: bool = False
+    max_weight: Stat = None
+    method: str = Field(
+        "closed_form",
+        description="'closed_form' (Sigma^-1 sigma, rescaled); long-only: "
+        "'active_set' (the homogenised KKT system on the active set of the "
+        "critical line's tangency) or 'critical_line' (that tangency).",
+    )
+    certified: Optional[bool] = Field(
+        None,
+        description="Long-only: whether the weights pass the ratio's KKT "
+        "certificate to 1e-12, which makes them the maximum. Null for the "
+        "closed form.",
+    )
+    kkt_residual: Stat = Field(
+        None, description="Long-only: the largest KKT residual, relative."
+    )
+    solver_message: Optional[str] = None
 
 
 class AssetRisk(BaseModel):
@@ -1038,7 +1071,9 @@ def optimize_max_diversification(
 ) -> MaxDiversificationResult:
     return MaxDiversificationResult(
         **lib.max_diversification(
-            _covariance(input_data, "optimize_max_diversification")
+            _covariance(input_data, "optimize_max_diversification"),
+            long_only=input_data.long_only,
+            max_weight=input_data.max_weight,
         )
     )
 
@@ -1083,17 +1118,12 @@ CONSTRUCTION_TOOL_DEFS.extend(
     [
         (
             "optimize_max_diversification",
-            "The portfolio that maximizes the DIVERSIFICATION RATIO -- the "
+            "The portfolio maximizing the DIVERSIFICATION RATIO: the "
             "weighted average of the assets' volatilities over the "
-            "portfolio's own. It is 1.0 when everything is perfectly "
-            "correlated and grows as correlations fall, so maximizing it "
-            "maximizes the volatility that CANCELS. Not the same as minimum "
-            "variance, which piles into the quietest assets because quiet is "
-            "what it minimizes; this normalizes by each asset's own "
-            "volatility first, so an asset is rewarded for being "
-            "UNCORRELATED rather than for being quiet. It does invert the "
-            "correlation matrix and reports the condition number for that "
-            "reason.",
+            "portfolio's own, 1.0 when all are perfectly correlated. Unlike "
+            "minimum variance it rewards being UNCORRELATED, not quiet. "
+            "Default: the closed form, which may short; long_only=True "
+            "(optional max_weight): exact and certified.",
             MaxDiversificationInput,
         ),
         (

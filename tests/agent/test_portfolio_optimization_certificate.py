@@ -88,14 +88,19 @@ def test_the_tool_reports_the_exact_method_and_its_certificate(kwargs):
     assert payload["solver"]["certificate"]["tolerance"] == 1e-12
 
 
-def test_methods_outside_the_exact_solve_report_no_certification():
-    """Bounded target_volatility is not convex, so it is reported as
-    positively uncertified rather than as a method a certificate does not
-    apply to (see the CHANGELOG entry of 2026-10-22)."""
+def test_bounded_target_volatility_is_certified_on_the_critical_line():
+    """Bounded target_volatility is not convex, and SLSQP stopped on
+    dominated portfolios. It is solved on the frontier instead and carries
+    the frontier's KKT certificate at the risk tolerance it sits at."""
     result = _run(method="target_volatility", target_volatility=0.2)
-    assert result.solver.method == "SLSQP"
-    assert result.solver.certified is False
-    assert result.solver.certificate is None
+    assert result.converged is True
+    assert result.expected_volatility == pytest.approx(0.2, abs=1e-6)
+    assert result.solver.method == "critical_line"
+    assert result.solver.certified is True
+    assert result.solver.status == 0
+    for key in ("stationarity", "dual_infeasibility", "equality_residual"):
+        assert result.solver.certificate[key] <= 1e-12, key
+    assert "critical line" in result.solver.message
 
 
 def _stall(monkeypatch):
@@ -112,14 +117,17 @@ def _stall(monkeypatch):
 
 
 def test_a_stalled_solver_is_described_not_called_infeasible(monkeypatch):
+    """Capped max_sharpe with its exact polish withheld, so SLSQP's stalled
+    answer is the one reported."""
     _stall(monkeypatch)
-    result = _run(method="target_volatility", target_volatility=0.2)
+    monkeypatch.setattr(opt, "_polish_max_sharpe", lambda *a, **k: None)
+    result = _run(method="max_sharpe", max_weight=0.4)
     assert result.converged is False
     text = " ".join(result.warnings)
     assert "constraints may be infeasible" not in text
     assert "optimizer did not converge: SLSQP ended with status 8" in text
     assert "sum-to-1 residual" in text
-    assert "target_volatility residual" in text
+    assert "KKT stationarity residual" in text
 
 
 def test_a_stalled_capped_max_sharpe_comes_back_certified(monkeypatch):

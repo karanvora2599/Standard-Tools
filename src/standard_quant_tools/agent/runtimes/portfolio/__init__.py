@@ -83,20 +83,12 @@ TOOL_DEFS = [
     ),
     (
         "get_efficient_frontier",
-        "The WHOLE efficient frontier in one call, exactly, from the "
-        "closed form. run_portfolio_optimization(method='target_return') "
-        "answers for ONE target return, so tracing a curve through it "
-        "costs a tool call and an agent turn per point, and leaves the "
-        "caller to guess which target returns are worth asking about. "
-        "This returns the span, the points on it, the global "
-        "minimum-variance portfolio, the condition number of the "
-        "covariance it inverted, and the tangency portfolio at a given "
-        "rate -- null with a warning when no such portfolio exists rather "
-        "than a normalization onto the inefficient branch. Weights are "
-        "unbounded and sum to one, which is the condition the algebra "
-        "describes; a long-only or capped frontier is a different curve "
-        "with no closed form and is still run_portfolio_optimization "
-        "point by point.",
+        "The WHOLE efficient frontier in one call, exactly: the closed form "
+        "when weights are unbounded, Markowitz's critical line algorithm "
+        "when long-only or capped. Returns the points, a bounded curve's "
+        "certified corner portfolios, the minimum-variance portfolio, the "
+        "condition number, and the tangency portfolio at a rate (null with a "
+        "warning when none exists).",
         EfficientFrontierInput,
     ),
     (

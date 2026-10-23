@@ -14,11 +14,14 @@ an existing alpha score into weights (backtest/sizing.py). Three families:
   target_return, and long-only max_sharpe without a binding cap) are solved
   exactly by the active-set methods in `_active_set` and certified against
   their KKT conditions, with SLSQP as the last fallback. Capped or shorting
-  max_sharpe runs SLSQP and is then solved exactly on SLSQP's active set;
-  target_volatility is SLSQP's alone, and is reported uncertified with a
-  warning on every bounded solve: its volatility constraint is a quadratic
-  EQUALITY, which is not convex, and SLSQP can stop on a portfolio that
-  another inside the same bounds beats at the same volatility.
+  max_sharpe runs SLSQP and is then solved exactly on SLSQP's active set.
+  Bounded target_volatility is solved on the frontier itself:
+  `critical_line` traces its corner portfolios exactly, and the answer is
+  the mix of the two corners whose volatilities bracket the target -- the
+  maximum-return portfolio at that volatility, certified. Its volatility
+  constraint is a quadratic EQUALITY, which is not convex, and SLSQP, which
+  solved it before, could stop on a portfolio another inside the same
+  bounds beat at the same volatility.
 - `risk_parity_weights` — equalizes each asset's fractional contribution to
   total portfolio variance (or a custom risk budget). It validates the
   request and delegates to `construction.risk_parity`'s cyclical coordinate
@@ -51,6 +54,7 @@ from standard_quant_tools.numeric_contract import (
     require_positive_int,
 )
 from standard_quant_tools.portfolio import _active_set
+from standard_quant_tools.portfolio.critical_line import Frontier, critical_line
 
 logger = logging.getLogger(__name__)
 
@@ -579,15 +583,9 @@ def _solve_constrained(
         constraints.append(
             {"type": "eq", "fun": lambda w: float(w @ mu) - target_return}
         )
-    elif objective == "target_volatility":
-        assert target_volatility is not None
-        constraints.append(
-            {"type": "eq", "fun": lambda w: float(w @ cov @ w) - target_volatility**2}
-        )
     elif objective not in ("min_volatility", "max_sharpe"):
-        raise AssertionError(
-            f"unreachable objective {objective!r}"
-        )  # _OBJECTIVES pre-validated
+        # target_volatility is solved on the critical line, never here.
+        raise AssertionError(f"unreachable objective {objective!r}")
 
     # _solve_constrained is only ever called after _require_scipy() has
     # confirmed _scipy_minimize is not None.
@@ -793,8 +791,8 @@ def _convex_programme(
     (mu - rf)'y = 1, y >= 0, and w = y / 1'y. A binding cap w_i <= c becomes y_i <= c * 1'y, a general
     inequality rather than a bound, and a short floor does the same; those
     stay with SLSQP, and `_polish_max_sharpe` then solves exactly on SLSQP's
-    active set. target_volatility constrains a quadratic and stays with
-    SLSQP alone.
+    active set. target_volatility constrains a quadratic and is solved on
+    the critical line (`_solve_target_volatility`).
     """
     n = len(mu)
     lower, upper = _effective_bounds(n, allow_short, max_weight)
@@ -867,7 +865,8 @@ def _certificate(
     wherever the excess return is positive (the caller has established that
     a positive-excess portfolio exists), so its KKT points are its maxima.
     None for target_volatility: its constraint is a quadratic equality, and
-    KKT conditions on it do not establish a maximum.
+    KKT conditions on it do not establish a maximum. Its answer is certified
+    instead as a point of the frontier (`critical_line.certify`).
     """
     n = len(mu)
     lower, upper = _effective_bounds(n, allow_short, max_weight)
@@ -922,42 +921,152 @@ def _constraint_residuals(
     return ", ".join(parts)
 
 
-def _target_volatility_warning(target_volatility: float) -> str:
+def bounded_frontier(
+    mu: np.ndarray,
+    cov: np.ndarray,
+    allow_short: bool,
+    max_weight: Optional[float],
+    names: Optional[List[str]] = None,
+) -> Frontier:
     """
-    Why a bounded target_volatility answer is never certified.
+    The efficient frontier inside the bounds `allow_short` and `max_weight`
+    describe (`_effective_bounds`), as `critical_line`'s corner portfolios.
 
-    The objective is linear and the constraint is w'Sw == sigma^2, a
-    quadratic EQUALITY. That is not a convex set: on the fully-invested
-    portfolios inside the bounds, the ones at exactly this volatility can
-    hold several local maxima of expected return, and one can sit on the
-    inefficient branch. SLSQP follows the constraint from equal weights and
-    stops at whichever it reaches. On two assets it is Newton's method on
-    the variance along the one line of fully-invested portfolios, so it
-    lands on the root on the same side of the minimum-variance mix as the
-    start -- the inefficient one whenever equal weights hold more of the
-    low-return asset than the minimum-variance mix does. Over 60 random
+    The same bounds the exact min_volatility, target_return and max_sharpe
+    solves use, so a corner's return solved with target_return gives the
+    corner back, to the rounding of the two solves.
+    """
+    lower, upper = _effective_bounds(len(mu), allow_short, max_weight)
+    return critical_line(mu, cov, lower, upper, names=names)
+
+
+def _bounds_text(allow_short: bool, max_weight: Optional[float]) -> str:
+    lower, upper = _weight_bounds(0, allow_short, max_weight)
+    if not allow_short and max_weight is None:
+        return "long-only"
+    return f"each weight in [{lower:g}, {upper:g}]"
+
+
+#: A target volatility this close (relatively) to an end of the attainable
+#: range is that end: the range's ends are themselves computed volatilities.
+_RANGE_SLACK = 1e-12
+
+
+def _solve_target_volatility(
+    mu: np.ndarray,
+    cov: np.ndarray,
+    target_volatility: float,
+    allow_short: bool,
+    max_weight: Optional[float],
+    tickers: List[str],
+) -> Tuple[np.ndarray, bool, Dict[str, Any], List[str]]:
+    """
+    Bounded target_volatility, exactly, on the efficient frontier.
+
+    Maximizing return subject to w'Sw = sigma^2 is not convex, and SLSQP,
+    which solved it before, stopped on dominated portfolios: over 60 random
     long-only problems of six assets, 6 came back up to 16 percentage
     points of return below the frontier at the requested volatility, with
-    converged=True and no warning. The closed form (allow_short=True,
-    max_weight=None) takes the efficient root and is not affected.
+    converged=True. The maximum is a frontier portfolio, so it is found on
+    the frontier instead. `critical_line` traces the corner portfolios
+    inside the bounds; volatility rises monotonically along them, so one
+    piece between two adjacent corners holds the target, and on that piece
+    the variance is a quadratic in the mix of the two corners whose root in
+    [0, 1] is the answer.
+
+    It is certified by the frontier's own KKT conditions at the
+    interpolated risk tolerance lam: minimum variance at its own return
+    under the bounds, and with lam >= 0 the maximum return at its
+    volatility (`critical_line.certify`).
+
+    A target below the minimum-variance portfolio's volatility has no
+    portfolio inside the bounds; one above the highest-return portfolio's
+    has no EFFICIENT one -- every portfolio that risky earns less than that
+    one does at less risk. Both are refused with the attainable range.
+
+    Returns (weights, converged, solver report, warnings).
     """
-    return (
-        f"target_volatility={target_volatility:.6f} with bounds "
-        "(allow_short=False and/or max_weight set) is solved by SLSQP on the "
-        "equality w'Sw = target_volatility^2, which is not convex: the "
-        "fully-invested portfolios inside the bounds at exactly this "
-        "volatility can include several local maxima of expected return, one "
-        "of them on the inefficient branch, and SLSQP stops at whichever it "
-        "reaches first. These weights meet the target volatility, but nothing "
-        "certifies that they earn the most return at it -- a portfolio inside "
-        "the same bounds can earn more at the same risk. Measured on two "
-        "assets at 25% and 20% volatility with correlation -0.5, long-only at "
-        "a 13% target: 5.20% expected return where 7.98% is attainable. "
-        "solver.certified is False for this reason. For a certified answer, "
-        "use objective='target_return', which is solved exactly: the "
-        "efficient portfolio at this volatility is the target_return "
-        "portfolio whose volatility equals it."
+    frontier = bounded_frontier(mu, cov, allow_short, max_weight, tickers)
+    low, high = frontier.volatility_range()
+    target = float(target_volatility)
+    bounds = _bounds_text(allow_short, max_weight)
+    if target < low:
+        if target < low * (1.0 - _RANGE_SLACK):
+            raise ValidationError(
+                f"target_volatility={target:.6f} is below {low:.6f}, the "
+                f"volatility of the minimum-variance portfolio inside these "
+                f"bounds ({bounds}): no portfolio inside them is that quiet. "
+                f"The efficient portfolios span volatilities [{low:.6f}, "
+                f"{high:.6f}]; choose a target in that range, or "
+                "objective='min_volatility'."
+            )
+        target = low
+    if target > high:
+        if target > high * (1.0 + _RANGE_SLACK):
+            raise ValidationError(
+                f"target_volatility={target:.6f} is above {high:.6f}, the "
+                f"volatility of the highest-return portfolio inside these "
+                f"bounds ({bounds}), which earns "
+                f"{frontier.top.expected_return:.6f}. The efficient portfolios "
+                f"span volatilities [{low:.6f}, {high:.6f}]; every portfolio "
+                "at more volatility than that earns less than it, so the "
+                "answer would be a dominated one. Choose a target in that "
+                "range, or loosen the bounds."
+            )
+        target = high
+    point = frontier.at_volatility(target)
+    certificate = point.certificate
+    certified = bool(certificate.certified and point.lam >= 0.0)
+    corners = frontier.corners
+    k = point.corner
+    if point.share >= 1.0 or k + 1 >= len(corners):
+        where = f"this volatility is corner {k + 1}'s own"
+    elif point.share <= 0.0:
+        where = f"this volatility is corner {k + 2}'s own"
+    else:
+        where = (
+            f"this volatility lies on the piece between corners {k + 1} and "
+            f"{k + 2} (risk tolerance {corners[k].lam:.6g} to "
+            f"{corners[k + 1].lam:.6g}): the weights are {point.share:.6f} of "
+            f"the first and {1.0 - point.share:.6f} of the second, the root of "
+            "that piece's variance quadratic"
+        )
+    message = (
+        f"solved exactly by Markowitz's critical line algorithm: "
+        f"{len(corners)} corner portfolio(s) trace the frontier inside these "
+        f"bounds ({bounds}), and {where}. KKT residuals of minimizing "
+        f"1/2 w'Sw - lam mu'w at risk tolerance lam = {point.lam:.6g}, under "
+        f"the budget and the bounds: largest {certificate.worst:.1e}, "
+        + (
+            f"certified to {_active_set.CERTIFICATE_TOLERANCE:.0e}: the "
+            "minimum-variance weights at their own return, and so the "
+            "maximum-return weights at this volatility"
+            if certified
+            else f"over the {_active_set.CERTIFICATE_TOLERANCE:.0e} that certifies"
+        )
     )
+    w = point.weights
+    report: Dict[str, Any] = {
+        "method": "critical_line",
+        "iterations": len(corners),
+        "status": 0,
+        "message": message,
+        "objective": _objective_value("target_volatility", w, mu, cov, 0.0),
+        "n_function_evals": None,
+        "multipliers": [float(v) for v in certificate.multipliers],
+        "certified": certified,
+        "certificate": certificate.as_dict(),
+        "fallback": None,
+    }
+    notes: List[str] = []
+    if not certified:
+        notes.append(
+            f"The critical line's answer at target_volatility={target:.6f} did "
+            f"not certify: its largest KKT residual is {certificate.worst:.1e} "
+            f"against {_active_set.CERTIFICATE_TOLERANCE:.0e} (risk tolerance "
+            f"{point.lam:.6g}). Treat the weights as approximate."
+        )
+    return w, certified, report, notes
 
 
 def _slsqp_stop(report: Dict[str, Any]) -> str:
@@ -1307,16 +1416,15 @@ def mean_variance_optimize(
         when the weights miss a constraint), warnings (list of str — the
         small-sample and conditioning caveats, any constraint the weights
         miss, and what a solve that did not converge or certify actually
-        did), solver (the run: method — "closed_form", "active_set" or
-        "SLSQP" — iterations, status, message, objective,
-        n_function_evals, multipliers; certified and certificate, the KKT
-        residuals of the returned weights where a certificate applies, with
-        certified False on every bounded target_volatility solve, which is
-        not convex and can stop on a dominated portfolio; and fallback, why
-        the exact solve's cold start did not produce the answer when it did
-        not) and condition_number (of the annualized
-        covariance, reported at every level rather than only warned about
-        above the threshold).
+        did), solver (the run: method — "closed_form", "active_set",
+        "critical_line" (bounded target_volatility) or "SLSQP" —
+        iterations (for "critical_line", the number of corner portfolios),
+        status, message, objective, n_function_evals, multipliers;
+        certified and certificate, the KKT residuals of the returned
+        weights where a certificate applies; and fallback, why the exact
+        solve's cold start did not produce the answer when it did not) and
+        condition_number (of the annualized covariance, reported at every
+        level rather than only warned about above the threshold).
 
     Raises:
         ValidationError: unknown objective, fewer than 2 assets, fewer than
@@ -1328,8 +1436,11 @@ def mean_variance_optimize(
             singular/degenerate covariance matrix, a risk_free_rate at or
             above the minimum-variance return for the unconstrained
             max_sharpe objective or at or above the highest return any
-            portfolio inside the bounds can earn for the constrained one,
-            or (constrained path only) scipy not installed.
+            portfolio inside the bounds can earn for the constrained one, a
+            target_volatility below the minimum-variance portfolio's (or,
+            with bounds, above the highest-return portfolio's: the range is
+            named), or (constrained path, other than target_volatility)
+            scipy not installed.
     """
     if objective not in _OBJECTIVES:
         raise ValidationError(
@@ -1463,6 +1574,13 @@ def mean_variance_optimize(
             "certificate": None,
             "fallback": None,
         }
+    elif objective == "target_volatility":
+        # On the frontier itself, which needs no scipy.
+        assert target_volatility is not None  # validated above
+        w, converged, solver, notes = _solve_target_volatility(
+            mu, cov, target_volatility, allow_short, max_weight, tickers
+        )
+        warnings.extend(notes)
     else:
         _require_scipy(
             "constrained mean-variance optimization (allow_short=False and/or max_weight set)"
@@ -1574,15 +1692,6 @@ def mean_variance_optimize(
                 # SLSQP stopped with.
                 if solver["certified"] and not run.warnings:
                     converged = True
-            if objective == "target_volatility":
-                # Not null: a certificate does not merely fail to apply here,
-                # the problem is non-convex and SLSQP can stop on a dominated
-                # portfolio, so the answer is positively uncertified -- on
-                # every bounded solve, since which ones are dominated cannot
-                # be told from the weights without solving the frontier.
-                solver["certified"] = False
-                assert target_volatility is not None  # validated above
-                warnings.append(_target_volatility_warning(target_volatility))
             if attainable is not None:
                 warnings.append(
                     f"target_return={target_return:.6f} is outside "

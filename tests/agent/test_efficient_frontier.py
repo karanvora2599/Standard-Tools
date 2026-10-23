@@ -306,12 +306,14 @@ class TestTheSchemaRefusesWhatHasNoFrontier:
             )
 
     def test_an_unknown_argument_is_refused_rather_than_ignored(self):
+        """`method` is run_portfolio_optimization's argument, not this
+        tool's; a caller who passes it gets told rather than ignored."""
         with pytest.raises(PydanticValidationError):
             EfficientFrontierInput(
                 tickers=["AAA", "BBB"],
                 start_date=START,
                 end_date=END,
-                allow_short=True,
+                method="target_return",
             )
 
     def test_more_assets_than_observations_is_refused_with_the_remedy(self):
@@ -421,6 +423,149 @@ class TestTheTangencyPortfolioIsAbsentWithAReason:
         result = _frontier(risk_free_rate=0.01)
         assert result.tangency is not None
         assert sum(result.tangency.weights.values()) == pytest.approx(1.0, abs=1e-5)
+
+
+class TestTheBoundedFrontier:
+    """allow_short=False or a max_weight: the critical line algorithm's
+    corner portfolios, and every point a mix of the two around it. Checked
+    against the optimizer it replaces, point by point, under the same
+    bounds -- each of those an exact solve of its own."""
+
+    TICKERS = ["AAA", "BBB", "CCC", "DDD"]
+
+    def _bounded(self, **kwargs):
+        payload = {"tickers": self.TICKERS, "start_date": START, "end_date": END}
+        payload.update(kwargs)
+        with _patched():
+            return get_efficient_frontier(EfficientFrontierInput(**payload))
+
+    def _optimize(self, **kwargs):
+        with _patched():
+            return run_portfolio_optimization(
+                PortfolioOptimizationInput(
+                    tickers=self.TICKERS, start_date=START, end_date=END, **kwargs
+                )
+            )
+
+    def test_the_default_is_still_the_closed_form(self):
+        result = _frontier()
+        assert result.method == "closed_form"
+        assert result.corners is None
+        assert result.certified is None
+        assert result.largest_kkt_residual is None
+        assert not any("largest_kkt_residual" in w for w in result.warnings)
+
+    @pytest.mark.parametrize(
+        "bounds",
+        [dict(allow_short=False), dict(allow_short=False, max_weight=0.4)],
+        ids=["long_only", "capped"],
+    )
+    def test_corners_are_certified_and_inside_the_bounds(self, bounds):
+        result = self._bounded(**bounds)
+        assert result.method == "critical_line"
+        assert result.certified is True
+        assert result.largest_kkt_residual <= 1e-12
+        cap = bounds.get("max_weight", 1.0)
+        for point in [*result.corners, *result.points]:
+            assert sum(point.weights.values()) == pytest.approx(1.0, abs=1e-5)
+            assert min(point.weights.values()) >= 0.0
+            assert max(point.weights.values()) <= cap
+        tolerances = [c.risk_tolerance for c in result.corners]
+        assert tolerances == sorted(tolerances, reverse=True)
+        assert tolerances[-1] == 0.0 or "minimum-variance end" in (
+            result.corners[-1].event
+        )
+
+    @pytest.mark.parametrize(
+        "bounds",
+        [
+            dict(allow_short=False),
+            dict(allow_short=False, max_weight=0.4),
+            dict(allow_short=True, max_weight=0.6),
+        ],
+        ids=["long_only", "capped", "shorting_capped"],
+    )
+    def test_every_point_is_the_optimizers_target_return_portfolio(self, bounds):
+        """The same bounds, the same return, the optimizer's exact
+        target_return solve: the same portfolio to the six decimals both
+        publish. The returns are round numbers inside the attainable span,
+        so both tools solve at the same one rather than one at the other's
+        rounding (with shorts a weight moves ten times the return)."""
+        span = self._bounded(n_points=2, **bounds).points
+        low, high = span[0].expected_return, span[-1].expected_return
+        targets = [round(low + share * (high - low), 4) for share in (0.2, 0.5, 0.8)]
+        for target in targets:
+            point = self._bounded(
+                n_points=2, return_range=(target, targets[2] + 1e-4), **bounds
+            ).points[0]
+            assert point.expected_return == pytest.approx(target, abs=1e-9)
+            solved = self._optimize(
+                method="target_return", target_return=target, **bounds
+            )
+            assert solved.solver.certified is True
+            assert solved.expected_volatility == pytest.approx(
+                point.volatility, abs=WEIGHT_ROUNDING
+            )
+            for ticker, weight in point.weights.items():
+                assert solved.weights[ticker] == pytest.approx(
+                    weight, abs=WEIGHT_ROUNDING
+                )
+
+    def test_the_ends_and_the_tangency_match_the_optimizer(self):
+        bounds = dict(allow_short=False, max_weight=0.4)
+        result = self._bounded(risk_free_rate=0.02, **bounds)
+        least = self._optimize(method="min_volatility", **bounds)
+        assert least.expected_volatility == pytest.approx(
+            result.min_variance.volatility, abs=WEIGHT_ROUNDING
+        )
+        best = self._optimize(method="max_sharpe", risk_free_rate=0.02, **bounds)
+        assert best.solver.certified is True
+        assert result.tangency is not None
+        for ticker, weight in result.tangency.weights.items():
+            assert best.weights[ticker] == pytest.approx(weight, abs=WEIGHT_ROUNDING)
+
+    def test_the_default_span_is_the_attainable_one(self):
+        """From the minimum-variance portfolio's return to the highest any
+        portfolio inside the bounds earns: all in the best asset,
+        long-only."""
+        result = self._bounded(allow_short=False, n_points=5)
+        means = _returns(self.TICKERS).mean() * 252
+        assert result.points[-1].expected_return == pytest.approx(
+            float(means.max()), abs=1e-6
+        )
+        assert result.points[0].expected_return == pytest.approx(
+            result.min_variance.expected_return, abs=1e-9
+        )
+        assert result.corners[0].weights[str(means.idxmax())] == 1.0
+
+    def test_target_volatility_lands_on_the_frontier(self):
+        """A point's volatility asked of the optimizer's target_volatility
+        returns that point: the optimizer now solves on the same corners."""
+        bounds = dict(allow_short=False, max_weight=0.4)
+        result = self._bounded(n_points=5, **bounds)
+        point = result.points[2]
+        solved = self._optimize(
+            method="target_volatility", target_volatility=point.volatility, **bounds
+        )
+        assert solved.solver.method == "critical_line"
+        assert solved.expected_return == pytest.approx(
+            point.expected_return, abs=WEIGHT_ROUNDING
+        )
+
+    def test_a_return_range_outside_the_attainable_span_is_refused(self):
+        with pytest.raises(ValidationError, match="returns of the efficient"):
+            self._bounded(allow_short=False, return_range=(0.0, 5.0))
+
+    def test_an_infeasible_cap_is_refused(self):
+        with pytest.raises(PydanticValidationError, match="infeasible"):
+            EfficientFrontierInput(
+                tickers=self.TICKERS, start_date=START, end_date=END, max_weight=0.2
+            )
+
+    def test_no_tangency_when_nothing_inside_the_bounds_earns_the_rate(self):
+        result = self._bounded(allow_short=False, risk_free_rate=5.0)
+        assert result.tangency is None
+        assert any("no maximum-Sharpe" in w for w in result.warnings)
 
 
 class TestTheToolIsReachable:

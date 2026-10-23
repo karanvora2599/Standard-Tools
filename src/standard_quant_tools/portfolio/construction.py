@@ -50,6 +50,8 @@ from standard_quant_tools.numeric_contract import (
     require_finite_covariance,
     require_periods_per_year,
 )
+from standard_quant_tools.portfolio import _active_set
+from standard_quant_tools.portfolio.critical_line import critical_line
 
 logger = logging.getLogger(__name__)
 
@@ -1379,7 +1381,119 @@ def _normal_quantile(p: float) -> float:
     return 0.5 * (lo + hi)
 
 
-def max_diversification(covariance: Any) -> Dict[str, Any]:
+def _ratio_certificate(
+    weights: np.ndarray,
+    volatilities: np.ndarray,
+    matrix: np.ndarray,
+    lower: np.ndarray,
+    upper: np.ndarray,
+) -> _active_set.Certificate:
+    """
+    KKT residuals of `weights` for maximizing the diversification ratio
+    w'sigma / sqrt(w'Sw) subject to 1'w = 1 and the bounds.
+
+    The ratio is the Sharpe ratio with the volatilities as the returns and a
+    zero rate, so these are max_sharpe's residuals (minimizing the negated
+    ratio). It is pseudoconcave wherever w'sigma > 0 -- every long-only
+    portfolio -- so a KKT point is the maximum. The multipliers are
+    estimated from the weights alone.
+    """
+    s = matrix @ weights
+    variance = float(weights @ s)
+    volatility = math.sqrt(variance)
+    numerator = float(weights @ volatilities)
+    gradient = -volatilities / volatility + numerator * s / (volatility * variance)
+    scale = np.abs(volatilities) / volatility + numerator * (
+        np.abs(matrix) @ np.abs(weights)
+    ) / (volatility * variance)
+    return _active_set.kkt_certificate(
+        weights, gradient, scale, np.ones((1, weights.size)), [1.0], lower, upper
+    )
+
+
+def _long_only_max_diversification(
+    names: List[str],
+    matrix: np.ndarray,
+    volatilities: np.ndarray,
+    max_weight: Optional[float],
+) -> "tuple[np.ndarray, Dict[str, Any]]":
+    """
+    The long-only (and optionally capped) maximum, exactly, and how.
+
+    Homogenised, it is max_sharpe's problem with the volatilities as the
+    returns and a zero rate: minimize y'Sy subject to sigma'y = 1 and
+    0 <= y_i <= cap * 1'y, then w = y / 1'y -- `_active_set`'s
+    `solve_homogeneous`, which solves the KKT system on a set of assets at
+    their bounds exactly. Started cold, or from the unconstrained holding
+    clipped to the bounds, that method stopped without an answer on 3 to 12
+    in 100 random capped problems (a cycle, or a first pass with no positive
+    scale -- which is the case where 1'S^-1 sigma < 0). So the set comes
+    from the frontier instead: the maximum ratio is the tangency portfolio
+    of the frontier whose returns are the volatilities, and
+    `critical_line` finds it exactly, piece by piece. `solve_homogeneous`
+    then solves on that set; its answer is kept when its certificate
+    passes, else the frontier's own when that one passes. Every answer is
+    certified by the ratio's own KKT conditions (`_ratio_certificate`).
+    """
+    n = len(names)
+    lower = np.zeros(n)
+    upper = np.full(
+        n, np.inf if max_weight is None or max_weight >= 1.0 else max_weight
+    )
+    with single_threaded_blas():
+        frontier = critical_line(volatilities, matrix, lower, upper, names=names)
+        tangency = frontier.max_sharpe(0.0)
+        if tangency is None:  # pragma: no cover - every volatility is positive
+            raise ValidationError(
+                "max_diversification: no long-only portfolio has a positive "
+                "weighted volatility."
+            )
+        traced = tangency.weights
+        traced_certificate = _ratio_certificate(
+            traced, volatilities, matrix, lower, upper
+        )
+        try:
+            solution = _active_set.solve_homogeneous(
+                matrix, volatilities, lower, upper, start=traced
+            )
+        except (_active_set.ActiveSetFailure, np.linalg.LinAlgError) as failure:
+            solved, solved_certificate, stopped = None, None, str(failure)
+        else:
+            solved = solution.x
+            solved_certificate = _ratio_certificate(
+                solved, volatilities, matrix, lower, upper
+            )
+            stopped = (
+                f"its answer's largest KKT residual, {solved_certificate.worst:.1e}, "
+                f"is over {_active_set.CERTIFICATE_TOLERANCE:.0e}"
+            )
+    if solved_certificate is not None and solved_certificate.certified:
+        weights, certificate, method = solved, solved_certificate, "active_set"
+        how = (
+            "solved exactly: the homogenised KKT system on the set of assets "
+            "at their bounds that the critical line's tangency holds"
+        )
+    else:
+        weights, certificate, method = traced, traced_certificate, "critical_line"
+        how = (
+            "the critical line's tangency portfolio, as the homogenised solve "
+            f"on its set stopped ({stopped})"
+        )
+    return weights, {
+        "method": method,
+        "certified": certificate.certified,
+        "kkt_residual": certificate.worst,
+        "how": how,
+        "corners": len(frontier.corners),
+    }
+
+
+def max_diversification(
+    covariance: Any,
+    *,
+    long_only: bool = False,
+    max_weight: Optional[float] = None,
+) -> Dict[str, Any]:
     """
     The portfolio that maximizes the DIVERSIFICATION RATIO: the weighted
     average of the assets' volatilities over the portfolio's own.
@@ -1398,18 +1512,50 @@ def max_diversification(covariance: Any) -> Dict[str, Any]:
     volatility first, so a quiet asset gets no advantage from being quiet --
     only from being UNCORRELATED.
 
+    TWO PROBLEMS. By default the weights only sum to 1: the maximum is the
+    closed form w proportional to Sigma^-1 sigma, which may short, and is
+    refused when its sum 1'Sigma^-1 sigma is not positive (rescaling would
+    flip it into the minimum). With `long_only=True` the weights are also
+    non-negative (and at most `max_weight` when given), and the maximum is
+    solved exactly and certified against its KKT conditions
+    (`_long_only_max_diversification`) -- including the case the closed form
+    refuses, where a long-only maximum always exists.
+
     IT STILL INVERTS THE COVARIANCE MATRIX, and inherits everything that
     implies: on an ill-conditioned estimate the smallest eigenvalue becomes
     the largest and the portfolio bets on the direction the data says least
     about. The condition number is reported for exactly that reason.
     `hierarchical_risk_parity` is the version that avoids inversion.
     """
+    if max_weight is not None:
+        if not long_only:
+            raise ValidationError(
+                f"max_diversification: max_weight={max_weight!r} caps the "
+                "long-only maximum; the unconstrained one is a closed form "
+                "with no bounds. Pass long_only=True with it, or omit it."
+            )
+        if (
+            isinstance(max_weight, bool)
+            or not isinstance(max_weight, (int, float))
+            or not math.isfinite(max_weight)
+            or not max_weight > 0
+        ):
+            raise ValidationError(
+                f"max_diversification: max_weight must be a finite number "
+                f"above 0, got {max_weight!r}."
+            )
     frame = _covariance_frame(covariance, "max_diversification")
     psd_notes = list(frame.attrs.get("warnings", []))
     matrix = frame.to_numpy()
     n = matrix.shape[0]
     if n < 2:
         raise ValidationError("max_diversification: needs at least two assets.")
+    if max_weight is not None and max_weight * n < 1.0 - 1e-12:
+        raise ValidationError(
+            f"max_diversification: max_weight={max_weight!r} is infeasible for "
+            f"{n} assets whose weights sum to 1: need max_weight >= "
+            f"{1.0 / n:.4f}."
+        )
 
     volatilities = np.sqrt(np.diag(matrix))
     # Maximizing w'v / sqrt(w'Sw) has the same solution as minimum variance
@@ -1443,7 +1589,12 @@ def max_diversification(covariance: Any) -> Dict[str, Any]:
     direction = raw / volatilities
     total = float(direction.sum())
     scale = float(np.abs(direction).sum()) or 1.0
-    if not total > 1e-12 * scale:
+    solved: Optional[Dict[str, Any]] = None
+    if long_only:
+        weights, solved = _long_only_max_diversification(
+            [str(c) for c in frame.columns], matrix, volatilities, max_weight
+        )
+    elif not total > 1e-12 * scale:
         best = float(math.sqrt(max(float(volatilities @ direction), 0.0)))
         shape = {
             str(c): round(float(d) / scale, 4) for c, d in zip(frame.columns, direction)
@@ -1461,11 +1612,13 @@ def max_diversification(covariance: Any) -> Dict[str, Any]:
             + (f"its minimum ({-best:.4f})" if flipped else "a division by zero")
             + ". It happens when a low-volatility asset is strongly correlated "
             "with a combination of the others and the holding shorts it "
-            "heavily. Use optimize_risk_parity or "
-            "optimize_hierarchical_risk_parity, which are long-only, or drop "
-            "the asset with the most negative entry above."
+            "heavily. Pass long_only=True for the exact long-only maximum, "
+            "which always exists; or use optimize_risk_parity or "
+            "optimize_hierarchical_risk_parity, or drop the asset with the "
+            "most negative entry above."
         )
-    weights = direction / total
+    else:
+        weights = direction / total
 
     portfolio_volatility = _portfolio_volatility(weights, matrix)
     weighted_average = float(weights @ volatilities)
@@ -1480,10 +1633,17 @@ def max_diversification(covariance: Any) -> Dict[str, Any]:
     if negative:
         warnings.append(
             f"{len(negative)} weight(s) came out NEGATIVE, so this solution "
-            "requires shorting. Maximum diversification is unconstrained -- "
-            "if the mandate is long-only, this is not the portfolio, and a "
-            "constrained optimizer is needed rather than clipping these to "
-            "zero."
+            "requires shorting. Maximum diversification is unconstrained by "
+            "default -- if the mandate is long-only, this is not the "
+            "portfolio: pass long_only=True for the exact long-only maximum "
+            "rather than clipping these to zero."
+        )
+    if solved is not None and not solved["certified"]:
+        warnings.append(
+            f"The long-only maximum did not certify: its largest KKT residual "
+            f"is {solved['kkt_residual']:.1e} against "
+            f"{_active_set.CERTIFICATE_TOLERANCE:.0e} ({solved['how']}). Treat "
+            "the weights as approximate."
         )
     if condition > 1000:
         warnings.append(
@@ -1500,7 +1660,7 @@ def max_diversification(covariance: Any) -> Dict[str, Any]:
         "by each asset's own volatility first, so an asset is rewarded for "
         "being UNCORRELATED rather than for being quiet."
     )
-    return {
+    result: Dict[str, Any] = {
         "n_assets": int(n),
         "weights": {str(c): float(w) for c, w in zip(frame.columns, weights)},
         "diversification_ratio": ratio,
@@ -1511,6 +1671,25 @@ def max_diversification(covariance: Any) -> Dict[str, Any]:
         "negative_weights": negative,
         "warnings": warnings,
     }
+    if solved is not None:
+        result.update(
+            long_only=True,
+            max_weight=max_weight,
+            method=solved["method"],
+            certified=solved["certified"],
+            kkt_residual=solved["kkt_residual"],
+            solver_message=(
+                f"{solved['how']}; {solved['corners']} corner portfolio(s) on "
+                "the frontier of the volatilities. Largest KKT residual of the "
+                f"ratio's maximum {solved['kkt_residual']:.1e}, "
+                + (
+                    f"certified to {_active_set.CERTIFICATE_TOLERANCE:.0e}"
+                    if solved["certified"]
+                    else "NOT certified"
+                )
+            ),
+        )
+    return result
 
 
 def marginal_risk_contribution(

@@ -105,10 +105,12 @@ from standard_quant_tools.modeling.validation.comparison import (
 )
 from standard_quant_tools.portfolio import construction
 from standard_quant_tools.portfolio.covariance import estimate_covariance
+from standard_quant_tools.portfolio.critical_line import critical_line
 from standard_quant_tools.portfolio.optimize import (
     annualized_mean_cov,
     black_litterman,
     frontier_stats,
+    mean_variance_optimize,
 )
 from standard_quant_tools.portfolio.portfolio import portfolio_metrics
 
@@ -586,11 +588,47 @@ def _cox_predict_wide():
     return model.predict(rng.normal(size=(5_000, 300)))
 
 
+def _corners(frontier):
+    """A traced frontier as a comparable structure: each corner's risk
+    tolerance, weights, return and variance."""
+    return [[c.lam, c.weights, c.expected_return, c.variance] for c in frontier.corners]
+
+
+def _bounded_target_volatility():
+    """Capped target_volatility on the critical line: the frontier's own
+    trace, and the mix of the two corners around a volatility halfway up
+    it."""
+    mu, cov = annualized_mean_cov(RETURNS, 252)
+    frontier = critical_line(mu, cov, 0.0, 0.02)
+    low, high = frontier.volatility_range()
+    return mean_variance_optimize(
+        RETURNS,
+        "target_volatility",
+        target_volatility=0.5 * (low + high),
+        max_weight=0.02,
+    )
+
+
 CALLS = {
     "_repair_psd": lambda: construction._repair_psd(RAGGED, "test"),
     "risk_parity": lambda: construction.risk_parity(RAGGED, max_iterations=200),
     "max_diversification": lambda: construction.max_diversification(COVARIANCE),
     "max_diversification_ragged": lambda: construction.max_diversification(RAGGED),
+    # The long-only and capped maximum: a critical-line trace, then the
+    # homogenised solve on its active set.
+    "max_diversification_long_only": lambda: construction.max_diversification(
+        COVARIANCE, long_only=True
+    ),
+    "max_diversification_capped": lambda: construction.max_diversification(
+        COVARIANCE, long_only=True, max_weight=0.02
+    ),
+    "critical_line_long_only": lambda: _corners(
+        critical_line(*annualized_mean_cov(RETURNS, 252), 0.0, np.inf)
+    ),
+    "critical_line_capped": lambda: _corners(
+        critical_line(*annualized_mean_cov(RETURNS, 252), 0.0, 0.02)
+    ),
+    "mean_variance_target_volatility_capped": _bounded_target_volatility,
     "marginal_risk_contribution": lambda: construction.marginal_risk_contribution(
         WEIGHTS, RAGGED
     ),

@@ -1,5 +1,63 @@
 # Changelog
 
+## A bounded frontier is traced through its corner portfolios, a bounded target volatility is the frontier's portfolio there, and the long-only maximum diversification is exact
+
+- **Markowitz's critical line algorithm.** `portfolio.critical_line`
+  traces the efficient frontier under a budget and per-asset bounds
+  exactly: at a fixed set of assets held at a bound the solution of
+  1/2 w'Sw - lam mu'w is linear in the risk tolerance lam, so the
+  frontier is straight pieces joined at corner portfolios, where an
+  asset reaches or leaves a bound. Each corner carries its lam, return,
+  volatility, what changed there, and a KKT certificate; every point
+  between two corners is their mix. Ties in expected returns at the
+  highest-return end start at the tied assets' least-variance split, a
+  start with no free asset moves a pair, coincident events are taken one
+  at a time, and a covariance singular on the free assets or a cycling
+  corner is refused by name. Against a brute force over every face of
+  the box (up to five assets) the variance at each return and the
+  highest return at each volatility agree to 1e-8; where no bound binds
+  the curve is the Merton closed form to 1e-12. Up to 500 assets.
+- **Bounded `target_volatility` returns the frontier portfolio,
+  certified.** SLSQP solved the non-convex equality w'Sw = sigma^2 and
+  stopped on dominated portfolios: on the 60 random long-only problems
+  that measured it, 6 came back up to 16.0 percentage points of return
+  below the frontier, with `converged=True`. The answer is now the mix of
+  the two corners whose volatilities bracket the target (the root of
+  that piece's variance quadratic), hit to 3e-17 and equal to a bisection
+  reference to 4e-16 on all 60; `solver.method` is `"critical_line"` and
+  `certified` is True, and the uncertified warning is gone. Two assets at
+  25% and 20% volatility correlated -0.5, long-only at 13%, returned
+  5.20% and now return 7.98%. A target below the minimum-variance
+  volatility, or above the highest-return portfolio's, is refused with
+  the attainable range; SLSQP used to return a portfolio there. This path
+  no longer needs scipy.
+- **`get_efficient_frontier` takes `allow_short` and `max_weight`.** The
+  default (`allow_short=True`, no cap) is the closed form, unchanged.
+  Bounded, `method` is `"critical_line"` and the result adds `corners`,
+  `certified` and `largest_kkt_residual`; the points, the minimum-variance
+  portfolio and the tangency (the exact maximum Sharpe over the pieces)
+  are inside the bounds and agree with `run_portfolio_optimization` under
+  the same bounds. A `return_range` outside the attainable span is
+  refused with the span. Its description and field descriptions are
+  shorter, by 435 bytes of schema.
+- **`optimize_max_diversification` takes `long_only` and `max_weight`.**
+  The default is the closed form, unchanged, and still refuses a holding
+  whose sum 1'Sigma^-1 sigma is not positive, now naming `long_only=True`
+  as the fix. Long-only (optionally capped) the maximum is the tangency of
+  the frontier whose returns are the volatilities, and the homogenised
+  KKT system is solved on its active set; `certified`, `kkt_residual`,
+  `method` and `solver_message` report it. Started cold or from the
+  clipped holding, the homogenised solve stopped without an answer on 3
+  to 12 in 100 random capped problems. On the planted net-short case
+  (volatilities 3.17, 4.59, 0.80) the long-only maximum drops the third
+  asset at a ratio of sqrt(2 / (1 - 0.474)) = 1.9499.
+- **Tests.** The corners, their certificates, the brute force, the
+  degenerate cases and the closed forms of the long-only maximum (two
+  assets, one correlation, a binding cap, the core property that every
+  held asset's correlation with the portfolio is 1 / DR) are planted; the
+  frontier, the capped target volatility and both long-only maxima are in
+  the BLAS same-bits registry.
+
 ## Lint passes again: the audit caller's refusal is one line, as the pinned black writes it
 
 - **`audit/context.py` is formatted.** The tenant check's refusal was

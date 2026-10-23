@@ -697,24 +697,23 @@ class TestNonConvergenceSaysWhatHappened:
     def test_a_status_8_stop_names_the_solver_status_and_residuals(
         self, monkeypatch, caplog
     ):
-        """target_volatility stays with SLSQP alone. A stalled run used to
-        log that the weights "may violate the sum-to-1 constraint" and put
-        nothing in `warnings`."""
+        """Capped max_sharpe whose exact polish does not certify keeps
+        SLSQP's answer. A stalled run used to log that the weights "may
+        violate the sum-to-1 constraint" and put nothing in `warnings`.
+        (target_volatility, which this used to pin, no longer runs SLSQP:
+        it is solved on the critical line.)"""
         frame = _factor_frame(3, 8, 600)
         _stalled(monkeypatch)
+        monkeypatch.setattr(opt, "_polish_max_sharpe", lambda *a, **k: None)
         with caplog.at_level(logging.WARNING, logger=opt.__name__):
-            result = mean_variance_optimize(
-                frame, "target_volatility", target_volatility=0.25
-            )
+            result = mean_variance_optimize(frame, "max_sharpe", max_weight=0.25)
         assert result["converged"] is False
-        # Never certified: its volatility equality is not convex (the
-        # CHANGELOG entry of 2026-10-22).
         assert result["solver"]["certified"] is False
         (warning,) = [w for w in result["warnings"] if "status 8" in w]
         assert "SLSQP ended with status 8" in warning
         assert "sum-to-1 residual" in warning
         assert "largest bound violation" in warning
-        assert "target_volatility residual" in warning
+        assert "KKT stationarity residual" in warning
         assert "does not by itself mean the constraints are infeasible" in warning
         messages = " ".join(r.message for r in caplog.records)
         assert "status 8" in messages

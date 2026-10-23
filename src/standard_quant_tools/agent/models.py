@@ -712,16 +712,18 @@ class SolverReport(BaseModel):
         description="'active_set' for an exact, certified solve: "
         "min_volatility, target_return and long-only max_sharpe without a "
         "binding cap from a cold start, and capped or shorting max_sharpe "
-        "from SLSQP's answer. 'SLSQP' for bounded target_volatility (never "
-        "certified), an infeasible target, and an answer the exact solve "
-        "could not certify. "
+        "from SLSQP's answer. 'critical_line' for bounded target_volatility: "
+        "the mix of the two frontier corners that bracket the volatility, "
+        "certified. 'SLSQP' for an infeasible target and an answer the exact "
+        "solve could not certify. "
         "'closed_form' for the unconstrained analytic solution, which runs "
         "no iterations.",
     )
     iterations: int = Field(
         0,
         description="Major iterations; active-set passes (one linear solve "
-        "each) for 'active_set'. 0 on the closed-form path.",
+        "each) for 'active_set'; corner portfolios for 'critical_line'. 0 "
+        "on the closed-form path.",
     )
     status: Optional[int] = Field(
         None,
@@ -753,11 +755,11 @@ class SolverReport(BaseModel):
         "optimum of the problem asked, to its tolerance. False when a "
         "certificate was computed and does not show that -- an SLSQP answer "
         "the exact solve could not certify, whose residuals say how near the "
-        "optimum it is -- and on every bounded target_volatility solve, "
-        "whose volatility equality is not convex: SLSQP can stop there on a "
-        "portfolio another inside the same bounds beats at the same "
-        "volatility, and a warning says so. Null where no certificate "
-        "applies: the closed form and an infeasible target.",
+        "optimum it is. Bounded target_volatility is certified as a frontier "
+        "portfolio: minimum variance at its own return under the bounds, at "
+        "a non-negative risk tolerance, which makes it the maximum return at "
+        "its volatility. Null where no certificate applies: the closed form "
+        "and an infeasible target.",
     )
     certificate: Optional[Dict[str, float]] = Field(
         None,
@@ -768,7 +770,9 @@ class SolverReport(BaseModel):
         "relative to the size of the terms they are residuals of; "
         "'equality_residual' (largest relative miss of sum-to-1 and of a "
         "target_return); 'bound_violation' (largest distance outside the "
-        "bounds); and 'tolerance', which all four must be at or under.",
+        "bounds); and 'tolerance', which all four must be at or under. For "
+        "'critical_line' they are the residuals of minimizing "
+        "1/2 w'Sw - lam mu'w at the risk tolerance lam the message names.",
     )
     fallback: Optional[str] = Field(
         None,
@@ -852,11 +856,10 @@ class EfficientFrontierInput(BaseModel):
     # had configured something.
     model_config = ConfigDict(extra="forbid")
 
+    # The field descriptions are short because this runtime's schema
+    # budget is: the reasons behind them are in 05_portfolio.md.
     tickers: List[str] = Field(
-        ...,
-        min_length=2,
-        description="Universe to trace the frontier over. A frontier needs "
-        "at least two assets: with one there is no trade-off to draw.",
+        ..., min_length=2, description="Universe, two or more assets."
     )
     start_date: str = Field(..., description="Start date YYYY-MM-DD.")
     end_date: str = Field(..., description="End date YYYY-MM-DD.")
@@ -864,18 +867,15 @@ class EfficientFrontierInput(BaseModel):
         25,
         ge=2,
         le=200,
-        description="How many portfolios to solve along the frontier. Each "
-        "is a closed form rather than an optimizer run, so a fine curve "
-        "costs no more turns than a coarse one.",
+        description="Portfolios along the frontier, each exact, none an "
+        "optimizer run.",
     )
     risk_free_rate: float = Field(
         0.0,
         ge=-10,
         le=10,
-        description="ANNUAL rate, used only to locate the tangency "
-        "portfolio. The frontier itself does not depend on it. A decimal "
-        "bounded to +/-10 (1,000%) on magnitude, never on sign: a larger "
-        "magnitude is a unit error.",
+        description="ANNUAL decimal rate, for the tangency portfolio only; "
+        "bounded to +/-10 on magnitude, never on sign.",
     )
     periods_per_year: int = Field(
         252,
@@ -885,11 +885,21 @@ class EfficientFrontierInput(BaseModel):
     )
     return_range: Optional[Tuple[float, float]] = Field(
         None,
-        description="ANNUALIZED (low, high) target returns to span. The "
-        "default runs from the global minimum-variance portfolio's own "
-        "return to the highest single-asset mean, which is the stretch of "
-        "the curve anybody is choosing among; a wider range is allowed and "
-        "extrapolates the same closed form.",
+        description="ANNUALIZED (low, high) returns to span. Default: the "
+        "minimum-variance portfolio's return to the highest single-asset "
+        "mean (bounded: highest attainable, and a range must lie inside).",
+    )
+    allow_short: bool = Field(
+        True,
+        description="False: long-only, by the critical line algorithm. True "
+        "and no max_weight: the unbounded closed form.",
+    )
+    max_weight: Optional[float] = Field(
+        None,
+        gt=0,
+        le=10,
+        allow_inf_nan=False,
+        description="Per-asset cap (short floor -max_weight if allow_short).",
     )
 
     @model_validator(mode="after")
@@ -901,6 +911,12 @@ class EfficientFrontierInput(BaseModel):
                 "must appear once — a repeated ticker collapses to a single "
                 "column, and two identical columns make the covariance "
                 "singular by construction, which has no frontier at all."
+            )
+        if self.max_weight is not None and self.max_weight * len(self.tickers) < 1:
+            raise ValueError(
+                f"max_weight={self.max_weight} is infeasible for "
+                f"{len(self.tickers)} assets summing to 1: need max_weight >= "
+                f"{1.0 / len(self.tickers):.4f}."
             )
         if self.return_range is not None:
             low, high = self.return_range
@@ -925,38 +941,88 @@ class FrontierPoint(ExplainsNulls):
     volatility: Stat = Field(..., description="Annualized volatility of these weights.")
     weights: Dict[str, Stat] = Field(
         ...,
-        description="ticker -> weight, summing to 1. UNBOUNDED: the closed "
-        "form imposes sum(w)=1 and nothing else, so a weight may be "
-        "negative (a short) or above 1 (levered by the short). That is what "
-        "makes it exact rather than an approximation.",
+        description="ticker -> weight, summing to 1. On the closed-form "
+        "frontier UNBOUNDED: sum(w)=1 and nothing else, so a weight may be "
+        "negative (a short) or above 1 (levered by the short), which is what "
+        "makes it exact. On a bounded frontier, inside the bounds.",
+    )
+
+
+class FrontierCorner(FrontierPoint):
+    """One corner portfolio of a bounded frontier: where an asset reaches or
+    leaves a bound. Between two adjacent corners every frontier portfolio is
+    a mix of the two."""
+
+    risk_tolerance: Stat = Field(
+        ...,
+        description="Markowitz's lambda at this corner: the weights minimize "
+        "1/2 w'Sw - lambda * mu'w under the budget and the bounds, and "
+        "2 * lambda is the frontier's slope of variance against return "
+        "here. 0 at the minimum-variance end.",
+    )
+    event: str = Field(
+        ...,
+        description="What changes here as the risk tolerance falls: an asset "
+        "leaving or reaching a bound, or the minimum-variance end.",
     )
 
 
 class EfficientFrontierResult(ExplainsNulls):
     model_config = ConfigDict(extra="forbid")
+    null_reasons = {
+        "largest_kkt_residual": (
+            "the frontier is the unbounded closed form, which has no corners "
+            "and no bounds to certify against"
+        ),
+    }
 
     tickers: List[str] = Field(
         default_factory=list,
         description="The columns the covariance was actually built from.",
     )
+    method: Literal["closed_form", "critical_line"] = Field(
+        "closed_form",
+        description="'closed_form' for the unbounded frontier (the Merton "
+        "constants); 'critical_line' for a long-only or capped one, traced "
+        "exactly through its corner portfolios (Markowitz 1956).",
+    )
     points: List[FrontierPoint] = Field(
         default_factory=list,
         description="The frontier, from the lowest target return to the "
         "highest, each an exact solution of the same algebra "
-        "run_portfolio_optimization approximates one point at a time.",
+        "run_portfolio_optimization solves one point at a time. Bounded, "
+        "each is the mix of the two corners whose returns bracket it.",
+    )
+    corners: Optional[List[FrontierCorner]] = Field(
+        None,
+        description="Bounded only: the corner portfolios, highest return "
+        "first and minimum variance last -- the whole frontier, since every "
+        "portfolio on it is a mix of two adjacent corners.",
+    )
+    certified: Optional[bool] = Field(
+        None,
+        description="Bounded only: whether every corner passes its KKT "
+        "certificate (each the minimum-variance portfolio at its return "
+        "under the bounds) to 1e-12.",
+    )
+    largest_kkt_residual: Stat = Field(
+        None,
+        description="Bounded only: the largest KKT residual over the "
+        "corners, relative to the terms it is a residual of.",
     )
     tangency: Optional[FrontierPoint] = Field(
         None,
-        description="The maximum-Sharpe portfolio at `risk_free_rate`, or "
-        "null with a warning when the closed form has no solution — which "
-        "happens when the rate sits at or above the minimum-variance "
-        "portfolio's own return, so every fully-invested efficient "
-        "portfolio has negative excess return.",
+        description="The maximum-Sharpe portfolio at `risk_free_rate` "
+        "(inside the bounds when bounded), or null with a warning when none "
+        "exists -- unbounded, when the rate sits at or above the "
+        "minimum-variance portfolio's own return; bounded, when no portfolio "
+        "inside the bounds earns more than the rate.",
     )
     min_variance: FrontierPoint = Field(
         ...,
-        description="The global minimum-variance portfolio: the leftmost "
-        "point of the curve, and the one that needs no return forecast.",
+        description="The minimum-variance portfolio (inside the bounds when "
+        "bounded): the leftmost point of the curve, and the one that needs "
+        "no return forecast.",
     )
     condition_number: Stat = Field(
         None,
