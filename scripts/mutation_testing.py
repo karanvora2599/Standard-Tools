@@ -223,6 +223,30 @@ MUTATIONS: List[Mutation] = [
         "tests/analysis/test_inference.py",
     ),
     Mutation(
+        # A never-filled z-score window read as a spread at its mean.
+        "pairs: report a z-score of 0.0 when the window never filled",
+        SRC / "agent/runtimes/research/tools.py",
+        "    return round(float(valid.iloc[-1]), 4) if not valid.empty else None\n",
+        "    return round(float(valid.iloc[-1]), 4) if not valid.empty else 0.0\n",
+        "tests/agent/test_agent_tools.py tests/agent/test_new_agent_tools.py",
+    ),
+    Mutation(
+        # An empty trade log averaged to zero, as it was.
+        "trade expectancy: average no trades to zero",
+        SRC / "metrics/diagnostics.py",
+        '            "expectancy_pct": nan,\n',
+        '            "expectancy_pct": 0.0,\n',
+        "tests/metrics/test_diagnostics.py",
+    ),
+    Mutation(
+        # No winner averaged to a 0.0 winner, as it was.
+        "trade expectancy: report a 0.0 average winner with no winner",
+        SRC / "metrics/diagnostics.py",
+        '        "avg_winner_pct": round(avg_winner, 4) if len(wins) else nan,\n',
+        '        "avg_winner_pct": round(avg_winner, 4),\n',
+        "tests/metrics/test_diagnostics.py",
+    ),
+    Mutation(
         # The break-even annualized over the front's remaining life again,
         # whatever the gap between the expiries: 365% at one day.
         "roll: annualize the break-even over the front's remaining life",

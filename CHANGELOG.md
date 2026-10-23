@@ -1,5 +1,39 @@
 # Changelog
 
+## A z-score that was never computed and trade averages over no trades are null with a reason, not 0.0
+
+- **`current_zscore` read 0.0 when there was no z-score.**
+  `run_cointegration_test`, `run_kalman_hedge_ratio` and `scan_pairs` took
+  the last value of the spread's rolling z-score and fell back to 0.0
+  when the window never filled -- a `zscore_window` longer than the data.
+  0.0 says "the spread sits exactly at its mean", a reading of the
+  market, and the signal derived from it said `neutral` for the same
+  invented reason. Now `current_zscore` is null, the signal is `neutral`
+  for want of a z-score, and a warning says which window did not fill on
+  how many bars (for a scan, how many returned pairs have none).
+  `CointegrationResult` gains `warnings`.
+- **`get_backtest_diagnostics` reported a strategy that never traded as
+  a zero edge.** Its `trade_diagnostics` gave an expectancy, an average
+  winner, an average loser, a payoff ratio and both average excursions
+  of 0.0 for no trades; `metrics.diagnostics.trade_expectancy` returned
+  the first four as 0.0 for an empty log, and an average winner of 0.0
+  whenever no trade won. Now an average over no trades is NaN in the
+  library -- all four with no trades, the average winner and the payoff
+  ratio with no winner, the average loser with no loser (the payoff ratio
+  stays +inf there: unbounded, not undefined) -- and null on the wire,
+  where `TradeDiagnostics` explains each null in the result's warnings,
+  e.g. "trade_diagnostics.expectancy_pct is null: no trade closed, so
+  there is no trade to average." The streak counts are counts and stay 0.
+- **Not changed:** the engine's own `win_rate` and `avg_trade_return_pct`
+  for a run with no trades are still 0.0, as the native kernel computes
+  them; they feed rankings and aggregates across many tools, and moving
+  them is a change of its own.
+- Tests: a never-filled window gives a null z-score and the warning in
+  all three tools; a never-trading strategy's diagnostics are null with
+  a reason per field; the expectancy of no trades, of no winner and of no
+  loser. The test that pinned 0.0 for an empty log now pins NaN. The
+  mutation catalogue gains three entries, all killed.
+
 ## A roll's break-even is annualized over the time the next contract is held, so it no longer depends on the roll date
 
 - **The same roll read 4.06% a year at 90 days to expiry and 365% at

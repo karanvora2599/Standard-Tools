@@ -1246,7 +1246,12 @@ class CointegrationResult(BaseModel):
     critical_values: Dict[str, float]
     spread_mean: float
     spread_std: float
-    current_zscore: float
+    current_zscore: Stat = Field(
+        ...,
+        description="The spread's latest rolling z-score. Null, with the "
+        "reason in warnings, when the window is longer than the data and no "
+        "z-score exists -- it was reported as 0.0.",
+    )
     signal: str  # "long_a_short_b" | "short_a_long_b" | "neutral"
     n_obs: int
     warnings: List[str] = Field(default_factory=list)
@@ -1328,7 +1333,12 @@ class KalmanHedgeRatioResult(BaseModel):
     hedge_ratio_std: float
     spread_mean: float
     spread_std: float
-    current_zscore: float
+    current_zscore: Stat = Field(
+        ...,
+        description="The spread's latest rolling z-score. Null, with the "
+        "reason in warnings, when the window is longer than the data and no "
+        "z-score exists -- it was reported as 0.0.",
+    )
     signal: str  # "long_a_short_b" | "short_a_long_b" | "neutral"
     n_obs: int
     path_ref: Optional[str] = Field(
@@ -2117,7 +2127,11 @@ class PairResult(BaseModel):
     )
     half_life_critical_value: Stat = None
     adf_statistic: float
-    current_zscore: float
+    current_zscore: Stat = Field(
+        ...,
+        description="The spread's latest rolling z-score; null when the "
+        "window is longer than the data, and the scan's warnings say so.",
+    )
     signal: str  # "long_a_short_b" | "short_a_long_b" | "neutral"
 
 
@@ -4604,15 +4618,38 @@ class DrawdownEpisode(BaseModel):
     recovery_bars: Optional[int] = None  # trough -> recovery; None if unrecovered
 
 
-class TradeDiagnostics(BaseModel):
-    expectancy_pct: float
-    avg_winner_pct: float
-    avg_loser_pct: float
-    payoff_ratio: float  # can be inf if there are no losing trades
+class TradeDiagnostics(ExplainsNulls):
+    # Null, with the reason in the holding result's warnings, when there is
+    # no trade to average: these were 0.0 for a strategy that never traded.
+    # No warnings field of its own, so the result holding it says why.
+    null_reasons = {
+        "expectancy_pct": "no trade closed, so there is no trade to average",
+        "avg_winner_pct": (
+            "no trade closed with a gain, so there is no winner to average"
+        ),
+        "avg_loser_pct": "no trade closed with a loss, so there is no loser to average",
+        "payoff_ratio": (
+            "no trade closed with a gain, so there is no average winner to divide",
+            "no trade closed with a loss, so the average loser it divides by is zero",
+        ),
+        "avg_mae_pct": (
+            "no trade's excursion could be measured -- none closed, or none "
+            "had a price window"
+        ),
+        "avg_mfe_pct": (
+            "no trade's excursion could be measured -- none closed, or none "
+            "had a price window"
+        ),
+    }
+
+    expectancy_pct: Stat
+    avg_winner_pct: Stat
+    avg_loser_pct: Stat
+    payoff_ratio: Stat  # null and explained when unbounded or undefined
     max_consecutive_wins: int
     max_consecutive_losses: int
-    avg_mae_pct: float  # average maximum adverse excursion across trades
-    avg_mfe_pct: float  # average maximum favorable excursion across trades
+    avg_mae_pct: Stat  # average maximum adverse excursion across trades
+    avg_mfe_pct: Stat  # average maximum favorable excursion across trades
 
 
 class ExposureDiagnostics(BaseModel):

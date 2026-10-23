@@ -141,13 +141,24 @@ def trade_expectancy(trade_log: pd.DataFrame) -> Dict[str, Any]:
     stats from the `return_pct` column `_build_trade_log`
     (backtest/engine.py) already produces (values are in percent, e.g. 2.5
     means +2.5%).
+
+    AN AVERAGE OVER NO TRADES IS NaN, NOT 0.0. With no trades this
+    returned an expectancy, an average winner, an average loser and a
+    payoff ratio of 0.0 each -- a strategy that never traded reported a
+    zero edge and a zero payoff, which are statements about trades that
+    did not happen -- and with no winning trade an average winner of 0.0.
+    Now: no trades gives NaN for all four; no winner gives NaN for the
+    average winner and the payoff ratio; no loser, NaN for the average
+    loser (the payoff ratio stays +inf there, which is unbounded rather
+    than undefined). The streak counts are counts, and zero is right.
     """
+    nan = float("nan")
     if trade_log.empty:
         return {
-            "expectancy_pct": 0.0,
-            "avg_winner_pct": 0.0,
-            "avg_loser_pct": 0.0,
-            "payoff_ratio": 0.0,
+            "expectancy_pct": nan,
+            "avg_winner_pct": nan,
+            "avg_loser_pct": nan,
+            "payoff_ratio": nan,
             "max_consecutive_wins": 0,
             "max_consecutive_losses": 0,
         }
@@ -183,6 +194,8 @@ def trade_expectancy(trade_log: pd.DataFrame) -> Dict[str, Any]:
     losses = returns[is_loss]
 
     win_rate = len(wins) / len(returns)
+    # 0.0 stands in for an empty side inside the expectancy, where it is
+    # multiplied by a rate of zero; it is reported as NaN below.
     avg_winner = float(wins.mean()) if len(wins) else 0.0
     avg_loser = float(losses.mean()) if len(losses) else 0.0  # <= 0
 
@@ -195,7 +208,10 @@ def trade_expectancy(trade_log: pd.DataFrame) -> Dict[str, Any]:
     # either average. The streak loop below already got this right.
     loss_rate = len(losses) / len(returns)
     expectancy = win_rate * avg_winner + loss_rate * avg_loser
-    payoff_ratio = abs(avg_winner / avg_loser) if avg_loser != 0 else float("inf")
+    if not len(wins):
+        payoff_ratio = nan
+    else:
+        payoff_ratio = abs(avg_winner / avg_loser) if avg_loser != 0 else float("inf")
 
     # Three states, not two. Iterating `is_win` alone made every non-win a
     # loss, so a breakeven trade extended a LOSING STREAK — the one statistic
@@ -216,10 +232,10 @@ def trade_expectancy(trade_log: pd.DataFrame) -> Dict[str, Any]:
 
     return {
         "expectancy_pct": round(expectancy, 4),
-        "avg_winner_pct": round(avg_winner, 4),
-        "avg_loser_pct": round(avg_loser, 4),
+        "avg_winner_pct": round(avg_winner, 4) if len(wins) else nan,
+        "avg_loser_pct": round(avg_loser, 4) if len(losses) else nan,
         "payoff_ratio": (
-            round(payoff_ratio, 4) if np.isfinite(payoff_ratio) else float("inf")
+            round(payoff_ratio, 4) if np.isfinite(payoff_ratio) else payoff_ratio
         ),
         "max_consecutive_wins": int(max_w),
         "max_consecutive_losses": int(max_l),

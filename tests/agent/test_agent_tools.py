@@ -925,6 +925,22 @@ class TestRunCointegrationTest:
         assert result.half_life_days == pytest.approx(82.1)
         assert any("82.1 bars is not evidence" in w for w in result.warnings)
 
+    def test_a_window_longer_than_the_data_gives_no_zscore(self, cointegrating_pair):
+        """It gave 0.0 -- 'the spread sits at its mean' -- for a rolling
+        window that never filled."""
+        result = run_cointegration_test(
+            CointegrationInput(
+                symbol_a="KO",
+                symbol_b="PEP",
+                start_date=START,
+                end_date=END,
+                zscore_window=100_000,
+            )
+        )
+        assert result.current_zscore is None
+        assert result.signal == "neutral"
+        assert any("current_zscore is null" in w for w in result.warnings)
+
     def test_cointegrated_is_bool(self, cointegrating_pair):
         inp = CointegrationInput(
             symbol_a="KO",
@@ -1020,6 +1036,20 @@ class TestRunKalmanHedgeRatio:
         result = run_kalman_hedge_ratio(inp)
         assert isinstance(result.current_hedge_ratio, float)
         assert isinstance(result.current_intercept, float)
+
+    def test_a_window_longer_than_the_data_gives_no_zscore(self, patched_factory):
+        result = run_kalman_hedge_ratio(
+            KalmanHedgeRatioInput(
+                symbol_a="KO",
+                symbol_b="PEP",
+                start_date=START,
+                end_date=END,
+                zscore_window=100_000,
+            )
+        )
+        assert result.current_zscore is None
+        assert result.signal == "neutral"
+        assert any("current_zscore is null" in w for w in result.warnings)
 
     def test_hedge_ratio_std_nonnegative(self, patched_factory):
         inp = KalmanHedgeRatioInput(

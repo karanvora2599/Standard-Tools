@@ -1,5 +1,6 @@
 """Tests for extended backtest diagnostics (metrics/diagnostics.py)."""
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -79,9 +80,30 @@ class TestDrawdownPeriods:
 
 class TestTradeExpectancy:
     def test_empty_trade_log(self):
+        """No trade, no average: these were 0.0 -- a zero edge and a zero
+        payoff for trades that never happened. The streaks are counts."""
         result = trade_expectancy(pd.DataFrame(columns=["return_pct"]))
-        assert result["expectancy_pct"] == 0.0
+        for key in (
+            "expectancy_pct",
+            "avg_winner_pct",
+            "avg_loser_pct",
+            "payoff_ratio",
+        ):
+            assert np.isnan(result[key]), key
         assert result["max_consecutive_wins"] == 0
+        assert result["max_consecutive_losses"] == 0
+
+    def test_no_winner_has_no_average_winner_and_no_payoff(self):
+        result = trade_expectancy(pd.DataFrame({"return_pct": [-2.0, -1.0, 0.0]}))
+        assert np.isnan(result["avg_winner_pct"])
+        assert np.isnan(result["payoff_ratio"])
+        assert result["avg_loser_pct"] == pytest.approx(-1.5)
+        assert result["expectancy_pct"] == pytest.approx(-1.0)
+
+    def test_no_loser_has_no_average_loser(self):
+        result = trade_expectancy(pd.DataFrame({"return_pct": [2.0, 1.0]}))
+        assert np.isnan(result["avg_loser_pct"])
+        assert result["payoff_ratio"] == float("inf")
 
     def test_hand_verified_expectancy(self):
         """

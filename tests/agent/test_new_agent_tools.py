@@ -820,6 +820,20 @@ class TestScanPairsMultipleTesting:
             == result.n_pairs_significant_uncorrected
         )
 
+    def test_a_window_longer_than_the_data_gives_no_zscore(self, universe):
+        inp = PairScannerInput(
+            tickers=self.TICKERS + ["PAIR"],
+            start_date=START,
+            end_date=END,
+            zscore_window=100_000,
+        )
+        result = scan_pairs(inp)
+        assert result.pairs
+        for pair in result.pairs:
+            assert pair.current_zscore is None
+            assert pair.signal == "neutral"
+        assert any("null current_zscore" in w for w in result.warnings)
+
     def test_a_half_life_its_own_test_rejects_is_not_returned(self, universe):
         """
         A half-life is a claim that the spread mean-reverts, and the range
@@ -2129,6 +2143,33 @@ class TestBacktestDiagnostics:
         assert isinstance(td.expectancy_pct, float)
         assert td.max_consecutive_wins >= 0
         assert td.max_consecutive_losses >= 0
+
+    def test_a_strategy_that_never_traded_has_null_trade_averages(self, patched_long):
+        """They were 0.0 each: an expectancy, a payoff ratio and two
+        excursions for trades that never happened. Null now, each with its
+        reason in warnings."""
+        inp = BacktestDiagnosticsInput(
+            symbol="AAPL",
+            start_date=START,
+            end_date=END,
+            strategy_type="rsi_mean_reversion",
+            parameters={"period": 14, "oversold": 1, "overbought": 99},
+        )
+        result = get_backtest_diagnostics(inp)
+        assert result.num_trades == 0
+        td = result.model_dump(mode="json")["trade_diagnostics"]
+        for key in (
+            "expectancy_pct",
+            "avg_winner_pct",
+            "avg_loser_pct",
+            "payoff_ratio",
+            "avg_mae_pct",
+            "avg_mfe_pct",
+        ):
+            assert td[key] is None, key
+            assert any(key in w and "is null" in w for w in result.warnings), key
+        assert td["max_consecutive_wins"] == 0
+        assert td["max_consecutive_losses"] == 0
 
     def test_exposure_fields_bounded(self, patched_long):
         inp = BacktestDiagnosticsInput(

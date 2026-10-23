@@ -719,6 +719,34 @@ def run_factor_regression(input_data: FactorRegressionInput) -> FactorRegression
     )
 
 
+def _current_zscore(z: pd.Series) -> Optional[float]:
+    """
+    The latest z-score of a spread, or None when the rolling window never
+    filled. It was 0.0 then: "the spread sits exactly at its mean", a
+    reading of the market, for a window longer than the data.
+    """
+    valid = z.dropna()
+    return round(float(valid.iloc[-1]), 4) if not valid.empty else None
+
+
+def _zscore_signal(current_z: Optional[float]) -> str:
+    """The +-2 entry rule; no position without a z-score."""
+    if current_z is not None and current_z < -2.0:
+        return "long_a_short_b"
+    if current_z is not None and current_z > 2.0:
+        return "short_a_long_b"
+    return "neutral"
+
+
+def _no_zscore_warning(window: int, n_spread: int) -> str:
+    return (
+        f"current_zscore is null: the {window}-bar window never filled on "
+        f"{n_spread} bars of spread, so there is no z-score, and signal is "
+        "'neutral' for want of one rather than because the spread is at its "
+        "mean. Shorten zscore_window or widen the dates."
+    )
+
+
 def run_cointegration_test(input_data: CointegrationInput) -> CointegrationResult:
     """Engle-Granger cointegration test with hedge ratio, half-life, and a z-score signal."""
     logger.debug(
@@ -740,15 +768,8 @@ def run_cointegration_test(input_data: CointegrationInput) -> CointegrationResul
     result = cointegration_test(prices_a, prices_b)
     spread = compute_spread(prices_a, prices_b, hedge_ratio=result["hedge_ratio"])
     z = spread_zscore(spread, window=input_data.zscore_window)
-    valid_z = z.dropna()
-    current_z = round(float(valid_z.iloc[-1]), 4) if not valid_z.empty else 0.0
-
-    if current_z < -2.0:
-        signal = "long_a_short_b"
-    elif current_z > 2.0:
-        signal = "short_a_long_b"
-    else:
-        signal = "neutral"
+    current_z = _current_zscore(z)
+    signal = _zscore_signal(current_z)
 
     # Guard against inf half-life (non-mean-reverting spread)
     hl = result["half_life_days"]
@@ -762,6 +783,8 @@ def run_cointegration_test(input_data: CointegrationInput) -> CointegrationResul
     t_stat = float(result["half_life_t_statistic"])
     critical = float(result["half_life_critical_value"])
     warnings: List[str] = []
+    if current_z is None:
+        warnings.append(_no_zscore_warning(input_data.zscore_window, len(spread)))
     if not reverting and math.isfinite(hl):
         warnings.append(
             f"half_life_days of {hl_safe:g} bars is not evidence that the "
@@ -827,19 +850,14 @@ def run_kalman_hedge_ratio(input_data: KalmanHedgeRatioInput) -> KalmanHedgeRati
         include_intercept=input_data.include_intercept,
     )
     z = spread_zscore(kf["Spread"], window=input_data.zscore_window)
-    valid_z = z.dropna()
-    current_z = round(float(valid_z.iloc[-1]), 4) if not valid_z.empty else 0.0
-
-    if current_z < -2.0:
-        signal = "long_a_short_b"
-    elif current_z > 2.0:
-        signal = "short_a_long_b"
-    else:
-        signal = "neutral"
+    current_z = _current_zscore(z)
+    signal = _zscore_signal(current_z)
 
     beta_series = kf["Hedge_Ratio"]
 
     warnings: List[str] = []
+    if current_z is None:
+        warnings.append(_no_zscore_warning(input_data.zscore_window, len(kf)))
     if not input_data.include_intercept:
         warnings.append(
             "`Intercept` is all zero in the published path and "
@@ -1362,6 +1380,7 @@ def scan_pairs(input_data: PairScannerInput) -> PairScannerResult:
     all_pairs = list(combinations(valid_tickers, 2))
     n_tested = 0
     n_not_reverting = 0
+    n_no_zscore = 0
     passing: List[PairResult] = []
     failed_pairs: List[PairFailure] = []
 
@@ -1476,14 +1495,11 @@ def scan_pairs(input_data: PairScannerInput) -> PairScannerResult:
             if not reversion["mean_reverting"]:
                 n_not_reverting += 1
                 continue
-            z = _zscore(spread, window=input_data.zscore_window).dropna()
-            current_z = round(float(z.iloc[-1]), 4) if not z.empty else 0.0
-
-            signal = (
-                "long_a_short_b"
-                if current_z < -2.0
-                else "short_a_long_b" if current_z > 2.0 else "neutral"
+            current_z = _current_zscore(
+                _zscore(spread, window=input_data.zscore_window)
             )
+            n_no_zscore += current_z is None
+            signal = _zscore_signal(current_z)
 
             passing.append(
                 PairResult(
@@ -1526,6 +1542,13 @@ def scan_pairs(input_data: PairScannerInput) -> PairScannerResult:
             )
         )
 
+    if n_no_zscore:
+        warnings.append(
+            f"{n_no_zscore} returned pair(s) have a null current_zscore: the "
+            f"{input_data.zscore_window}-bar window never filled on their "
+            "spread, so there is no z-score and their signal is 'neutral' "
+            "for want of one. Shorten zscore_window or widen the dates."
+        )
     if n_not_reverting:
         warnings.append(
             f"{n_not_reverting} pair(s) cleared the p-value gate with a "

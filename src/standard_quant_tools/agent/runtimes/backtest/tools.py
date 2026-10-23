@@ -2432,8 +2432,10 @@ def get_backtest_diagnostics(
 
     expectancy = trade_expectancy(trade_log)
     excursions = trade_excursions(trade_log, df)
-    avg_mae = float(excursions["mae_pct"].mean()) if not excursions.empty else 0.0
-    avg_mfe = float(excursions["mfe_pct"].mean()) if not excursions.empty else 0.0
+    # NaN with no excursion to average, which the result reports as null
+    # and explains; this was 0.0 for a strategy that never traded.
+    avg_mae = float(excursions["mae_pct"].mean()) if not excursions.empty else math.nan
+    avg_mfe = float(excursions["mfe_pct"].mean()) if not excursions.empty else math.nan
 
     exposure = exposure_stats(executed, trade_log)
 
