@@ -125,6 +125,17 @@ FX_RATES = {
 CURRENCIES = list(FX_RATES)
 
 
+#: References that stand in for an input the synthesizer CAN build inline:
+#: a `returns_panel` beside inline or fetched returns, a `covariance` beside
+#: an inline matrix. A reference cannot be invented -- the string `"a"`
+#: names nothing -- so these are left out of the optional fields tried, the
+#: inline form is synthesized, and the published baseline in `hermetic`
+#: supplies the reference. Without this the one optional reference was
+#: always the first single field that constructed, and the inline path of
+#: every tool given one stopped being fuzzed.
+FIXTURE_REFERENCES = frozenset({"returns_ref", "covariance_ref"})
+
+
 def names_a_path(model: Any) -> bool:
     """Whether any of this model's fields names a file on disk."""
     return any(PATH_FIELD.search(f) for f in model.model_fields)
@@ -439,6 +450,11 @@ def _value(annotation: Any, info: Any, name: str, length: int, salt: int = 0) ->
             # of tickers per fuzz case.
             return SYMBOLS[: max(min(count, len(SYMBOLS)), 2)]
         if get_origin(inner) in (list, List):
+            if name == "covariance":
+                # Square over the asset list synthesized beside it, which is
+                # the symbol set: a 300 x 300 matrix against six names is a
+                # shape refusal, not a test of the tool.
+                return _covariance(len(SYMBOLS))
             return _covariance(max(count, 3))
         if isinstance(inner, type) and issubclass(inner, BaseModel):
             return [
@@ -597,6 +613,8 @@ def build(model: type[BaseModel], *, length: int = 300, salt: int = 0) -> Any:
 
     extras: Dict[str, Any] = {}
     for name, info in _optional_fields(model):
+        if name in FIXTURE_REFERENCES:
+            continue
         try:
             extras[name] = _value(info.annotation, info, name.lower(), length, salt)
         except (Unsynthesizable, ValidationError):
@@ -608,8 +626,9 @@ def build(model: type[BaseModel], *, length: int = 300, salt: int = 0) -> Any:
             k: v for k, v in required.items() if k not in truly_required
         }
         passes.append((truly_required, {**factory_defaulted, **extras}))
+    unset = {name for name, info in _optional_fields(model) if info.default is None}
     for base, pool in passes:
-        for chosen in _subsets_to_try(list(pool)):
+        for chosen in _subsets_to_try(list(pool), [n for n in pool if n in unset]):
             try:
                 return model(**base, **{name: pool[name] for name in chosen})
             except ValidationError:
@@ -617,12 +636,25 @@ def build(model: type[BaseModel], *, length: int = 300, salt: int = 0) -> Any:
     raise first_refusal
 
 
-def _subsets_to_try(names: List[str]) -> Iterator[Tuple[str, ...]]:
-    """None, each one, each pair, all, and all minus each one -- in that order."""
+def _subsets_to_try(
+    names: List[str], unset: Optional[List[str]] = None
+) -> Iterator[Tuple[str, ...]]:
+    """
+    None, each one, each pair, every field that is unset by default, all,
+    and all minus each one -- in that order.
+
+    The unset stage is for an input that needs three or more fields together
+    and has others with working defaults: tickers with both ends of their
+    window, beside a `method` whose synthesized "a" no estimator answers to.
+    "All" would carry those defaults' synthesized values and be refused for
+    them.
+    """
     yield ()
     for name in names:
         yield (name,)
     yield from combinations(names, 2)
+    if unset and len(unset) > 2:
+        yield tuple(unset)
     yield tuple(names)
     for dropped in names:
         yield tuple(name for name in names if name != dropped)

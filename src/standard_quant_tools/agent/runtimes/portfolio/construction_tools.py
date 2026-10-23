@@ -10,9 +10,10 @@ entirely (risk parity, HRP) or answers a question the optimizer never asks:
 what is this portfolio a bet ON, how concentrated is it really, and what
 does the risk look like once you admit you cannot exit at the mark.
 
-INPUTS ARE INLINE. A covariance matrix arrives as a nested list with names
-or as the name-keyed map `estimate_covariance` returns, returns as a map of
-asset to series, dated or not (`inline_inputs.py`). Nothing here fetches
+INPUTS ARE INLINE OR PUBLISHED. A covariance matrix arrives as a nested list
+with names, as the name-keyed map `estimate_covariance` returns, or as the
+`covariance_ref` it publishes; returns as a map of asset to series, dated
+or not, or as a `returns_ref` panel (`inline_inputs.py`). Nothing here fetches
 prices -- these consume a matrix the caller already estimated, which
 matters because the estimator IS a choice (`estimate_covariance` offers
 shrinkage for a reason) and burying it inside an allocator would hide it.
@@ -22,10 +23,17 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Annotated, Dict, List, Literal, Optional
+from typing import Annotated, ClassVar, Dict, List, Literal, Optional
 
 import pandas as pd
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 from standard_quant_tools.agent.models import _distinct
 from standard_quant_tools.agent.runtimes._json_safe import (
@@ -38,21 +46,27 @@ from standard_quant_tools.error import ValidationError
 from standard_quant_tools.portfolio import construction as lib
 
 from .inline_inputs import (
+    COVARIANCE_REF_DESCRIPTION,
     NamedCovariance,
     NamedCovarianceInput,
     ReturnsAlignment,
     ReturnSeries,
+    SeriesAlignment,
     aligned_returns,
+    resolved_covariance,
 )
 
 #: The covariance argument's description, shared by the four tools that
-#: take one, so the two accepted forms are stated once.
+#: take one, so the accepted forms are stated once.
 _COVARIANCE_FORMS = (
     "Square covariance matrix: rows parallel to `assets`, or the map of "
     "asset -> {asset: covariance} that estimate_covariance returns as "
     "`matrix`, read by name and refused unless its names are exactly "
     "`assets`."
 )
+
+#: `assets`' description where a covariance_ref can name the assets.
+_ASSETS_WITH_REF = "An inline covariance's row names; optional with covariance_ref."
 
 logger = logging.getLogger(__name__)
 Stat = Annotated[Optional[float], BeforeValidator(_finite_or_none)]
@@ -110,6 +124,16 @@ def _finite_map(values: Dict[str, float], field: str) -> Dict[str, float]:
     return values
 
 
+def _covariance(input_data: NamedCovarianceInput, who: str) -> pd.DataFrame:
+    """The named covariance frame from whichever form the input took."""
+    ref = getattr(input_data, "covariance_ref", None)
+    if ref is not None:
+        return resolved_covariance(ref, getattr(input_data, "assets", None), who)
+    return _square_frame(
+        getattr(input_data, "covariance"), getattr(input_data, "assets"), who
+    )
+
+
 def _distinct_assets(values: Optional[List[str]]) -> Optional[List[str]]:
     """The names of a covariance matrix's rows, each once. The results are
     keyed by name, so a repeat collapsed two rows into one key while both
@@ -123,24 +147,28 @@ def _distinct_assets(values: Optional[List[str]]) -> Optional[List[str]]:
 class RiskParityInput(NamedCovarianceInput):
     model_config = ConfigDict(extra="forbid")
 
-    assets: List[str] = Field(..., min_length=2, description="Asset names.")
-    covariance: NamedCovariance = Field(
-        ...,
+    assets: Optional[List[str]] = Field(
+        None, min_length=2, description=_ASSETS_WITH_REF
+    )
+    covariance: Optional[NamedCovariance] = Field(
+        None,
         description=f"{_COVARIANCE_FORMS} "
         "Annualized or not -- the weights are scale-invariant either way.",
     )
+    covariance_ref: Optional[str] = Field(None, description=COVARIANCE_REF_DESCRIPTION)
     budget: Optional[List[float]] = Field(
         None,
         description="RISK budget per asset, e.g. [0.5, 0.3, 0.2]: finite and "
-        "positive. Normalized internally. Omit for equal contribution. Most "
-        "real mandates are stated this way rather than as equal risk.",
+        "positive, in asset order. Normalized internally. Omit for equal "
+        "contribution. Most real mandates are stated this way rather than as "
+        "equal risk.",
     )
     max_iterations: int = Field(5000, ge=1, le=100000)
     tolerance: float = Field(1e-10, gt=0)
 
     @field_validator("assets")
     @classmethod
-    def _assets_once(cls, v: List[str]) -> List[str]:
+    def _assets_once(cls, v: Optional[List[str]]) -> Optional[List[str]]:
         return _distinct_assets(v)
 
     @field_validator("budget")
@@ -175,8 +203,8 @@ class RiskParityInput(NamedCovarianceInput):
 class HRPInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    returns: Dict[str, ReturnSeries] = Field(
-        ...,
+    returns: Optional[Dict[str, ReturnSeries]] = Field(
+        None,
         description="Asset name -> return series, DATED as {ISO date: "
         "return} or an undated list. Dated series have their dates checked "
         "(see `alignment`); undated lists must all be the same length and "
@@ -186,6 +214,11 @@ class HRPInput(BaseModel):
         "correlation structure to build its tree. A series with no variance "
         "(a cash sleeve, a halted name) is refused by name: HRP splits "
         "capital by inverse variance, so its weight is undefined.",
+    )
+    returns_ref: Optional[str] = Field(
+        None,
+        description="A `returns_panel` reference in place of `returns`: "
+        "its columns are the assets, dated.",
     )
     alignment: Literal["exact", "intersect"] = Field(
         "exact",
@@ -206,6 +239,21 @@ class HRPInput(BaseModel):
         "overstated by sqrt(252/12) = 4.6x. Echoed back on the result. The "
         "WEIGHTS do not depend on it -- only the risk numbers do.",
     )
+
+    @model_validator(mode="after")
+    def _one_source_of_returns(self) -> "HRPInput":
+        given = [
+            name
+            for name in ("returns", "returns_ref")
+            if getattr(self, name) is not None
+        ]
+        if len(given) != 1:
+            raise ValueError(
+                "HRP needs exactly one of returns / returns_ref; got "
+                f"{given or 'neither'}. `returns` is the series inline, "
+                "returns_ref a published returns_panel."
+            )
+        return self
 
 
 class FactorExposureInput(BaseModel):
@@ -556,9 +604,7 @@ class LiquidityVarResult(_Result):
 def optimize_risk_parity(input_data: RiskParityInput) -> RiskParityResult:
     return RiskParityResult(
         **lib.risk_parity(
-            _square_frame(
-                input_data.covariance, input_data.assets, "optimize_risk_parity"
-            ),
+            _covariance(input_data, "optimize_risk_parity"),
             max_iterations=input_data.max_iterations,
             tolerance=input_data.tolerance,
             budget=input_data.budget,
@@ -566,10 +612,82 @@ def optimize_risk_parity(input_data: RiskParityInput) -> RiskParityResult:
     )
 
 
-def optimize_hierarchical_risk_parity(input_data: HRPInput) -> HRPResult:
-    frame, alignment, notes = aligned_returns(
-        input_data.returns, input_data.alignment, "optimize_hierarchical_risk_parity"
+def _aligned_returns_ref(
+    ref: str, alignment: str, who: str
+) -> "tuple[pd.DataFrame, ReturnsAlignment, List[str]]":
+    """
+    A returns_panel reference as HRP's frame, under HRP's own `alignment`
+    rule: 'exact' refuses a panel whose columns do not carry the same dates
+    (a blank cell is a date that column lacks), 'intersect' keeps the dates
+    every column has. Either way the columns are checked as return streams
+    -- dated, finite, returns rather than levels -- and the report is the
+    one dated series get.
+    """
+    from standard_quant_tools.agent.runtimes.streams import returns_ref_streams
+    from standard_quant_tools.portfolio.streams import (
+        align_return_streams,
+        alignment_notes,
     )
+
+    streams = returns_ref_streams(ref, what=who)
+    frame, report = align_return_streams(
+        streams, min_overlap=max(2, len(streams)), what=who
+    )
+    lacking = {
+        name: row["n_supplied"] - row["n_kept"]
+        for name, row in report["by_stream"].items()
+        if row["n_supplied"] != row["n_kept"]
+    }
+    if alignment == "exact" and lacking:
+        union = None
+        for series in streams.values():
+            union = series.index if union is None else union.union(series.index)
+        short = [
+            f"{name!r} lacks {len(union) - len(series)}"
+            for name, series in streams.items()
+            if len(series) < len(union)
+        ]
+        raise ValidationError(
+            f"{who}: the columns of returns_ref do not carry the same dates: "
+            f"{len(union)} dates appear across them and {report['n_dates']} "
+            f"are in every one; {'; '.join(short[:5])}. A blank cell is a date "
+            "that column was not observed on. Pass alignment='intersect' to "
+            "use the dates every column shares (each column's losses are "
+            "reported), or publish an aligned panel."
+        )
+    by_series = {
+        name: SeriesAlignment(
+            n_given=row["n_supplied"],
+            n_used=row["n_kept"],
+            n_dropped=row["n_supplied"] - row["n_kept"],
+            first_date=row["first_date"],
+            last_date=row["last_date"],
+        )
+        for name, row in report["by_stream"].items()
+    }
+    return (
+        frame,
+        ReturnsAlignment(
+            alignment=alignment,  # type: ignore[arg-type]
+            n_dates=report["n_dates"],
+            first_date=report["first_date"],
+            last_date=report["last_date"],
+            by_series=by_series,
+        ),
+        alignment_notes(report, who),
+    )
+
+
+def optimize_hierarchical_risk_parity(input_data: HRPInput) -> HRPResult:
+    who = "optimize_hierarchical_risk_parity"
+    if input_data.returns_ref is not None:
+        frame, alignment, notes = _aligned_returns_ref(
+            input_data.returns_ref, input_data.alignment, who
+        )
+    else:
+        frame, alignment, notes = aligned_returns(
+            input_data.returns, input_data.alignment, who
+        )
     result = lib.hierarchical_risk_parity(
         frame, periods_per_year=input_data.periods_per_year
     )
@@ -747,12 +865,15 @@ CONSTRUCTION_TOOL_DISPATCH = {
 class MaxDiversificationInput(NamedCovarianceInput):
     model_config = ConfigDict(extra="forbid")
 
-    assets: List[str] = Field(..., min_length=2)
-    covariance: NamedCovariance = Field(..., description=_COVARIANCE_FORMS)
+    assets: Optional[List[str]] = Field(
+        None, min_length=2, description=_ASSETS_WITH_REF
+    )
+    covariance: Optional[NamedCovariance] = Field(None, description=_COVARIANCE_FORMS)
+    covariance_ref: Optional[str] = Field(None, description=COVARIANCE_REF_DESCRIPTION)
 
     @field_validator("assets")
     @classmethod
-    def _assets_once(cls, v: List[str]) -> List[str]:
+    def _assets_once(cls, v: Optional[List[str]]) -> Optional[List[str]]:
         return _distinct_assets(v)
 
 
@@ -764,12 +885,15 @@ class MarginalRiskInput(NamedCovarianceInput):
         description="The portfolio you ALREADY hold. Every asset in the "
         "covariance matrix needs one.",
     )
-    assets: List[str] = Field(..., min_length=2)
-    covariance: NamedCovariance = Field(..., description=_COVARIANCE_FORMS)
+    assets: Optional[List[str]] = Field(
+        None, min_length=2, description=_ASSETS_WITH_REF
+    )
+    covariance: Optional[NamedCovariance] = Field(None, description=_COVARIANCE_FORMS)
+    covariance_ref: Optional[str] = Field(None, description=COVARIANCE_REF_DESCRIPTION)
 
     @field_validator("assets")
     @classmethod
-    def _assets_once(cls, v: List[str]) -> List[str]:
+    def _assets_once(cls, v: Optional[List[str]]) -> Optional[List[str]]:
         return _distinct_assets(v)
 
     @field_validator("weights")
@@ -783,6 +907,9 @@ class MarginalRiskInput(NamedCovarianceInput):
 
 class PortfolioScenariosInput(NamedCovarianceInput):
     model_config = ConfigDict(extra="forbid")
+
+    #: The covariance only states each scenario in portfolio sigmas.
+    _covariance_required: ClassVar[bool] = False
 
     weights: Dict[str, float] = Field(...)
     scenarios: Dict[str, Dict[str, float]] = Field(
@@ -798,6 +925,7 @@ class PortfolioScenariosInput(NamedCovarianceInput):
         description="Optional, to express each scenario in portfolio sigmas. "
         f"{_COVARIANCE_FORMS}",
     )
+    covariance_ref: Optional[str] = Field(None, description=COVARIANCE_REF_DESCRIPTION)
 
     @field_validator("assets")
     @classmethod
@@ -910,11 +1038,7 @@ def optimize_max_diversification(
 ) -> MaxDiversificationResult:
     return MaxDiversificationResult(
         **lib.max_diversification(
-            _square_frame(
-                input_data.covariance,
-                input_data.assets,
-                "optimize_max_diversification",
-            )
+            _covariance(input_data, "optimize_max_diversification")
         )
     )
 
@@ -925,11 +1049,7 @@ def get_marginal_risk_contribution(
     return MarginalRiskResult(
         **lib.marginal_risk_contribution(
             input_data.weights,
-            _square_frame(
-                input_data.covariance,
-                input_data.assets,
-                "get_marginal_risk_contribution",
-            ),
+            _covariance(input_data, "get_marginal_risk_contribution"),
         )
     )
 
@@ -938,7 +1058,11 @@ def run_portfolio_scenarios(
     input_data: PortfolioScenariosInput,
 ) -> PortfolioScenariosResult:
     covariance = None
-    if input_data.covariance is not None:
+    if input_data.covariance_ref is not None:
+        covariance = resolved_covariance(
+            input_data.covariance_ref, input_data.assets, "run_portfolio_scenarios"
+        )
+    elif input_data.covariance is not None:
         if not input_data.assets:
             raise ValidationError(
                 "run_portfolio_scenarios: a covariance matrix needs `assets` "

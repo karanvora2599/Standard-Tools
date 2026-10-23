@@ -6,9 +6,12 @@ reports what a strategy did on a sample. It cannot report how many other
 strategies you tried before keeping this one, and that number changes what
 the result means more than almost anything inside the backtest does.
 
-INPUTS ARE INLINE. Returns come in as a list of numbers, a trial grid as a
-map of configuration name to its return series. Nothing here re-runs a
-backtest -- these consume results the caller already has, from this
+INPUTS ARE INLINE OR A PUBLISHED PANEL. Returns come in as a list of
+numbers, a trial grid as a map of configuration name to its return series
+-- or, for the deflated Sharpe, PBO and the reality check, as `returns_ref`,
+a `returns_panel` whose columns are the series, put on the dates they all
+share with each column's losses reported in `streams`. Nothing here re-runs
+a backtest -- these consume results the caller already has, from this
 library's backtest tools or from anywhere else. That is deliberate: the
 trials you need to declare include the ones you ran last week and the ones
 you ran in a notebook, and no tool can enumerate those for you.
@@ -31,6 +34,10 @@ from standard_quant_tools.agent.models import Seed
 from standard_quant_tools.agent.runtimes._json_safe import (
     finite_or_none as _finite_or_none,
 )
+from standard_quant_tools.agent.runtimes.streams import (
+    StreamAlignment,
+    returns_ref_streams,
+)
 from standard_quant_tools.backtesting import overfitting as lib
 from standard_quant_tools.error import ValidationError
 
@@ -47,14 +54,47 @@ class _Result(BaseModel):
     )
 
 
+#: `streams` on the three results that take a returns_ref.
+_STREAMS_DESCRIPTION = (
+    "returns_ref only: the dates the panel's columns share -- the rows "
+    "used -- and what each column lost to them. Null for inline returns."
+)
+
+#: `returns_ref`'s description, up to what its columns are.
+_RETURNS_REF = "An `sqt://returns_panel/...` reference in place of "
+
+
+def _exactly_one(model: Any, inline: List[str], who: str) -> None:
+    """Refuse both an inline form and returns_ref, or neither, by name."""
+    given = [name for name in inline if getattr(model, name) is not None]
+    if given and model.returns_ref is not None:
+        raise ValueError(
+            f"{who}: {' and '.join(given)} and returns_ref were both given. "
+            "The returns are read from one of them; drop the other."
+        )
+    if not given and model.returns_ref is None:
+        raise ValueError(
+            f"{who} needs {' or '.join(inline)} inline, or returns_ref, a "
+            "published returns_panel."
+        )
+
+
 # ── inputs ──────────────────────────────────────────────────────────────
 
 
 class DeflatedSharpeInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    returns: List[float] = Field(
-        ..., min_length=20, description="Periodic returns as decimals."
+    returns: Optional[List[float]] = Field(
+        None, min_length=20, description="Periodic returns as decimals."
+    )
+    returns_ref: Optional[str] = Field(
+        None,
+        description=f"{_RETURNS_REF}`returns`, read as one dated series; "
+        "returns_column names it when the panel has several columns.",
+    )
+    returns_column: Optional[str] = Field(
+        None, description="With returns_ref: the column that is the strategy."
     )
     n_trials: int = Field(
         ...,
@@ -78,14 +118,28 @@ class DeflatedSharpeInput(BaseModel):
         252, ge=1, description="252 for daily, 52 weekly, 12 monthly."
     )
 
+    @model_validator(mode="after")
+    def _one_series(self) -> "DeflatedSharpeInput":
+        _exactly_one(self, ["returns"], "get_deflated_sharpe_ratio")
+        if self.returns_column is not None and self.returns_ref is None:
+            raise ValueError(
+                "returns_column names a column of returns_ref and was given "
+                "without it. Drop returns_column, or pass returns_ref."
+            )
+        return self
+
 
 class PBOInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    trial_returns: Dict[str, List[float]] = Field(
-        ...,
+    trial_returns: Optional[Dict[str, List[float]]] = Field(
+        None,
         description="Configuration name -> its return series. Every series "
         "must be the same length and aligned in time.",
+    )
+    returns_ref: Optional[str] = Field(
+        None,
+        description=f"{_RETURNS_REF}trial_returns: each column is a " "configuration.",
     )
     n_splits: int = Field(
         8,
@@ -95,6 +149,11 @@ class PBOInput(BaseModel):
         "method forms every equal split of the chunks into two halves, so "
         "the count grows as C(n, n/2) and 16 is already 12,870 splits.",
     )
+
+    @model_validator(mode="after")
+    def _one_grid(self) -> "PBOInput":
+        _exactly_one(self, ["trial_returns"], "estimate_backtest_overfitting")
+        return self
 
 
 #: The longest series one call splits: a year of one-minute bars. The
@@ -217,6 +276,23 @@ class RealityCheckInput(BaseModel):
         "the largest pairwise one: beating every alternative means beating "
         "the hardest.",
     )
+    returns_ref: Optional[str] = Field(
+        None,
+        description=f"{_RETURNS_REF}the inline series. Under "
+        "best_candidate_vs_benchmark every column but benchmark_column is a "
+        "candidate; under beats_every_alternative every column but "
+        "strategy_column is an alternative.",
+    )
+    benchmark_column: Optional[str] = Field(
+        None,
+        description="best_candidate_vs_benchmark with returns_ref: the "
+        "benchmark's column. Omitted, the benchmark is zero.",
+    )
+    strategy_column: Optional[str] = Field(
+        None,
+        description="beats_every_alternative with returns_ref: the "
+        "strategy's column (required).",
+    )
     method: Literal["white", "hansen_spa"] = Field(
         "white",
         description="best_candidate_vs_benchmark only. 'hansen_spa' divides "
@@ -257,6 +333,18 @@ class RealityCheckInput(BaseModel):
 
     @model_validator(mode="after")
     def _inputs_of_the_question(self) -> "RealityCheckInput":
+        if self.returns_ref is not None:
+            return self._columns_of_the_question()
+        stray = [
+            name
+            for name in ("benchmark_column", "strategy_column")
+            if getattr(self, name) is not None
+        ]
+        if stray:
+            raise ValueError(
+                f"{', '.join(stray)} names a column of returns_ref and was "
+                "given without it. Pass returns_ref, or the series inline."
+            )
         if self.question == "best_candidate_vs_benchmark":
             needed, unread = ["candidate_returns"], [
                 "strategy_returns",
@@ -289,6 +377,55 @@ class RealityCheckInput(BaseModel):
             )
         return self
 
+    def _columns_of_the_question(self) -> "RealityCheckInput":
+        """The roles of returns_ref's columns under the question asked."""
+        inline = [
+            name
+            for name in (
+                "candidate_returns",
+                "benchmark_returns",
+                "strategy_returns",
+                "alternative_returns",
+            )
+            if getattr(self, name) is not None
+        ]
+        if inline:
+            raise ValueError(
+                f"{' and '.join(inline)} and returns_ref were both given. The "
+                "series are read from one of them: with returns_ref, name the "
+                "benchmark_column or strategy_column and every other column "
+                "takes the question's other role."
+            )
+        if self.question == "best_candidate_vs_benchmark":
+            if self.strategy_column is not None:
+                raise ValueError(
+                    "strategy_column is read under question="
+                    "'beats_every_alternative'. Under best_candidate_vs_benchmark "
+                    "every column of returns_ref but benchmark_column is a "
+                    "candidate; drop strategy_column or change the question."
+                )
+        else:
+            if self.benchmark_column is not None:
+                raise ValueError(
+                    "benchmark_column is read under question="
+                    "'best_candidate_vs_benchmark'. Under beats_every_alternative "
+                    "name the strategy in strategy_column; every other column "
+                    "is an alternative."
+                )
+            if self.strategy_column is None:
+                raise ValueError(
+                    "question='beats_every_alternative' with returns_ref needs "
+                    "strategy_column: which column is the strategy, every other "
+                    "column being an alternative it must beat."
+                )
+            if self.method != "white":
+                raise ValueError(
+                    f"method={self.method!r} applies to question="
+                    "'best_candidate_vs_benchmark'; under beats_every_alternative "
+                    "each pair is tested on its own. Leave method at 'white'."
+                )
+        return self
+
 
 class RegimeStratifiedInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -317,6 +454,7 @@ class ParameterDecayInput(BaseModel):
 
 
 class DeflatedSharpeResult(_Result):
+    streams: Optional[StreamAlignment] = Field(None, description=_STREAMS_DESCRIPTION)
     n_observations: int = 0
     observed_sharpe: Stat = None
     n_trials: int = 1
@@ -336,6 +474,7 @@ class DeflatedSharpeResult(_Result):
 
 
 class PBOResult(_Result):
+    streams: Optional[StreamAlignment] = Field(None, description=_STREAMS_DESCRIPTION)
     n_configurations: int = 0
     n_observations: int = 0
     n_splits: int = 0
@@ -386,6 +525,7 @@ class PurgedCVResult(_Result):
 
 
 class RealityCheckResult(_Result):
+    streams: Optional[StreamAlignment] = Field(None, description=_STREAMS_DESCRIPTION)
     question: str = Field(
         "", description="The hypothesis tested, as the input named it."
     )
@@ -527,27 +667,91 @@ def _aligned_frame(mapping: Dict[str, List[float]], who: str) -> pd.DataFrame:
     return pd.DataFrame(mapping)
 
 
+def _columns(
+    streams: Dict[str, Any], who: str, min_overlap: int
+) -> "tuple[Dict[str, List[float]], StreamAlignment, List[str]]":
+    """
+    A returns_panel's columns on the dates they all share, as the
+    name -> list the inline inputs are, so the library is called exactly as
+    it is for inline returns. The dates are honoured in the alignment and
+    the order; the computation, like the inline one, is positional.
+    """
+    from standard_quant_tools.portfolio.streams import (
+        align_return_streams,
+        alignment_notes,
+    )
+
+    frame, report = align_return_streams(streams, min_overlap=min_overlap, what=who)
+    return (
+        {str(c): frame[c].tolist() for c in frame.columns},
+        StreamAlignment(**report),
+        alignment_notes(report, who),
+    )
+
+
+def _the_column(
+    streams: Dict[str, Any], wanted: Optional[str], role: str, field: str, who: str
+) -> Optional[str]:
+    """`wanted` checked against the panel's columns, for a refusal by name."""
+    if wanted is not None and wanted not in streams:
+        raise ValidationError(
+            f"{who}: {field}={wanted!r} is not a column of returns_ref; its "
+            f"columns are {list(streams)[:12]}. Name the {role}'s column."
+        )
+    return wanted
+
+
 def get_deflated_sharpe_ratio(
     input_data: DeflatedSharpeInput,
 ) -> DeflatedSharpeResult:
-    return DeflatedSharpeResult(
-        **lib.deflated_sharpe_ratio(
-            pd.Series(input_data.returns),
-            n_trials=input_data.n_trials,
-            trial_sharpes=input_data.trial_sharpes,
-            benchmark_sharpe=input_data.benchmark_sharpe,
-            periods_per_year=input_data.periods_per_year,
+    who = "get_deflated_sharpe_ratio"
+    returns = input_data.returns
+    streams = None
+    notes: List[str] = []
+    if input_data.returns_ref is not None:
+        panel = returns_ref_streams(input_data.returns_ref, what=who)
+        column = _the_column(
+            panel, input_data.returns_column, "strategy", "returns_column", who
         )
+        if column is None and len(panel) != 1:
+            raise ValidationError(
+                f"{who}: returns_ref has {len(panel)} columns "
+                f"({list(panel)[:12]}) and the deflated Sharpe is of ONE "
+                "series. Name it in returns_column."
+            )
+        column = column or next(iter(panel))
+        columns, streams, notes = _columns({column: panel[column]}, who, 20)
+        (returns,) = columns.values()
+    result = lib.deflated_sharpe_ratio(
+        pd.Series(returns),
+        n_trials=input_data.n_trials,
+        trial_sharpes=input_data.trial_sharpes,
+        benchmark_sharpe=input_data.benchmark_sharpe,
+        periods_per_year=input_data.periods_per_year,
     )
+    result["warnings"] = notes + list(result.get("warnings", []))
+    return DeflatedSharpeResult(**result, streams=streams)
 
 
 def estimate_backtest_overfitting(input_data: PBOInput) -> PBOResult:
-    return PBOResult(
-        **lib.probability_of_backtest_overfitting(
-            _aligned_frame(input_data.trial_returns, "estimate_backtest_overfitting"),
-            n_splits=input_data.n_splits,
+    who = "estimate_backtest_overfitting"
+    trials = input_data.trial_returns
+    streams = None
+    notes: List[str] = []
+    if input_data.returns_ref is not None:
+        # The library needs five rows per chunk; asked here, a short overlap
+        # names the column that limits it.
+        trials, streams, notes = _columns(
+            returns_ref_streams(input_data.returns_ref, what=who),
+            who,
+            input_data.n_splits * 5,
         )
+    result = lib.probability_of_backtest_overfitting(
+        _aligned_frame(trials, who),
+        n_splits=input_data.n_splits,
     )
+    result["warnings"] = notes + list(result.get("warnings", []))
+    return PBOResult(**result, streams=streams)
 
 
 def _as_ranges(indices: List[int]) -> List[List[int]]:
@@ -596,21 +800,62 @@ def build_purged_cv_splits(input_data: PurgedCVInput) -> PurgedCVResult:
     return PurgedCVResult(**result)
 
 
+def _reality_check_columns(input_data: RealityCheckInput, who: str):
+    """
+    returns_ref's columns in the roles the question gives them: the inline
+    inputs they stand for, and the alignment report.
+    """
+    ref = input_data.returns_ref
+    assert ref is not None
+    panel = returns_ref_streams(ref, what=who)
+    if input_data.question == "best_candidate_vs_benchmark":
+        role = "candidate"
+        named = _the_column(
+            panel, input_data.benchmark_column, "benchmark", "benchmark_column", who
+        )
+    else:
+        role = "alternative"
+        named = _the_column(
+            panel, input_data.strategy_column, "strategy", "strategy_column", who
+        )
+    if not [name for name in panel if name != named]:
+        raise ValidationError(
+            f"{who}: returns_ref has no column besides {named!r}, so there is "
+            f"no {role} to test. Every other column is a {role}."
+        )
+    columns, streams, notes = _columns(panel, who, 30)
+    others = {name: values for name, values in columns.items() if name != named}
+    single = columns[named] if named is not None else None
+    return others, single, streams, notes
+
+
 def run_reality_check(input_data: RealityCheckInput) -> RealityCheckResult:
     who = "run_reality_check"
+    streams = None
+    notes: List[str] = []
+    candidate_returns = input_data.candidate_returns
+    benchmark_returns = input_data.benchmark_returns
+    strategy_returns = input_data.strategy_returns
+    alternative_returns = input_data.alternative_returns
+    if input_data.returns_ref is not None:
+        others, single, streams, notes = _reality_check_columns(input_data, who)
+        if input_data.question == "best_candidate_vs_benchmark":
+            candidate_returns, benchmark_returns = others, single
+        else:
+            alternative_returns, strategy_returns = others, single
     if input_data.question == "best_candidate_vs_benchmark":
-        assert input_data.candidate_returns is not None
-        candidates = _aligned_frame(input_data.candidate_returns, who)
+        assert candidate_returns is not None
+        candidates = _aligned_frame(candidate_returns, who)
         benchmark = None
-        if input_data.benchmark_returns is not None:
-            if len(input_data.benchmark_returns) != len(candidates):
+        if benchmark_returns is not None:
+            if len(benchmark_returns) != len(candidates):
                 raise ValidationError(
                     f"{who}: benchmark_returns has "
-                    f"{len(input_data.benchmark_returns)} values and each "
+                    f"{len(benchmark_returns)} values and each "
                     f"candidate {len(candidates)}. They must be aligned in "
                     "time, one value per period."
                 )
-            benchmark = pd.Series(input_data.benchmark_returns)
+            benchmark = pd.Series(benchmark_returns)
         result = lib.reality_check(
             question=input_data.question,
             candidate_returns=candidates,
@@ -621,24 +866,25 @@ def run_reality_check(input_data: RealityCheckInput) -> RealityCheckResult:
             seed=input_data.seed,
         )
     else:
-        assert input_data.strategy_returns is not None
-        assert input_data.alternative_returns is not None
-        alternatives = _aligned_frame(input_data.alternative_returns, who)
-        if len(input_data.strategy_returns) != len(alternatives):
+        assert strategy_returns is not None
+        assert alternative_returns is not None
+        alternatives = _aligned_frame(alternative_returns, who)
+        if len(strategy_returns) != len(alternatives):
             raise ValidationError(
-                f"{who}: strategy_returns has {len(input_data.strategy_returns)} "
+                f"{who}: strategy_returns has {len(strategy_returns)} "
                 f"values and each alternative {len(alternatives)}. They must "
                 "be aligned in time, one value per period."
             )
         result = lib.reality_check(
             question=input_data.question,
-            strategy_returns=pd.Series(input_data.strategy_returns),
+            strategy_returns=pd.Series(strategy_returns),
             alternative_returns=alternatives,
             n_bootstrap=input_data.n_bootstrap,
             block_size=input_data.block_size,
             seed=input_data.seed,
         )
-    return RealityCheckResult(**result)
+    result["warnings"] = notes + list(result.get("warnings", []))
+    return RealityCheckResult(**result, streams=streams)
 
 
 def get_regime_stratified_performance(

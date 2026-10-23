@@ -14,10 +14,11 @@ WHY PUBLISHED FIXTURES. A synthesized input names no reference, dataset,
 model or request id that exists, so about two tools in five refused at the
 baseline and every mutation of them re-tested the argument lookup and
 nothing else. `publish_fixtures` builds each once per session -- price,
-returns, score, signal and weight panels, an equity curve and a trade log, a
-tick tape, quotes, registered order-book and order-event files, an indicator
-panel, a data bundle, a dataset, two ridge models and their predictions with
-outcomes -- and `published_baseline` substitutes them into a tool's
+returns, score, signal and weight panels, a covariance, an equity curve and a
+trade log, a tick tape, quotes, registered order-book and order-event files,
+an indicator panel, a data bundle, a dataset, two ridge models and their
+predictions with outcomes -- and `published_baseline` substitutes them into a
+tool's
 synthesized input by field name, with a short table for the inputs whose
 shape the schema cannot describe.
 """
@@ -286,6 +287,21 @@ def publish_fixtures(directory: str) -> Dict[str, Any]:
         )
         if out:
             refs[kind] = out["ref"]
+
+    # A covariance, published by the tool that estimates one, from the
+    # returns panel above -- so the allocators' covariance_ref baselines read
+    # what estimate_covariance actually writes.
+    if refs.get("returns_panel"):
+        out = step(
+            "covariance",
+            lambda: _call(
+                "portfolio",
+                "estimate_covariance",
+                dict(returns_ref=refs["returns_panel"], run_id="fx"),
+            ),
+        )
+        if out:
+            refs["covariance"] = out["covariance_ref"]
 
     dates = pd.bdate_range(start, end)
     scores = pd.DataFrame(
@@ -608,6 +624,7 @@ _REF_BY_FIELD = {
     "predictions_ref_a": "predictions",
     "predictions_ref_b": "predictions",
     "equity_curve_ref": "equity_curve",
+    "covariance_ref": "covariance",
 }
 
 #: Tools whose one `ref` field wants a particular kind.
@@ -690,8 +707,30 @@ def _hand_written(
         "optimize_max_diversification",
         "get_marginal_risk_contribution",
     ):
+        # The published covariance stands in for the synthesized matrix, and
+        # names its own assets; the synthesized input keeps the inline form.
+        if refs.get("covariance"):
+            return {"covariance": _DELETE, "assets": _DELETE}
         names = base.get("asset_names") or base.get("tickers") or SYMBOLS
-        return {k: synth._covariance(len(names)) for k in base if "cov" in k}
+        return {"covariance": synth._covariance(len(names))}
+    # The returns panel's columns are the six symbols. Each tool given it in
+    # place of its inline returns reads them in its own roles: the assets,
+    # the strategy, the configurations, the candidates beside a benchmark.
+    if refs.get("returns_panel"):
+        if tool == "estimate_covariance":
+            return {"tickers": _DELETE, "start_date": _DELETE, "end_date": _DELETE}
+        if tool == "optimize_hierarchical_risk_parity":
+            return {"returns": _DELETE}
+        if tool == "get_deflated_sharpe_ratio":
+            return {"returns": _DELETE, "returns_column": SYMBOLS[0]}
+        if tool == "estimate_backtest_overfitting":
+            return {"trial_returns": _DELETE}
+        if tool == "run_reality_check":
+            return {
+                "candidate_returns": _DELETE,
+                "benchmark_returns": _DELETE,
+                "benchmark_column": SYMBOLS[0],
+            }
     if tool == "build_continuous_futures_series":
         near = pd.bdate_range("2020-01-02", "2020-03-20")
         far = pd.bdate_range("2020-01-02", "2020-06-19")

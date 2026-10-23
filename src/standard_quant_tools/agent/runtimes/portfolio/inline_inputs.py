@@ -15,6 +15,12 @@ is refused when its names are not exactly `assets` or a row lacks a column.
 Symmetry and finiteness are then the numeric contract's to check, for both
 forms alike, in the library function the tool calls.
 
+A third form travels without being transcribed: `covariance_ref`, the
+`covariance` reference estimate_covariance publishes given a run_id. It
+names its own assets, so `assets` is optional beside it; given, it must
+name exactly the reference's assets and fixes their order. Exactly one of
+the inline matrix and the reference is taken.
+
 THE RETURNS. HRP took `Dict[str, List[float]]`: series with no dates, so
 two equal-length series from different calendars -- one a fortnight later,
 one with another market's holidays -- were accepted as aligned and
@@ -24,12 +30,23 @@ carry the same dates, and `alignment="intersect"` keeps the dates all of
 them share and reports, per series, what that dropped. The undated form
 still works, and the result says its alignment could not be checked.
 
-See the CHANGELOG entry of 2026-10-22.
+See the CHANGELOG entries of 2026-10-22.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Literal, Mapping, Optional, Sequence, Tuple, Union
+from typing import (
+    Any,
+    ClassVar,
+    Dict,
+    List,
+    Literal,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+)
 
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -38,6 +55,7 @@ from standard_quant_tools.agent.runtimes._shared import parse_date_keys
 from standard_quant_tools.error import ValidationError
 
 __all__ = [
+    "COVARIANCE_REF_DESCRIPTION",
     "NamedCovariance",
     "NamedCovarianceInput",
     "ReturnSeries",
@@ -45,6 +63,7 @@ __all__ = [
     "SeriesAlignment",
     "aligned_returns",
     "covariance_rows",
+    "resolved_covariance",
 ]
 
 #: A covariance matrix as rows parallel to `assets`, or as the map of asset
@@ -115,22 +134,98 @@ def covariance_rows(
 
 class NamedCovarianceInput(BaseModel):
     """
-    The base of an input taking `assets` and a `covariance` in either form.
+    The base of an input taking `assets` and a covariance in one of three
+    forms: rows, the name-keyed map, or `covariance_ref`.
 
     A map is turned into rows once the fields are validated, so the tool
     behind the input always reads `covariance` as rows parallel to `assets`
-    -- the form it has always read. When `assets` is absent (it is optional
-    where the covariance is), the map is left for the tool's own refusal,
-    which names the missing `assets`.
+    -- the form it has always read. Exactly one of `covariance` and
+    `covariance_ref` is taken; an inline one needs `assets` to name its
+    rows, while a reference names its own and `assets`, if given, only
+    fixes their order. Where the covariance itself is optional (the
+    scenarios) neither is required, and a map without `assets` is left for
+    the tool's own refusal, which names the missing `assets`.
     """
+
+    #: Whether the tool needs a covariance at all.
+    _covariance_required: ClassVar[bool] = True
 
     @model_validator(mode="after")
     def _covariance_by_name(self) -> "NamedCovarianceInput":
         covariance = getattr(self, "covariance", None)
+        ref = getattr(self, "covariance_ref", None)
         assets = getattr(self, "assets", None)
+        if covariance is not None and ref is not None:
+            raise ValueError(
+                "covariance and covariance_ref were both given. Exactly one "
+                "form of the matrix is read -- rows, the map, or the "
+                "reference -- and a second would make the precedence rule "
+                "part of the contract. Drop one."
+            )
+        if self._covariance_required:
+            if covariance is None and ref is None:
+                raise ValueError(
+                    "a covariance is required: `covariance` as rows parallel "
+                    "to `assets` or as the map estimate_covariance returns as "
+                    "`matrix`, or `covariance_ref`, the reference "
+                    "estimate_covariance publishes when given a run_id."
+                )
+            if covariance is not None and not assets:
+                raise ValueError(
+                    "an inline covariance needs `assets` to name its rows. "
+                    "Pass the `assets` estimate_covariance returned beside its "
+                    "`matrix`, or pass covariance_ref, which names its own."
+                )
         if isinstance(covariance, dict) and assets:
             self.covariance = covariance_rows(covariance, assets)
         return self
+
+
+#: `covariance_ref`'s description, shared by the four tools that take one.
+COVARIANCE_REF_DESCRIPTION = (
+    "An `sqt://covariance/...` reference (estimate_covariance with a run_id) "
+    "in place of `covariance`; `assets`, if given, must name exactly its "
+    "assets."
+)
+
+
+def resolved_covariance(
+    ref: str, assets: Optional[Sequence[str]], who: str
+) -> pd.DataFrame:
+    """
+    A `covariance` reference as the named frame an inline matrix becomes:
+    in `assets` order when given -- which must be exactly the reference's
+    names -- and in the reference's own order otherwise. Another kind of
+    reference is refused naming both kinds.
+    """
+    from standard_quant_tools.agent.runtimes import handoff
+
+    try:
+        stored = handoff.resolve(ref, expect="covariance")
+    except Exception as exc:  # noqa: BLE001 -- one refusal, not a traceback
+        raise ValidationError(
+            f"{who}: covariance_ref {ref!r} could not be resolved -- {exc} "
+            "estimate_covariance publishes a covariance when given a run_id."
+        ) from exc
+    names = [str(c) for c in stored.columns]
+    order = names if assets is None else [str(a) for a in assets]
+    if assets is not None and set(order) != set(names):
+        missing = [a for a in names if a not in set(order)]
+        extra = [a for a in order if a not in set(names)]
+        raise ValidationError(
+            f"{who}: `assets` must name exactly the covariance_ref's assets; "
+            + (f"it omits {_listed(missing)}" if missing else "")
+            + ("; " if missing and extra else "")
+            + (f"{_listed(extra)} are not in the reference" if extra else "")
+            + f". The reference holds {_listed(names)}. Drop `assets` to use "
+            "the reference's own order."
+        )
+    if len(order) < 2:
+        raise ValidationError(
+            f"{who}: covariance_ref {ref!r} holds {len(order)} asset; an "
+            "allocation needs at least two."
+        )
+    return pd.DataFrame(stored.loc[order, order].to_numpy(), index=order, columns=order)
 
 
 class SeriesAlignment(BaseModel):

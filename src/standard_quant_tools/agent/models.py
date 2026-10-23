@@ -17,6 +17,7 @@ from standard_quant_tools.agent.runtimes._json_safe import (
 from standard_quant_tools.agent.runtimes._json_safe import (
     finite_or_none as _finite_or_none,
 )
+from standard_quant_tools.agent.runtimes.streams import StreamAlignment
 from standard_quant_tools.data.factory import ProviderName
 
 #: A float that may legitimately be undefined. Non-finite in, null out --
@@ -8348,9 +8349,19 @@ class PlanRebalanceResult(ExplainsNulls):
 class EstimateCovarianceInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    tickers: List[str] = Field(..., min_length=2, max_length=200)
-    start_date: str = Field(..., description="Start date YYYY-MM-DD.")
-    end_date: str = Field(..., description="End date YYYY-MM-DD.")
+    tickers: Optional[List[str]] = Field(
+        None,
+        min_length=2,
+        max_length=200,
+        description="Fetched over start_date..end_date; or pass returns_ref.",
+    )
+    start_date: Optional[str] = Field(None, description="Start date YYYY-MM-DD.")
+    end_date: Optional[str] = Field(None, description="End date YYYY-MM-DD.")
+    returns_ref: Optional[str] = Field(
+        None,
+        description="A `returns_panel` reference in place of tickers: its "
+        "columns are the assets, on the dates they all share.",
+    )
     method: str = Field(
         "ledoit_wolf",
         description=(
@@ -8375,6 +8386,40 @@ class EstimateCovarianceInput(BaseModel):
     periods_per_year: int = Field(
         252, ge=1, description="Used to annualize the matrix."
     )
+    run_id: Optional[str] = Field(
+        None,
+        description="Publish the matrix as a `covariance` reference, "
+        "returned as covariance_ref. A used run_id is refused.",
+    )
+
+    @model_validator(mode="after")
+    def _one_source_of_returns(self) -> "EstimateCovarianceInput":
+        if (self.tickers is None) == (self.returns_ref is None):
+            raise ValueError(
+                "estimate_covariance needs exactly one of tickers / "
+                f"returns_ref; got {'both' if self.tickers else 'neither'}. "
+                "tickers fetches returns over start_date..end_date; "
+                "returns_ref reads a published returns_panel."
+            )
+        window = [
+            name
+            for name in ("start_date", "end_date")
+            if getattr(self, name) is not None
+        ]
+        if self.returns_ref is not None and window:
+            raise ValueError(
+                f"{' and '.join(window)} only apply to tickers: a returns_ref "
+                "panel already fixes its own dates. Drop them."
+            )
+        missing = [
+            name for name in ("start_date", "end_date") if getattr(self, name) is None
+        ]
+        if self.tickers is not None and missing:
+            raise ValueError(
+                f"tickers needs {' and '.join(missing)}: the window the "
+                "returns are fetched over, e.g. start_date='2024-01-02'."
+            )
+        return self
 
 
 class EstimateCovarianceResult(BaseModel):
@@ -8410,6 +8455,19 @@ class EstimateCovarianceResult(BaseModel):
         "panel and moved risk-parity weights by 12.4% of NAV.",
     )
     matrix: Dict[str, Dict[str, float]]
+    covariance_ref: Optional[str] = Field(
+        None,
+        description="The matrix published as an `sqt://covariance/...` "
+        "reference, with its annualization, method and observations; what "
+        "optimize_risk_parity, optimize_max_diversification, "
+        "get_marginal_risk_contribution and run_portfolio_scenarios take as "
+        "covariance_ref. Null without a run_id.",
+    )
+    streams: Optional[StreamAlignment] = Field(
+        None,
+        description="returns_ref only: the dates the panel's columns share "
+        "and what each column lost to them. Null for tickers.",
+    )
     warnings: List[str] = Field(default_factory=list)
 
 

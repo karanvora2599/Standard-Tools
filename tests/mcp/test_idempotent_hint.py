@@ -27,8 +27,8 @@ from standard_quant_tools.mcp.server import build_server
 from standard_quant_tools.modeling.agent import MODELING_TOOL_DISPATCH
 from standard_quant_tools.modeling.agent.feature_tools import FEATURE_TOOL_DISPATCH
 
-#: The tools whose hint changed from true to false: each takes a `run_id`
-#: and answers with the reference it published there.
+#: The tools whose hint is false because each takes a `run_id` and answers
+#: with the reference it published there.
 PUBLISH_AT_RUN_ID = frozenset(
     {
         "analyze_basis_history",
@@ -43,6 +43,7 @@ PUBLISH_AT_RUN_ID = frozenset(
         "construct_weights_from_scores",
         "convert_reference",
         "detect_regimes",
+        "estimate_covariance",
         "fetch_ohlcv",
         "fetch_ohlcv_panel",
         "fetch_order_book",
@@ -86,9 +87,11 @@ def _dispatch_tables():
 
 
 class TestTheHintFollowsWhatACallWrites:
-    def test_the_32_publishers_are_no_longer_advertised_idempotent(self, catalog):
-        """The pinned list: every one of them was `true` before."""
-        assert len(PUBLISH_AT_RUN_ID) == 32
+    def test_the_33_publishers_are_no_longer_advertised_idempotent(self, catalog):
+        """The pinned list: every one of them was `true` before, but for
+        estimate_covariance, which took no run_id until it learned to publish
+        its matrix as a `covariance` reference."""
+        assert len(PUBLISH_AT_RUN_ID) == 33
         wrong = sorted(n for n in PUBLISH_AT_RUN_ID if catalog[n].idempotent)
         assert not wrong, f"advertised idempotent but refuse a repeat: {wrong}"
 

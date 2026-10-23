@@ -1879,23 +1879,65 @@ def estimate_covariance(
     effective sample size), and shrunk EWMA 35.
 
     The matrix comes back ANNUALIZED, matching every other risk number here.
+
+    The returns are fetched for `tickers`, or read from a `returns_ref`
+    panel, whose columns are aligned as return streams first: on the dates
+    they all share, each column's losses reported in `streams`. Given a
+    `run_id`, the matrix is published as a `covariance` reference the
+    allocators take; without one nothing is published and the result is
+    what it always was.
     """
     from standard_quant_tools.portfolio.covariance import (
         estimate_covariance as _estimate,
     )
 
-    logger.debug(
-        "[estimate_covariance] %d tickers method=%s",
-        len(input_data.tickers),
-        input_data.method,
-    )
-    returns = fetch_returns_sync(
-        input_data.tickers, input_data.start_date, input_data.end_date
-    )
+    who = "estimate_covariance"
+    streams = None
+    notes: List[str] = []
+    if input_data.returns_ref is not None:
+        from standard_quant_tools.agent.runtimes.streams import aligned_returns_ref
+
+        returns, streams, notes = aligned_returns_ref(
+            input_data.returns_ref, what=who, min_overlap=2
+        )
+    else:
+        logger.debug(
+            "[estimate_covariance] %d tickers method=%s",
+            len(input_data.tickers),
+            input_data.method,
+        )
+        returns = fetch_returns_sync(
+            input_data.tickers, input_data.start_date, input_data.end_date
+        )
     result = _estimate(
         returns,
         method=input_data.method,
         halflife=input_data.halflife,
         periods_per_year=input_data.periods_per_year,
     )
-    return EstimateCovarianceResult(**result)
+    if streams is not None:
+        # The panel's dates that some column lacked, as the tickers path
+        # counts the rows its frame dropped.
+        result["n_rows_dropped"] = int(streams.n_dates_any - streams.n_dates)
+        result["warnings"] = notes + list(result.get("warnings", []))
+    covariance_ref = None
+    if input_data.run_id is not None:
+        from standard_quant_tools.agent.runtimes import handoff
+
+        covariance_ref = handoff.publish(
+            {
+                "assets": list(result["assets"]),
+                "matrix": result["matrix"],
+                "annualized": bool(result["annualized"]),
+                "periods_per_year": int(input_data.periods_per_year),
+                "method": str(result["method"]),
+                "n_observations": int(result["n_observations"]),
+            },
+            kind="covariance",
+            run_id=input_data.run_id,
+            name="covariance",
+            producer=who,
+        )
+    return EstimateCovarianceResult(
+        **result, covariance_ref=covariance_ref, streams=streams
+    )

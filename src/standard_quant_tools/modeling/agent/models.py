@@ -1474,13 +1474,14 @@ class EvaluateModelPortfolioResult(ExplainsNulls):
     equity_curve_ref: str = Field(
         ...,
         description="The simulated equity curve as a handoff reference "
-        "(`sqt://equity_curve/...`): account value per bar, not returns. "
-        "convert_reference to `returns_panel` turns it into a returns "
-        "reference that calculate_series_metrics and "
-        "run_terminal_monte_carlo take as their series. "
-        "get_deflated_sharpe_ratio, estimate_backtest_overfitting and "
-        "run_reality_check do NOT take a reference: they read returns "
-        "inline, as a list of numbers.",
+        "(`sqt://equity_curve/...`): account value per bar, not returns, so "
+        "no returns tool takes it as it is. convert_reference to "
+        "`returns_panel` turns it into a returns reference that "
+        "calculate_series_metrics and run_terminal_monte_carlo take as "
+        "their series and get_deflated_sharpe_ratio as returns_ref. "
+        "estimate_backtest_overfitting and run_reality_check take a "
+        "returns_ref too: a panel whose columns are the configurations or "
+        "candidates.",
     )
     provenance: Dict[str, Any] = Field(
         ...,

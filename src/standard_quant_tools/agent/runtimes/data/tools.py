@@ -158,6 +158,8 @@ _BUNDLE_KINDS: Dict[str, tuple] = {
     "predictions": (),
     "analytic_series": (),
     "analytic_frame": (),
+    # An estimate from returns, not a source with timing of its own.
+    "covariance": (),
     "data_bundle": (),
 }
 

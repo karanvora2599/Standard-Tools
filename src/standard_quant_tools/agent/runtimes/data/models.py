@@ -36,6 +36,12 @@ from typing import Dict, List, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from standard_quant_tools.data.factory import ProviderName
+from standard_quant_tools.portfolio.streams import (
+    MAX_PLAUSIBLE_TYPICAL_RETURN,
+)
+from standard_quant_tools.portfolio.streams import (
+    refuse_if_not_returns as _refuse_if_not_returns,
+)
 
 
 class DataSource(BaseModel):
@@ -588,43 +594,11 @@ __all__ = [
 ]
 
 
-#: Typical |value| above this is not a fractional return. An equity curve
-#: at any base -- 10 000, 100, or normalized to 1.0 -- clears it; a daily
-#: return series sits five or six orders of magnitude below it. Median
-#: rather than max, so one genuine +200% day does not trip it.
-_MAX_PLAUSIBLE_TYPICAL_RETURN = 1.0
-
-
-def _refuse_if_not_returns(series, what: str):
-    """Refuse a series that cannot be returns, naming the likely cause.
-
-    Deliberately ONE rule, and a blunt one. The tempting second rule --
-    refuse a series with no negative observation -- would refuse a
-    money-market or T-bill return series, which really is all-positive and
-    really does have an enormous Sharpe against a 0% rate. Being unable to
-    measure a real series is worse than the narrower guard, so the softer
-    signal lives where there is a warnings channel to carry it.
-    """
-    from standard_quant_tools.error import ValidationError
-
-    finite = series[series.notna()]
-    if finite.empty:
-        return
-    typical = float(finite.abs().median())
-    if typical > _MAX_PLAUSIBLE_TYPICAL_RETURN:
-        raise ValidationError(
-            f"{what}: this is a RETURN series, and the typical |value| here "
-            f"is {typical:.4g} -- a {typical * 100:.0f}% move per period. "
-            "That is a level series (an equity curve, or prices), not "
-            "returns. A Sharpe taken on levels is scale-invariant and comes "
-            "back two to three orders of magnitude too high with nothing "
-            "looking wrong. If you passed values, convert them first with "
-            "`.pct_change().dropna()`. If you passed a REFERENCE -- which "
-            "you cannot call pandas on -- run convert_reference from "
-            "`equity_curve` to `returns_panel`, which drops the first bar "
-            "rather than carrying it as a fabricated flat period, and hand "
-            "the reference it returns to this tool instead."
-        )
+# The rule that refuses levels passed as returns lives in `portfolio.streams`
+# now, beside the return streams that apply it to every stream;
+# `_refuse_if_not_returns` is imported from there above, and both names stay
+# importable here.
+_MAX_PLAUSIBLE_TYPICAL_RETURN = MAX_PLAUSIBLE_TYPICAL_RETURN
 
 
 def resolve_source(source: "DataSource", *, what: str = "series"):

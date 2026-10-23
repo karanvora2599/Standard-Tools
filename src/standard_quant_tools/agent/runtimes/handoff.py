@@ -141,6 +141,15 @@ KINDS: Dict[str, Dict[str, str]] = {
         "storage": "frame",
         "description": "Wide frame of prices or a stacked OHLCV panel.",
     },
+    "covariance": {
+        "storage": "covariance",
+        "description": (
+            "A covariance matrix by asset name -- square, symmetric, finite "
+            "-- with whether it is annualized, at how many periods a year, "
+            "the estimator and its observations. What estimate_covariance "
+            "publishes and the allocators take as covariance_ref."
+        ),
+    },
     "predictions": {
         "storage": "frame",
         "description": (
@@ -303,6 +312,184 @@ def _frame_to_mapping(frame: pd.DataFrame) -> Dict[str, Dict[str, float]]:
     }
 
 
+#: How far a published covariance may be from symmetric: the largest
+#: |c_ij - c_ji| as a fraction of the largest |c_ij|. A matrix built by any
+#: estimator here is symmetric to rounding, about 1e-16 of its scale; a
+#: matrix further off than this one is not a covariance, and an allocator
+#: reading one triangle would answer for a matrix nobody estimated.
+COVARIANCE_SYMMETRY_TOLERANCE = 1e-10
+
+#: What a `covariance` payload holds, besides the matrix itself.
+_COVARIANCE_FIELDS = (
+    "assets",
+    "matrix",
+    "annualized",
+    "periods_per_year",
+    "method",
+    "n_observations",
+)
+
+
+def _covariance_payload(data: Any) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """
+    A `covariance` payload as the frame stored and the record kept beside it,
+    or a refusal naming what is wrong.
+
+    The payload is {assets, matrix, annualized, periods_per_year, method,
+    n_observations}; `matrix` is rows parallel to `assets` or the map of
+    asset -> {asset: covariance} that estimate_covariance returns. It must
+    be square under unique names, finite, and symmetric within
+    `COVARIANCE_SYMMETRY_TOLERANCE` of its largest entry. The matrix is
+    stored as given, not symmetrized, so it resolves to the same bits.
+    """
+    import numpy as np
+
+    who = "a 'covariance' reference"
+    if not isinstance(data, dict):
+        raise ValidationError(
+            f"{who} is published from a mapping of "
+            f"{list(_COVARIANCE_FIELDS)}, got a {type(data).__name__}."
+        )
+    missing = [f for f in _COVARIANCE_FIELDS if f not in data]
+    extra = sorted(str(k) for k in data if k not in _COVARIANCE_FIELDS)
+    if missing or extra:
+        raise ValidationError(
+            f"{who} needs exactly {list(_COVARIANCE_FIELDS)}; "
+            + (f"missing {missing}" if missing else "")
+            + ("; " if missing and extra else "")
+            + (f"unexpected {extra}" if extra else "")
+            + "."
+        )
+    assets = data["assets"]
+    if (
+        not isinstance(assets, (list, tuple))
+        or not assets
+        or not all(isinstance(a, str) and a for a in assets)
+    ):
+        raise ValidationError(
+            f"{who}: assets must be a non-empty list of non-empty names, got "
+            f"{assets!r:.200}."
+        )
+    names = [str(a) for a in assets]
+    repeated = sorted({a for a in names if names.count(a) > 1})
+    if repeated:
+        raise ValidationError(
+            f"{who}: assets names {repeated} more than once. Each name is one "
+            "row and one column, and a repeated one would be read as both."
+        )
+    matrix = data["matrix"]
+    if isinstance(matrix, dict):
+        absent = [a for a in names if a not in matrix]
+        surplus = sorted(str(k) for k in matrix if k not in set(names))
+        lacking = [
+            f"{r!r} lacks {[c for c in names if c not in matrix[r]][:5]}"
+            for r in names
+            if r in matrix
+            and isinstance(matrix[r], dict)
+            and any(c not in matrix[r] for c in names)
+        ]
+        if (
+            absent
+            or surplus
+            or lacking
+            or not all(isinstance(matrix[r], dict) for r in names if r in matrix)
+        ):
+            raise ValidationError(
+                f"{who}: the matrix map is not square under assets: "
+                f"no row for {absent}, rows not in assets {surplus}, "
+                f"{'; '.join(lacking[:5]) or 'no row lacks a column'}. Every "
+                "row needs a value for every asset -- a missing covariance is "
+                "not zero."
+            )
+        rows = [[matrix[r][c] for c in names] for r in names]
+    elif isinstance(matrix, (list, tuple)):
+        rows = list(matrix)
+        if len(rows) != len(names) or not all(
+            isinstance(row, (list, tuple)) and len(row) == len(names) for row in rows
+        ):
+            raise ValidationError(
+                f"{who}: the matrix is not {len(names)} x {len(names)} under "
+                f"{len(names)} assets; it has {len(rows)} rows of lengths "
+                f"{[len(r) if isinstance(r, (list, tuple)) else None for r in rows[:8]]}."
+            )
+    else:
+        raise ValidationError(
+            f"{who}: matrix is rows parallel to assets or a map of asset -> "
+            f"{{asset: covariance}}, got a {type(matrix).__name__}."
+        )
+    try:
+        values = np.array(rows, dtype="float64")
+    except (TypeError, ValueError) as exc:
+        raise ValidationError(f"{who}: the matrix holds non-numbers ({exc}).") from exc
+    bad = np.argwhere(~np.isfinite(values))
+    if bad.size:
+        cells = [f"({names[i]}, {names[j]})" for i, j in bad[:5]]
+        raise ValidationError(
+            f"{who}: the matrix is not finite at {len(bad)} cell(s), e.g. "
+            f"{', '.join(cells)}. A NaN or infinite covariance has no allocation."
+        )
+    scale = float(np.abs(values).max())
+    gap = np.abs(values - values.T)
+    worst = float(gap.max())
+    if worst > COVARIANCE_SYMMETRY_TOLERANCE * scale:
+        i, j = np.unravel_index(int(gap.argmax()), gap.shape)
+        raise ValidationError(
+            f"{who}: the matrix is not symmetric: cov[{names[i]}, {names[j]}] = "
+            f"{values[i, j]!r} and cov[{names[j]}, {names[i]}] = "
+            f"{values[j, i]!r}, {worst:.3g} apart against a tolerance of "
+            f"{COVARIANCE_SYMMETRY_TOLERANCE:g} x the largest entry "
+            f"({scale:.3g}). A covariance is symmetric; publish the matrix the "
+            "estimator returned."
+        )
+    annualized = data["annualized"]
+    if not isinstance(annualized, bool):
+        raise ValidationError(
+            f"{who}: annualized is true or false, got {annualized!r}."
+        )
+    periods = data["periods_per_year"]
+    if isinstance(periods, bool) or not isinstance(periods, int) or periods < 1:
+        raise ValidationError(
+            f"{who}: periods_per_year is a whole number of periods a year, at "
+            f"least 1 (252 daily, 12 monthly), got {periods!r}."
+        )
+    method = data["method"]
+    if not isinstance(method, str) or not method:
+        raise ValidationError(
+            f"{who}: method names the estimator ('sample', 'ledoit_wolf', ...), "
+            f"got {method!r}."
+        )
+    n_obs = data["n_observations"]
+    if isinstance(n_obs, bool) or not isinstance(n_obs, int) or n_obs < 2:
+        raise ValidationError(
+            f"{who}: n_observations is the number of observations behind the "
+            f"estimate, at least 2 for a spread, got {n_obs!r}."
+        )
+    frame = pd.DataFrame(values, index=pd.Index(names, name="asset"), columns=names)
+    meta = {
+        "annualized": annualized,
+        "periods_per_year": int(periods),
+        "method": method,
+        "n_observations": int(n_obs),
+    }
+    return frame, meta
+
+
+def _covariance_frame(frame: pd.DataFrame, sidecar: Dict[str, Any], ref: str):
+    """The stored matrix with what the record says about it, on `attrs`."""
+    meta = sidecar.get("meta")
+    if not isinstance(meta, dict) or any(f not in meta for f in _COVARIANCE_FIELDS[2:]):
+        raise ValidationError(
+            f"{ref!r} is a covariance whose record carries no annualization, "
+            "periods per year, estimator or observation count, so its scale "
+            "cannot be known. Publish the matrix again under a fresh run_id."
+        )
+    out = frame.copy()
+    out.index = pd.Index([str(a) for a in out.index], name="asset")
+    out.columns = [str(c) for c in out.columns]
+    out.attrs.update({f: meta[f] for f in _COVARIANCE_FIELDS[2:]})
+    return out
+
+
 def publish(
     data: Any,
     kind: str,
@@ -345,7 +532,14 @@ def publish(
     _validate_identifier(name, "name")
 
     storage = KINDS[kind]["storage"]
-    if storage == "mapping":
+    meta: Optional[Dict[str, Any]] = None
+    if storage == "covariance":
+        # Validated whole before anything is written: square under unique
+        # names, finite, symmetric. What the matrix's scale means -- the
+        # annualization, periods a year, estimator, observations -- is kept
+        # in the record beside it, which every resolve reads anyway.
+        payload, meta = _covariance_payload(data)
+    elif storage == "mapping":
         # A DATE-BY-ENTITY FRAME IS ACCEPTED AS WELL AS THE MAPPING, because
         # it is already the stored shape: the dict is converted straight
         # into one on the next line, and `resolve` hands a mapping back
@@ -425,7 +619,10 @@ def publish(
     # it would silently repoint every holder of the reference at this
     # value instead.
     sidecar = _resolved_within_runs_dir(_runs_dir() / run_id / _sidecar_name(name))
-    record = json.dumps({"kind": kind, "producer": producer}, indent=1).encode("utf-8")
+    fields: Dict[str, Any] = {"kind": kind, "producer": producer}
+    if meta is not None:
+        fields["meta"] = meta
+    record = json.dumps(fields, indent=1).encode("utf-8")
     if overwrite:
         write_bytes_atomically(sidecar, record)
     elif not write_bytes_exclusively(sidecar, record):
@@ -689,6 +886,8 @@ def resolve(ref: str, expect: Optional[str] = None) -> Any:
 
     frame = _load_path(reference.run_id, reference.name)
     storage = KINDS[reference.kind]["storage"]
+    if storage == "covariance":
+        return _covariance_frame(frame, sidecar, reference.ref)
     if storage == "mapping":
         return _frame_to_mapping(frame)
     if storage == "series":
@@ -989,6 +1188,7 @@ def kinds() -> Dict[str, str]:
 
 
 __all__ = [
+    "COVARIANCE_SYMMETRY_TOLERANCE",
     "EXTERNAL_FRAME_MAX_ROWS",
     "EXTERNAL_KINDS",
     "KINDS",

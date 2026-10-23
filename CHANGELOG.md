@@ -1,5 +1,104 @@
 # Changelog
 
+## Return streams meet on the dates they share, five tools read a published returns panel, and a covariance travels as a reference
+
+- **Dated return streams, one set of rules.** Two return series of the
+  same length look aligned and need not be. The new library module
+  `portfolio.streams` holds `align_return_streams(streams, min_overlap=)`:
+  it keeps the dates every stream has, in date order, with each stream's
+  own values bit for bit, and reports per stream the returns supplied, the
+  first and last date, the rows kept and the returns dropped before the
+  window every stream covers, after it, and inside it on a date another
+  stream lacks; `start_set_by` and `end_set_by` name the streams that set
+  the window. Planted: two ten-return streams, one on business days from
+  2024-01-02, the other two days later and without 2024-01-08, share 7
+  dates; the first loses 2 before the window and 1 inside it, the second 3
+  after it. Refused by name: fewer shared dates than `min_overlap`, naming
+  the stream whose removal would share the most (three streams sharing 5
+  dates, 60 without the one that starts late, name that one with its
+  range); a repeated date; a missing or non-finite value; a level series
+  passed as returns; undated values; dates in different time zones.
+- **The levels rule moved with them.** `_refuse_if_not_returns` is
+  `portfolio.streams.refuse_if_not_returns`, one rule for every stream;
+  the data runtime's two old names still import. `streams_from_panel`
+  reads a wide returns frame as streams, a blank cell being a date that
+  column has no return on; a positional index is refused, an ISO string
+  index read as dates.
+- **`combine_return_streams` publishes the aligned panel** as a
+  `returns_panel` at a `run_id`, from Series or stream specs, and returns
+  the reference, the columns, the report and a note on what was dropped.
+  A second publish at the same run_id is refused, as every publisher's
+  is. No tool exposes it yet.
+- **A stream as an input.** `agent.runtimes.streams.ReturnStream` takes
+  exactly one of a `returns_panel` `ref` (with `column` when it has
+  several), `values` as {ISO date: return}, or a `symbol` with both ends of
+  its window and an optional `source` -- `DataSource`'s rule. An undated
+  list is refused with the reason: equal lengths are not the same dates.
+  `ReturnStreams` maps names to streams and `resolve_return_streams` turns
+  them into dated Series; a reference is resolved as a `returns_panel`, so
+  an equity curve is refused naming both kinds and `convert_reference`.
+  HRP's undated form and its warning are unchanged.
+- **Five tools take `returns_ref`.** `estimate_covariance` (in place of
+  tickers and their window), `optimize_hierarchical_risk_parity` (in place
+  of `returns`, under its own `alignment` rule: 'exact' refuses a panel
+  whose columns lack dates, 'intersect' keeps the shared ones),
+  `get_deflated_sharpe_ratio` (one column, named in `returns_column` when
+  there are several), `estimate_backtest_overfitting` (each column a
+  configuration) and `run_reality_check` (every column but
+  `benchmark_column` a candidate, or under `beats_every_alternative` every
+  column but `strategy_column` an alternative). Exactly one of the inline
+  form and `returns_ref` is taken; both, neither, a role column the panel
+  lacks or a role the question does not read are refused by name. The
+  columns are aligned as streams at the tool's own minimum (2 dates for the
+  covariance, one per asset for HRP, 20 for the deflated Sharpe, 5 per
+  chunk for PBO, 30 for the reality check), and the result carries the
+  report as `streams` (HRP's in its `alignment`). On the same returns each
+  door's answer is the inline answer to the bit, every number and warning,
+  tested on all five. A 300-day panel with 20, 10 and 5 blank days in three
+  columns gives the covariance of its 265 shared rows, `n_rows_dropped`
+  35.
+- **A covariance is a reference kind.** `covariance` holds the assets, the
+  matrix, `annualized`, `periods_per_year`, `method` and `n_observations`.
+  Publishing refuses a matrix that is not square under unique names, not
+  finite, or further from symmetric than 1e-10 of its largest entry, and
+  stores it as given; the scale record sits beside it and resolving under
+  `expect="covariance"` returns the named frame with the record on
+  `attrs`. `estimate_covariance` takes an optional `run_id` and publishes
+  `sqt://covariance/<run_id>/covariance` as `covariance_ref`; without one
+  nothing is published and every field is what it was, beside two new null
+  ones (`covariance_ref`, `streams`). It is a publisher now, so its
+  `idempotentHint` is false: 33 tools publish at a run_id. A data bundle
+  refuses a covariance as a frame, as it refuses every derived result.
+- **Four tools take `covariance_ref`.** `optimize_risk_parity`,
+  `optimize_max_diversification`, `get_marginal_risk_contribution` and
+  `run_portfolio_scenarios` take the rows, the map or the reference,
+  exactly one of them. `assets` is optional beside a reference; given, it
+  must name exactly the reference's assets and fixes their order. A
+  reference of another kind is refused naming both kinds. The answers equal
+  the inline matrix's to the bit, tested end to end from
+  `estimate_covariance`'s own output.
+- **`equity_curve_ref` names the route that works**: convert_reference to
+  `returns_panel`, then the deflated Sharpe, PBO and the reality check as
+  `returns_ref`, beside the two tools whose series is a `DataSource`. Its
+  test holds each named tool to the field and to the refusal of the curve
+  itself.
+- **The surface layer learns the inputs.** The fixtures publish a
+  covariance with `estimate_covariance` from the returns panel, and the
+  published baselines of the nine tools read the references -- the panel's
+  columns in each tool's roles. The synthesizer leaves `returns_ref` and
+  `covariance_ref` to those fixtures and synthesizes the inline forms, a
+  covariance square over the synthesized assets, and tries the fields that
+  are unset by default together before trying every field, so a ticker
+  input with its window keeps its defaults.
+- **What changes for a caller.** No computed number for an existing call.
+  New optional arguments on nine tools; `covariance` and `assets` are no
+  longer required on risk parity, maximum diversification and marginal
+  risk, nor `tickers` and the window on `estimate_covariance`, each
+  refused by name when needed. MCP schema bytes under `auto` (full):
+  `portfolio` 37,246 -> 39,592 (48,787 -> 51,133), still thinning the same
+  three tools; `backtest` 44,673 -> 45,405 (111,196 -> 112,735), the same
+  seventeen. Every other runtime is unchanged.
+
 ## Holdings are valued in one base currency by exact products and sums, so reordering positions moves no total, and a price written in pence is refused rather than booked as pounds
 
 - **One shape for holdings, before any tool reads them.** `Position`
