@@ -1,5 +1,18 @@
 # Changelog
 
+## The portfolio worker is told about the frontier, the factor and tail risk splits, and what Kelly sizes now
+
+- **`portfolio_risk`'s prose** named `optimize_portfolio` but not
+  `get_efficient_frontier`, `decompose_factor_risk` or `decompose_tail_risk`,
+  which reached the worker only through the generated scope list. It now
+  says what each is for, that `estimate_factor_model` (research) fits the
+  factor split's B, F and D, and that a tail split is read with its tail
+  count.
+- **Two sentences were older than the tools.** `get_position_size`'s Kelly
+  is a position as a multiple of equity, capped at `max_leverage` (with
+  `kelly_risk_fraction` what a loss then costs), and `get_capacity_report`
+  reports `days_to_liquidate` at the caller's `account_size`.
+
 ## An audit bundle carries its verifier however the package was installed
 
 - **The defect.** `export_bundle` read `verify_audit_log.py` from the

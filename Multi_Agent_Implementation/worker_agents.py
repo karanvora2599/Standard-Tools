@@ -765,11 +765,28 @@ utility, under per-asset bounds, a budget, sector groups, factor-exposure
 limits and volatility or tracking-error caps. Read `certified` before
 quoting the weights, and quote a binding constraint's shadow_price when
 asked what a limit costs.
-get_position_size: ATR-based stop-loss sizing with optional Kelly criterion,
-given account equity and (optionally) a strategy's win rate / avg win / avg loss.
+get_efficient_frontier: the whole frontier in one call, through its
+certified corner portfolios when weights are long-only or capped, with the
+minimum-variance and tangency portfolios.
+decompose_factor_risk: a portfolio's variance split into factor and
+specific risk from loadings B, a factor covariance F and specific variances
+D, with Euler contributions by factor and by asset and the tracking error
+against a benchmark. estimate_factor_model, which belongs to the Quant
+Research Agent, fits those three maps from return series; hand the request
+there when the user has returns and not a model.
+decompose_tail_risk: which positions an expected shortfall and VaR come
+from, as Euler component ES and kernel component VaR from a scenario matrix
+or a returns_ref. Report the tail count with it: a split of a dozen tail
+scenarios is mostly noise.
+get_position_size: ATR-based stop-loss sizing, and Kelly when a strategy's
+win rate / avg win / avg loss are given. Kelly's f* is a POSITION as a
+multiple of equity (kelly_risk_fraction is what a losing trade then costs),
+and the half-Kelly size is capped at max_leverage times equity, 1 by
+default; say when the cap binds.
 get_capacity_report: how much account size a target-weight portfolio can
 support before positions become too large relative to each ticker's own
-trading volume (ADV-based), plus days-to-liquidate and sector exposure.
+trading volume (ADV-based), plus days_to_liquidate at the account_size you
+give and sector exposure.
 run_stress_test: replay a portfolio's weights against a named historical
 crash window (black_monday_1987, dotcom_2000, gfc_2008, volmageddon_2018,
 covid_2020, rate_shock_2022, or a custom date range) using each ticker's
