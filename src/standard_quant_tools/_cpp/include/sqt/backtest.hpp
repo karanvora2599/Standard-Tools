@@ -38,14 +38,36 @@ struct BacktestResult {
  * All zero by default, and with all three zero no bar changes by a bit.
  * Without them, at a 5% rate a 3x signal read a Sharpe of -0.062 against
  * -0.258 for the same signal at 1x: the two borrowed units were free.
+ *
+ * THE PER-BAR FORM. A financing spec (backtest/financing.py) states its
+ * terms over a benchmark that may move and accrues on calendar days, so a
+ * bar's rate is no longer one number over periods_per_year. Python
+ * resolves it into four arrays of length n, each already the fraction a
+ * bar accrues (annual rate * days / basis, 0 on bar 0): what a unit of
+ * cash earns, what a unit of borrowing pays, what a unit of short pays, and
+ * the benchmark itself, which then replaces risk_free_rate / periods_per_year
+ * as the rate the Sharpe and Sortino subtract. When the three financing
+ * arrays are set they replace the three scalars, element for element in
+ * the same expression; the scalars must then be zero. Null by default.
  */
 struct StrategyFinancing {
     double cash_rate      = 0.0;  // annual, credited on positive cash
     double financing_rate = 0.0;  // annual, charged on exposure beyond 1x
     double borrow_fee_bps = 0.0;  // annual basis points on the short size
 
+    const double* cash_per_bar      = nullptr;  // (n) fraction earned per unit of cash
+    const double* debit_per_bar     = nullptr;  // (n) fraction paid per unit borrowed
+    const double* borrow_per_bar    = nullptr;  // (n) fraction paid per unit short
+    const double* benchmark_per_bar = nullptr;  // (n) the Sharpe's per-bar rate
+
+    bool per_bar() const {
+        return cash_per_bar != nullptr || debit_per_bar != nullptr ||
+               borrow_per_bar != nullptr;
+    }
+
     bool active() const {
-        return cash_rate != 0.0 || financing_rate != 0.0 || borrow_fee_bps != 0.0;
+        return cash_rate != 0.0 || financing_rate != 0.0 || borrow_fee_bps != 0.0 ||
+               per_bar();
     }
 };
 
@@ -371,6 +393,22 @@ struct PortfolioCosts {
     double day_basis                 = 365.0;  // 365 (ACT/365F) or 360 (ACT/360)
 };
 
+// The financing rates per bar and per ticker, from a financing spec
+// (backtest/financing.py) or its scalar shorthand. Each pointer, when set,
+// replaces the matching scalar on PortfolioCosts element for element in the
+// same expression: credit[bar] for cash_rate, debit[bar] for
+// margin_interest_rate, rebate[bar] for short_rebate_rate, borrow_bps[i]
+// for borrow_fee_bps. A bar's entry is the annual rate that bar's accrual
+// uses. When every ticker's borrow rate is the same the fee is charged on
+// the short book's summed notional, as it always was; when they differ each
+// short pays its own, in ticker order.
+struct PortfolioRates {
+    const double* credit     = nullptr;  // (n_bars) annual, on positive free cash
+    const double* debit      = nullptr;  // (n_bars) annual, on negative free cash
+    const double* rebate     = nullptr;  // (n_bars) annual, on segregated proceeds
+    const double* borrow_bps = nullptr;  // (n_tickers) annual bps per ticker
+};
+
 // The financing a run accrued, summed over its bars. Filled when the caller
 // passes somewhere to put it; every field stays 0.0 when nothing accrued.
 struct PortfolioFinancing {
@@ -447,7 +485,12 @@ std::size_t run_portfolio_simulation(
     const double* volatility    = nullptr,
     // The financing totals, or null. Appended and defaulted for the same
     // reason as the two panels above.
-    PortfolioFinancing* out_financing = nullptr);
+    PortfolioFinancing* out_financing = nullptr,
+    // Per-bar and per-ticker rates (see PortfolioRates), or null for the
+    // scalar terms on `costs`.
+    const PortfolioRates* rates = nullptr,
+    // (n_tickers) the borrow fee each ticker paid over the run, or null.
+    double* out_borrow_by_asset = nullptr);
 
 
 std::vector<BacktestResult> batch_run_strategy(

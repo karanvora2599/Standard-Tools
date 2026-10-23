@@ -120,6 +120,7 @@ def run_pair_backtest(
     short_proceeds: str = "net_cash",
     short_rebate_rate: float = 0.0,
     day_count: str = DEFAULT_DAY_COUNT,
+    financing: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """
     Backtest a cointegrated pair as one synchronized two-leg trade: long the
@@ -176,6 +177,13 @@ def run_pair_backtest(
             could not take it. cash_rate is what the account's cash earns:
             a dollar-neutral pair holds its equity plus the short leg's
             proceeds in cash.
+        financing: the full terms instead of those six -- a
+            `backtest.financing.FinancingSpec` (or its input model, or a
+            mapping of its fields), passed to run_portfolio_simulation. Long
+            the spread shorts symbol_b and short the spread shorts symbol_a;
+            whichever leg is held short pays its own entry in the spec's
+            borrow_bps, or its default_borrow_bps, and a short leg with
+            neither is refused by name.
         fill_price: passed through to run_portfolio_simulation; defaults to
             "next_open" (not "close") because the z-score signal used to
             decide a transition is itself computed from that same bar's
@@ -274,6 +282,7 @@ def run_pair_backtest(
         short_proceeds=short_proceeds,
         short_rebate_rate=short_rebate_rate,
         day_count=day_count,
+        financing=financing,
     )
 
     n_round_trips = int(sum(1 for d in transition_dates if state.loc[d] == 0.0))

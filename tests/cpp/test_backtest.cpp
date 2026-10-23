@@ -1289,6 +1289,198 @@ static void test_portfolio_cash_book_earns_the_compounded_cash_rate() {
 }
 
 
+// ── A financing spec's per-bar and per-ticker rates ─────────────────────────
+
+static void test_strategy_per_bar_arrays_equal_to_the_scalars_are_the_scalars() {
+    // The shorthand, handed in as arrays of its own quotients, is the same
+    // double on every bar: a call with the arrays and one with the scalars
+    // agree on every field, in both kernels.
+    std::uint64_t state = 91;
+    const int n = 150;
+    std::vector<double> prices(n), signals(n);
+    for (int i = 0; i < n; ++i) {
+        prices[i]  = 50.0 + pseudo_random(state) * 40.0;
+        signals[i] = pseudo_random(state) * 3.0 - 1.0;
+    }
+    sqt::StrategyFinancing scalars;
+    scalars.cash_rate = 0.04;
+    scalars.financing_rate = 0.06;
+    scalars.borrow_fee_bps = 75.0;
+    std::vector<double> cash(n, 0.04 / 252.0), debit(n, 0.06 / 252.0),
+        borrow(n, (75.0 / 10'000.0) / 252.0), bench(n, 0.04 / 252.0);
+    sqt::StrategyFinancing arrays;
+    arrays.cash_per_bar = cash.data();
+    arrays.debit_per_bar = debit.data();
+    arrays.borrow_per_bar = borrow.data();
+    arrays.benchmark_per_bar = bench.data();
+    auto a = sqt::run_strategy(prices.data(), signals.data(), n, 10'000.0, 0.001,
+                               0.0005, 252.0, nullptr, 0.04, scalars);
+    auto b = sqt::run_strategy(prices.data(), signals.data(), n, 10'000.0, 0.001,
+                               0.0005, 252.0, nullptr, 0.0, arrays);
+    for (int i = 0; i < n; ++i) CHECK(a.equity_curve[i] == b.equity_curve[i]);
+    // Every metric of both full runs is the summary kernel's on the arrays,
+    // which is what the grid ranks with.
+    auto sb = sqt::run_strategy_summary(prices.data(), signals.data(), n, 10'000.0,
+                                        0.001, 0.0005, 252.0, nullptr, 0.0, arrays);
+    check_all_fields_match(a, sb);
+    check_all_fields_match(b, sb);
+}
+
+static void test_strategy_per_bar_benchmark_moves_the_excess_by_bar() {
+    // A flat book earns exactly what the cash array says on each bar, and a
+    // benchmark equal to it leaves an excess of exactly zero on every bar.
+    const std::vector<double> prices = {100.0, 104.0, 97.0, 101.0, 99.0, 103.0};
+    const std::size_t n = prices.size();
+    const std::vector<double> flat(n, 0.0);
+    // ACT/360 fractions of a moving benchmark over 0, 1, 3, 1, 1, 4 days.
+    const double days[] = {0.0, 1.0, 3.0, 1.0, 1.0, 4.0};
+    const double rate[] = {0.05, 0.05, 0.051, 0.052, 0.049, 0.05};
+    std::vector<double> cash(n), zero(n, 0.0);
+    for (std::size_t i = 0; i < n; ++i) cash[i] = rate[i > 0 ? i - 1 : 0] * (days[i] / 360.0);
+    sqt::StrategyFinancing f;
+    f.cash_per_bar = cash.data();
+    f.debit_per_bar = cash.data();
+    f.borrow_per_bar = zero.data();
+    f.benchmark_per_bar = cash.data();
+    auto r = sqt::run_strategy(prices.data(), flat.data(), n, 10'000.0, 0.0, 0.0,
+                               252.0, nullptr, 0.0, f);
+    double expected = 10'000.0;
+    for (std::size_t i = 1; i < n; ++i) {
+        expected *= 1.0 + cash[i];
+        CHECK(r.equity_curve[i] == expected);
+    }
+    // Every excess is exactly zero, so the Sortino is 0/0.
+    CHECK(std::isnan(r.sortino_ratio));
+    CHECK(r.sharpe_ratio == 0.0 || std::isnan(r.sharpe_ratio));
+}
+
+static void test_portfolio_rates_equal_to_the_scalars_are_the_scalars() {
+    // A levered book with a short, financed at scalar terms and at the same
+    // terms as arrays: every output the same bits.
+    const std::size_t n_bars = 8, n_tickers = 2;
+    const std::vector<double> close = {100, 50, 101, 49, 99, 52, 103, 51,
+                                       104, 50, 102, 48, 105, 47, 107, 49};
+    const std::vector<double> weights = {1.6, -0.4};
+    const std::vector<long long> rebal = {0};
+    const std::vector<double> gaps = {0, 1, 1, 3, 1, 1, 1, 3};
+    auto costs = free_costs();
+    costs.max_gross_leverage = 2.0;
+    costs.max_position_pct = 2.0;
+    costs.cash_rate = 0.03;
+    costs.margin_interest_rate = 0.06;
+    costs.borrow_fee_bps = 80.0;
+    costs.day_basis = 360.0;
+    std::vector<double> eq_a(n_bars), cash_a(n_bars), gross(n_bars), net(n_bars), reb(3);
+    std::vector<double> eq_b(n_bars), cash_b(n_bars), by_asset(n_tickers);
+    double peak = 0.0;
+    sqt::PortfolioSimError err;
+    sqt::PortfolioFinancing fin_a, fin_b;
+    sqt::run_portfolio_simulation(close.data(), close.data(), weights.data(),
+                                  rebal.data(), gaps.data(), n_bars, n_tickers, 1,
+                                  costs, eq_a.data(), cash_a.data(), gross.data(),
+                                  net.data(), reb.data(), &peak, &err, nullptr,
+                                  nullptr, &fin_a);
+    const std::vector<double> credit(n_bars, 0.03), debit(n_bars, 0.06),
+        rebate(n_bars, 0.0), bps(n_tickers, 80.0);
+    sqt::PortfolioRates rates;
+    rates.credit = credit.data();
+    rates.debit = debit.data();
+    rates.rebate = rebate.data();
+    rates.borrow_bps = bps.data();
+    auto bare = costs;
+    bare.cash_rate = 0.0;
+    bare.margin_interest_rate = 0.0;
+    bare.borrow_fee_bps = 0.0;
+    sqt::run_portfolio_simulation(close.data(), close.data(), weights.data(),
+                                  rebal.data(), gaps.data(), n_bars, n_tickers, 1,
+                                  bare, eq_b.data(), cash_b.data(), gross.data(),
+                                  net.data(), reb.data(), &peak, &err, nullptr,
+                                  nullptr, &fin_b, &rates, by_asset.data());
+    CHECK(err.status == sqt::kPortfolioOk);
+    for (std::size_t b = 0; b < n_bars; ++b) {
+        CHECK(eq_a[b] == eq_b[b]);
+        CHECK(cash_a[b] == cash_b[b]);
+    }
+    CHECK(fin_a.interest_charged == fin_b.interest_charged);
+    CHECK(fin_a.interest_credited == fin_b.interest_credited);
+    CHECK(fin_a.borrow_charged == fin_b.borrow_charged);
+    CHECK(fin_b.interest_charged > 0.0);
+    // Only the short ticker paid borrow; one rate for the book, so the
+    // per-ticker figure is the whole fee to rounding.
+    CHECK(by_asset[0] == 0.0);
+    CHECK_NEAR(by_asset[1], fin_b.borrow_charged, 1e-9);
+}
+
+static void test_portfolio_each_short_pays_its_own_borrow_rate() {
+    // Short two names at constant prices, one at 100 bps and one at 300:
+    // each pays notional * bps * days / basis, and the account pays both.
+    const std::size_t n_bars = 3, n_tickers = 2;
+    const std::vector<double> close = {100, 40, 100, 40, 100, 40};
+    const std::vector<double> weights = {-0.5, -0.5};
+    const std::vector<long long> rebal = {0};
+    const std::vector<double> gaps = {0, 30, 31};
+    auto costs = free_costs();
+    costs.initial_capital = 1'000'000.0;
+    costs.day_basis = 365.0;
+    const std::vector<double> zero(n_bars, 0.0), bps = {100.0, 300.0};
+    sqt::PortfolioRates rates;
+    rates.credit = zero.data();
+    rates.debit = zero.data();
+    rates.rebate = zero.data();
+    rates.borrow_bps = bps.data();
+    std::vector<double> eq(n_bars), cash(n_bars), gross(n_bars), net(n_bars), reb(3),
+        by_asset(n_tickers);
+    double peak = 0.0;
+    sqt::PortfolioSimError err;
+    sqt::PortfolioFinancing fin;
+    sqt::run_portfolio_simulation(close.data(), close.data(), weights.data(),
+                                  rebal.data(), gaps.data(), n_bars, n_tickers, 1,
+                                  costs, eq.data(), cash.data(), gross.data(),
+                                  net.data(), reb.data(), &peak, &err, nullptr,
+                                  nullptr, &fin, &rates, by_asset.data());
+    CHECK(err.status == sqt::kPortfolioOk);
+    // 500,000 of each name short over 61 days.
+    CHECK_NEAR(by_asset[0], 500'000.0 * 0.01 * 61.0 / 365.0, 1e-6);
+    CHECK_NEAR(by_asset[1], 500'000.0 * 0.03 * 61.0 / 365.0, 1e-6);
+    CHECK_NEAR(fin.borrow_charged, by_asset[0] + by_asset[1], 1e-9);
+    CHECK_NEAR(eq[n_bars - 1], 1'000'000.0 - fin.borrow_charged, 1e-6);
+}
+
+static void test_portfolio_debit_on_a_levered_book_act_360() {
+    // $10m long on $5m of equity, 30 calendar days at 5.30% + 50 bp on
+    // ACT/360: $5m borrowed for 30/360 of a year at 5.80%, 24,166.67.
+    const std::size_t n_bars = 2, n_tickers = 1;
+    const std::vector<double> close = {100.0, 100.0};
+    const std::vector<double> weights = {2.0};
+    const std::vector<long long> rebal = {0};
+    const std::vector<double> gaps = {0.0, 30.0};
+    auto costs = free_costs();
+    costs.initial_capital = 5'000'000.0;
+    costs.max_gross_leverage = 2.0;
+    costs.max_position_pct = 2.0;
+    costs.day_basis = 360.0;
+    const std::vector<double> zero(n_bars, 0.0), debit(n_bars, 0.053 + 0.005),
+        bps(n_tickers, 0.0);
+    sqt::PortfolioRates rates;
+    rates.credit = zero.data();
+    rates.debit = debit.data();
+    rates.rebate = zero.data();
+    rates.borrow_bps = bps.data();
+    std::vector<double> eq(n_bars), cash(n_bars), gross(n_bars), net(n_bars), reb(3);
+    double peak = 0.0;
+    sqt::PortfolioSimError err;
+    sqt::PortfolioFinancing fin;
+    sqt::run_portfolio_simulation(close.data(), close.data(), weights.data(),
+                                  rebal.data(), gaps.data(), n_bars, n_tickers, 1,
+                                  costs, eq.data(), cash.data(), gross.data(),
+                                  net.data(), reb.data(), &peak, &err, nullptr,
+                                  nullptr, &fin, &rates);
+    CHECK(err.status == sqt::kPortfolioOk);
+    CHECK_NEAR(fin.interest_charged, 5'000'000.0 * 0.058 * 30.0 / 360.0, 1e-9);
+    CHECK_NEAR(fin.interest_charged, 24'166.67, 0.005);
+}
+
+
 int main() {
     test_flat_signal_zero_return();
     test_empty_input();
@@ -1347,6 +1539,13 @@ int main() {
     test_portfolio_insolvent_at_bar_marks_that_bar_only();
     test_portfolio_next_open_trigger_on_the_last_bar();
     test_portfolio_cash_book_earns_the_compounded_cash_rate();
+
+    // a financing spec's per-bar and per-ticker rates
+    test_strategy_per_bar_arrays_equal_to_the_scalars_are_the_scalars();
+    test_strategy_per_bar_benchmark_moves_the_excess_by_bar();
+    test_portfolio_rates_equal_to_the_scalars_are_the_scalars();
+    test_portfolio_each_short_pays_its_own_borrow_rate();
+    test_portfolio_debit_on_a_levered_book_act_360();
 
     std::printf("\n%d / %d tests passed.\n",
                 g_tests_run - g_tests_failed, g_tests_run);

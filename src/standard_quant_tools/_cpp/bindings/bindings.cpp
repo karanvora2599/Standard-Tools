@@ -264,6 +264,72 @@ static sqt::StrategyFinancing strategy_financing(
     return f;
 }
 
+using RateArray = py::array_t<double, py::array::c_style | py::array::forcecast>;
+
+// One optional per-bar (or per-ticker) rate array: None, or 1-D of length
+// `n` with every element finite (and >= 0 when `non_negative`). The array
+// is held in `hold` so the returned pointer outlives this call. A NaN rate
+// turns every balance it touches into NaN, and a short array would be read
+// past its end, so both are refused here rather than met in the kernel.
+static const double* take_rate_array(py::object src, RateArray& hold,
+                                     std::size_t n, const char* name,
+                                     const char* fn, bool non_negative = false)
+{
+    if (src.is_none()) return nullptr;
+    hold = src.cast<RateArray>();
+    auto b = hold.request();
+    if (b.ndim != 1 || static_cast<std::size_t>(b.shape[0]) != n)
+        throw std::invalid_argument(
+            std::string(fn) + ": " + name + " must be 1-D with " +
+            std::to_string(n) + " entries");
+    const double* p = static_cast<const double*>(b.ptr);
+    for (std::size_t i = 0; i < n; ++i) {
+        if (!std::isfinite(p[i]) || (non_negative && p[i] < 0.0))
+            throw std::invalid_argument(
+                std::string(fn) + ": " + name + "[" + std::to_string(i) +
+                "] must be finite" + (non_negative ? " and >= 0" : "") +
+                ", got " + std::to_string(p[i]));
+    }
+    return p;
+}
+
+// run_strategy's per-bar financing, from a financing spec. The arrays
+// replace the three scalars and the benchmark replaces the risk-free rate,
+// so a call that sets both would be financed two ways: refused.
+struct StrategyRateArrays {
+    RateArray cash, debit, borrow, benchmark;
+};
+
+static void attach_per_bar_financing(
+    sqt::StrategyFinancing& fin, StrategyRateArrays& hold,
+    py::object cash_per_bar, py::object debit_per_bar,
+    py::object borrow_per_bar, py::object benchmark_per_bar,
+    std::size_t n, double risk_free_rate, const char* fn)
+{
+    fin.cash_per_bar   = take_rate_array(cash_per_bar, hold.cash, n,
+                                         "cash_per_bar", fn);
+    fin.debit_per_bar  = take_rate_array(debit_per_bar, hold.debit, n,
+                                         "debit_per_bar", fn);
+    fin.borrow_per_bar = take_rate_array(borrow_per_bar, hold.borrow, n,
+                                         "borrow_per_bar", fn, true);
+    fin.benchmark_per_bar = take_rate_array(benchmark_per_bar, hold.benchmark, n,
+                                            "benchmark_per_bar", fn);
+    const bool arrays = fin.per_bar();
+    if (arrays && !(fin.cash_per_bar && fin.debit_per_bar && fin.borrow_per_bar))
+        throw std::invalid_argument(
+            std::string(fn) + ": cash_per_bar, debit_per_bar and borrow_per_bar "
+            "go together; pass all three or none");
+    if (arrays && (fin.cash_rate != 0.0 || fin.financing_rate != 0.0 ||
+                   fin.borrow_fee_bps != 0.0))
+        throw std::invalid_argument(
+            std::string(fn) + ": the per-bar financing arrays replace cash_rate, "
+            "financing_rate and borrow_fee_bps, which must then be 0");
+    if (fin.benchmark_per_bar && risk_free_rate != 0.0)
+        throw std::invalid_argument(
+            std::string(fn) + ": benchmark_per_bar replaces risk_free_rate as "
+            "the rate the Sharpe subtracts, which must then be 0");
+}
+
 // The same lesson for the portfolio account, which shipped with fifteen
 // scalars and no call at all. Measured on that build: slippage_pct=-0.5 tripled
 // the final equity, a NaN max_gross_leverage silently switched the limit off
@@ -583,7 +649,9 @@ PYBIND11_MODULE(_sqt_core, m) {
            std::optional<py::array_t<double, py::array::c_style | py::array::forcecast>>
                ref_prices,
            double risk_free_rate,
-           double cash_rate, double financing_rate, double borrow_fee_bps)
+           double cash_rate, double financing_rate, double borrow_fee_bps,
+           py::object cash_per_bar, py::object debit_per_bar,
+           py::object borrow_per_bar, py::object benchmark_per_bar)
         -> py::dict {
             require_1d(prices, "prices");
             require_1d(signals, "signals");
@@ -591,8 +659,13 @@ PYBIND11_MODULE(_sqt_core, m) {
                 throw std::invalid_argument("prices and signals must have equal length");
             require_backtest_scalars(initial_capital, commission_pct, slippage_pct,
                                      periods_per_year, risk_free_rate, "run_strategy");
-            const sqt::StrategyFinancing fin = strategy_financing(
+            sqt::StrategyFinancing fin = strategy_financing(
                 cash_rate, financing_rate, borrow_fee_bps, "run_strategy");
+            StrategyRateArrays rate_hold;
+            attach_per_bar_financing(fin, rate_hold, cash_per_bar, debit_per_bar,
+                                     borrow_per_bar, benchmark_per_bar,
+                                     static_cast<std::size_t>(prices.size()),
+                                     risk_free_rate, "run_strategy");
             const double* prices_ptr  = prices.data();
             const double* signals_ptr = signals.data();
             const auto    n           = prices.size();
@@ -662,8 +735,19 @@ PYBIND11_MODULE(_sqt_core, m) {
         py::arg("cash_rate")      = 0.0,
         py::arg("financing_rate") = 0.0,
         py::arg("borrow_fee_bps") = 0.0,
+        // A financing spec's terms per bar, each the fraction that bar
+        // accrues (see sqt::StrategyFinancing). None by default.
+        py::arg("cash_per_bar")      = py::none(),
+        py::arg("debit_per_bar")     = py::none(),
+        py::arg("borrow_per_bar")    = py::none(),
+        py::arg("benchmark_per_bar") = py::none(),
         "Vectorized backtest kernel — identical algorithm to run_strategy in engine.py.\n\n"
         "One-bar lag execution: executed[i] = signals[i-1].\n"
+        "cash_per_bar/debit_per_bar/borrow_per_bar (all three or none) replace\n"
+        "the scalar financing rates with a per-bar fraction each, and\n"
+        "benchmark_per_bar replaces risk_free_rate / periods_per_year as the\n"
+        "per-bar rate the Sharpe and Sortino subtract; each 1-D, len(prices),\n"
+        "finite, with the replaced scalars 0.\n"
         "Returns a dict with keys: final_equity, total_return, annualized_volatility,\n"
         "sharpe_ratio, sortino_ratio, max_drawdown, calmar_ratio, num_trades,\n"
         "win_rate, profit_factor, avg_trade_return_pct, equity_curve.");
@@ -680,15 +764,22 @@ PYBIND11_MODULE(_sqt_core, m) {
            std::optional<py::array_t<double, py::array::c_style | py::array::forcecast>>
                ref_prices,
            double risk_free_rate,
-           double cash_rate, double financing_rate, double borrow_fee_bps)
+           double cash_rate, double financing_rate, double borrow_fee_bps,
+           py::object cash_per_bar, py::object debit_per_bar,
+           py::object borrow_per_bar, py::object benchmark_per_bar)
         -> py::array_t<double>
         {
             constexpr const char* fn = "batch_backtest_crossover";
             require_1d(prices, "prices");
             require_backtest_scalars(initial_capital, commission_pct, slippage_pct,
                                      periods_per_year, risk_free_rate, fn);
-            const sqt::StrategyFinancing fin = strategy_financing(
+            sqt::StrategyFinancing fin = strategy_financing(
                 cash_rate, financing_rate, borrow_fee_bps, fn);
+            StrategyRateArrays rate_hold;
+            attach_per_bar_financing(fin, rate_hold, cash_per_bar, debit_per_bar,
+                                     borrow_per_bar, benchmark_per_bar,
+                                     static_cast<std::size_t>(prices.size()),
+                                     risk_free_rate, fn);
             auto ind_buf  = indicators.request();
             const IndexArray pair_idx = exact_int64(pair_idx_obj, "pair_idx", fn);
             if (ind_buf.ndim != 2)
@@ -771,6 +862,11 @@ PYBIND11_MODULE(_sqt_core, m) {
         py::arg("cash_rate")      = 0.0,
         py::arg("financing_rate") = 0.0,
         py::arg("borrow_fee_bps") = 0.0,
+        // A financing spec's terms per bar -- see run_strategy.
+        py::arg("cash_per_bar")      = py::none(),
+        py::arg("debit_per_bar")     = py::none(),
+        py::arg("borrow_per_bar")    = py::none(),
+        py::arg("benchmark_per_bar") = py::none(),
         "Fused crossover grid: builds each combination's signal from two rows "
         "of `indicators` and backtests it immediately, so no (num_combos x "
         "n_bars) signal matrix is ever materialized. pair_idx is a "
@@ -790,15 +886,22 @@ PYBIND11_MODULE(_sqt_core, m) {
            std::optional<py::array_t<double, py::array::c_style | py::array::forcecast>>
                ref_prices,
            double risk_free_rate,
-           double cash_rate, double financing_rate, double borrow_fee_bps)
+           double cash_rate, double financing_rate, double borrow_fee_bps,
+           py::object cash_per_bar, py::object debit_per_bar,
+           py::object borrow_per_bar, py::object benchmark_per_bar)
         -> py::array_t<double>
         {
             require_1d(prices, "prices");
             require_backtest_scalars(initial_capital, commission_pct, slippage_pct,
                                      periods_per_year, risk_free_rate,
                                      "batch_run_strategy");
-            const sqt::StrategyFinancing fin = strategy_financing(
+            sqt::StrategyFinancing fin = strategy_financing(
                 cash_rate, financing_rate, borrow_fee_bps, "batch_run_strategy");
+            StrategyRateArrays rate_hold;
+            attach_per_bar_financing(fin, rate_hold, cash_per_bar, debit_per_bar,
+                                     borrow_per_bar, benchmark_per_bar,
+                                     static_cast<std::size_t>(prices.size()),
+                                     risk_free_rate, "batch_run_strategy");
             auto prices_buf  = prices.request();
             auto signals_buf = signals_2d.request();
 
@@ -885,6 +988,11 @@ PYBIND11_MODULE(_sqt_core, m) {
         py::arg("cash_rate")      = 0.0,
         py::arg("financing_rate") = 0.0,
         py::arg("borrow_fee_bps") = 0.0,
+        // A financing spec's terms per bar -- see run_strategy.
+        py::arg("cash_per_bar")      = py::none(),
+        py::arg("debit_per_bar")     = py::none(),
+        py::arg("borrow_per_bar")    = py::none(),
+        py::arg("benchmark_per_bar") = py::none(),
         "Batch vectorized backtest — run all parameter combinations in one C++ call.\n\n"
         "signals must be a 2-D float64 array of shape (num_tests, n_bars).\n"
         "Returns a 2-D float64 array of shape (num_tests, 11), one row per\n"
@@ -911,7 +1019,9 @@ PYBIND11_MODULE(_sqt_core, m) {
            bool use_impact_model, double impact_coefficient,
            double max_adv_participation,
            double cash_rate, double short_rebate_rate,
-           bool segregated_short_proceeds, double day_basis) -> py::dict
+           bool segregated_short_proceeds, double day_basis,
+           py::object credit_rates, py::object debit_rates,
+           py::object rebate_rates, py::object borrow_bps) -> py::dict
         {
             constexpr const char* fn = "run_portfolio_simulation";
             const IndexArray rebal_bars = exact_int64(rebal_bars_obj, "rebal_bars", fn);
@@ -1030,6 +1140,32 @@ PYBIND11_MODULE(_sqt_core, m) {
                 throw std::invalid_argument(
                     "use_impact_model needs a volatility panel");
 
+            // The resolved financing schedule. Each array replaces its
+            // scalar term, so a call that sets both would be financed two
+            // ways: the replaced scalar must be 0.
+            RateArray credit_hold, debit_hold, rebate_hold, borrow_hold;
+            sqt::PortfolioRates rates;
+            rates.credit = take_rate_array(credit_rates, credit_hold, n_bars,
+                                           "credit_rates", fn);
+            rates.debit = take_rate_array(debit_rates, debit_hold, n_bars,
+                                          "debit_rates", fn);
+            rates.rebate = take_rate_array(rebate_rates, rebate_hold, n_bars,
+                                           "rebate_rates", fn);
+            rates.borrow_bps = take_rate_array(borrow_bps, borrow_hold, n_tickers,
+                                               "borrow_bps", fn, true);
+            const std::pair<const double*, std::pair<double, const char*>> pairs[] = {
+                {rates.credit, {cash_rate, "cash_rate"}},
+                {rates.debit, {margin_interest_rate, "margin_interest_rate"}},
+                {rates.rebate, {short_rebate_rate, "short_rebate_rate"}},
+                {rates.borrow_bps, {borrow_fee_bps, "borrow_fee_bps"}},
+            };
+            for (const auto& p : pairs) {
+                if (p.first && p.second.first != 0.0)
+                    throw std::invalid_argument(
+                        std::string(fn) + ": an array of rates replaces " +
+                        p.second.second + ", which must then be 0");
+            }
+
             const auto nb = static_cast<py::ssize_t>(n_bars);
             py::array_t<double> eq(nb), csh(nb), grs(nb), net(nb);
             py::array_t<double> reb({static_cast<py::ssize_t>(n_rebal),
@@ -1050,13 +1186,16 @@ PYBIND11_MODULE(_sqt_core, m) {
             sqt::PortfolioFinancing fin;
             std::size_t n_executed = 0;
             double peak_position = 0.0;
+            py::array_t<double> borrow_by(static_cast<py::ssize_t>(n_tickers));
+            double* borrow_by_ptr = borrow_by.mutable_data();
             {
                 py::gil_scoped_release release;
                 n_executed = sqt::run_portfolio_simulation(
                     c_ptr, x_ptr, w_ptr, r_ptr, g_ptr,
                     n_bars, n_tickers, n_rebal, costs,
                     eq_ptr, csh_ptr, grs_ptr, net_ptr, reb_ptr,
-                    &peak_position, &err, dv_ptr, vol_ptr, &fin);
+                    &peak_position, &err, dv_ptr, vol_ptr, &fin,
+                    &rates, borrow_by_ptr);
             }
 
             py::dict d;
@@ -1076,6 +1215,7 @@ PYBIND11_MODULE(_sqt_core, m) {
             d["borrow_charged"]      = fin.borrow_charged;
             d["rebate_credited"]     = fin.rebate_credited;
             d["debit_balance_years"] = fin.debit_balance_years;
+            d["borrow_by_asset"]     = borrow_by;
             return d;
         },
         py::arg("close"),
@@ -1109,6 +1249,13 @@ PYBIND11_MODULE(_sqt_core, m) {
         py::arg("short_rebate_rate")         = 0.0,
         py::arg("segregated_short_proceeds") = false,
         py::arg("day_basis")                 = 365.0,
+        // A financing schedule (backtest/financing.py): per-bar annual
+        // rates and per-ticker borrow, each replacing its scalar. None by
+        // default.
+        py::arg("credit_rates") = py::none(),
+        py::arg("debit_rates")  = py::none(),
+        py::arg("rebate_rates") = py::none(),
+        py::arg("borrow_bps")   = py::none(),
         "Shared-cash multi-asset portfolio simulation.\n\n"
         "Runs every configuration backtest/portfolio_engine.py accepts: the\n"
         "pct and per_share commission models (commission_model 0 / 1), the\n"
@@ -1126,7 +1273,12 @@ PYBIND11_MODULE(_sqt_core, m) {
         "360 = ACT/360): positive free cash earns cash_rate, negative free\n"
         "cash pays margin_interest_rate, shorts pay borrow_fee_bps, and with\n"
         "segregated_short_proceeds the short book's value is excluded from\n"
-        "free cash and earns short_rebate_rate instead.\n\n"
+        "free cash and earns short_rebate_rate instead. credit_rates,\n"
+        "debit_rates and rebate_rates (n_bars each, the annual rate each\n"
+        "bar's accrual uses) and borrow_bps (n_tickers) replace cash_rate,\n"
+        "margin_interest_rate, short_rebate_rate and borrow_fee_bps, which\n"
+        "must then be 0; tickers with differing borrow rates each pay their\n"
+        "own, and borrow_by_asset in the result is what each one paid.\n\n"
         "Every scalar is held to the Python engine's bounds (capital,\n"
         "leverage and position limits finite and > 0; rates, fees and the\n"
         "impact coefficient finite and >= 0; fill and commission_model one of\n"

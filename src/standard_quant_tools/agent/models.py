@@ -10,6 +10,15 @@ from pydantic import (
     model_validator,
 )
 
+from standard_quant_tools.agent.runtimes._financing import (
+    FINANCING_NULL_REASONS,
+    FinancingBenchmarkReport,
+    FinancingSpecInput,
+    borrow_fee_field,
+    cash_rate_field,
+    day_count_reason,
+    financing_rate_field,
+)
 from standard_quant_tools.agent.runtimes._json_safe import (
     ExplainsNulls,
     Reason,
@@ -224,13 +233,13 @@ class BacktestInput(BaseModel):
         ge=0.0,
         le=1.0,
         description=(
-            "Annualized risk-free rate (0.045 = 4.5%). Sharpe/Sortino "
-            "measure the excess over it, and the simulated account earns it "
-            "on idle cash and pays it on leverage beyond 1x -- run_strategy's "
-            "cash_rate and financing_rate default to it. 0.0 (default) "
-            "measures total return per unit of risk, not EXCESS return."
+            "Rate (0.045 = 4.5%) the excess is over; default cash_rate and "
+            "financing_rate."
         ),
     )
+    cash_rate: Optional[float] = cash_rate_field()
+    financing_rate: Optional[float] = financing_rate_field()
+    borrow_fee_bps: float = borrow_fee_field()
 
 
 class Trade(BaseModel):
@@ -2006,13 +2015,13 @@ class RegimeAdaptiveInput(BaseModel):
         ge=0.0,
         le=1.0,
         description=(
-            "Annualized risk-free rate (0.045 = 4.5%). Sharpe/Sortino "
-            "measure the excess over it, and the simulated account earns it "
-            "on idle cash and pays it on leverage beyond 1x -- run_strategy's "
-            "cash_rate and financing_rate default to it. 0.0 (default) "
-            "measures total return per unit of risk, not EXCESS return."
+            "Rate (0.045 = 4.5%) the excess is over; default cash_rate and "
+            "financing_rate."
         ),
     )
+    cash_rate: Optional[float] = cash_rate_field()
+    financing_rate: Optional[float] = financing_rate_field()
+    borrow_fee_bps: float = borrow_fee_field()
 
 
 #: Why the regime diagnostics of an adaptive backtest are null. They were
@@ -2271,13 +2280,13 @@ class WalkForwardInput(BaseModel):
         ge=0.0,
         le=1.0,
         description=(
-            "Annualized risk-free rate (0.045 = 4.5%). Sharpe/Sortino "
-            "measure the excess over it, and the simulated account earns it "
-            "on idle cash and pays it on leverage beyond 1x -- run_strategy's "
-            "cash_rate and financing_rate default to it. 0.0 (default) "
-            "measures total return per unit of risk, not EXCESS return."
+            "Rate (0.045 = 4.5%) the excess is over; default cash_rate and "
+            "financing_rate."
         ),
     )
+    cash_rate: Optional[float] = cash_rate_field()
+    financing_rate: Optional[float] = financing_rate_field()
+    borrow_fee_bps: float = borrow_fee_field()
 
     run_id: Optional[str] = Field(
         None,
@@ -2441,13 +2450,13 @@ class RegimeAdaptiveWalkForwardInput(BaseModel):
         ge=0.0,
         le=1.0,
         description=(
-            "Annualized risk-free rate (0.045 = 4.5%). Sharpe/Sortino "
-            "measure the excess over it, and the simulated account earns it "
-            "on idle cash and pays it on leverage beyond 1x -- run_strategy's "
-            "cash_rate and financing_rate default to it. 0.0 (default) "
-            "measures total return per unit of risk, not EXCESS return."
+            "Rate (0.045 = 4.5%) the excess is over; default cash_rate and "
+            "financing_rate."
         ),
     )
+    cash_rate: Optional[float] = cash_rate_field()
+    financing_rate: Optional[float] = financing_rate_field()
+    borrow_fee_bps: float = borrow_fee_field()
 
 
 class RegimeAdaptiveWalkForwardWindow(ExplainsNulls):
@@ -2934,14 +2943,13 @@ class BuyAndHoldInput(BaseModel):
         0.0,
         ge=0.0,
         le=1.0,
-        description=(
-            "Annualized risk-free rate (0.045 = 4.5%). Sharpe/Sortino "
-            "measure the excess over it, and the simulated account earns it "
-            "on idle cash and pays it on leverage beyond 1x -- run_strategy's "
-            "cash_rate and financing_rate default to it. 0.0 (default) "
-            "measures total return per unit of risk, not EXCESS return."
-        ),
+        description="Rate (0.045 = 4.5%) the excess is over, and idle cash earns.",
     )
+    # No cash_rate, financing_rate or borrow_fee_bps, unlike the other
+    # run_strategy tools: the book is fully long from its first held bar, so
+    # it never borrows or shorts, and its only idle cash -- the opening bar of
+    # a two-leg fill -- earns risk_free_rate, as cash_rate does by default.
+    # Fields that cannot move the answer are not advertised.
 
 
 # ──────────────────────────────────────────────
@@ -3051,13 +3059,13 @@ class CompareStrategiesInput(BaseModel):
         ge=0.0,
         le=1.0,
         description=(
-            "Annualized risk-free rate (0.045 = 4.5%). Sharpe/Sortino "
-            "measure the excess over it, and the simulated account earns it "
-            "on idle cash and pays it on leverage beyond 1x -- run_strategy's "
-            "cash_rate and financing_rate default to it. 0.0 (default) "
-            "measures total return per unit of risk, not EXCESS return."
+            "Rate (0.045 = 4.5%) the excess is over; default cash_rate and "
+            "financing_rate."
         ),
     )
+    cash_rate: Optional[float] = cash_rate_field()
+    financing_rate: Optional[float] = financing_rate_field()
+    borrow_fee_bps: float = borrow_fee_field()
 
 
 class CompareStrategiesResult(ExplainsNulls):
@@ -3230,13 +3238,13 @@ class BacktestOptInput(BaseModel):
         ge=0.0,
         le=1.0,
         description=(
-            "Annualized risk-free rate (0.045 = 4.5%). Sharpe/Sortino "
-            "measure the excess over it, and the simulated account earns it "
-            "on idle cash and pays it on leverage beyond 1x -- run_strategy's "
-            "cash_rate and financing_rate default to it. 0.0 (default) "
-            "measures total return per unit of risk, not EXCESS return."
+            "Rate (0.045 = 4.5%) the excess is over; default cash_rate and "
+            "financing_rate."
         ),
     )
+    cash_rate: Optional[float] = cash_rate_field()
+    financing_rate: Optional[float] = financing_rate_field()
+    borrow_fee_bps: float = borrow_fee_field()
 
     @field_validator("param_grid")
     @classmethod
@@ -3616,13 +3624,13 @@ class CustomSignalBacktestInput(BaseModel):
         ge=0.0,
         le=1.0,
         description=(
-            "Annualized risk-free rate (0.045 = 4.5%). Sharpe/Sortino "
-            "measure the excess over it, and the simulated account earns it "
-            "on idle cash and pays it on leverage beyond 1x -- run_strategy's "
-            "cash_rate and financing_rate default to it. 0.0 (default) "
-            "measures total return per unit of risk, not EXCESS return."
+            "Rate (0.045 = 4.5%) the excess is over; default cash_rate and "
+            "financing_rate."
         ),
     )
+    cash_rate: Optional[float] = cash_rate_field()
+    financing_rate: Optional[float] = financing_rate_field()
+    borrow_fee_bps: float = borrow_fee_field()
 
     @model_validator(mode="after")
     def _check_signal_values(self) -> "CustomSignalBacktestInput":
@@ -3731,13 +3739,13 @@ class SignalPanelBacktestInput(BaseModel):
         ge=0.0,
         le=1.0,
         description=(
-            "Annualized risk-free rate (0.045 = 4.5%). Sharpe/Sortino "
-            "measure the excess over it, and the simulated account earns it "
-            "on idle cash and pays it on leverage beyond 1x -- run_strategy's "
-            "cash_rate and financing_rate default to it. 0.0 (default) "
-            "measures total return per unit of risk, not EXCESS return."
+            "Rate (0.045 = 4.5%) the excess is over; default cash_rate and "
+            "financing_rate."
         ),
     )
+    cash_rate: Optional[float] = cash_rate_field()
+    financing_rate: Optional[float] = financing_rate_field()
+    borrow_fee_bps: float = borrow_fee_field()
 
     run_id: Optional[str] = Field(
         None,
@@ -4047,6 +4055,14 @@ class PortfolioSimulationInput(BaseModel):
             "return per unit of risk, not EXCESS return."
         ),
     )
+    financing: Optional[FinancingSpecInput] = Field(
+        None,
+        description="Full financing terms in place of the scalar rates above, "
+        "day_count and risk_free_rate (refused beside any of them set): a "
+        "benchmark, scalar or dated, with credit and debit spreads, borrow "
+        "per asset and a rebate spread. Its benchmark_rate is also the rate "
+        "the Sharpe measures against.",
+    )
 
     run_id: Optional[str] = Field(
         None,
@@ -4163,20 +4179,47 @@ class RebalanceEvent(BaseModel):
     )
 
 
-class FinancingReport(BaseModel):
+class FinancingReport(ExplainsNulls):
     """The rates a shared-cash simulation accrued at, and what they came to."""
+
+    null_reasons = FINANCING_NULL_REASONS
 
     day_count: str = Field(
         ..., description="'ACT/365F' or 'ACT/360': every accrual's day count."
     )
-    cash_rate: float = Field(..., description="Annual rate credited on positive cash.")
-    margin_interest_rate: float = Field(
-        ..., description="Annual rate charged on negative cash."
+    cash_rate: Stat = Field(None, description="Annual rate credited on positive cash.")
+    margin_interest_rate: Stat = Field(
+        None, description="Annual rate charged on negative cash."
     )
-    borrow_fee_bps: float = Field(..., description="Annual bps on short notional.")
+    borrow_fee_bps: Stat = Field(None, description="Annual bps on short notional.")
     short_proceeds: str = Field(..., description="'net_cash' or 'segregated'.")
-    short_rebate_rate: float = Field(
-        ..., description="Annual rate on segregated short proceeds."
+    short_rebate_rate: Stat = Field(
+        None, description="Annual rate on segregated short proceeds."
+    )
+    source: str = Field(
+        "scalars",
+        description="'scalars' (the scalar rates) or 'spec' (financing).",
+    )
+    benchmark: Optional[FinancingBenchmarkReport] = Field(
+        None, description="Under financing: the benchmark as the run used it."
+    )
+    credit_spread_bps: Stat = Field(
+        None, description="Under financing: the spread under the benchmark on credit."
+    )
+    debit_spread_bps: Stat = Field(
+        None, description="Under financing: the spread over the benchmark on debit."
+    )
+    rebate_spread_bps: Stat = Field(
+        None, description="Under financing: the spread under it on segregated proceeds."
+    )
+    borrow_bps_by_asset: Dict[str, float] = Field(
+        default_factory=dict,
+        description="The annual borrow rate each asset held short paid, in bps.",
+    )
+    borrow_charged_by_asset: Dict[str, float] = Field(
+        default_factory=dict,
+        description="Currency of borrow fee each asset held short paid; under "
+        "one rate for every short they add up to borrow_charged to rounding.",
     )
     interest_credited: float = Field(
         ..., description="Currency credited on positive cash over the run."
@@ -4199,6 +4242,9 @@ class FinancingReport(BaseModel):
         ...,
         description="The negative cash balance integrated over time, in "
         "currency-years on day_count: each 1% of margin rate costs 1% of it.",
+    )
+    notes: List[str] = Field(
+        default_factory=list, description="Why any rate above is null."
     )
 
 
@@ -4459,6 +4505,14 @@ class PairTradeBacktestInput(BaseModel):
         description="Day count for every accrual and the per-bar risk-free "
         "benchmark. Echoed on the result.",
     )
+    financing: Optional[FinancingSpecInput] = Field(
+        None,
+        description="Full financing terms in place of the scalar rates above, "
+        "day_count and risk_free_rate (refused beside any of them set): a "
+        "benchmark, scalar or dated, with credit and debit spreads, borrow "
+        "per asset and a rebate spread. Its benchmark_rate is also the rate "
+        "the Sharpe measures against.",
+    )
     run_id: Optional[str] = Field(
         None,
         description=(
@@ -4617,13 +4671,13 @@ class BacktestDiagnosticsInput(BaseModel):
         ge=0.0,
         le=1.0,
         description=(
-            "Annualized risk-free rate (0.045 = 4.5%). Sharpe/Sortino "
-            "measure the excess over it, and the simulated account earns it "
-            "on idle cash and pays it on leverage beyond 1x -- run_strategy's "
-            "cash_rate and financing_rate default to it. 0.0 (default) "
-            "measures total return per unit of risk, not EXCESS return."
+            "Rate (0.045 = 4.5%) the excess is over; default cash_rate and "
+            "financing_rate."
         ),
     )
+    cash_rate: Optional[float] = cash_rate_field()
+    # No financing_rate or borrow_fee_bps: a registry strategy is long or
+    # flat, never short or above 1x, so neither can accrue here.
 
 
 class DrawdownEpisode(BaseModel):
@@ -4798,13 +4852,13 @@ class RobustnessDiagnosticsInput(BaseModel):
         ge=0.0,
         le=1.0,
         description=(
-            "Annualized risk-free rate (0.045 = 4.5%). Sharpe/Sortino "
-            "measure the excess over it, and the simulated account earns it "
-            "on idle cash and pays it on leverage beyond 1x -- run_strategy's "
-            "cash_rate and financing_rate default to it. 0.0 (default) "
-            "measures total return per unit of risk, not EXCESS return."
+            "Rate (0.045 = 4.5%) the excess is over; default cash_rate and "
+            "financing_rate."
         ),
     )
+    cash_rate: Optional[float] = cash_rate_field()
+    financing_rate: Optional[float] = financing_rate_field()
+    borrow_fee_bps: float = borrow_fee_field()
 
     @field_validator("param_grid")
     @classmethod
@@ -5419,13 +5473,13 @@ class BacktestCompactInput(BaseModel):
         ge=0.0,
         le=1.0,
         description=(
-            "Annualized risk-free rate (0.045 = 4.5%). Sharpe/Sortino "
-            "measure the excess over it, and the simulated account earns it "
-            "on idle cash and pays it on leverage beyond 1x -- run_strategy's "
-            "cash_rate and financing_rate default to it. 0.0 (default) "
-            "measures total return per unit of risk, not EXCESS return."
+            "Rate (0.045 = 4.5%) the excess is over; default cash_rate and "
+            "financing_rate."
         ),
     )
+    cash_rate: Optional[float] = cash_rate_field()
+    # No financing_rate or borrow_fee_bps: a registry strategy is long or
+    # flat, never short or above 1x, so neither can accrue here.
 
 
 class BacktestResultV2(ExplainsNulls):
@@ -6069,6 +6123,17 @@ class EstimateTradeCostInput(BaseModel):
     margin_annual_rate: float = Field(
         0.0, ge=0, description="Annualized rate on negative cash."
     )
+    day_count: Literal["ACT/365F", "ACT/360"] = Field(
+        "ACT/365F",
+        description="Day count the borrow and margin accrue on over "
+        "holding_days: / 365 (default) or / 360, how USD margin rates are "
+        "usually quoted.",
+    )
+
+    @field_validator("day_count", mode="before")
+    @classmethod
+    def _day_count_reason(cls, value: Any) -> Any:
+        return day_count_reason(value)
 
     @model_validator(mode="after")
     def _check_model_inputs(self) -> "EstimateTradeCostInput":
@@ -6230,13 +6295,13 @@ class CompareCostModelsInput(BaseModel):
         ge=0.0,
         le=1.0,
         description=(
-            "Annualized risk-free rate (0.045 = 4.5%). Sharpe/Sortino "
-            "measure the excess over it, and the simulated account earns it "
-            "on idle cash and pays it on leverage beyond 1x -- run_strategy's "
-            "cash_rate and financing_rate default to it. 0.0 (default) "
-            "measures total return per unit of risk, not EXCESS return."
+            "Rate (0.045 = 4.5%) the excess is over; default cash_rate and "
+            "financing_rate."
         ),
     )
+    cash_rate: Optional[float] = cash_rate_field()
+    # No financing_rate or borrow_fee_bps: a registry strategy is long or
+    # flat, never short or above 1x, so neither can accrue here.
 
     @field_validator("scenarios")
     @classmethod
@@ -7908,13 +7973,13 @@ class StrategyMatrixInput(BaseModel):
         ge=0.0,
         le=1.0,
         description=(
-            "Annualized risk-free rate (0.045 = 4.5%). Sharpe/Sortino "
-            "measure the excess over it, and the simulated account earns it "
-            "on idle cash and pays it on leverage beyond 1x -- run_strategy's "
-            "cash_rate and financing_rate default to it. 0.0 (default) "
-            "measures total return per unit of risk, not EXCESS return."
+            "Rate (0.045 = 4.5%) the excess is over; default cash_rate and "
+            "financing_rate."
         ),
     )
+    cash_rate: Optional[float] = cash_rate_field()
+    # No financing_rate or borrow_fee_bps: a registry strategy is long or
+    # flat, never short or above 1x, so neither can accrue here.
 
     @field_validator("tickers", "strategies")
     @classmethod

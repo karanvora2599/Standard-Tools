@@ -61,7 +61,7 @@ _STREAMS_DESCRIPTION = (
 )
 
 #: `returns_ref`'s description, up to what its columns are.
-_RETURNS_REF = "An `sqt://returns_panel/...` reference in place of "
+_RETURNS_REF = "A published returns_panel in place of "
 
 
 def _exactly_one(model: Any, inline: List[str], who: str) -> None:
@@ -90,11 +90,10 @@ class DeflatedSharpeInput(BaseModel):
     )
     returns_ref: Optional[str] = Field(
         None,
-        description=f"{_RETURNS_REF}`returns`, read as one dated series; "
-        "returns_column names it when the panel has several columns.",
+        description=f"{_RETURNS_REF}returns, read as one dated series.",
     )
     returns_column: Optional[str] = Field(
-        None, description="With returns_ref: the column that is the strategy."
+        None, description="returns_ref's column, if it has several."
     )
     n_trials: int = Field(
         ...,
@@ -139,7 +138,7 @@ class PBOInput(BaseModel):
     )
     returns_ref: Optional[str] = Field(
         None,
-        description=f"{_RETURNS_REF}trial_returns: each column is a " "configuration.",
+        description=f"{_RETURNS_REF}trial_returns, a column per configuration.",
     )
     n_splits: int = Field(
         8,

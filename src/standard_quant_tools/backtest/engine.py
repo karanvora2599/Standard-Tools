@@ -10,7 +10,14 @@ logger = logging.getLogger(__name__)
 import numpy as np
 import pandas as pd
 
-from standard_quant_tools.backtest.financing import ratios_over_accrued_rate
+from standard_quant_tools.backtest.financing import (
+    FinancingSpec,
+    as_financing_spec,
+    calendar_day_gaps,
+    ratios_over_accrued_rate,
+    ratios_over_benchmark,
+    refuse_scalars_with_spec,
+)
 from standard_quant_tools.backtest.ranking import rank_rows, unrankable_note
 from standard_quant_tools.backtest.screens import (  # noqa: F401
     SPLIT_SCREEN_THRESHOLD,
@@ -416,6 +423,130 @@ def _strategy_financing(
     return float(cash), float(debit), float(borrow)
 
 
+#: run_strategy's financing scalars at their defaults: what "not given" is
+#: when a FinancingSpec arrives with them.
+_STRATEGY_SCALAR_DEFAULTS: Dict[str, Any] = {
+    "risk_free_rate": 0.0,
+    "cash_rate": None,
+    "financing_rate": None,
+    "borrow_fee_bps": 0.0,
+}
+
+
+def _spec_or_none(
+    financing: Any,
+    where: str,
+    risk_free_rate: float,
+    cash_rate: Optional[float],
+    financing_rate: Optional[float],
+    borrow_fee_bps: float,
+) -> Optional[FinancingSpec]:
+    """The financing spec, refused beside any scalar term set away from its
+    default and refused with segregated proceeds, which this engine's one
+    cash account does not hold apart."""
+    spec = as_financing_spec(financing, f"{where}: financing")
+    if spec is None:
+        return None
+    refuse_scalars_with_spec(
+        {
+            "risk_free_rate": risk_free_rate,
+            "cash_rate": cash_rate,
+            "financing_rate": financing_rate,
+            "borrow_fee_bps": borrow_fee_bps,
+        },
+        _STRATEGY_SCALAR_DEFAULTS,
+        where,
+    )
+    if spec.segregated:
+        raise ValidationError(
+            f"{where}: financing.short_proceeds='segregated' is not something "
+            "this engine can hold: a signal is a fraction of one equity, and a "
+            "short's proceeds are part of the cash it earns on. Use "
+            "short_proceeds='net_cash' here, or run_portfolio_simulation, "
+            "which keeps proceeds with the lender."
+        )
+    return spec
+
+
+def _spec_per_bar(
+    spec: FinancingSpec,
+    index: pd.Index,
+    asset: Optional[str],
+    signals: Optional[np.ndarray],
+    where: str,
+) -> Dict[str, np.ndarray]:
+    """
+    A financing spec as the four per-bar fractions run_strategy accrues and
+    measures against, each annual rate * calendar days / basis (0 on bar 0):
+    `cash` (what a unit of cash earned), `debit` (what a unit borrowed
+    paid), `borrow` (what a unit short paid) and `benchmark` (the rate the
+    Sharpe subtracts). backtest.cpp reads the same four arrays.
+
+    `signals` are the raw signals, or None when every signal the run will
+    see is not known yet (a grid checks each combination as it builds it);
+    a short in them with no borrow rate is refused, naming `asset`.
+    """
+    gaps = calendar_day_gaps(index)
+    frac = gaps / spec.basis
+    applied = spec.applied_benchmark(index)
+    bps = spec.borrow_rate_for(asset)
+    if bps is None and signals is not None:
+        _refuse_unpriced_short(spec, asset, signals, where)
+    credit = applied - spec.credit_spread_bps / 10_000.0
+    debit = applied + spec.debit_spread_bps / 10_000.0
+    return {
+        "cash": credit * frac,
+        "debit": debit * frac,
+        "borrow": ((0.0 if bps is None else bps) / 10_000.0) * frac,
+        "benchmark": applied * frac,
+    }
+
+
+def _refuse_unpriced_short(
+    spec: FinancingSpec, asset: Optional[str], signals: np.ndarray, where: str
+) -> None:
+    """Refuse a short held with no borrow rate under a spec. The last
+    signal is never held (it would fill after the last bar)."""
+    if spec.borrow_rate_for(asset) is not None:
+        return
+    held = np.asarray(signals, dtype=np.float64)[:-1]
+    if not (held < 0.0).any():
+        return
+    name = repr(asset) if asset is not None else "this run's instrument"
+    hint = (
+        f"set borrow_bps[{asset!r}] or default_borrow_bps"
+        if asset is not None
+        else "pass asset= to name it (borrow_bps is keyed by asset) or set "
+        "default_borrow_bps"
+    )
+    raise ValidationError(
+        f"{where}: the signal holds {name} short and financing has no borrow "
+        "rate for it. A short is borrowed stock, and with a financing spec in "
+        f"use nothing borrows for free by default: {hint}."
+    )
+
+
+def _native_per_bar(per_bar: Optional[Dict[str, np.ndarray]]) -> Dict[str, Any]:
+    """The kernel's keyword arguments for a spec's per-bar arrays: all three
+    financing arrays when any is nonzero, the benchmark when it is nonzero,
+    and nothing at all for a spec that accrues nothing -- which the kernel
+    then runs exactly as a zero-rate call."""
+    if per_bar is None:
+        return {}
+    kwargs: Dict[str, Any] = {}
+    if per_bar["cash"].any() or per_bar["debit"].any() or per_bar["borrow"].any():
+        kwargs.update(
+            cash_per_bar=np.ascontiguousarray(per_bar["cash"], dtype=np.float64),
+            debit_per_bar=np.ascontiguousarray(per_bar["debit"], dtype=np.float64),
+            borrow_per_bar=np.ascontiguousarray(per_bar["borrow"], dtype=np.float64),
+        )
+    if per_bar["benchmark"].any():
+        kwargs["benchmark_per_bar"] = np.ascontiguousarray(
+            per_bar["benchmark"], dtype=np.float64
+        )
+    return kwargs
+
+
 def _with_financing(
     strategy_returns: pd.Series,
     executed: pd.Series,
@@ -425,6 +556,7 @@ def _with_financing(
     financing_rate: float,
     borrow_fee_bps: float,
     periods_per_year: int,
+    per_bar: Optional[Dict[str, np.ndarray]] = None,
 ) -> pd.Series:
     """
     Each bar's return plus what its cash earned, its leverage cost and its
@@ -437,13 +569,26 @@ def _with_financing(
     accrues on bar 0. backtest.cpp's financing_at is the same two selects in
     the same order, so a bar's return is the same double on both paths.
 
+    `per_bar` is a financing spec's own fractions (see `_spec_per_bar`),
+    which replace the three rate / periods_per_year quotients element for
+    element.
+
     With every rate zero this returns `strategy_returns` itself, untouched.
     """
-    if cash_rate == 0.0 and financing_rate == 0.0 and borrow_fee_bps == 0.0:
-        return strategy_returns
-    cash_pp = cash_rate / periods_per_year
-    debit_pp = financing_rate / periods_per_year
-    borrow_pp = borrow_fee_bps / 10_000.0 / periods_per_year
+    if per_bar is not None:
+        if not (
+            per_bar["cash"].any() or per_bar["debit"].any() or per_bar["borrow"].any()
+        ):
+            return strategy_returns
+        cash_pp: Any = per_bar["cash"]
+        debit_pp: Any = per_bar["debit"]
+        borrow_pp: Any = per_bar["borrow"]
+    else:
+        if cash_rate == 0.0 and financing_rate == 0.0 and borrow_fee_bps == 0.0:
+            return strategy_returns
+        cash_pp = cash_rate / periods_per_year
+        debit_pp = financing_rate / periods_per_year
+        borrow_pp = borrow_fee_bps / 10_000.0 / periods_per_year
     held_series = executed.shift(1).fillna(0.0) if two_leg else executed
     held = held_series.to_numpy(dtype=np.float64)
     cash_frac = 1.0 - held
@@ -460,6 +605,7 @@ def _ratios_after_bar_zero(
     risk_free_rate: float,
     periods_per_year: int,
     financed: bool = False,
+    benchmark: Optional[np.ndarray] = None,
 ) -> Tuple[float, float]:
     """
     Sharpe and Sortino over the risk-free rate as it accrued: rate /
@@ -476,8 +622,17 @@ def _ratios_after_bar_zero(
     then sits in cash earns exactly the rate on every bar after bar 0, so
     its only dispersion is bar 0's placeholder; its Sharpe is NaN, as
     backtest.cpp reports it, because there is no risk to divide by.
+
+    `benchmark`: a financing spec's benchmark as each bar accrued it (0 on
+    bar 0), which replaces rate / periods_per_year.
     """
-    if risk_free_rate == 0.0:
+    if benchmark is not None:
+        sharpe, sortino = ratios_over_benchmark(
+            strategy_returns,
+            pd.Series(benchmark, index=strategy_returns.index, dtype=float),
+            periods_per_year,
+        )
+    elif risk_free_rate == 0.0:
         sharpe, sortino = (
             sharpe_ratio(strategy_returns, 0.0, periods_per_year),
             sortino_ratio(strategy_returns, 0.0, periods_per_year),
@@ -567,6 +722,8 @@ def run_strategy(
     cash_rate: Optional[float] = None,
     financing_rate: Optional[float] = None,
     borrow_fee_bps: float = 0.0,
+    financing: Optional[Any] = None,
+    asset: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Vectorized backtesting engine with transaction costs.
@@ -621,6 +778,21 @@ def run_strategy(
             (the lagged signal under a close fill, the one before it under
             a two-leg fill, whose change lands at the next open), from the
             second bar on; with all three zero no bar changes.
+        financing: the full terms instead of the three rates above -- a
+            `backtest.financing.FinancingSpec` (or its input model, or a
+            mapping of its fields). Cash earns its benchmark less the credit
+            spread, borrowing beyond 1x pays the benchmark plus the debit
+            spread, and a short pays the asset's borrow rate, each per bar
+            at rate * calendar days / the spec's day count (so the bars
+            must be dated) on the benchmark in force on the previous bar.
+            The benchmark is then also the rate the Sharpe and Sortino
+            subtract, bar by bar, in place of risk_free_rate. Refused beside
+            risk_free_rate, cash_rate, financing_rate or borrow_fee_bps set
+            away from their defaults, with segregated short proceeds (one
+            cash account holds a short's proceeds), and for a short with no
+            borrow rate.
+        asset: the instrument's name, which picks its entry in the spec's
+            borrow_bps. Without it only default_borrow_bps applies.
         adjusted: whether the bars are split-adjusted, when the caller
             knows (a provider's DataSetMetadata.split_adjusted). Read from
             `price_data.attrs` when not passed (`split_adjusted`, else the
@@ -700,6 +872,14 @@ def run_strategy(
     # returned a NaN Sharpe beside a +inf Sortino. Any sign is allowed:
     # negative policy rates are real.
     require_finite_scalar(risk_free_rate, "risk_free_rate", "run_strategy")
+    spec = _spec_or_none(
+        financing,
+        "run_strategy",
+        risk_free_rate,
+        cash_rate,
+        financing_rate,
+        borrow_fee_bps,
+    )
     cash_rate, financing_rate, borrow_fee_bps = _strategy_financing(
         risk_free_rate, cash_rate, financing_rate, borrow_fee_bps, "run_strategy"
     )
@@ -790,6 +970,27 @@ def run_strategy(
         require_positive_price_series(
             price_data.loc[idx, "Low"], "Low", "run_strategy", allow_nan=False
         )
+
+    # The spec's per-bar fractions, on the bars actually backtested, built
+    # once and read by both paths. None without a spec.
+    per_bar = (
+        _spec_per_bar(spec, idx, asset, signals_arr, "run_strategy")
+        if spec is not None
+        else None
+    )
+    financed = (
+        bool(per_bar["cash"].any() or per_bar["debit"].any() or per_bar["borrow"].any())
+        if per_bar is not None
+        else bool(cash_rate or financing_rate or borrow_fee_bps)
+    )
+    # The rate the Sharpe subtracts per bar under a spec, and the number the
+    # 0/0 convention reads its sign from.
+    sharpe_benchmark = per_bar["benchmark"] if per_bar is not None else None
+    rate_for_conventions = (
+        float(np.mean(per_bar["benchmark"][1:]))
+        if per_bar is not None and len(idx) > 1
+        else risk_free_rate
+    )
 
     n_bars = len(prices)
     logger.debug(
@@ -913,6 +1114,7 @@ def run_strategy(
             cash_rate=cash_rate,
             financing_rate=financing_rate,
             borrow_fee_bps=borrow_fee_bps,
+            **_native_per_bar(per_bar),
         )
         equity_curve = pd.Series(r["equity_curve"], index=idx)
 
@@ -941,7 +1143,7 @@ def run_strategy(
             r["total_return"],
             r["annualized_volatility"],
             r["num_trades"],
-            risk_free_rate,
+            rate_for_conventions,
             win_rate=r["win_rate"],
         )
         r["sortino_ratio"] = float(sortino_v)
@@ -1072,6 +1274,7 @@ def run_strategy(
         financing_rate=financing_rate,
         borrow_fee_bps=borrow_fee_bps,
         periods_per_year=ppy,
+        per_bar=per_bar,
     )
     # A BAR RETURN AT OR BELOW -100% WIPES THE ACCOUNT OUT; it does not
     # take equity negative. An unguarded cumprod does exactly that, and
@@ -1105,7 +1308,8 @@ def run_strategy(
         strategy_returns,
         risk_free_rate,
         ppy,
-        financed=bool(cash_rate or financing_rate or borrow_fee_bps),
+        financed=financed,
+        benchmark=sharpe_benchmark,
     )
     mdd = max_drawdown(equity_curve)
     cal = calmar_ratio(equity_curve, ppy)
@@ -1172,6 +1376,7 @@ def _fused_crossover_metrics(
     risk_free_rate: float = 0.0,
     periods_per_year: int = 252,
     financing: Tuple[float, float, float] = (0.0, 0.0, 0.0),
+    per_bar: Optional[Dict[str, np.ndarray]] = None,
 ) -> Optional[np.ndarray]:
     """
     Fused path for two-moving-average crossover grids.
@@ -1231,6 +1436,7 @@ def _fused_crossover_metrics(
         cash_rate=financing[0],
         financing_rate=financing[1],
         borrow_fee_bps=financing[2],
+        **_native_per_bar(per_bar),
     )
 
 
@@ -1267,6 +1473,9 @@ def _run_grid_job(job: Dict[str, Any]) -> Dict[str, Any]:
         cash_rate=job.get("cash_rate", 0.0),
         financing_rate=job.get("financing_rate", 0.0),
         borrow_fee_bps=job.get("borrow_fee_bps", 0.0),
+        # A spec in place of the three (they are then None, None and 0.0).
+        financing=job.get("financing"),
+        asset=job.get("asset"),
     )
     result.pop("equity_curve", None)
     result.pop("trade_log", None)
@@ -1308,6 +1517,8 @@ def _run_signal_fn_job(
     risk_free_rate: float = 0.0,
     periods_per_year: Optional[int] = None,
     financing: Tuple[float, float, float] = (0.0, 0.0, 0.0),
+    spec: Optional[FinancingSpec] = None,
+    asset: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Sequential-only counterpart to _run_grid_job for a user-supplied signal
@@ -1319,6 +1530,15 @@ def _run_signal_fn_job(
     callable strategy's grid Sharpe disagreed with its single run.
     """
     signals = signal_fn(price_data, **params)
+    scalars: Dict[str, Any] = (
+        {
+            "cash_rate": financing[0],
+            "financing_rate": financing[1],
+            "borrow_fee_bps": financing[2],
+        }
+        if spec is None
+        else {"financing": spec, "asset": asset}
+    )
     result = run_strategy(
         price_data,
         signals,
@@ -1328,9 +1548,7 @@ def _run_signal_fn_job(
         fill_price=fill_price,
         risk_free_rate=risk_free_rate,
         periods_per_year=periods_per_year,
-        cash_rate=financing[0],
-        financing_rate=financing[1],
-        borrow_fee_bps=financing[2],
+        **scalars,
     )
     result.pop("equity_curve", None)
     result.pop("trade_log", None)
@@ -1449,6 +1667,8 @@ def backtest_grid(
     cash_rate: Optional[float] = None,
     financing_rate: Optional[float] = None,
     borrow_fee_bps: float = 0.0,
+    financing: Optional[Any] = None,
+    asset: Optional[str] = None,
 ) -> pd.DataFrame:
     """
     Run a backtest across every parameter combination in param_grid in parallel.
@@ -1511,6 +1731,11 @@ def backtest_grid(
                         two rates default to risk_free_rate, and every path
                         (fused, batch and Python) is financed alike, so a
                         grid row is the single run with the same arguments.
+        financing, asset: the full terms in place of those three, and the
+                        instrument whose borrow rate they name -- see
+                        run_strategy. Every path reads the same per-bar
+                        arrays, and the Sharpe each row ranks on subtracts
+                        the spec's benchmark.
 
     Returns:
         pd.DataFrame with one row per distinct parameter combination, ranked
@@ -1560,7 +1785,15 @@ def backtest_grid(
                 f"{name} must be non-negative and finite, got {value!r}"
             )
     require_finite_scalar(risk_free_rate, "risk_free_rate", "backtest_grid")
-    financing = _strategy_financing(
+    spec = _spec_or_none(
+        financing,
+        "backtest_grid",
+        risk_free_rate,
+        cash_rate,
+        financing_rate,
+        borrow_fee_bps,
+    )
+    scalar_financing = _strategy_financing(
         risk_free_rate, cash_rate, financing_rate, borrow_fee_bps, "backtest_grid"
     )
     # Before either path, and before the bars are read for anything: the
@@ -1573,6 +1806,19 @@ def backtest_grid(
         periods_per_year=periods_per_year,
         interval=interval,
         where="backtest_grid",
+    )
+    # The spec's per-bar fractions on the grid's bars, once for every row;
+    # each combination's signal is checked for an unpriced short as it is
+    # built (run_strategy checks its own on the Python path).
+    grid_per_bar = (
+        _spec_per_bar(spec, price_data.index, asset, None, "backtest_grid")
+        if spec is not None
+        else None
+    )
+    grid_benchmark_sign = (
+        float(np.mean(grid_per_bar["benchmark"][1:]))
+        if grid_per_bar is not None and len(price_data.index) > 1
+        else risk_free_rate
     )
 
     is_custom = callable(strategy)
@@ -1666,7 +1912,8 @@ def backtest_grid(
                     grid_ref_arr,
                     risk_free_rate,
                     ppy,
-                    financing,
+                    scalar_financing,
+                    per_bar=grid_per_bar,
                 )
 
             if metrics_arr is None:
@@ -1680,6 +1927,9 @@ def backtest_grid(
                     np.vstack(sig_rows), dtype=np.float64
                 )  # shape: (num_combos, n_bars)
                 require_finite_array(signals_mat, "signals", "batch_run_strategy")
+                if spec is not None:
+                    for row in signals_mat:
+                        _refuse_unpriced_short(spec, asset, row, "backtest_grid")
 
                 # win_rate/profit_factor/num_trades/avg_trade_return_pct here come
                 # straight from the native kernel's own trade-log logic, same as
@@ -1710,9 +1960,10 @@ def backtest_grid(
                     float(ppy),
                     grid_ref_arr,
                     risk_free_rate,
-                    cash_rate=financing[0],
-                    financing_rate=financing[1],
-                    borrow_fee_bps=financing[2],
+                    cash_rate=scalar_financing[0],
+                    financing_rate=scalar_financing[1],
+                    borrow_fee_bps=scalar_financing[2],
+                    **_native_per_bar(grid_per_bar),
                 )
             metrics_df = pd.DataFrame(metrics_arr, columns=_BATCH_METRIC_COLUMNS)
             metrics_df["num_trades"] = metrics_df["num_trades"].astype(int)
@@ -1728,7 +1979,7 @@ def backtest_grid(
                 metrics_df["total_return"],
                 metrics_df["annualized_volatility"],
                 metrics_df["num_trades"],
-                risk_free_rate,
+                grid_benchmark_sign,
                 win_rate=metrics_df["win_rate"],
             )
             metrics_df["final_equity"] = metrics_df["final_equity"].round(2)
@@ -1821,11 +2072,30 @@ def backtest_grid(
                 fill_price=fill_price,
                 risk_free_rate=risk_free_rate,
                 periods_per_year=ppy,
-                financing=financing,
+                financing=scalar_financing,
+                spec=spec,
+                asset=asset,
             )
             for combo in combos
         ]
     else:
+        # Under a spec the three scalars stay at their defaults, so the
+        # single run each job makes takes the spec alone.
+        job_financing: Dict[str, Any] = (
+            {
+                "cash_rate": scalar_financing[0],
+                "financing_rate": scalar_financing[1],
+                "borrow_fee_bps": scalar_financing[2],
+            }
+            if spec is None
+            else {
+                "cash_rate": None,
+                "financing_rate": None,
+                "borrow_fee_bps": 0.0,
+                "financing": spec,
+                "asset": asset,
+            }
+        )
         jobs = [
             {
                 "price_data": price_data,
@@ -1837,9 +2107,7 @@ def backtest_grid(
                 "fill_price": fill_price,
                 "risk_free_rate": risk_free_rate,
                 "periods_per_year": ppy,
-                "cash_rate": financing[0],
-                "financing_rate": financing[1],
-                "borrow_fee_bps": financing[2],
+                **job_financing,
             }
             for combo in combos
         ]

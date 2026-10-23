@@ -1677,7 +1677,10 @@ def estimate_trade_cost(
                 "borrow",
                 "short_borrow_cost",
                 short_borrow_cost(
-                    notional, input_data.short_borrow_bps, input_data.holding_days
+                    notional,
+                    input_data.short_borrow_bps,
+                    input_data.holding_days,
+                    day_count=input_data.day_count,
                 ),
             )
         else:
@@ -1694,6 +1697,7 @@ def estimate_trade_cost(
                     input_data.margin_cash,
                     input_data.margin_annual_rate,
                     input_data.holding_days,
+                    day_count=input_data.day_count,
                 )
             ),
             6,

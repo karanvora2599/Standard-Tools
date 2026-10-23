@@ -209,6 +209,10 @@ from standard_quant_tools.agent.models import (
     WalkForwardWindow,
     financing_report,
 )
+from standard_quant_tools.agent.runtimes._financing import (
+    account_financing_kwargs,
+    strategy_financing_kwargs,
+)
 from standard_quant_tools.agent.runtimes._shared import (
     FETCH_INTERVAL,
     _run_backtest,
@@ -218,7 +222,7 @@ from standard_quant_tools.backtest.artifacts import load_artifact, save_artifact
 from standard_quant_tools.backtest.engine import backtest_grid, run_strategy
 from standard_quant_tools.backtest.financing import (
     ratios_over_accrued_rate,
-    resolve_debit_rate,
+    ratios_over_benchmark,
 )
 from standard_quant_tools.backtest.monte_carlo import simulate_forward_paths
 from standard_quant_tools.backtest.pairs import run_pair_backtest as _pair_backtest_run
@@ -458,6 +462,7 @@ def compare_strategies(input_data: CompareStrategiesInput) -> CompareStrategiesR
         slippage_pct=input_data.slippage_pct,
         fill_price=input_data.fill_price,
         risk_free_rate=input_data.risk_free_rate,
+        **strategy_financing_kwargs(input_data),
     )
     bh = _run_backtest(bh_input, df, bh_signals)
 
@@ -488,6 +493,7 @@ def compare_strategies(input_data: CompareStrategiesInput) -> CompareStrategiesR
             # sortino_ratio, so without this the RANKING itself silently
             # assumed a 0% rate -- not just the number beside each row.
             risk_free_rate=input_data.risk_free_rate,
+            **strategy_financing_kwargs(input_data),
         )
         bt = _run_backtest(bt_input, df, signals)
         comparisons.append(
@@ -617,6 +623,7 @@ def run_regime_adaptive_backtest(
         ascending=False,
         n_workers=input_data.n_workers,
         risk_free_rate=input_data.risk_free_rate,
+        **strategy_financing_kwargs(input_data),
         interval=FETCH_INTERVAL,
     )
 
@@ -647,6 +654,7 @@ def run_regime_adaptive_backtest(
         # Sharpe measured against 0%. Two numbers from one call, under two
         # different assumptions.
         risk_free_rate=input_data.risk_free_rate,
+        **strategy_financing_kwargs(input_data),
     )
     bt_result = _run_backtest(dummy_input, df, signals)
 
@@ -780,6 +788,7 @@ def run_regime_adaptive_walkforward_backtest(
                 n_workers=1,
                 fill_price=input_data.fill_price,
                 risk_free_rate=input_data.risk_free_rate,
+                **strategy_financing_kwargs(input_data),
                 interval=FETCH_INTERVAL,
             )
             # The grid puts each strategy's best RANKABLE row first.
@@ -837,6 +846,7 @@ def run_regime_adaptive_walkforward_backtest(
             slippage_pct=input_data.slippage_pct,
             fill_price=input_data.fill_price,
             risk_free_rate=input_data.risk_free_rate,
+            **strategy_financing_kwargs(input_data),
             interval=FETCH_INTERVAL,
         )
 
@@ -888,6 +898,7 @@ def run_regime_adaptive_walkforward_backtest(
         slippage_pct=input_data.slippage_pct,
         fill_price=input_data.fill_price,
         risk_free_rate=input_data.risk_free_rate,
+        **strategy_financing_kwargs(input_data),
         interval=FETCH_INTERVAL,
     )
     worst_window = min(windows, key=lambda w: w.out_of_sample_return)
@@ -1013,6 +1024,7 @@ def run_walk_forward_backtest(input_data: WalkForwardInput) -> WalkForwardResult
             n_workers=1,
             fill_price=input_data.fill_price,
             risk_free_rate=input_data.risk_free_rate,
+            **strategy_financing_kwargs(input_data),
             interval=FETCH_INTERVAL,
         )
 
@@ -1050,6 +1062,7 @@ def run_walk_forward_backtest(input_data: WalkForwardInput) -> WalkForwardResult
             slippage_pct=input_data.slippage_pct,
             fill_price=input_data.fill_price,
             risk_free_rate=input_data.risk_free_rate,
+            **strategy_financing_kwargs(input_data),
             interval=FETCH_INTERVAL,
         )
 
@@ -1097,6 +1110,7 @@ def run_walk_forward_backtest(input_data: WalkForwardInput) -> WalkForwardResult
         slippage_pct=input_data.slippage_pct,
         fill_price=input_data.fill_price,
         risk_free_rate=input_data.risk_free_rate,
+        **strategy_financing_kwargs(input_data),
         interval=FETCH_INTERVAL,
     )
     avg_is_sharpe = float(np.mean([w.in_sample_sharpe for w in windows]))
@@ -1174,6 +1188,7 @@ def run_backtest_optimization(input_data: BacktestOptInput) -> BacktestOptResult
         n_workers=input_data.n_workers,
         fill_price=input_data.fill_price,
         risk_free_rate=input_data.risk_free_rate,
+        **strategy_financing_kwargs(input_data),
         interval=FETCH_INTERVAL,
     )
 
@@ -1297,6 +1312,7 @@ def run_custom_signal_backtest(input_data: CustomSignalBacktestInput) -> Backtes
         # Rebuilding BacktestInput field by field dropped this, so the
         # tool advertised "for Sharpe/Sortino" and measured against 0%.
         risk_free_rate=input_data.risk_free_rate,
+        **strategy_financing_kwargs(input_data),
     )
     return _run_backtest(bt_input, df, signal_series)
 
@@ -1372,6 +1388,7 @@ def run_signal_panel_backtest(
         include_trade_log=input_data.include_trade_log,
         fill_price=input_data.fill_price,
         risk_free_rate=input_data.risk_free_rate,
+        **strategy_financing_kwargs(input_data),
         interval=FETCH_INTERVAL,
     )
 
@@ -1517,32 +1534,27 @@ def _metrics_with_day0_cost(
     return returns, total_return, annualized_return, equity_with_start
 
 
-def _financing_kwargs(input_data: Any) -> Dict[str, Any]:
+def _financing_kwargs(input_data: Any, tool: str) -> Dict[str, Any]:
     """
-    The shared-cash engine's financing terms from a tool input, resolved.
+    The shared-cash engine's financing terms from a tool input: the scalar
+    terms resolved -- a rate left as None takes the risk-free rate, so cash
+    earns it, and borrowing costs it plus `margin_spread_bps` -- or the
+    full terms in `financing`. That is the world the reported Sharpe is
+    measured in: it subtracts the same rate, or the spec's benchmark.
+    """
+    return account_financing_kwargs(input_data, tool)
 
-    A rate left as None takes the risk-free rate: cash earns it, and
-    borrowing costs it plus `margin_spread_bps`. That is the world the
-    reported Sharpe is measured in -- it subtracts the same rate -- and a
-    simulation that charged the rate in the Sharpe while crediting nothing
-    on cash scored a book half in cash at 0.57 against 0.84 for the same
-    asset fully invested. With the risk-free rate at 0 every resolved rate
-    is 0 and the simulation is what it always was.
-    """
-    rf = float(input_data.risk_free_rate)
-    rebate = input_data.short_rebate_rate
-    return {
-        "cash_rate": (
-            rf if input_data.cash_rate is None else float(input_data.cash_rate)
-        ),
-        "margin_interest_rate": resolve_debit_rate(
-            input_data.margin_interest_rate, rf, input_data.margin_spread_bps
-        ),
-        "borrow_fee_bps": float(input_data.borrow_fee_bps),
-        "short_proceeds": input_data.short_proceeds,
-        "short_rebate_rate": 0.0 if rebate is None else float(rebate),
-        "day_count": input_data.day_count,
-    }
+
+def _account_ratios(
+    returns: pd.Series, raw: Dict[str, Any], risk_free_rate: float, day_count: str
+) -> Tuple[float, float]:
+    """Sharpe and Sortino of a shared-cash run over the rate its cash
+    accrued: the spec's benchmark as each bar accrued it when the run had
+    one, the risk-free rate on day_count otherwise."""
+    benchmark = raw.get("benchmark_accrual")
+    if benchmark is not None:
+        return ratios_over_benchmark(returns, benchmark)
+    return ratios_over_accrued_rate(returns, risk_free_rate, day_count)
 
 
 def _cap_constructed_weights(
@@ -1752,7 +1764,7 @@ def run_portfolio_simulation(
         impact_coefficient=input_data.impact_coefficient,
         impact_lookback=input_data.impact_lookback,
         max_adv_participation=input_data.max_adv_participation,
-        **_financing_kwargs(input_data),
+        **_financing_kwargs(input_data, "run_portfolio_simulation"),
     )
 
     equity_curve = raw["equity_curve"]
@@ -1766,8 +1778,8 @@ def run_portfolio_simulation(
     day0_calmar = (
         annualized_return / abs(day0_max_dd) if day0_max_dd != 0.0 else float("inf")
     )
-    sim_sharpe, sim_sortino = ratios_over_accrued_rate(
-        returns, input_data.risk_free_rate, input_data.day_count
+    sim_sharpe, sim_sortino = _account_ratios(
+        returns, raw, input_data.risk_free_rate, input_data.day_count
     )
 
     ir: Optional[float] = None
@@ -1957,7 +1969,7 @@ def run_pair_trade_backtest(
         slippage_pct=input_data.slippage_pct,
         gross_leverage=input_data.gross_leverage,
         fill_price=input_data.fill_price,
-        **_financing_kwargs(input_data),
+        **_financing_kwargs(input_data, "run_pair_trade_backtest"),
     )
 
     equity_curve = raw["equity_curve"]
@@ -1971,8 +1983,8 @@ def run_pair_trade_backtest(
     day0_calmar = (
         annualized_return / abs(day0_max_dd) if day0_max_dd != 0.0 else float("inf")
     )
-    pair_sharpe, pair_sortino = ratios_over_accrued_rate(
-        returns, input_data.risk_free_rate, input_data.day_count
+    pair_sharpe, pair_sortino = _account_ratios(
+        returns, raw, input_data.risk_free_rate, input_data.day_count
     )
     rebalance_events = [
         RebalanceEvent(
@@ -2087,6 +2099,7 @@ def get_robustness_diagnostics(
         sort_by=input_data.sort_by,
         ascending=input_data.sort_by in _LOWER_IS_BETTER,
         risk_free_rate=input_data.risk_free_rate,
+        **strategy_financing_kwargs(input_data),
         interval=FETCH_INTERVAL,
     )
     sensitivity = _parameter_sensitivity(grid_df, metric_col=input_data.sort_by)
@@ -2132,6 +2145,7 @@ def get_robustness_diagnostics(
         commission_pct=input_data.commission_pct,
         slippage_pct=input_data.slippage_pct,
         risk_free_rate=input_data.risk_free_rate,
+        **strategy_financing_kwargs(input_data),
         interval=FETCH_INTERVAL,
     )
     best_returns = best_result["equity_curve"].pct_change(fill_method=None).fillna(0.0)
@@ -2280,6 +2294,7 @@ def run_backtest_compact(input_data: BacktestCompactInput) -> BacktestResultV2:
         include_trade_log=True,
         fill_price=input_data.fill_price,
         risk_free_rate=input_data.risk_free_rate,
+        **strategy_financing_kwargs(input_data),
         interval=FETCH_INTERVAL,
     )
     equity_curve = results["equity_curve"]
@@ -2428,6 +2443,7 @@ def get_backtest_diagnostics(
         include_trade_log=True,
         fill_price=input_data.fill_price,
         risk_free_rate=input_data.risk_free_rate,
+        **strategy_financing_kwargs(input_data),
         interval=FETCH_INTERVAL,
     )
     equity_curve = results["equity_curve"]
@@ -2634,6 +2650,7 @@ def compare_cost_models(
             include_trade_log=True,
             fill_price=input_data.fill_price,
             risk_free_rate=input_data.risk_free_rate,
+            **strategy_financing_kwargs(input_data),
             interval=FETCH_INTERVAL,
         )
 
@@ -2776,6 +2793,7 @@ def run_strategy_matrix(input_data: StrategyMatrixInput) -> StrategyMatrixResult
                     slippage_pct=input_data.slippage_pct,
                     fill_price=input_data.fill_price,
                     risk_free_rate=input_data.risk_free_rate,
+                    **strategy_financing_kwargs(input_data),
                     interval=FETCH_INTERVAL,
                 )
             except Exception as exc:

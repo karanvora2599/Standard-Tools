@@ -193,19 +193,44 @@ namespace {
     }
 
     // The per-bar rates StrategyFinancing describes, each annual rate over
-    // periods_per_year. Python computes the same three quotients.
+    // periods_per_year. Python computes the same three quotients. Under a
+    // financing spec the three come per bar from Python's arrays instead,
+    // and the benchmark replaces rf / periods_per_year in the excess.
     struct PerBarFinancing {
         double cash = 0.0, debit = 0.0, borrow = 0.0;
+        const double* cash_at   = nullptr;
+        const double* debit_at  = nullptr;
+        const double* borrow_at = nullptr;
+        const double* bench_at  = nullptr;
+        double rf_per_period    = 0.0;
         bool   on   = false;
+
+        double cash_of(std::size_t i) const { return cash_at ? cash_at[i] : cash; }
+        double debit_of(std::size_t i) const { return debit_at ? debit_at[i] : debit; }
+        double borrow_of(std::size_t i) const {
+            return borrow_at ? borrow_at[i] : borrow;
+        }
+        // The rate the excess subtracts on bar i: nothing on bar 0, over
+        // which no time passed, then the benchmark or rf / periods.
+        double excess_rate(std::size_t i) const {
+            if (i == 0) return 0.0;
+            return bench_at ? bench_at[i] : rf_per_period;
+        }
     };
 
     inline PerBarFinancing per_bar_financing(const StrategyFinancing& f,
-                                             double periods_per_year) {
+                                             double periods_per_year,
+                                             double risk_free_rate) {
         PerBarFinancing out;
-        out.on     = f.active();
-        out.cash   = f.cash_rate / periods_per_year;
-        out.debit  = f.financing_rate / periods_per_year;
-        out.borrow = (f.borrow_fee_bps / 10'000.0) / periods_per_year;
+        out.on        = f.active();
+        out.cash      = f.cash_rate / periods_per_year;
+        out.debit     = f.financing_rate / periods_per_year;
+        out.borrow    = (f.borrow_fee_bps / 10'000.0) / periods_per_year;
+        out.cash_at   = f.cash_per_bar;
+        out.debit_at  = f.debit_per_bar;
+        out.borrow_at = f.borrow_per_bar;
+        out.bench_at  = f.benchmark_per_bar;
+        out.rf_per_period = risk_free_rate / periods_per_year;
         return out;
     }
 
@@ -224,9 +249,9 @@ namespace {
             ? signals[i - 1]
             : ((i >= 2) ? signals[i - 2] : 0.0);
         const double cash_frac = 1.0 - held;
-        const double interest  = (cash_frac > 0.0) ? cash_frac * f.cash
-                                                   : cash_frac * f.debit;
-        const double borrow    = (held < 0.0) ? (-held) * f.borrow : 0.0;
+        const double interest  = (cash_frac > 0.0) ? cash_frac * f.cash_of(i)
+                                                   : cash_frac * f.debit_of(i);
+        const double borrow    = (held < 0.0) ? (-held) * f.borrow_of(i) : 0.0;
         return interest - borrow;
     }
 
@@ -304,7 +329,8 @@ BacktestResult run_strategy(
     if (n == 0) return r;
 
     const double cost_per_unit = commission_pct + slippage_pct;
-    const PerBarFinancing fin = per_bar_financing(financing, periods_per_year);
+    const PerBarFinancing fin =
+        per_bar_financing(financing, periods_per_year, risk_free_rate);
     ReturnRange after_bar0;
 
     // ── Strategy returns (vectorized formula) ─────────────────────────────────
@@ -403,11 +429,11 @@ BacktestResult run_strategy(
     // excess itself rather than mean_r less the rate, so a cash book's
     // excess is exactly zero and its Sortino is 0/0, not +/-inf from the
     // rounding of two different sums. At a zero rate every term is
-    // strat_ret[i] - 0.0, the same sum as mean_r's, bit for bit.
-    const double rf_per_period = risk_free_rate / periods_per_year;
+    // strat_ret[i] - 0.0, the same sum as mean_r's, bit for bit. Under a
+    // financing spec the rate is its benchmark as each bar accrued it.
     double sum_excess = 0.0;
     for (std::size_t i = 0; i < n; ++i)
-        sum_excess += strat_ret[i] - ((i == 0) ? 0.0 : rf_per_period);
+        sum_excess += strat_ret[i] - fin.excess_rate(i);
     const double mean_excess = sum_excess / n_d;
 
     const double sample_std = (n > 1) ? std::sqrt(sum_sq / (n_d - 1.0)) : 0.0;
@@ -436,8 +462,7 @@ BacktestResult run_strategy(
     {
         double down_sq_sum = 0.0;
         for (std::size_t i = 0; i < n; ++i) {
-            const double d = std::min(
-                strat_ret[i] - ((i == 0) ? 0.0 : rf_per_period), 0.0);
+            const double d = std::min(strat_ret[i] - fin.excess_rate(i), 0.0);
             down_sq_sum += d * d;
         }
         const double down_dev = std::sqrt(down_sq_sum / n_d) * std::sqrt(periods_per_year);
@@ -549,10 +574,11 @@ BacktestResult run_strategy_summary(
     if (n == 0) return r;
 
     const double cost_per_unit = commission_pct + slippage_pct;
-    const PerBarFinancing fin = per_bar_financing(financing, periods_per_year);
     // Bar 0 accrues no rate -- see run_strategy() -- and every later bar
-    // accrues rf_per_period, so the excess is summed alongside the return.
-    const double rf_per_period = risk_free_rate / periods_per_year;
+    // accrues rf_per_period (or the spec's benchmark), so the excess is
+    // summed alongside the return.
+    const PerBarFinancing fin =
+        per_bar_financing(financing, periods_per_year, risk_free_rate);
     // n (size_t) used directly below rather than narrowed to int -- n can
     // exceed INT_MAX for a large series.
     const double n_d = static_cast<double>(n);
@@ -612,7 +638,7 @@ BacktestResult run_strategy_summary(
         }
 
         sum_r += strat_ret_i;
-        sum_excess += strat_ret_i - rf_per_period;
+        sum_excess += strat_ret_i - fin.excess_rate(i);
         if (fin.on) after_bar0.add(strat_ret_i);
 
         if (pdiff != 0.0) {
@@ -692,7 +718,7 @@ BacktestResult run_strategy_summary(
         const double d = strat_ret_i - mean_r;
         sum_sq += d * d;
 
-        const double down_d = std::min(strat_ret_i - rf_per_period, 0.0);
+        const double down_d = std::min(strat_ret_i - fin.excess_rate(i), 0.0);
         down_sq_sum += down_d * down_d;
     }
 
@@ -756,10 +782,20 @@ std::size_t run_portfolio_simulation(
     PortfolioSimError* err,
     const double* dollar_volume,
     const double* volatility,
-    PortfolioFinancing* out_financing)
+    PortfolioFinancing* out_financing,
+    const PortfolioRates* rates,
+    double* out_borrow_by_asset)
 {
     if (err) *err = PortfolioSimError{};
     if (out_peak_position) *out_peak_position = 0.0;
+    // The borrow each ticker paid, accumulated here whether or not the
+    // caller asked for it, so the arithmetic never depends on the request.
+    std::vector<double> borrow_by_asset(n_tickers, 0.0);
+    struct BorrowOut {
+        double* dst;
+        const std::vector<double>& src;
+        ~BorrowOut() { if (dst) std::copy(src.begin(), src.end(), dst); }
+    } borrow_out{out_borrow_by_asset, borrow_by_asset};
     // Totals accumulate here and are copied out on every return path, so an
     // early stop still reports what accrued up to it.
     PortfolioFinancing fin_totals{};
@@ -976,13 +1012,44 @@ std::size_t run_portfolio_simulation(
     };
 
     const bool segregated = costs.segregated_short_proceeds;
+    // Each bar's rates and each ticker's borrow fee: the arrays a financing
+    // spec resolved to when given, the scalar terms otherwise. The scalar
+    // shorthand handed in as arrays is the scalar on every element, so the
+    // two read the same doubles.
+    const double* credit_rates = rates ? rates->credit : nullptr;
+    const double* debit_rates  = rates ? rates->debit : nullptr;
+    const double* rebate_rates = rates ? rates->rebate : nullptr;
+    const double* borrow_rates = rates ? rates->borrow_bps : nullptr;
+    auto credit_at = [&](std::size_t bar) {
+        return credit_rates ? credit_rates[bar] : costs.cash_rate;
+    };
+    auto debit_at = [&](std::size_t bar) {
+        return debit_rates ? debit_rates[bar] : costs.margin_interest_rate;
+    };
+    auto rebate_at = [&](std::size_t bar) {
+        return rebate_rates ? rebate_rates[bar] : costs.short_rebate_rate;
+    };
+    auto borrow_at = [&](std::size_t i) {
+        return borrow_rates ? borrow_rates[i] : costs.borrow_fee_bps;
+    };
+    // One fee for the whole book is charged on its summed notional, as it
+    // always was; fees that differ are charged ticker by ticker.
+    bool any_borrow = false;
+    bool uniform_borrow = true;
+    const double first_bps = (n_tickers > 0) ? borrow_at(0) : 0.0;
+    for (std::size_t i = 0; i < n_tickers; ++i) {
+        const double bps = borrow_at(i);
+        if (bps > 0.0) any_borrow = true;
+        if (bps != first_bps) uniform_borrow = false;
+    }
+    bool any_rate = false;
+    for (std::size_t bar = 0; bar < n_bars && !any_rate; ++bar)
+        any_rate = credit_at(bar) != 0.0 || debit_at(bar) != 0.0 ||
+                   rebate_at(bar) != 0.0;
     // Whether any balance accrues anything. With every rate at zero and the
     // proceeds in cash the block below never runs, which is what keeps a
     // zero-rate run bit for bit what it always was.
-    const bool financing = costs.borrow_fee_bps > 0.0 ||
-                           costs.margin_interest_rate > 0.0 ||
-                           costs.cash_rate != 0.0 || segregated ||
-                           costs.short_rebate_rate != 0.0;
+    const bool financing = any_borrow || any_rate || segregated;
     const double basis = costs.day_basis;
 
     for (std::size_t bar = 0; bar < n_bars; ++bar) {
@@ -997,7 +1064,7 @@ std::size_t run_portfolio_simulation(
         if (financing && bar > 0) {
             const double days = day_gaps[bar];
             double short_value = 0.0;
-            if (costs.borrow_fee_bps > 0.0 || segregated) {
+            if (any_borrow || segregated) {
                 // The fee is LINEAR in notional, so summing the short book
                 // first and scaling once is the same quantity as scaling
                 // each short separately.
@@ -1010,22 +1077,37 @@ std::size_t run_portfolio_simulation(
             const double free_cash = segregated ? cash - short_value : cash;
             double charged = 0.0;
             if (free_cash < 0.0)
-                charged = std::abs(free_cash) * costs.margin_interest_rate * (days / basis);
+                charged = std::abs(free_cash) * debit_at(bar) * (days / basis);
             double daily_cost = charged;
             double borrow = 0.0;
-            if (costs.borrow_fee_bps > 0.0 && short_value > 0.0) {
-                borrow = short_value * (costs.borrow_fee_bps / 10'000.0) * (days / basis);
+            if (any_borrow && short_value > 0.0) {
+                // Each short's own fee, for the per-ticker totals and, when
+                // the fees differ, for the charge itself.
+                double per_ticker = 0.0;
+                for (std::size_t i = 0; i < n_tickers; ++i) {
+                    if (shares[i] < 0.0) {
+                        const double fee = std::abs(shares[i] * cp[i]) *
+                                           (borrow_at(i) / 10'000.0) * (days / basis);
+                        borrow_by_asset[i] += fee;
+                        per_ticker += fee;
+                    }
+                }
+                borrow = uniform_borrow
+                    ? short_value * (first_bps / 10'000.0) * (days / basis)
+                    : per_ticker;
                 daily_cost += borrow;
             }
             cash -= daily_cost;
             double credited = 0.0;
-            if (costs.cash_rate != 0.0 && free_cash > 0.0) {
-                credited = free_cash * costs.cash_rate * (days / basis);
+            const double credit_rate = credit_at(bar);
+            if (credit_rate != 0.0 && free_cash > 0.0) {
+                credited = free_cash * credit_rate * (days / basis);
                 cash += credited;
             }
             double rebate = 0.0;
-            if (segregated && costs.short_rebate_rate != 0.0 && short_value > 0.0) {
-                rebate = short_value * costs.short_rebate_rate * (days / basis);
+            const double rebate_rate = rebate_at(bar);
+            if (segregated && rebate_rate != 0.0 && short_value > 0.0) {
+                rebate = short_value * rebate_rate * (days / basis);
                 cash += rebate;
             }
             if (free_cash < 0.0)

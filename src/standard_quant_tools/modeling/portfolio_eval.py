@@ -55,6 +55,7 @@ from standard_quant_tools.backtest.costs import DEFAULT_DAY_COUNT
 from standard_quant_tools.backtest.financing import (
     accrued_rate_per_bar,
     ratios_over_accrued_rate,
+    ratios_over_benchmark,
     resolve_debit_rate,
 )
 from standard_quant_tools.backtest.portfolio_engine import run_portfolio_simulation
@@ -697,13 +698,24 @@ def _summarize_simulation(
     # days that passed before it.
     sharpe, sortino = (0.0, 0.0)
     if not returns.empty:
+        # Under a financing spec the rate is its benchmark as each bar
+        # accrued it, which the simulation returns.
+        spec_benchmark = result.get("benchmark_accrual")
         benchmark = (
             accrued_rate_per_bar(equity.index, risk_free_rate, day_count)
-            if risk_free_rate != 0.0
+            if risk_free_rate != 0.0 and spec_benchmark is None
             else None
         )
-        sharpe, sortino = ratios_over_accrued_rate(
-            returns, risk_free_rate, day_count, periods_per_year, benchmark=benchmark
+        sharpe, sortino = (
+            ratios_over_benchmark(returns, spec_benchmark, periods_per_year)
+            if spec_benchmark is not None
+            else ratios_over_accrued_rate(
+                returns,
+                risk_free_rate,
+                day_count,
+                periods_per_year,
+                benchmark=benchmark,
+            )
         )
 
     rebalance_log = result["rebalance_log"]
@@ -766,6 +778,15 @@ def _spec_financing(portfolio: PortfolioSimSpec) -> Dict[str, Any]:
     cannot be a cash rate, so one left to default to such a risk-free rate
     is refused under that name.
     """
+    if portfolio.financing is not None:
+        # The full terms, refused beside any scalar term set away from its
+        # default, with a dated benchmark's keys read as every dated input
+        # on the tool surface reads them.
+        from standard_quant_tools.agent.runtimes._financing import (
+            account_financing_kwargs,
+        )
+
+        return account_financing_kwargs(portfolio, "evaluate_model_portfolio")
     rf = float(portfolio.risk_free_rate)
     if portfolio.cash_rate is None and not (math.isfinite(rf) and abs(rf) <= 1.0):
         raise ValidationError(

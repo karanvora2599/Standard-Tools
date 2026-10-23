@@ -1,5 +1,88 @@
 # Changelog
 
+## An account is financed over a benchmark with its spreads, each short pays its own borrow, and a dated rate is the one in force when the balance was carried
+
+- **The full terms, as a broker states them.** The engines took one scalar
+  per term: a cash rate, a margin rate, one borrow fee for every short.
+  `backtest.financing.FinancingSpec` (and its input model
+  `FinancingSpecInput`) is a benchmark rate -- a scalar or a dated series
+  `{ISO date: rate}` -- with `credit_spread_bps` under it on positive cash,
+  `debit_spread_bps` over it on negative cash, `borrow_bps` per asset with
+  a `default_borrow_bps`, and `short_proceeds` net or segregated at the
+  benchmark less `rebate_spread_bps`. `day_count` is required, ACT/360 or
+  ACT/365F; 30/360 is refused with the reason (it counts months as 30
+  days, and a balance accrues on the days it is outstanding). Rates are
+  decimals at most 1 in magnitude, negative allowed; spreads are finite
+  and >= 0; neither side is floored.
+- **A balance accrues at the rate of the bar it was carried from.** An
+  overnight rate published for a date is the rate on money lent to the
+  next business day, so Friday's covers the weekend. Under
+  `benchmark_fill="refuse"` (the default) every bar but the last needs its
+  own rate and the first one missing is named; `"previous"` carries the
+  last rate forward and refuses a bar before the first one.
+- **No short borrows for free under the spec.** A short in an asset with
+  neither its own `borrow_bps` nor a `default_borrow_bps` is refused by
+  name. Two shorts at constant prices at 100 and 300 bps each accrue
+  notional x bps x days / basis, to 1e-12 of it, and the result says
+  which paid what.
+- **Both engines read one schedule.** The spec, or the scalar shorthand
+  (a constant benchmark with no spreads), resolves into per-bar credit,
+  debit and rebate rates and a per-asset borrow array, which the Python
+  loop and the native kernel read alike: one fee for the book is charged
+  on its summed notional as before, differing fees asset by asset. On one
+  name under a dated benchmark the two paths agree bit for bit; on ten,
+  within the 1e-13 they always did. `run_strategy`, its summary and batch
+  kernels and `backtest_grid` take the spec as four per-bar fractions
+  (cash, debit, borrow, benchmark) on calendar days, with `asset=` naming
+  the borrow entry; segregated proceeds are refused there, since one
+  equity holds a short's proceeds as cash. The pair backtest charges each
+  leg its own borrow, and the signal panel each ticker its own.
+- **The benchmark is the rate the Sharpe subtracts.** Under a spec the
+  portfolio and pair tools, `run_strategy`, the grid, the panel and
+  `evaluate_model_portfolio` measure the excess over the benchmark as each
+  bar accrued it, so a book holding only cash at no credit spread reports
+  an excess of zero.
+- **The planted answers.** $10m long on $5m at 5.30% + 50 bp for 30 days
+  ACT/360 charges 24,166.67 (to 1e-9); a k-times book under a benchmark
+  that moves every day returns kR - (k - 1)f on every bar to 1e-12 for k
+  = 0, 0.5, 2 and 3, on both engines; a dated benchmark that is constant
+  gives the scalar's bits.
+- **Where the terms are taken.** `run_portfolio_simulation` and the pair
+  backtest, their tools, and `PortfolioSimSpec` take `financing`; a spec
+  passed beside a scalar term set away from its default (including
+  `risk_free_rate`) is refused by name. The run_strategy-based tools take
+  the three scalar rates `run_strategy` always had -- `cash_rate`,
+  `financing_rate`, `borrow_fee_bps`, defaulting as it does -- and not the
+  spec: a dated benchmark and borrow per asset are terms of a book, and the
+  nested model would have cost each of those tools its whole schema. At
+  constant prices a flat book through one of them earns `cash_rate / 252` a
+  bar, a short pays its borrow, and a 2x book pays `financing_rate` on the
+  borrowed unit. A tool takes only the rates that can move its answer: the
+  four that run registry strategies alone take `cash_rate` (every registry
+  strategy is long or flat, which a test holds), and `run_buy_and_hold`,
+  fully long, takes none. The financing block reports `source`, the
+  benchmark (the scalar, or the first, last and day-weighted mean rate
+  used), the spreads, and borrow rate and borrow charged per asset; a rate
+  that moved with a dated benchmark is null with the reason.
+- **`estimate_trade_cost` declares its day count.** `day_count` (default
+  ACT/365F, the arithmetic it always used) applies to the borrow and the
+  account margin; the default output is unchanged.
+- **The panel's combined Sharpe charges no opening bar.** It subtracted
+  rate / periods from the first bar as well, which no other engine does:
+  a one-ticker panel at 5% on 120 bars read 0.2206 beside the ticker's own
+  0.2246 (Sortino 0.3058 against 0.3113), and a five-ticker panel over two
+  years at 4.5% moves from -1.7836 to -1.7827. At a zero rate nothing
+  moves.
+- **At a zero rate and no spec nothing moves.** Across 724 engine
+  configurations (both paths; every fill; pct, per-share, impact and the
+  ADV cap; long, levered, short, neutral and flat books; zero, scalar and
+  segregated terms; `run_strategy` in five books and three fills; the
+  grid; pairs) every number is bit for bit what it was, on Python 3.11 and
+  3.12 and pandas 2.3, 3.0 and 3.1. The default tool detail lists the same
+  tools in full as before in every runtime, and `risk_free_rate`'s
+  description on the run_strategy-based tools is shorter, since it now
+  also says what the two rates default to.
+
 ## The last two expected shortfalls say how many days they average, the grid and the compact backtest say which returns they compounded, an evaluation is measured from its capital, and three lags count their nanoseconds on every pandas
 
 - **`run_portfolio_simulation` and `run_backtest_compact` report their

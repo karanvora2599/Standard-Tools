@@ -25,6 +25,7 @@ import pandas as pd
 import pytest
 
 import standard_quant_tools.backtest.portfolio_engine as pe
+from standard_quant_tools.backtest.financing import scalar_schedule
 from standard_quant_tools.error import ValidationError
 
 requires_cpp = pytest.mark.skipif(not pe.HAS_CPP, reason="_sqt_core not built")
@@ -289,8 +290,18 @@ class TestTheThreeFormerlyUnsupportedConfigurations:
             slippage_pct=0.0,
             max_gross_leverage=1.0,
             max_position_pct=1.0,
-            borrow_fee_bps=0.0,
-            margin_interest_rate=0.0,
+            # The financing the engine resolved: nothing accrues.
+            schedule=scalar_schedule(
+                60,
+                3,
+                cash_rate=0.0,
+                margin_interest_rate=0.0,
+                borrow_fee_bps=0.0,
+                short_proceeds="net_cash",
+                short_rebate_rate=0.0,
+                day_count="ACT/365F",
+            ),
+            financing_active=False,
         )
         assert pe._native_portfolio_sim(**{**base, "fill_price": "nonsense"}) is None
         assert (

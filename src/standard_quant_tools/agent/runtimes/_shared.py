@@ -26,6 +26,7 @@ from standard_quant_tools.agent.models import (
     BacktestResult,
     Trade,
 )
+from standard_quant_tools.agent.runtimes._financing import strategy_financing_kwargs
 from standard_quant_tools.backtest.engine import run_strategy
 from standard_quant_tools.data.bloomberg_provider import BloombergProvider
 from standard_quant_tools.data.polygon_provider import PolygonProvider
@@ -217,6 +218,9 @@ def _run_backtest(
         fill_price=input_data.fill_price,
         risk_free_rate=input_data.risk_free_rate,
         interval=interval,
+        # The tool's own financing rates: what its idle cash earns and its
+        # leverage and short cost.
+        **strategy_financing_kwargs(input_data),
     )
 
     trade_log_raw = results.get("trade_log", pd.DataFrame())

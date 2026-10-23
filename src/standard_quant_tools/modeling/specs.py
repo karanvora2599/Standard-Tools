@@ -22,6 +22,8 @@ from pydantic import (
     model_validator,
 )
 
+from standard_quant_tools.backtest.financing import FinancingSpecInput
+
 from .features.base import RESERVED_PANEL_COLUMNS
 from .limits import (
     DEFAULT_MAX_FITS,
@@ -2184,6 +2186,14 @@ class PortfolioSimSpec(BaseModel):
         "enters the simulation: it is the default cash_rate, and with "
         "margin_spread_bps the default margin_interest_rate, so the cash the "
         "Sharpe charges the rate on earns it.",
+    )
+    financing: Optional[FinancingSpecInput] = Field(
+        None,
+        description="Full financing terms in place of the scalar rates, "
+        "day_count and risk_free_rate (refused beside any of them set): a "
+        "benchmark, scalar or dated, with credit and debit spreads, borrow "
+        "per asset and a rebate spread. Its benchmark_rate is also the rate "
+        "the Sharpe and Sortino measure against.",
     )
 
     @model_validator(mode="after")

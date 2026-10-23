@@ -15,7 +15,12 @@ from typing import Any, Dict, List, Optional, Union
 
 import pandas as pd
 
-from standard_quant_tools.backtest.engine import run_strategy
+from standard_quant_tools.backtest.engine import (
+    _ratios_after_bar_zero,
+    _spec_or_none,
+    run_strategy,
+)
+from standard_quant_tools.backtest.financing import calendar_day_gaps
 from standard_quant_tools.backtest.screens import require_sorted_unique_index
 from standard_quant_tools.error import ValidationError
 from standard_quant_tools.metrics.annualization import resolve_periods_per_year
@@ -83,6 +88,10 @@ def run_signal_panel_backtest(
     risk_free_rate: float = 0.0,
     periods_per_year: Optional[int] = None,
     interval: Optional[str] = None,
+    cash_rate: Optional[float] = None,
+    financing_rate: Optional[float] = None,
+    borrow_fee_bps: float = 0.0,
+    financing: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """
     Backtest a pre-computed signal panel across a ticker universe.
@@ -104,7 +113,19 @@ def run_signal_panel_backtest(
         risk_free_rate: annualized rate for Sharpe/Sortino, applied BOTH per
                       ticker and at the portfolio level so the per-ticker
                       rows and the combined row are measured against the
-                      same thing.
+                      same thing: rate / periods_per_year on every bar after
+                      the first, and nothing on the first, the opening, over
+                      which no time passed -- the convention run_strategy
+                      and the shared-cash engine use. The combined row used
+                      to charge that bar a period of the rate as well.
+        cash_rate, financing_rate, borrow_fee_bps, financing: what each
+                      ticker's idle cash earns and its leverage and short
+                      cost, passed to run_strategy for every ticker (see
+                      its docstring). `financing` is the full terms, a
+                      `backtest.financing.FinancingSpec`: each ticker pays
+                      its own entry in the spec's borrow_bps, and both the
+                      per-ticker rows and the combined row measure their
+                      Sharpe against the spec's benchmark.
         fill_price:   "close" (default) or "next_open" — passed through to
                       run_strategy for every ticker; see its docstring.
         signal_calendar_policy: what to do when a ticker's signal series is
@@ -179,6 +200,23 @@ def run_signal_panel_backtest(
             f"signal_calendar_policy must be one of {sorted(_CALENDAR_POLICIES)}, "
             f"got {signal_calendar_policy!r}"
         )
+    spec = _spec_or_none(
+        financing,
+        "run_signal_panel_backtest",
+        risk_free_rate,
+        cash_rate,
+        financing_rate,
+        borrow_fee_bps,
+    )
+    ticker_financing: Dict[str, Any] = (
+        {
+            "cash_rate": cash_rate,
+            "financing_rate": financing_rate,
+            "borrow_fee_bps": borrow_fee_bps,
+        }
+        if spec is None
+        else {"financing": spec}
+    )
     # Refused by name, per ticker, before anything is read off the bars. A
     # repeated signal date made the reindex below raise a bare pandas error.
     require_sorted_unique_index(
@@ -226,6 +264,8 @@ def run_signal_panel_backtest(
             fill_price=fill_price,
             risk_free_rate=risk_free_rate,
             periods_per_year=ppy,
+            asset=ticker,
+            **ticker_financing,
         )
         per_ticker_results[ticker] = result
         # Realized per-bar strategy return, recovered from the equity curve —
@@ -273,6 +313,28 @@ def run_signal_panel_backtest(
         benchmark_returns=benchmark_returns,
     )
     portfolio_returns = build_portfolio(returns_df, w)
+
+    # The combined row's Sharpe and Sortino on the engines' convention:
+    # nothing accrues on the opening bar. portfolio_metrics subtracts
+    # rate / periods_per_year from every bar, the first included, and that
+    # first bar is the panel's opening -- on a common calendar every
+    # ticker's return there is the 0.0 of an account that has only just
+    # opened -- so the combined row was charged one period of the rate the
+    # per-ticker rows were not.
+    # At a zero rate and no spec nothing is subtracted anywhere and the
+    # numbers portfolio_metrics returned stand, bit for bit.
+    if spec is not None or risk_free_rate != 0.0:
+        benchmark = None
+        if spec is not None:
+            gaps = calendar_day_gaps(portfolio_returns.index)
+            benchmark = spec.applied_benchmark(portfolio_returns.index) * (
+                gaps / spec.basis
+            )
+        sharpe, sortino = _ratios_after_bar_zero(
+            portfolio_returns, risk_free_rate, ppy, benchmark=benchmark
+        )
+        metrics["sharpe_ratio"] = round(float(sharpe), 4)
+        metrics["sortino_ratio"] = round(float(sortino), 4)
 
     logger.debug(
         "[signal_panel] portfolio  sharpe=%.3f  return=%.2f%%  maxdd=%.2f%%",
