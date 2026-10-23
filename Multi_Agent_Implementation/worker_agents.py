@@ -712,6 +712,13 @@ risk parity (equal or custom-budgeted risk contribution), or Black-Litterman
 (market-equilibrium prior blended with explicit views). Use this when asked
 to "build", "construct", or "find the optimal" portfolio weights, not just
 to evaluate weights already given.
+optimize_portfolio: the exact constrained optimizer on expected returns and
+a covariance the user supplies (or estimate_covariance's covariance_ref):
+min variance, max utility, max Sharpe, min tracking error or max active
+utility, under per-asset bounds, a budget, sector groups, factor-exposure
+limits and volatility or tracking-error caps. Read `certified` before
+quoting the weights, and quote a binding constraint's shadow_price when
+asked what a limit costs.
 get_position_size: ATR-based stop-loss sizing with optional Kelly criterion,
 given account equity and (optionally) a strategy's win rate / avg win / avg loss.
 get_capacity_report: how much account size a target-weight portfolio can

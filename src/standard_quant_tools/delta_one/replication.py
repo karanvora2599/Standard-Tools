@@ -25,15 +25,24 @@ applies to `S` and `c` together -- shrinking the candidates' covariance
 while leaving their covariance with the benchmark raw would tilt the
 objective toward whichever names had the noisiest benchmark relationship.
 
+EACH SOLVE IS EXACT AND CERTIFIED. The fit is `optimize_portfolio`'s
+min_tracking_error: the benchmark rides along as one more asset with weight
+held at zero and benchmark weight one, so (w - b)'S(w - b) over the joined
+covariance is exactly w'Sw - 2 w'c + var_b. The active-set method ends with
+one linear solve on the final active set, and the answer's KKT conditions
+are checked from the weights. SLSQP did this before and stopped about 1e-6
+short of the optimum in the weights on this module's test inputs;
+`converged` now means the answer certified.
+
 CARDINALITY IS THE HARD PART AND THE ANSWER IS A HEURISTIC. "At most forty
-names" is an integer constraint. SLSQP is a continuous method and cannot
-express it, and this library has no mixed-integer solver -- so `max_names`
-is enforced by solving, keeping the largest positions, and re-solving on
-that support. That is standard practice and it is NOT a global optimum: a
-different subset of the same size may track better, and finding the best
-one is combinatorial. The result says so rather than presenting a heuristic
-as a solution, because a tracking error 4 bps worse than optimal matters far
-less than a caller believing it is optimal.
+names" is an integer constraint. The quadratic programme is continuous and
+cannot express it, and this library has no mixed-integer solver -- so
+`max_names` is enforced by solving, keeping the largest positions, and
+re-solving on that support. That is standard practice and it is NOT a
+global optimum: a different subset of the same size may track better, and
+finding the best one is combinatorial. The result says so rather than
+presenting a heuristic as a solution, because a tracking error 4 bps worse
+than optimal matters far less than a caller believing it is optimal.
 
 IN-SAMPLE TRACKING ERROR IS NOT A FORECAST. The optimizer fits the same
 window it is scored on, so the realized figure is the best this basket will
@@ -52,6 +61,7 @@ import pandas as pd
 
 from standard_quant_tools._blas import single_threaded_blas
 from standard_quant_tools.error import ValidationError
+from standard_quant_tools.portfolio import general_optimizer
 from standard_quant_tools.portfolio.covariance import estimate_covariance
 
 from .hedging import TRADING_DAYS, tracking_error
@@ -60,11 +70,11 @@ __all__ = ["HAS_SCIPY", "optimize_replication_basket"]
 
 HAS_SCIPY = False
 try:
-    from scipy.optimize import minimize as _scipy_minimize
+    import scipy.optimize  # noqa: F401 -- the feasibility programme's HiGHS
 
     HAS_SCIPY = True
 except ImportError:  # pragma: no cover - exercised only without scipy
-    _scipy_minimize = None  # type: ignore[assignment]
+    pass
 
 #: The column the benchmark is carried under while it rides along with the
 #: candidates through the covariance estimator. Chosen to be something no
@@ -163,7 +173,7 @@ def optimize_replication_basket(
         )
 
     support = np.arange(n_assets)
-    weights, stop = _solve(cov, cross, support, lower, caps, n_assets)
+    weights, stop = _solve(cov, cross, bench_var, support, lower, caps, names)
 
     thresholded = False
     if max_names is not None:
@@ -177,7 +187,7 @@ def optimize_replication_basket(
                 break
             keep = active[np.argsort(-np.abs(weights[active]))[:max_names]]
             support = np.sort(keep)
-            weights, stop = _solve(cov, cross, support, lower, caps, n_assets)
+            weights, stop = _solve(cov, cross, bench_var, support, lower, caps, names)
             thresholded = True
 
     held = np.flatnonzero(np.abs(weights) > 1e-8)
@@ -202,9 +212,8 @@ def optimize_replication_basket(
         beta = float(cross @ weights / bench_var) if bench_var > 0 else float("nan")
     predicted_te = math.sqrt(max(predicted_var, 0.0))
 
-    # Verified from the returned vector rather than trusted from the solver.
-    # `result.success` is the solver's opinion of its own run; these are the
-    # constraints it was given, recomputed.
+    # Verified from the returned vector rather than trusted from the solver:
+    # the constraints it was given, recomputed, beside its certificate.
     converged = stop is None
     if abs(float(weights.sum()) - 1.0) > 1e-6:
         converged = False
@@ -219,13 +228,12 @@ def optimize_replication_basket(
             f"A weight came back at {weights.min():.6g} despite long_only, "
             "so the bound was not respected."
         )
-    # And the solver's own opinion, which was never read: a run that hit
-    # the iteration limit or stalled in its line search returned its last
-    # iterate as the basket, with nothing in the result to say so.
+    # And the certificate: an answer whose KKT conditions do not hold, or a
+    # solve that stopped, is reported, never returned as the minimum.
     if stop is not None:
         warnings.append(
-            f"SLSQP did not confirm a minimum of tracking error: {stop}. The "
-            "weights are its last iterate, not a solved basket; converged is "
+            f"The exact solve did not certify a minimum of tracking error: "
+            f"{stop}. The weights are not a verified optimum; converged is "
             "False. The constraint checks above say whether they are at "
             "least feasible."
         )
@@ -253,9 +261,8 @@ def optimize_replication_basket(
         )
     if not selected:
         warnings.append(
-            "Every weight came back at zero, which means the solver did not "
-            "move off its starting point. Check that the benchmark is "
-            "actually spanned by the candidates."
+            "Every weight came back at zero: no basket was solved (the "
+            "warning above says why), so there is nothing to hold."
         )
 
     return {
@@ -286,72 +293,76 @@ def optimize_replication_basket(
 def _solve(
     cov: np.ndarray,
     cross: np.ndarray,
+    bench_var: float,
     support: np.ndarray,
     lower: float,
     caps: np.ndarray,
-    n_assets: int,
+    names: List[str],
 ) -> Tuple[np.ndarray, Optional[str]]:
     """
-    Minimize `w'Sw - 2 w'c` over `support`, fully invested and inside caps.
+    Minimize `w'Sw - 2 w'c + var_b` over `support`, fully invested and
+    inside caps, exactly: `optimize_portfolio`'s min_tracking_error on the
+    candidates and the benchmark joined, the benchmark held at weight zero
+    and given benchmark weight one, every candidate off the support held at
+    zero. Held weights are substituted out before the solve, so only the
+    support's own covariance has to be positive definite.
 
-    Returns the weights and, when SLSQP did not report success, how it
-    stopped (its status and message); None when it did.
-
-    The constant `var_b` is dropped: it does not depend on w, so it shifts
-    the objective without moving its minimum, and leaving it out keeps the
-    numbers the solver sees near 1 rather than near 1e-4.
+    Returns the weights and, when the answer did not certify, why (the
+    optimizer's account of each stage); None when it did. The optimizer
+    runs its linear algebra on one BLAS thread, as SLSQP's solve did here.
     """
     if not HAS_SCIPY:
         raise ValidationError(
             "optimize_replication_basket requires scipy, which is not "
-            "installed. There is no closed form here: long-only and the "
-            "per-name caps are inequality constraints, and dropping them "
-            "would answer a different question rather than the same one "
-            "approximately."
+            "installed: its feasibility programme is scipy's HiGHS. There is "
+            "no closed form here: long-only and the per-name caps are "
+            "inequality constraints, and dropping them would answer a "
+            "different question rather than the same one approximately."
         )
-
-    sub_cov = cov[np.ix_(support, support)]
-    sub_cross = cross[support]
-    k = len(support)
-    start = np.full(k, 1.0 / k)
-
-    def objective(w: np.ndarray) -> float:
-        return float(w @ sub_cov @ w - 2.0 * w @ sub_cross)
-
-    def gradient(w: np.ndarray) -> np.ndarray:
-        # Supplied rather than left to finite differences. Without it SLSQP
-        # evaluates the objective k+1 times per step to rebuild the same
-        # vector it is handed here for free -- which is where this library's
-        # other constrained solve spends 58% of its measured runtime.
-        return 2.0 * (sub_cov @ w - sub_cross)
-
-    # On one BLAS thread: SLSQP's least-squares steps are scipy's own
-    # BLAS and LAPACK, and on the CI runners' OpenBLAS the weights moved in
-    # their last bits between one thread and two.
-    with single_threaded_blas():
-        result = _scipy_minimize(
-            objective,
-            start,
-            jac=gradient,
-            method="SLSQP",
-            bounds=[(lower, float(caps[i])) for i in support],
-            constraints=[{"type": "eq", "fun": lambda w: float(np.sum(w)) - 1.0}],
-            options={"maxiter": 500, "ftol": 1e-12},
+    n = len(names)
+    joined = np.empty((n + 1, n + 1))
+    joined[:n, :n] = cov
+    joined[:n, n] = cross
+    joined[n, :n] = cross
+    joined[n, n] = bench_var
+    lower_bounds = np.zeros(n + 1)
+    upper_bounds = np.zeros(n + 1)
+    lower_bounds[support] = lower
+    upper_bounds[support] = caps[support]
+    benchmark = np.zeros(n + 1)
+    benchmark[n] = 1.0
+    try:
+        out = general_optimizer.optimize_portfolio(
+            joined,
+            assets=list(names) + [_BENCH],
+            objective="min_tracking_error",
+            benchmark_weights=benchmark,
+            lower_bounds=lower_bounds,
+            upper_bounds=upper_bounds,
+            budget=1.0,
+            budget_type="equal",
         )
-
-    weights = np.zeros(n_assets, dtype=float)
-    weights[support] = result.x
-    stop = (
-        None
-        if bool(getattr(result, "success", False))
-        else (
-            f"status {getattr(result, 'status', None)} "
-            f"({getattr(result, 'message', None)!r}) after "
-            f"{getattr(result, 'nit', None)} iterations on "
-            f"{len(support)} candidate(s)"
-        )
+    except ValidationError as exc:
+        raise ValidationError(
+            f"optimize_replication_basket: the tracking-error fit on "
+            f"{len(support)} candidate(s) was refused -- {exc}"
+        ) from exc
+    weights = np.zeros(n, dtype=float)
+    if out["weights"]:
+        weights = np.array([out["weights"][name] for name in names], dtype=float)
+        weights[np.setdiff1d(np.arange(n), support)] = 0.0
+    if out["certified"]:
+        return weights, None
+    certificate = out.get("certificate") or {}
+    failed = [
+        f"{key} {value:.1e}"
+        for key, value in certificate.items()
+        if key != "tolerance" and not value <= certificate.get("tolerance", 0.0)
+    ]
+    reason = f"{out.get('solver')} on {len(support)} candidate(s)" + (
+        f"; over tolerance: {', '.join(failed)}" if failed else ""
     )
-    return weights, stop
+    return weights, reason
 
 
 def _aligned(returns: Any, benchmark: Any):

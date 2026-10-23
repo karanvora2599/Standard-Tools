@@ -713,6 +713,25 @@ def _hand_written(
             return {"covariance": _DELETE, "assets": _DELETE}
         names = base.get("asset_names") or base.get("tickers") or SYMBOLS
         return {"covariance": synth._covariance(len(names))}
+    if tool == "optimize_portfolio":
+        # A utility with a forecast per asset, a cap and a group limit, so the
+        # probes reach the rows and the bounds, not only the covariance. The
+        # published covariance names the six symbols.
+        limits = {
+            "objective": "max_utility",
+            "expected_returns": {s: 0.04 + 0.01 * i for i, s in enumerate(SYMBOLS)},
+            "risk_aversion": 2.0,
+            "max_weight": 0.5,
+            "groups": {"first": SYMBOLS[:3]},
+            "group_max": {"first": 0.6},
+        }
+        if refs.get("covariance"):
+            return {"covariance": _DELETE, "assets": _DELETE, **limits}
+        return {
+            "assets": list(SYMBOLS),
+            "covariance": synth._covariance(len(SYMBOLS)),
+            **limits,
+        }
     # The returns panel's columns are the six symbols. Each tool given it in
     # place of its inline returns reads them in its own roles: the assets,
     # the strategy, the configurations, the candidates beside a benchmark.

@@ -55,6 +55,7 @@ class TestToolCategories:
         "get_position_size": "size a position",
         "optimize_hierarchical_risk_parity": "hierarchical risk parity",
         "optimize_max_diversification": "maximum diversification",
+        "optimize_portfolio": "constrained optimizer",
         "optimize_risk_parity": "risk parity",
         "plan_rebalance": "rebalance",
         "run_portfolio_optimization": "black-litterman",
@@ -244,6 +245,11 @@ class TestRoutingAccuracyEval:
         (
             "Which positions contribute most to my portfolio's expected "
             "shortfall across these scenarios?",
+            "portfolio_risk",
+        ),
+        (
+            "Here are my expected returns and covariance: minimize tracking "
+            "error to the benchmark with sector caps and zero value exposure.",
             "portfolio_risk",
         ),
         # derivatives -- split out of research; never covered before

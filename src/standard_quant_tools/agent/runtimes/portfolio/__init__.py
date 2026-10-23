@@ -31,6 +31,11 @@ from .construction_tools import (  # noqa: F401
     optimize_risk_parity,
     run_portfolio_scenarios,
 )
+from .optimizer_tools import (  # noqa: F401
+    OPTIMIZER_TOOL_DEFS,
+    OPTIMIZER_TOOL_DISPATCH,
+    optimize_portfolio,
+)
 from .risk_decomposition_tools import (  # noqa: F401
     RISK_DECOMPOSITION_TOOL_DEFS,
     RISK_DECOMPOSITION_TOOL_DISPATCH,
@@ -142,6 +147,9 @@ TOOL_DEFS = [
 # unit and cannot half-register.
 TOOL_DEFS = TOOL_DEFS + CONSTRUCTION_TOOL_DEFS
 
+# The exact constrained optimizer, declared in optimizer_tools.py.
+TOOL_DEFS = TOOL_DEFS + OPTIMIZER_TOOL_DEFS
+
 TOOL_DISPATCH = {name: (globals()[name], model) for name, _d, model in TOOL_DEFS}
 
 #: This runtime's slice of the library-wide routing taxonomy.
@@ -161,6 +169,7 @@ TOOL_CATEGORY = {
 
 TOOL_DISPATCH.update(CONSTRUCTION_TOOL_DISPATCH)
 TOOL_CATEGORY.update({name: "portfolio_risk" for name in CONSTRUCTION_TOOL_DISPATCH})
+TOOL_CATEGORY.update({name: "portfolio_risk" for name in OPTIMIZER_TOOL_DISPATCH})
 
 # The factor and tail risk decompositions, declared in
 # risk_decomposition_tools.py and registered the same way.
@@ -171,6 +180,7 @@ TOOL_CATEGORY.update(
 )
 
 __all__ = [
+    "optimize_portfolio",
     "optimize_max_diversification",
     "get_marginal_risk_contribution",
     "run_portfolio_scenarios",

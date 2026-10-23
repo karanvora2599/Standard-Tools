@@ -50,6 +50,10 @@ with it, is three np.dot products with as many terms as rows, where up to
 `optimize_replication_basket`. Each correlation runs under the limit now,
 and so does the basket's SLSQP solve, whose weights moved in their last
 bits between one thread and two on the CI runners.
+
+`optimize_portfolio`, which the basket now solves through, runs its dense
+KKT solves, its certificate's least squares and its covariance's
+eigenvalues under the limit from the start; it is held here at 235 assets.
 """
 
 from __future__ import annotations
@@ -107,6 +111,7 @@ from standard_quant_tools.portfolio import construction
 from standard_quant_tools.portfolio.covariance import estimate_covariance
 from standard_quant_tools.portfolio.critical_line import critical_line
 from standard_quant_tools.portfolio.factor_risk import decompose_factor_risk
+from standard_quant_tools.portfolio.general_optimizer import optimize_portfolio
 from standard_quant_tools.portfolio.optimize import (
     annualized_mean_cov,
     black_litterman,
@@ -389,6 +394,16 @@ WIDE = _factor_returns(252, 500, seed=67)
 NETWORK = _factor_returns(126, 1000, seed=71)
 VIEWS = np.zeros((2, N))
 VIEWS[0, 0], VIEWS[0, 1], VIEWS[1, 2] = 1.0, -1.0, 1.0
+OPTIMIZER_ARGS = {
+    "expected_returns": RETURNS.mean() * 252 + 0.05,
+    "upper_bounds": 0.03,
+    "groups": {"first": list(COVARIANCE.columns[:60])},
+    "group_max": {"first": 0.2},
+    "factor_loadings": pd.DataFrame(
+        {"size": np.linspace(-1.0, 1.0, N)}, index=COVARIANCE.columns
+    ),
+    "exposure_min": {"size": 0.1},
+}
 
 
 def _latent_features(n_rows, n_features, seed, latent):
@@ -755,6 +770,16 @@ CALLS = {
     ),
     "decompose_tail_risk_long": lambda: decompose_tail_risk(
         LONG_NAMES, {"W": 0.4, "X": 0.3, "Y": -0.2, "Z": 0.5}, confidence=0.99
+    ),
+    # The constrained optimizer's dense KKT solves, its certificate's least
+    # squares and its covariance's eigenvalues, at 235 assets: a sector cap
+    # and a factor floor (slack rows and the row-native primal method), a
+    # volatility cap's multiplier search, and the homogenised max Sharpe.
+    "optimize_portfolio_capped_utility": lambda: optimize_portfolio(
+        COVARIANCE, **OPTIMIZER_ARGS, objective="max_utility", max_volatility=0.065
+    ),
+    "optimize_portfolio_max_sharpe": lambda: optimize_portfolio(
+        COVARIANCE, **OPTIMIZER_ARGS, objective="max_sharpe"
     ),
 }
 

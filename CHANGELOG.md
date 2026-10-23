@@ -1,5 +1,108 @@
 # Changelog
 
+## A portfolio is optimized on the caller's own forecasts and risk model under sector, factor and risk limits, exactly, with the price of every binding limit and a certificate, and the replication basket is solved the same way
+
+- **`optimize_portfolio`, one constrained optimizer.** It takes expected
+  returns and a covariance the caller supplies -- rows with `assets`,
+  estimate_covariance's `matrix` map, or its `covariance_ref` -- and no
+  tickers, so the same arguments give the same answer. Objectives:
+  `min_variance`, `max_utility` (mu'w - lambda/2 w'Sw), `max_sharpe`,
+  `min_tracking_error` against benchmark weights, `max_active_utility`.
+  Limits: per-asset bounds (a scalar and per-asset overrides; equal
+  bounds fix a weight), a budget held equal or at most (0 is
+  dollar-neutral), group minimums and maximums over named members, factor
+  exposures B'w inside a range (min = max holds it there, 0 is
+  neutrality), and caps on volatility and tracking error. The library
+  function is `portfolio.general_optimizer.optimize_portfolio`.
+- **Every linear limit is a row of the exact active-set solver.** The
+  primal-dual method takes inequality rows as slack variables and a box;
+  with several rows it often guesses a singular active set, so a new
+  primal method, `_active_set.solve_rows`, follows from a feasible point
+  and holds a row in its KKT system only while it binds. With slack rows
+  every row is in every system: the homogenised max Sharpe with a cap on
+  each of 500 assets took 26 s that way and 1.3 s this way. A move of
+  rounding size does not block its ratio test, since sector groups that
+  cover every asset fix the last group's sum once the others are at their
+  bounds, and fixing it on that move made the next system singular in 6
+  of 6 trials at 500 assets. `solve_primal` gains the same tolerance and a
+  starting working set as options, off by default, and the solutions now
+  carry their final active set; with the options off `solve`,
+  `solve_primal`, `solve_homogeneous` and `kkt_certificate` give the bits
+  they gave before on 1,200 random calls.
+- **Feasibility, and infeasibility by name, come from one linear
+  programme.** HiGHS minimizes the total violation of the rows with every
+  bound kept. Zero starts the primal method; anything else is refused
+  naming the constraints its dual prices -- a Farkas certificate: caps of
+  0.1 on six assets under a budget of 1 name the budget and the six caps
+  and the least violation, 0.4; two group minimums of 0.6 name both groups,
+  the budget and the lower bounds of the assets outside them. An equality
+  limit the others imply (an exposure held at 1 on a factor every asset
+  loads 1 on) is refused naming the budget it restates.
+- **Max Sharpe is homogenised.** In y = w / tau with (mu - rf)'y = 1 every
+  limit is homogeneous in (y, tau) and the ratio is 1 / sqrt(y'Sy), a
+  convex programme. It needs a positive budget held in full and some
+  portfolio with a positive excess return (checked by the same linear
+  programme, refused with the highest attainable otherwise); an optimum
+  with tau = 0 -- the ratio approached only by levering a long-short book
+  without limit -- is refused rather than normalized onto the inefficient
+  branch.
+- **A cap is a multiplier found by search.** On (1 - theta) f + theta v,
+  theta = 0 is the uncapped answer and theta = 1 the lowest the capped
+  quantity can be; a cap below that floor is refused naming it, a cap the
+  uncapped answer meets is reported as not binding, and otherwise Brent's
+  method finds the theta at which the cap holds -- to 1e-9 and in practice
+  to the last bits -- in about twenty warm-started solves. For a utility
+  capped on its own risk the multiplier is a higher risk aversion,
+  reported as `effective_risk_aversion`. Two binding caps nest the search.
+- **Certified from the weights, with a price on every binding limit.** The
+  multipliers are fitted to the objective's gradient on the free
+  coordinates, and stationarity, the multipliers' signs, every
+  constraint's violation and complementary slackness are each held to
+  1e-12; `certified` is True only when all four are, and an answer that is
+  not certified keeps its weights and names the condition that failed.
+  Each binding constraint's `shadow_price` is the derivative of
+  `objective_value` with respect to its bound -- variance, utility or
+  Sharpe ratio per unit; per unit of volatility for a cap -- and equals a
+  central difference of re-solved optima to 1e-6. At a vertex the limits
+  fix by themselves, the price is one valid multiplier, between the rates
+  for raising and lowering the bound.
+- **Sized for 500 assets.** A larger universe is refused with its count.
+  At 500 assets with eleven sectors, a factor limit and caps of 4%: min
+  variance 0.05 s, max utility 0.8 s, max Sharpe 1.5 s, a volatility cap
+  1.1 s, a tracking-error cap 0.2 s.
+- **The replication basket is solved by it.** `optimize_replication_basket`
+  fits min_tracking_error on the candidates and the benchmark joined, the
+  benchmark held at weight zero with benchmark weight one, so
+  (w - b)'S(w - b) is exactly w'Sw - 2w'c + var_b; the max-names
+  thresholding still re-solves on the kept support. `converged` is now
+  the certificate. What moves on the existing tests' inputs: on a fixed
+  support the weights by at most 1.3e-6 and the tracking errors by about
+  1e-12 (SLSQP stopped short of the optimum); a spanned benchmark's
+  predicted tracking error from 2.6e-9 to 0. Under `max_names` the kept
+  names are the largest weights of the full solve, and on 25 near-equal
+  weights SLSQP's last digits had chosen them: at 5 names the predicted
+  tracking error falls from 7.27% to 6.96% and the realized from 6.78% to
+  6.43%, at 12 names 4.27% to 4.05% and 3.39% to 3.10%. A sample
+  covariance with fewer observations than candidates, whose minimum is
+  not unique, is refused naming the shrinkage fix, where SLSQP returned
+  one of its minima with a warning that the weights were unusable.
+- **In the `portfolio` runtime.** `portfolio` grows to 22 tools, and `auto`
+  thins `optimize_portfolio`, its most expensive, beside the four it already
+  thinned; its first sentence stands alone in the thin listing. The router's
+  portfolio description names it, the portfolio worker's prompt says when to
+  use it, and the surface fuzzer's baseline gives it a forecast, a cap and a
+  group limit.
+- Tests hold it to closed forms -- the equality-constrained minimum
+  variance and its prices, max utility and max active utility under the
+  budget (dollar-neutral included), the tangency portfolio, a
+  factor-neutral minimum variance on BFB' + D through Woodbury, and
+  water-filling on a diagonal covariance, nested under a group cap -- to
+  KKT and weak duality on 24 random problems of 5 to 50 assets with the
+  dual value rebuilt from the reported prices (gap under 1e-10), to SLSQP
+  from twelve starts never doing better, to central differences of the
+  prices and the cap, and to the same bits at one, two and four BLAS
+  threads; cvxpy is an oracle when it is installed.
+
 ## A portfolio's risk splits into its factors and its names' own, and its tail into the positions it comes from
 
 - **`decompose_factor_risk` (portfolio runtime).** The model is the
