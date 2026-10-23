@@ -1,5 +1,74 @@
 # Changelog
 
+## Holdings are valued in one base currency by exact products and sums, so reordering positions moves no total, and a price written in pence is refused rather than booked as pounds
+
+- **One shape for holdings, before any tool reads them.** `Position`
+  (instrument, signed quantity, price, multiplier, ISO 4217 currency, an
+  optional borrow fee) and `Holdings` (positions, base_currency,
+  fx_rates) are in `agent/runtimes/_positions.py`; the new library
+  package `standard_quant_tools.finance` values them. `position_values`
+  gives each line its local notional (quantity x price x multiplier), its
+  base notional (local x the caller's rate) and its side;
+  `exposure_summary` gives gross, net, long and short in the base
+  currency and the exposure per currency with its share of gross. No tool
+  takes them yet: a tool subclasses `Holdings`, or takes one as a field.
+  The identifier is `instrument`, because a field named `symbol`,
+  `ticker` or `universe` marks a tool as fetching market data (open-world
+  to MCP, outside the determinism layer), and none is named `book`, which
+  the fuzzer synthesizes as an order book.
+- **Exact, so the order cannot move a bit.** Each notional is the product
+  of its factors rounded once, from the floats' exact rational values. In
+  float arithmetic (contracts x price) x multiplier and (contracts x
+  multiplier) x price differ on 2,629 of 10,000 random many-digit lines;
+  here they are the same bits. A base-currency line's rate is exactly 1,
+  so its base notional is its local notional. Every total is `math.fsum`:
+  on +1e16, +1, -1e16, +1 a running sum gives 0, 1 or 2 by order, and
+  every total here is 2 in all 24 orders.
+- **Side is the sign of the quantity.** Zero and negative prices are kept
+  -- crude settled at -37.63 in April 2020 -- and the notional takes the
+  product's sign. Long and short sum the long and the short lines, so
+  long - short = net at any price; long + short is gross only when no
+  price is negative. A book whose every price is zero has no gross, and
+  its shares of it are null with the reason.
+- **Refused, by argument and value, with the fix:** a zero or non-finite
+  quantity (a zero line is not a position, as a zero option leg is not a
+  leg); a non-finite price; a multiplier that is not finite and positive
+  ("a short is a negative quantity, not a negative multiplier"); an
+  unknown currency, with the nearest code -- 'EUE' gives 'EUR', 'USS'
+  gives 'USD' rather than the fund code 'USN', 'YEN' gives 'JPY' rather
+  than Yemen's 'YER'; a withdrawn code, with its successor ('HRK' and
+  'BGN' to 'EUR', 'ANG' to 'XCG', 'ZWL' to 'ZWG'); pence, cents and
+  agorot ('GBp', 'GBX', 'ZAc', 'ILA'), with the division by 100, because
+  'GBp' upper-cased is 'GBP' and a line booked at a hundred times its
+  value; a missing rate, naming the currency and the lines that hold it;
+  a rate that is not finite and positive; a base-currency rate other than
+  exactly 1; one instrument on two lines in one currency; more than 5,000
+  lines.
+- **Decided:** a repeated instrument is refused rather than added up or
+  kept as lots -- two reports concatenated, two lots and a long held
+  against a short look the same, and margin and financing differ on which
+  it is, so netting is the caller's. Rates for currencies not held are
+  accepted, since a rate table usually covers more than one set of
+  holdings and a misspelt key is refused as a code anyway, and the summary
+  lists them as unused. A borrow fee may sit on any line, is read only
+  while it is short, and overrides the account's per-instrument and
+  default borrow.
+- **The currency list** is ISO 4217 List One on 2026-10-22, kept in the
+  library so validity does not depend on what is installed. Fund codes
+  and metals stay (CLF and MXV quote indexed bonds); XXX and XTS, no
+  currency and testing, are refused as units no amount is quoted in.
+- **The surface synthesizer** learns `*currency` fields (USD for a base,
+  the others in turn) and `fx_*` maps keyed by currency, so a set of
+  holdings is synthesized in six currencies with every rate given. Every
+  existing tool's synthesized input is unchanged.
+- Tests: the planted four-currency book (net 747,443.75, gross
+  791,693.75, long 769,568.75, short 22,125.00), the identities on random
+  books, multiplier scaling and every notional against Fraction
+  arithmetic, EUR relabelled as CHF at the same rate, shuffles of 500
+  lines to the bit, determinism, every refusal pinned by its location and
+  message, and the synthesizer building the models both as a tool's
+  top-level fields and as a nested field.
+
 ## A decision record names who the call was for, as the host declares it with `audit.caller(tenant=...)`
 
 - **The record carried the call and never the caller.** A host that

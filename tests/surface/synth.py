@@ -102,6 +102,28 @@ ALIGNED_TO_UNIVERSE = re.compile(
 #: against itself is not a diff.
 DISTINCT_FIELD = re.compile(r"(_a|_b|_one|_two|id)$")
 
+#: A field holding an ISO 4217 code. The generic `"a"` is refused as a
+#: currency, which made every input carrying positions unbuildable.
+CURRENCY_FIELD = re.compile(r"(^|_)currency$")
+
+#: A map of currency to FX rate, keyed by code rather than by ticker.
+FX_FIELD = re.compile(r"(^|_)fx(_|$)")
+
+#: Units of USD per one unit of each, the rates an FX map is synthesized
+#: with. USD comes first and is the base: a base currency is synthesized as
+#: USD, and its own rate must be exactly 1. Repeated sub-models -- a list of
+#: positions -- take their currency in turn from this list, so a fuzzed set
+#: of holdings converts five currencies, every one of them with a rate.
+FX_RATES = {
+    "USD": 1.0,
+    "EUR": 1.08,
+    "JPY": 0.0067,
+    "GBP": 1.27,
+    "CHF": 1.12,
+    "CAD": 0.73,
+}
+CURRENCIES = list(FX_RATES)
+
 
 def names_a_path(model: Any) -> bool:
     """Whether any of this model's fields names a file on disk."""
@@ -241,6 +263,10 @@ def _scalar(annotation: Any, info: Any, name: str, salt: int = 0) -> Any:
             return _DATES[salt % (len(_DATES) - _WINDOW)]
         if "symbol" in name or "ticker" in name:
             return SYMBOLS[0]
+        if CURRENCY_FIELD.search(name):
+            if name.startswith("base"):
+                return CURRENCIES[0]
+            return CURRENCIES[salt % len(CURRENCIES)]
         if PATH_FIELD.search(name):
             return str(_SCRATCH / name)
         if DISTINCT_FIELD.search(name):
@@ -447,6 +473,10 @@ def _value(annotation: Any, info: Any, name: str, length: int, salt: int = 0) ->
             # by design -- so the old generic branch made four backtest
             # tools unsynthesizable rather than fuzzing them.
             return {"fast_period": [5, 10], "slow_period": [20, 30]}
+        if FX_FIELD.search(name) and value_type is float:
+            # Keyed by currency, not by ticker: a rate table keyed 'AAPL'
+            # is refused as an unknown currency.
+            return dict(FX_RATES)
         if get_origin(value_type) in (list, List):
             return {k: _returns(length) for k in keys}
         if get_origin(value_type) in (dict, Dict):
