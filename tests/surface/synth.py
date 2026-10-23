@@ -496,6 +496,21 @@ def _value(annotation: Any, info: Any, name: str, length: int, salt: int = 0) ->
         if get_origin(value_type) in (list, List):
             return {k: _returns(length) for k in keys}
         if get_origin(value_type) in (dict, Dict):
+            if name == "factor_covariance":
+                # A factor model's covariance, keyed by factor on both axes:
+                # square, symmetric and positive definite, over the factors
+                # the loadings below name.
+                return {
+                    "mkt": {"mkt": 0.04, "size": 0.006},
+                    "size": {"mkt": 0.006, "size": 0.02},
+                }
+            if name == "factor_loadings":
+                # {ticker: {factor: loading}} over the symbol set, on the
+                # factors of `factor_covariance`.
+                return {
+                    ticker: {"mkt": 0.8 + 0.1 * i, "size": 0.1 * i - 0.2}
+                    for i, ticker in enumerate(keys)
+                }
             if "weight" in name or "panel" in name or "score" in name:
                 # {ticker: {date: value}} -- the panel shape, which is
                 # validated against the companion `tickers` list. The old

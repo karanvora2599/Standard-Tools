@@ -1,5 +1,71 @@
 # Changelog
 
+## A portfolio's risk splits into its factors and its names' own, and its tail into the positions it comes from
+
+- **`decompose_factor_risk` (portfolio runtime).** The model is the
+  caller's: loadings B, a factor covariance F and specific variances D,
+  with Sigma = B F B' + D (Grinold and Kahn, ch. 3). The result splits the
+  book's volatility into factor and specific variance and their shares of
+  the TOTAL, gives the exposures B'w, and with `benchmark_weights` the
+  same for the active weights: the tracking error, the active exposures
+  and their split. Contributions are Euler's, by factor (plus the
+  specific total) and by asset (with each asset's factor and specific
+  parts and its marginal), and each sums to the volatility -- or the
+  tracking error -- to 1e-12. A factor's contribution is also exposure x
+  factor volatility x its correlation with the book (Menchero and Davis
+  2011), and all three are reported. The factor-specific covariance is
+  stated as zero: it is the model's assumption, not a measurement. Units
+  are the inputs'; nothing is annualised.
+- **Specific variance is required, and every name is checked.** Without
+  D every book reads as a pure factor bet, which is the overstatement
+  `get_factor_exposure_budget` reported until its specific input landed.
+  The covariance is read by factor name and must be square under it; each
+  asset needs a loading on every factor and on no other; the specific
+  variances and the loadings must name the same assets; every asset in
+  the weights or the benchmark needs loadings. Each disagreement is
+  refused by name. A weight equal to the benchmark gives a tracking error
+  of exactly 0, with the shares that divide by it null and the reason
+  stated.
+- **`decompose_tail_risk` (portfolio runtime).** From a scenario matrix
+  inline (asset -> one value per scenario) or a `returns_panel` reference
+  -- its dates the scenarios, aligned on the dates the weighted columns
+  share and reported in `streams`; columns without a weight are not read
+  -- and the weights. VaR and ES are losses, positive, and on the same P&L
+  they are `var_historical`'s and `cvar`'s own bits. Component ES is
+  Euler's (Tasche 1999): each asset's weight times minus its mean in the
+  portfolio's tail, summing to the ES to rounding. Component VaR is
+  kernel-smoothed (Epperlein and Smillie 2006): a Gaussian kernel around
+  the VaR, its components summing exactly to the kernel-smoothed VaR,
+  reported as `var_kernel` beside the empirical `var`. The bandwidth is
+  Silverman's rule on the portfolio's P&L unless given, and is reported
+  with its rule and the kernel's effective scenario count. The tail count
+  is always reported, with the warning every other expected shortfall in
+  the library carries below ten. A negative component is named a hedge.
+- **The planted answers.** Two names at betas 1.2 and 0.8 to one factor
+  at variance 0.04, specific variances 0.09 and 0.0625, a 50/50 book
+  against a 30/70 benchmark: tracking error sqrt(0.006356) = 0.0797, the
+  factor 4.0% of it. A one-factor model with no specific variance is 100%
+  factor. Volatility, marginals and contributions agree with
+  `get_marginal_risk_contribution` on the implied Sigma to 1e-11. On
+  normal scenarios the components converge to w_i (Sigma w)_i / sigma_p
+  times z (VaR) or phi(z) / (1 - c) (ES): at two million scenarios within
+  0.5% and 1% of the totals. A returns_ref gives the inline answer to the
+  bit.
+- **Same bits on any thread count.** Both run their products under one
+  BLAS thread and are in the thread-count registry; the tail's portfolio
+  P&L is summed asset by asset with no BLAS product at all.
+- **Registered.** Both are `portfolio_risk` tools: the runtime's table,
+  the agent facade, the router's description and evaluation cases, and
+  the multi-agent example's Portfolio Risk & Sizing Agent, whose scope is
+  generated. The surface fixtures build a factor model by name and read
+  the tail's scenarios from the published returns panel.
+- **What the portfolio runtime advertises.** The two are 1,444 and 1,316
+  bytes of schema and description, their size bounds held in validators
+  rather than advertised. The runtime has too little room under `auto`'s 32
+  KB for them both, so `auto` now thins `get_position_size` beside the three
+  it thinned before: its schema comes from `describe_tool` before its first
+  call.
+
 ## A bounded frontier is traced through its corner portfolios, a bounded target volatility is the frontier's portfolio there, and the long-only maximum diversification is exact
 
 - **Markowitz's critical line algorithm.** `portfolio.critical_line`

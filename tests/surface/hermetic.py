@@ -731,6 +731,8 @@ def _hand_written(
                 "benchmark_returns": _DELETE,
                 "benchmark_column": SYMBOLS[0],
             }
+        if tool == "decompose_tail_risk":
+            return {"scenarios": _DELETE}
     if tool == "build_continuous_futures_series":
         near = pd.bdate_range("2020-01-02", "2020-03-20")
         far = pd.bdate_range("2020-01-02", "2020-06-19")
@@ -964,6 +966,10 @@ def _hand_written(
             "factors": ["mkt", "size"],
             "factor_covariance": [[0.04, 0.005], [0.005, 0.02]],
         }
+    if tool == "decompose_factor_risk":
+        # A benchmark beside the synthesized model, so every probe reaches
+        # the active decomposition and the tracking error too.
+        return {"benchmark_weights": {s: (i + 1) / 21 for i, s in enumerate(SYMBOLS)}}
     if tool == "get_sharpe_stability":
         return {
             "returns": [

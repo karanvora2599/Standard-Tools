@@ -179,6 +179,8 @@ from standard_quant_tools.agent.runtimes.portfolio import (
     analyze_concentration,
     check_spread_proxy,
     construct_weights_from_scores,
+    decompose_factor_risk,
+    decompose_tail_risk,
     detect_liquidity_events,
     estimate_covariance,
     estimate_trade_cost,

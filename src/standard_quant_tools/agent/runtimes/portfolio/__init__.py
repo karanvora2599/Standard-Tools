@@ -31,6 +31,12 @@ from .construction_tools import (  # noqa: F401
     optimize_risk_parity,
     run_portfolio_scenarios,
 )
+from .risk_decomposition_tools import (  # noqa: F401
+    RISK_DECOMPOSITION_TOOL_DEFS,
+    RISK_DECOMPOSITION_TOOL_DISPATCH,
+    decompose_factor_risk,
+    decompose_tail_risk,
+)
 from .tools import (
     check_spread_proxy,
     detect_liquidity_events,
@@ -156,6 +162,14 @@ TOOL_CATEGORY = {
 TOOL_DISPATCH.update(CONSTRUCTION_TOOL_DISPATCH)
 TOOL_CATEGORY.update({name: "portfolio_risk" for name in CONSTRUCTION_TOOL_DISPATCH})
 
+# The factor and tail risk decompositions, declared in
+# risk_decomposition_tools.py and registered the same way.
+TOOL_DEFS = TOOL_DEFS + RISK_DECOMPOSITION_TOOL_DEFS
+TOOL_DISPATCH.update(RISK_DECOMPOSITION_TOOL_DISPATCH)
+TOOL_CATEGORY.update(
+    {name: "portfolio_risk" for name in RISK_DECOMPOSITION_TOOL_DISPATCH}
+)
+
 __all__ = [
     "optimize_max_diversification",
     "get_marginal_risk_contribution",
@@ -169,6 +183,8 @@ __all__ = [
     "TOOL_DEFS",
     "TOOL_DISPATCH",
     "check_spread_proxy",
+    "decompose_factor_risk",
+    "decompose_tail_risk",
     "estimate_trade_cost",
     "get_capacity_report",
     "get_efficient_frontier",

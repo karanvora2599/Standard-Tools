@@ -41,6 +41,8 @@ class TestToolCategories:
     PORTFOLIO_RISK_VOCABULARY = {
         "analyze_concentration": "concentration",
         "construct_weights_from_scores": "alpha scores",
+        "decompose_factor_risk": "tracking error",
+        "decompose_tail_risk": "component expected shortfall",
         "estimate_covariance": "covariance matrix",
         "estimate_trade_cost": "trade's cost",
         "get_capacity_report": "capacity",
@@ -232,6 +234,16 @@ class TestRoutingAccuracyEval:
         ),
         (
             "How much should I size this position given my account equity?",
+            "portfolio_risk",
+        ),
+        (
+            "How much of my tracking error is factor bets and how much is "
+            "stock-specific risk?",
+            "portfolio_risk",
+        ),
+        (
+            "Which positions contribute most to my portfolio's expected "
+            "shortfall across these scenarios?",
             "portfolio_risk",
         ),
         # derivatives -- split out of research; never covered before

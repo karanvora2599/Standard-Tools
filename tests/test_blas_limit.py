@@ -106,6 +106,7 @@ from standard_quant_tools.modeling.validation.comparison import (
 from standard_quant_tools.portfolio import construction
 from standard_quant_tools.portfolio.covariance import estimate_covariance
 from standard_quant_tools.portfolio.critical_line import critical_line
+from standard_quant_tools.portfolio.factor_risk import decompose_factor_risk
 from standard_quant_tools.portfolio.optimize import (
     annualized_mean_cov,
     black_litterman,
@@ -113,6 +114,7 @@ from standard_quant_tools.portfolio.optimize import (
     mean_variance_optimize,
 )
 from standard_quant_tools.portfolio.portfolio import portfolio_metrics
+from standard_quant_tools.portfolio.tail_risk import decompose_tail_risk
 
 threadpoolctl = pytest.importorskip("threadpoolctl")
 from threadpoolctl import threadpool_limits  # noqa: E402
@@ -560,6 +562,33 @@ LONG_BENCHMARK = LONG_NAMES.mean(axis=1) + np.random.default_rng(179).normal(
 )
 
 
+def _factor_model(n_assets, n_factors, seed):
+    """A factor model over `n_assets` names: loadings, a factor covariance
+    from simulated factor returns, specific variances, a book and a
+    benchmark, as the maps `decompose_factor_risk` reads."""
+    rng = np.random.default_rng(seed)
+    assets = [f"A{i:03d}" for i in range(n_assets)]
+    factors = [f"F{k:02d}" for k in range(n_factors)]
+    loadings = rng.normal(0.0, 0.5, (n_assets, n_factors))
+    with threadpool_limits(limits=1, user_api="blas"):
+        factor_cov = np.cov(rng.normal(0, 0.01, (750, n_factors)), rowvar=False)
+    weights = rng.normal(1.0 / n_assets, 0.002, n_assets)
+    return dict(
+        weights=dict(zip(assets, weights)),
+        factor_loadings={
+            a: dict(zip(factors, row)) for a, row in zip(assets, loadings)
+        },
+        factor_covariance={
+            f: dict(zip(factors, row)) for f, row in zip(factors, factor_cov)
+        },
+        specific_variance=dict(zip(assets, rng.uniform(1e-5, 4e-4, n_assets))),
+        benchmark_weights={a: 1.0 / n_assets for a in assets},
+    )
+
+
+FACTOR_MODEL = _factor_model(500, 20, 181)
+
+
 def _cox_wide():
     """Two Newton steps of the Cox fit over 100 features: where, under
     OpenBLAS 0.3.31, the solve of the Hessian gave other last bits at two
@@ -714,6 +743,18 @@ CALLS = {
     ),
     "optimize_replication_basket_long": lambda: optimize_replication_basket(
         returns=LONG_NAMES, benchmark_returns=LONG_BENCHMARK
+    ),
+    # The factor and tail risk decompositions: the model's products over 500
+    # names and 20 factors, and the kernel's over 12,000 scenarios.
+    "decompose_factor_risk": lambda: decompose_factor_risk(
+        FACTOR_MODEL["weights"],
+        FACTOR_MODEL["factor_loadings"],
+        FACTOR_MODEL["factor_covariance"],
+        FACTOR_MODEL["specific_variance"],
+        benchmark_weights=FACTOR_MODEL["benchmark_weights"],
+    ),
+    "decompose_tail_risk_long": lambda: decompose_tail_risk(
+        LONG_NAMES, {"W": 0.4, "X": 0.3, "Y": -0.2, "Z": 0.5}, confidence=0.99
     ),
 }
 
