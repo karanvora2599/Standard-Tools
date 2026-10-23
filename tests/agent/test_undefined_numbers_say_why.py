@@ -400,6 +400,8 @@ SCALARS = [
         "nothing of x or y is left",
     ),
     (M.RallyDetectionResult, "adx", NAN, "never finished its warm-up"),
+    (M.BacktestResult, "win_rate", NAN, "no trade to count a win among"),
+    (M.BacktestResult, "avg_trade_return_pct", NAN, "no trade to average"),
     (M.RallyDetectionResult, "adx_threshold_used", INF, "infinite for this input"),
     (M.VolatilityEstimatorsResult, "parkinson_annualized", NAN, "no complete window"),
     (M.CapacityReportResult, "max_account_size", NAN, "NOT unbounded"),

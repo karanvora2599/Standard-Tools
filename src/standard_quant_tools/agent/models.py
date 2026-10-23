@@ -66,6 +66,10 @@ _PERFORMANCE_REASONS: Dict[str, Reason] = {
         "no gross profit or loss to divide",
         "no closed trade lost money, so the gross loss it divides by is zero",
     ),
+    # Averages over the closed trades, which were 0.0 -- a 0% win rate and a
+    # flat average trade -- for a strategy that never traded.
+    "win_rate": "no trade closed, so there is no trade to count a win among",
+    "avg_trade_return_pct": "no trade closed, so there is no trade to average",
     "annualized_volatility": (
         "fewer than two returns were measured, so there is no dispersion to "
         "annualize",
@@ -272,10 +276,13 @@ class BacktestResult(ExplainsNulls):
     sortino_ratio: Stat
     max_drawdown: float
     calmar_ratio: Stat
-    win_rate: float
+    # Null, with the reason in warnings, when no trade closed: they read
+    # 0.0, a 0% win rate and a flat average trade, for a run that never
+    # traded.
+    win_rate: Stat
     profit_factor: Stat
     num_trades: int
-    avg_trade_return_pct: float
+    avg_trade_return_pct: Stat
     final_equity: float
     equity_curve: List[float]
     trade_log: Optional[List[Trade]] = None
@@ -3033,7 +3040,8 @@ class StrategyComparison(ExplainsNulls):
     sortino_ratio: Stat
     max_drawdown: float
     calmar_ratio: Stat
-    win_rate: float
+    # Null when the strategy never traded -- it read 0.0, a 0% win rate.
+    win_rate: Stat
     num_trades: int
     final_equity: float
     # Three metrics sort_by offers that this row did not carry. Sorting on
@@ -3052,7 +3060,8 @@ class StrategyComparison(ExplainsNulls):
     )
     avg_trade_return_pct: Stat = Field(
         None,
-        description="Mean return per closed trade, as a fraction.",
+        description="Mean return per closed trade, in percent (2.5 is "
+        "+2.5%). Null when the strategy never traded.",
     )
 
 
@@ -3338,9 +3347,15 @@ class OptimizationRun(ExplainsNulls):
     profit_factor: Stat = Field(
         None, description="Gross profit over gross loss. Null when there was no loss."
     )
-    win_rate: Stat = Field(None, description="Fraction of trades that made money.")
+    win_rate: Stat = Field(
+        None,
+        description="Fraction of trades that made money. Null when the "
+        "combination never traded.",
+    )
     avg_trade_return_pct: Stat = Field(
-        None, description="Mean per-trade return, in percent."
+        None,
+        description="Mean per-trade return, in percent. Null when the "
+        "combination never traded.",
     )
 
 
@@ -8065,7 +8080,8 @@ class MatrixCell(ExplainsNulls):
     sharpe_ratio: Stat
     max_drawdown: float
     num_trades: int
-    win_rate: float
+    # Null when the cell never traded -- it read 0.0, a 0% win rate.
+    win_rate: Stat
 
 
 class StrategyMatrixResult(ExplainsNulls):

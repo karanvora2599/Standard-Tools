@@ -241,6 +241,41 @@ MUTATIONS: List[Mutation] = [
         "tests/delta_one/test_a_persistent_basis_is_not_a_shift.py",
     ),
     Mutation(
+        # A strategy that never traded read as a 0% win rate, as it did.
+        "trade stats: a run with no trade has a 0.0 win rate",
+        SRC / "backtest/engine.py",
+        '            "win_rate": float("nan"),\n',
+        '            "win_rate": 0.0,\n',
+        "tests/backtest/test_no_trade_averages.py",
+    ),
+    Mutation(
+        # ...and a flat average trade.
+        "trade stats: a run with no trade averages to a flat trade",
+        SRC / "backtest/engine.py",
+        '            "avg_trade_return_pct": float("nan"),\n',
+        '            "avg_trade_return_pct": 0.0,\n',
+        "tests/backtest/test_no_trade_averages.py",
+    ),
+    Mutation(
+        # A trial that never traded counted again: its 0.0 drawdown was the
+        # best trial while the grid ranked it last.
+        "parameter sensitivity: count a trial that never traded",
+        SRC / "backtest/robustness.py",
+        '        raw_values, grid_df["num_trades"] if has_trades else None\n',
+        "        raw_values, None\n",
+        "tests/backtest/test_no_trade_averages.py "
+        "tests/agent/test_no_trade_averages_say_why.py",
+    ),
+    Mutation(
+        # The null without its reason: a generic "not a number" in place of
+        # "no trade closed".
+        "backtest result: a null win rate without its reason",
+        SRC / "agent/models.py",
+        '    "win_rate": "no trade closed, so there is no trade to count a win among",\n',
+        "",
+        "tests/agent/test_no_trade_averages_say_why.py",
+    ),
+    Mutation(
         # A never-filled z-score window read as a spread at its mean.
         "pairs: report a z-score of 0.0 when the window never filled",
         SRC / "agent/runtimes/research/tools.py",

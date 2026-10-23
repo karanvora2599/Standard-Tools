@@ -263,12 +263,13 @@ def _run_backtest(
         warnings=list(results.get("warnings", [])),
     )
     logger.debug(
-        # %s, not %.3f: the ratio is null where it is undefined.
-        "[backtest] result  return=%.2f%%  sharpe=%s  maxdd=%.2f%%  trades=%d  win=%.0f%%",
+        # %s, not %.3f: the ratio is null where it is undefined, and so is
+        # the win rate of a run that never traded.
+        "[backtest] result  return=%.2f%%  sharpe=%s  maxdd=%.2f%%  trades=%d  win=%s",
         bt.total_return * 100,
         bt.sharpe_ratio,
         bt.max_drawdown * 100,
         bt.num_trades,
-        bt.win_rate * 100,
+        bt.win_rate,
     )
     return bt

@@ -38,6 +38,7 @@ from standard_quant_tools._special import (
     norm_cdf,
     norm_ppf,
 )
+from standard_quant_tools.backtest.ranking import rank_order
 from standard_quant_tools.constants import EULER_MASCHERONI
 from standard_quant_tools.error import ValidationError
 
@@ -179,15 +180,20 @@ def parameter_sensitivity(
 
     Returns:
         Dict with n_trials, best, median, best_minus_median,
-        best_minus_rank2 (gap to the second-best trial), and
+        best_minus_rank2 (gap to the second-best trial),
         best_minus_top5_mean (gap to the mean of ranks 2-5, or 0.0 when
-        fewer than 2 trials exist). Trials whose metric_col is NaN/Inf are
-        excluded from the ranking (and from n_trials) with a warning — they
-        have no comparable value to rank.
+        fewer than 2 trials exist), and n_excluded. A trial is excluded
+        from the ranking (and from n_trials) and counted in n_excluded
+        under the rule every ranked door shares (backtest/ranking.py):
+        its metric_col is NaN/Inf, or, when grid_df has a num_trades
+        column, it never traded. Neither has a comparable value to rank:
+        a combination that never traded has no drawdown and no loss, and
+        its 0.0 max_drawdown became `best` while the grid ranked it last;
+        its win rate, now NaN, was a 0.0 that pulled the median down.
 
     Raises:
-        ValidationError: empty grid_df, metric_col not present, or no finite
-            values in metric_col.
+        ValidationError: empty grid_df, metric_col not present, or no
+            trial left to rank.
     """
     if grid_df.empty:
         raise ValidationError("grid_df is empty")
@@ -201,22 +207,28 @@ def parameter_sensitivity(
     # (a grid row whose returns had zero variance is the common source) would
     # otherwise become `best`, making every reported gap NaN. A trial that
     # produced no comparable metric is excluded from the ranking rather than
-    # allowed to win it.
-    values = raw_values[np.isfinite(raw_values)]
-    n_dropped = len(raw_values) - len(values)
+    # allowed to win it, and so is one that never traded: the grid itself
+    # ranks both after every other row, so counting them here described a
+    # different ranking from the one the grid returned.
+    has_trades = "num_trades" in grid_df.columns
+    order, n_dropped = rank_order(
+        raw_values, grid_df["num_trades"] if has_trades else None
+    )
+    sorted_desc = raw_values[order[: len(raw_values) - n_dropped]]
+    values = sorted_desc
     if len(values) == 0:
+        why = "NaN/Inf or never traded" if has_trades else "NaN/Inf"
         raise ValidationError(
-            f"grid_df[{metric_col!r}] has no finite values "
-            f"({len(raw_values)} row(s), all NaN/Inf) — nothing to rank."
+            f"grid_df[{metric_col!r}] has no finite values to rank "
+            f"({len(raw_values)} row(s), each {why})."
         )
     if n_dropped:
         logger.warning(
-            "[robustness] parameter_sensitivity: excluded %d trial(s) with a "
-            "non-finite %s from the ranking",
+            "[robustness] parameter_sensitivity: excluded %d trial(s) with no "
+            "rankable %s (non-finite, or never traded) from the ranking",
             n_dropped,
             metric_col,
         )
-    sorted_desc = np.sort(values)[::-1]
     n = len(sorted_desc)
     best = float(sorted_desc[0])
     median = float(np.median(values))
@@ -235,6 +247,7 @@ def parameter_sensitivity(
         "best_minus_median": round(best - median, 6),
         "best_minus_rank2": round(best_minus_rank2, 6),
         "best_minus_top5_mean": round(best_minus_top5_mean, 6),
+        "n_excluded": int(n_dropped),
     }
     logger.debug("[robustness] parameter_sensitivity  %s", result)
     return result

@@ -318,13 +318,18 @@ BacktestResult run_strategy(
     // has no ratio, and +inf or 0.0 here read as "no downside" or "every
     // trade lost" -- the first ranked a do-nothing parameter set above
     // every real one. See undefined_ratio() below.
+    //
+    // The win rate and the average trade return are taken over the closed
+    // trades, and with none there is nothing to count or average: NaN, not
+    // 0.0. A strategy that never traded read as a 0% win rate and a flat
+    // average trade -- statements about trades that did not happen.
     r.sortino_ratio        = kNaN;
     r.max_drawdown         = 0.0;
     r.calmar_ratio         = kNaN;
     r.num_trades           = 0;
-    r.win_rate             = 0.0;
+    r.win_rate             = kNaN;
     r.profit_factor        = kNaN;
-    r.avg_trade_return_pct = 0.0;
+    r.avg_trade_return_pct = kNaN;
 
     if (n == 0) return r;
 
@@ -501,8 +506,10 @@ BacktestResult run_strategy(
     }
 
     // ── Trade statistics ──────────────────────────────────────────────────────
-    // A run with no trade keeps profit_factor at its NaN default: 0.0 is
-    // the value "every trade lost" produces, and nothing was traded.
+    // A run with no trade keeps profit_factor, win_rate and
+    // avg_trade_return_pct at their NaN defaults: 0.0 is what "every trade
+    // lost" (or "every trade was flat") produces, and nothing was traded.
+    // engine.py's _compute_trade_stats answers the same NaN.
     r.num_trades = numerics::checked_narrow_to_int(trade_rets.size(), "run_strategy: num_trades");
     if (r.num_trades > 0) {
         int    n_wins    = 0;
@@ -562,14 +569,15 @@ BacktestResult run_strategy_summary(
     r.total_return         = 0.0;
     r.annualized_vol       = 0.0;
     r.sharpe_ratio         = 0.0;
-    // Undefined until computed -- the same defaults as run_strategy().
+    // Undefined until computed -- the same defaults as run_strategy(),
+    // the two trade averages included.
     r.sortino_ratio        = kNaN;
     r.max_drawdown         = 0.0;
     r.calmar_ratio         = kNaN;
     r.num_trades           = 0;
-    r.win_rate             = 0.0;
+    r.win_rate             = kNaN;
     r.profit_factor        = kNaN;
-    r.avg_trade_return_pct = 0.0;
+    r.avg_trade_return_pct = kNaN;
 
     if (n == 0) return r;
 

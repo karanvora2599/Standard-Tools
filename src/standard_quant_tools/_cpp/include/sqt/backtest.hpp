@@ -16,11 +16,11 @@ struct BacktestResult {
     double calmar_ratio;    // +inf when max_drawdown == 0 and CAGR > 0;
                             // NaN when neither moved (0/0)
     int    num_trades;      // completed (closed) trades only
-    double win_rate;
+    double win_rate;        // NaN when no trades: none to count
     double profit_factor;   // +inf when no losing trade and a gross profit;
                             // NaN when no trades, or every trade returned
                             // exactly 0.0 (0/0)
-    double avg_trade_return_pct;
+    double avg_trade_return_pct;  // NaN when no trades: none to average
     std::vector<double> equity_curve;
 };
 

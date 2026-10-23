@@ -55,7 +55,10 @@ static void test_flat_signal_zero_return() {
     CHECK_NEAR(r.total_return, 0.0, 1e-10);
     CHECK_NEAR(r.final_equity, 10000.0, 1e-8);
     CHECK(r.num_trades == 0);
-    CHECK_NEAR(r.win_rate, 0.0, 1e-10);
+    // No trade to count or average: NaN, not a 0% win rate -- see
+    // test_no_trade_ratios_are_undefined_not_inf.
+    CHECK(std::isnan(r.win_rate));
+    CHECK(std::isnan(r.avg_trade_return_pct));
 }
 
 static void test_empty_input() {
@@ -64,6 +67,8 @@ static void test_empty_input() {
     CHECK_NEAR(r.final_equity, 10000.0, 1e-10);
     CHECK_NEAR(r.total_return, 0.0, 1e-10);
     CHECK(r.num_trades == 0);
+    CHECK(std::isnan(r.win_rate));
+    CHECK(std::isnan(r.avg_trade_return_pct));
     CHECK(r.equity_curve.empty());
 }
 
@@ -534,7 +539,9 @@ static void test_no_trade_ratios_are_undefined_not_inf() {
     // trade. Sortino and Calmar are 0/0 and the profit factor has nothing to
     // count, so all three are NaN on both kernels. They were +inf, +inf and
     // 0.0, and the +inf ranked a do-nothing grid row above every real
-    // strategy under sort_by="sortino_ratio" or "calmar_ratio".
+    // strategy under sort_by="sortino_ratio" or "calmar_ratio". The win
+    // rate and the average trade return have no trade to count or average
+    // either: NaN, where they were a 0% win rate and a flat average trade.
     std::vector<double> prices  = {100.0, 104.0, 99.0, 107.0, 103.0};
     std::vector<double> signals = {0.0, 0.0, 0.0, 0.0, 0.0};
     std::vector<double> refs    = {100.0, 103.0, 100.0, 105.0, 104.0};
@@ -550,6 +557,10 @@ static void test_no_trade_ratios_are_undefined_not_inf() {
         CHECK(std::isnan(r.sortino_ratio));
         CHECK(std::isnan(r.calmar_ratio));
         CHECK(std::isnan(r.profit_factor));
+        CHECK(std::isnan(r.win_rate));
+        CHECK(std::isnan(r.avg_trade_return_pct));
+        CHECK(std::isnan(s.win_rate));
+        CHECK(std::isnan(s.avg_trade_return_pct));
         check_all_fields_match(r, s);
     }
 }

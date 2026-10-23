@@ -750,7 +750,9 @@ PYBIND11_MODULE(_sqt_core, m) {
         "finite, with the replaced scalars 0.\n"
         "Returns a dict with keys: final_equity, total_return, annualized_volatility,\n"
         "sharpe_ratio, sortino_ratio, max_drawdown, calmar_ratio, num_trades,\n"
-        "win_rate, profit_factor, avg_trade_return_pct, equity_curve.");
+        "win_rate, profit_factor, avg_trade_return_pct, equity_curve.\n"
+        "With num_trades 0, win_rate, profit_factor and avg_trade_return_pct\n"
+        "are NaN: there is no trade to count or average.");
 
     // ── Batch backtest ────────────────────────────────────────────────────────
 
@@ -1000,7 +1002,9 @@ PYBIND11_MODULE(_sqt_core, m) {
         "total_return, annualized_volatility, sharpe_ratio, sortino_ratio,\n"
         "max_drawdown, calmar_ratio, win_rate, profit_factor, num_trades\n"
         "(stored as float, cast back to int on the Python side),\n"
-        "avg_trade_return_pct. equity_curve is NOT included, to save memory.");
+        "avg_trade_return_pct. equity_curve is NOT included, to save memory.\n"
+        "A row with num_trades 0 has NaN win_rate, profit_factor and\n"
+        "avg_trade_return_pct, as run_strategy does.");
 
     m.def(
         "run_portfolio_simulation",

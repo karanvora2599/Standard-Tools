@@ -1740,17 +1740,22 @@ ci = block_bootstrap_ci(best_trial_returns, sharpe_ratio, block_size=20, seed=42
 ```
 
 **`parameter_sensitivity(grid_df, metric_col="sharpe_ratio")`:** returns
-`n_trials`, `best`, `median`, `best_minus_median`, `best_minus_rank2`, and
-`best_minus_top5_mean`. A large gap on a small grid is a red flag for
-overfitting — the "best" combination may just be the one that happened to
-fit this particular sample.
+`n_trials`, `best`, `median`, `best_minus_median`, `best_minus_rank2`,
+`best_minus_top5_mean` and `n_excluded`. A large gap on a small grid is a
+red flag for overfitting — the "best" combination may just be the one that
+happened to fit this particular sample.
 
 Trials whose `metric_col` is NaN or infinite are **excluded from the
-ranking** (and from `n_trials`), with a warning — a grid row whose returns
-had zero variance is the common source. This matters because `np.sort`
-places NaN last, so a descending sort would otherwise put it *first* and
-report NaN as the best trial, poisoning every gap. `ValidationError` is
-raised if no finite values remain.
+ranking** (and from `n_trials`) and counted in `n_excluded`, with a warning
+— a grid row whose returns had zero variance is the common source. This
+matters because `np.sort` places NaN last, so a descending sort would
+otherwise put it *first* and report NaN as the best trial, poisoning every
+gap. When the grid has a `num_trades` column, a trial that never traded is
+excluded the same way, the rule the grid's own ranking follows: its 0.0
+`max_drawdown` was the `best` trial, and its win rate (now NaN) was a 0.0
+that pulled the median down. `get_robustness_diagnostics` says in its
+warnings how many were left out. `ValidationError` is raised if no trial
+remains.
 
 **`deflated_sharpe_ratio(observed_sharpe, sharpe_trials_std, n_trials, n_obs, skew=0.0, kurtosis=3.0)`:**
 implements Bailey & López de Prado's Deflated Sharpe Ratio (2014).
@@ -1793,10 +1798,10 @@ trial in one call.
 | `sortino_ratio` | float | Annualized excess return / downside vol. `inf` with no downside and a positive mean excess; `nan` with no downside and no excess (a book that never moved) |
 | `max_drawdown` | float | Worst peak-to-trough decline (negative) |
 | `calmar_ratio` | float | CAGR / \|max drawdown\|. `inf` with no drawdown and a positive CAGR; `nan` when the curve never moved |
-| `win_rate` | float | Fraction of profitable trades |
+| `win_rate` | float | Fraction of profitable trades. `nan` when nothing traded: there is no trade to count a win among (it used to read `0.0`, a 0% win rate for a strategy that never traded) |
 | `profit_factor` | float | Gross profit / gross loss (a trade of exactly 0.00% counts on the loss side). `inf` when gross loss is zero and gross profit is positive (no losing trade). `nan` when nothing traded (it used to read `0.0`, the value "every trade lost" produces) and when every trade returned exactly 0.00% — 0/0 is undefined, the same rule as a Sharpe without dispersion. That case used to read `inf` on both backends, which ranked a run of do-nothing trades first under `sort_by="profit_factor"`; before that the C++ kernel returned `0.0` while Python returned `inf`. |
 | `num_trades` | int | Number of completed round-trips |
-| `avg_trade_return_pct` | float | Average trade P&L in %: the mean of the trade log's `return_pct`, each lot's share of the equity curve |
+| `avg_trade_return_pct` | float | Average trade P&L in %: the mean of the trade log's `return_pct`, each lot's share of the equity curve. `nan` when nothing traded (it used to read `0.0`) |
 | `turnover` | float | Position changed, summed over bars, in signal units — a flat→long→flat round trip is 2.0 |
 | `realized_cost_pct` | float | `turnover × (commission_pct + slippage_pct)`: exactly what the returns were reduced by |
 | `equity_curve` | pd.Series | Day-by-day portfolio value |

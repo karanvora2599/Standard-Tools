@@ -1,5 +1,55 @@
 # Changelog
 
+## A backtest that never traded has no win rate and no average trade: both are null with a reason, not 0.0, on both engines
+
+- **`win_rate` and `avg_trade_return_pct` read 0.0 for a run with no
+  trade.** Both are taken over the closed trades, and with none there is
+  nothing to count or average, but `run_strategy` reported a 0% win rate
+  and a flat average trade on the Python path and the native one alike --
+  `backtest.cpp`'s `run_strategy` and `run_strategy_summary` started both
+  at 0.0, so `_sqt_core.run_strategy`, `batch_run_strategy` and
+  `batch_backtest_crossover` (and with them every `backtest_grid` row)
+  did too. A strategy that never traded looked like one that lost every
+  trade, and the numbers fed the rankings and aggregates that read a
+  backtest. Now both are NaN in the library -- the kernel's defaults and
+  `_compute_trade_stats` for an empty log -- so the two backends still
+  agree, and null on the wire, where the result's warnings say why:
+  "win_rate is null: no trade closed, so there is no trade to count a win
+  among." The profit factor was already NaN there; the trade count stays 0.
+- **On the wire, these go from 0.0 to null for a run with no trade:**
+  `BacktestResult.win_rate` and `.avg_trade_return_pct` (every single-run
+  backtest tool, `run_signal_panel_backtest`'s `per_ticker`,
+  `run_regime_adaptive_backtest`'s `backtest`), `StrategyComparison.win_rate` and
+  `.avg_trade_return_pct` (`compare_strategies`),
+  `OptimizationRun.win_rate` and `.avg_trade_return_pct`
+  (`run_backtest_optimization`'s `top_results`) and `MatrixCell.win_rate`
+  (`run_strategy_matrix`). The four that were typed as plain floats are
+  nullable now.
+- **The doors that rank already left such a run out; the aggregate did
+  not.** `backtest_grid` on both paths, `compare_strategies`, the
+  optimization, both walk-forwards and the strategy matrix rank through
+  `backtest/ranking.py`, which puts a row that never traded after every
+  row that did, so none of them ranked by the 0.0 -- and a NaN is
+  unrankable there on its own. `robustness.parameter_sensitivity`, which
+  `get_robustness_diagnostics` reduces the grid with, applied only half
+  of that rule: a trial that never traded was counted, so its 0.0
+  `max_drawdown` -- no position, no loss -- was the `best` trial while the
+  grid ranked it last, and its 0.0 win rate pulled the median down. It
+  now excludes such a trial too when the grid has a `num_trades` column,
+  counts every exclusion in a new `n_excluded`, and the tool's warnings
+  say how many of how many trials were ranked and why.
+- **Smaller.** The backtest's debug log formatted the win rate as a
+  number and would have raised on a null; it prints it as it is.
+  `StrategyComparison.avg_trade_return_pct` was described as a fraction;
+  it is in percent, as everywhere else.
+- Tests: both engines and the three native kernels give NaN with no trade
+  and agree; a grid's no-trade row is NaN and ranks last under either
+  metric, the fused crossover path included; `parameter_sensitivity`
+  leaves a no-trade trial out and counts it; every door above reports the
+  null with its reason, and a run that traded reports neither. The C++
+  suite's no-trade tests pin NaN where they pinned 0.0. The mutation
+  catalogue gains four entries.
+
 ## A target volatility a few rounding units from an end of the frontier is that end, so the minimum-variance answer is the same on every BLAS
 
 - **The flat end no longer turns rounding into weights.** A volatility

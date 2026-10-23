@@ -2160,6 +2160,15 @@ def get_robustness_diagnostics(
     )
 
     warnings: List[str] = list(grid_df.attrs.get("warnings", []))
+    if sensitivity["n_excluded"]:
+        warnings.append(
+            f"parameter_sensitivity ranks {sensitivity['n_trials']} of "
+            f"{len(grid_df)} trial(s): {sensitivity['n_excluded']} have no "
+            f"rankable {input_data.sort_by} -- they never traded, or the "
+            "value is undefined or infinite -- and are left out of best, "
+            "median and every gap rather than counted at a value they do not "
+            "have."
+        )
     if len(grid_df) < 5:
         warnings.append(
             f"Only {len(grid_df)} trial(s) searched — parameter sensitivity and "

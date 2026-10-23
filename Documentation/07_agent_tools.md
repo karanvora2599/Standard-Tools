@@ -596,6 +596,9 @@ result.profit_factor          # Gross profit / gross loss; > 1.5 is healthy
                               #   `warnings` says which and why
 result.num_trades             # Number of completed round-trip trades
 result.avg_trade_return_pct   # Average per-trade P&L in percent
+                              # win_rate and avg_trade_return_pct are None
+                              #   when no trade closed -- there is nothing to
+                              #   count or average -- and `warnings` says so
 result.final_equity           # Portfolio value at end date
 result.equity_curve           # List[float] — daily portfolio value
 result.trade_log              # Optional[List[Trade]] — per-trade details

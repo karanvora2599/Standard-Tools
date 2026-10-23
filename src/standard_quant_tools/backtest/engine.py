@@ -351,13 +351,16 @@ def _build_trade_log(
 
 def _compute_trade_stats(trade_log: pd.DataFrame) -> Dict[str, float]:
     if trade_log.empty:
+        # NaN, not 0.0, for all three: 0.0 is what "every trade lost" (or
+        # "every trade was flat") produces, and nothing traded. A strategy
+        # that never traded read as a 0% win rate and a flat average trade,
+        # which a sort or an average then took at its word. backtest.cpp
+        # starts from the same NaN.
         return {
-            "win_rate": 0.0,
-            # NaN, not 0.0: 0.0 is what "every trade lost" produces, and
-            # nothing traded. backtest.cpp starts from the same NaN.
+            "win_rate": float("nan"),
             "profit_factor": float("nan"),
             "num_trades": 0,
-            "avg_trade_return_pct": 0.0,
+            "avg_trade_return_pct": float("nan"),
         }
 
     num_trades = len(trade_log)
@@ -837,7 +840,9 @@ def run_strategy(
         are +inf over an empty denominator with a positive numerator and
         NaN when both are zero (a book that never moved); profit_factor is
         +inf when no trade lost and some trade won, and NaN when nothing
-        traded or every trade returned exactly zero (0/0). The trade log's
+        traded or every trade returned exactly zero (0/0); win_rate and
+        avg_trade_return_pct are NaN when nothing traded, for there is no
+        trade to count or average (they were 0.0). The trade log's
         return_pct is each lot's share of the equity curve, so the log
         compounds to exactly the curve's total return -- see
         _build_trade_log.
@@ -1741,9 +1746,12 @@ def backtest_grid(
         pd.DataFrame with one row per distinct parameter combination, ranked
         by sort_by. Columns include all metric keys plus the parameter
         names and `return_basis` (the frame's, the same on every row, as
-        run_strategy reports it). `attrs` carries n_unrankable,
-        n_combinations, duplicate_values_dropped, periods_per_year,
-        periods_per_year_source, return_basis and warnings.
+        run_strategy reports it). A row that never traded has NaN
+        win_rate, profit_factor and avg_trade_return_pct, as run_strategy
+        does, and is ranked after every row that traded. `attrs` carries
+        n_unrankable, n_combinations, duplicate_values_dropped,
+        periods_per_year, periods_per_year_source, return_basis and
+        warnings.
 
     Raises:
         ValidationError: price_data's index is unsorted or duplicated, or a
