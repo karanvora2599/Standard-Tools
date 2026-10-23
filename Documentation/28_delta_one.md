@@ -315,6 +315,14 @@ which used to run and turn every equity figure NaN.
   — generated argument-level reference
 - [19_runtimes.md](19_runtimes.md) — why runtimes exist and how values
   cross between them
+- [32_finance.md](32_finance.md) — `price_fx_forward_hedge` (an FX forward
+  by covered interest parity, each leg on its own day count, with a
+  cross-currency basis and the hedged return) and `analyze_book_carry`
+  (the carry of a set of positions, a future's (S - F)/(F T) among them);
+  `solve_forward_carry` here recovers one carry component from one quote.
+  The forward hedge sits in `finance` rather than here because in this
+  runtime it would have made `auto` thin one more tool
+  ([19_runtimes.md](19_runtimes.md#the-twelve-runtimes))
 
 ## 7. The live layer
 

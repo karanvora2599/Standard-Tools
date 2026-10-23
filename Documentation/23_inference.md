@@ -1,10 +1,11 @@
 # Statistical inference and diagnostics
 
-Nineteen tools in the `research` runtime that answer questions a summary
-statistic hides. They fall into three groups: **error bars** on estimates
+Twenty-one tools in the `research` runtime that answer questions a summary
+statistic hides. Most fall into three groups: **error bars** on estimates
 that are normally reported without any, **structure** in a series that a
 mean and a standard deviation cannot see, and **corrections** for the fact
-that you looked at more than one thing.
+that you looked at more than one thing. The last two make a value at risk
+into a **forecast** and check it against the returns that followed.
 
 `08_analysis.md` covers the older statistical surface — factor regression,
 cointegration, PCA, Hurst. This document covers what was added around it.
@@ -250,6 +251,40 @@ days. A strategy whose entire compound return disappears when five days are
 removed is a lottery ticket with good statistics; one whose return survives
 that is robust.
 
+## Value at risk as a forecast
+
+### `forecast_var_series`
+
+A VaR is used as a statement about tomorrow, and a statement about tomorrow
+can be checked -- but only if each day's forecast was made with nothing it
+could not have known. `forecast_var_series` makes the VaR and ES of every
+date from the `window` returns before it, by one of six methods
+(`historical`, `normal`, `cornish_fisher`, `ewma`, `filtered_historical`,
+`evt_garch`), and publishes the series with `run_id`. Changing any return
+from a date on changes no forecast up to it, for every method; the GARCH
+methods refit every `refit_every` forecasts on the window that ends before
+the refit date. Cornish-Fisher is refused where its expansion is not a
+quantile function (Maillard 2012) -- for instance whenever the window's
+excess kurtosis is negative -- rather than reported as a VaR with no
+distribution behind it.
+
+### `backtest_var_forecasts`
+
+On 300 samples of i.i.d. normal returns with a 95% normal VaR from a
+1,000-day window, every exception count sits in its 99.9% binomial band and
+Kupiec rejects 4.3% of the time; Christoffersen's independence test
+rejects 8% of i.i.d. 5% exception series of 1,000 dates (its chi-squared
+reading runs a little over the level when consecutive exceptions are
+rare), and an exception series in two runs of five at p = 1e-12. Z2
+averages 0.001 under the true model and rejects 9 of 200 at 5%; returns at
+1.5 times the forecast's scale give Z2 = -3.3. Read the p-values with the
+expected count: below five expected exceptions the tool says the
+chi-squared p-values are rough.
+
+`backtest_var_forecasts` sits in `research` beside the forecast rather than
+in `backtest`, where it would have made `auto` thin one more of that
+runtime's tools.
+
 ## The tools
 
 | Tool | Answers |
@@ -273,6 +308,8 @@ that is robust.
 | `test_granger_causality` | Does A precede B — Bonferroni corrected for the lags tested |
 | `get_partial_correlation` | What is left once the common drivers are removed from both |
 | `analyze_tail_dependence` | Do these move together in the tail, where it matters |
+| `forecast_var_series` | What was each day's VaR and ES, made only from the days before it, and what is the next period's |
+| `backtest_var_forecasts` | Were those forecasts right: exceptions, Kupiec, Christoffersen, the Basel traffic light, Acerbi-Szekely Z2 |
 
 Full argument lists: [20_tool_index.md](20_tool_index.md#research--research).
 

@@ -223,6 +223,10 @@ class TestCountsInProseAreReal:
             8: "eight",
             9: "nine",
             10: "ten",
+            11: "eleven",
+            12: "twelve",
+            13: "thirteen",
+            14: "fourteen",
         }
         expected = words.get(len(runtimes))
         assert expected, f"no word for {len(runtimes)} runtimes; extend the map"
@@ -299,6 +303,8 @@ class TestCountsInProseAreReal:
         "26_data.md": "data",
         "27_meta.md": "meta",
         "28_delta_one.md": "delta_one",
+        "31_allocation.md": "allocation",
+        "32_finance.md": "finance",
     }
 
     #: Enough to name any runtime this library will plausibly have. A count

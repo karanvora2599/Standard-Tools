@@ -76,6 +76,8 @@ DEEP_DOCS = {
     "microstructure": "[22_microstructure.md](22_microstructure.md)",
     "derivatives": "[21_derivatives.md](21_derivatives.md)",
     "delta_one": "[28_delta_one.md](28_delta_one.md)",
+    "allocation": "[31_allocation.md](31_allocation.md)",
+    "finance": "[32_finance.md](32_finance.md)",
     "meta": "[27_meta.md](27_meta.md), [10_auditability.md](10_auditability.md)",
     "modeling": "[15_modeling.md](15_modeling.md)",
     "feature_lab": "[15_modeling.md](15_modeling.md)",
@@ -109,7 +111,7 @@ scoping an MCP session -- see [18_mcp.md](18_mcp.md).
 
 Two tools (`run_backtest_optimization`, `scan_pairs`) are long-running and
 are served only with `--enable-long-running`. A default MCP session is also
-scoped to four categories rather than all of them, so it advertises 58 of the
+scoped to four categories rather than all of them, so it advertises 61 of the
 {total} below; `--runtime all --enable-long-running` serves every one.
 
 """

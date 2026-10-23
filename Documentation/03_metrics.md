@@ -152,6 +152,39 @@ print(f"CVaR/ES(99%) : {es:.4f}  (mean of the worst {n} days)")
 
 ---
 
+## VaR as a forecast, and its backtest
+
+`var_historical` and `cvar` describe a sample. `forecast_var_series` makes
+a series of one-step-ahead forecasts -- each date's VaR and ES from the
+`window` returns before it -- and `backtest_var_series` tests them against
+the returns that followed.
+
+```python
+from standard_quant_tools.metrics import backtest_var_series, forecast_var_series
+
+out = forecast_var_series(returns, method="filtered_historical", confidence=0.99,
+                          window=500, refit_every=20)
+out["forecasts"]            # DataFrame: realized, var, es, confidence by date
+out["next_var"], out["next_es"]   # for the period after the last return
+
+tests = backtest_var_series(out["forecasts"], 0.99, random_seed=0)
+tests["kupiec"]["p_value"], tests["christoffersen"]["p_value"]
+tests["basel"]["zone"], tests["z2"]["z2"], tests["z2"]["p_value"]
+```
+
+Methods: `historical`, `normal`, `cornish_fisher` (refused outside the
+region where the expansion is monotone), `ewma` (RiskMetrics, seeded with
+the first window's mean square), `filtered_historical` and `evt_garch`
+(GARCH(1,1) from `analysis.garch`, refitted every `refit_every`
+forecasts). VaR and ES are losses, positive; an exception is a return below
+-VaR. A statistic that is undefined -- independence with no exception, the
+traffic light off 99% or under 250 forecasts, Z2 without ES -- comes back
+`None` with a `null_reason`. The agent tools are `forecast_var_series` and
+`backtest_var_forecasts` in the `research` runtime; see
+[23_inference.md](23_inference.md#value-at-risk-as-a-forecast).
+
+---
+
 ## Benchmark-Relative Metrics
 
 ```python

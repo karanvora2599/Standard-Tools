@@ -56,13 +56,13 @@ print(result)  # plain dict, JSON-ready
 
 ## Tool Registry
 
-`get_agent_tools()` returns **192 tool definitions** in the format both OpenAI and Anthropic expect. (That is the analysis surface; the separate `modeling` and `feature_lab` runtimes add 38 and 11 more, for 241 in total — see [15_modeling.md](15_modeling.md) and [19_runtimes.md](19_runtimes.md).) The schemas are derived automatically from Pydantic — no manual JSON authoring.
+`get_agent_tools()` returns **213 tool definitions** in the format both OpenAI and Anthropic expect. (That is the analysis surface; the separate `modeling` and `feature_lab` runtimes add 38 and 11 more, for 262 in total — see [15_modeling.md](15_modeling.md) and [19_runtimes.md](19_runtimes.md).) The schemas are derived automatically from Pydantic — no manual JSON authoring.
 
 ```python
 from standard_quant_tools.agent import get_agent_tools
 
 tools = get_agent_tools()
-print(len(tools))  # 192
+print(len(tools))  # 213
 
 # Each tool follows the OpenAI function-calling format:
 # {"type": "function", "function": {"name": ..., "description": ..., "parameters": <JSON Schema>}}
@@ -82,7 +82,7 @@ list beside it can only be wrong later. This guide covers the fourteen core
 tools in depth — what each is for, how to read its output, and how they
 chain; [09_advanced_agent_tools.md](09_advanced_agent_tools.md) does the same
 for the rest of the backtest/portfolio/analytics surface, and
-[19_runtimes.md](19_runtimes.md) explains the ten execution boundaries the
+[19_runtimes.md](19_runtimes.md) explains the twelve execution boundaries the
 tools are split across.
 
 ### Dispatch — the recommended wiring approach
@@ -98,7 +98,7 @@ result = dispatch("analyze_stock_risk", {"symbol": "AAPL", "benchmark": "SPY"})
 ```
 
 Errors:
-- **`ValueError`** — unknown tool name; message lists all 192 valid names.
+- **`ValueError`** — unknown tool name; message lists all 213 valid names.
 - **`pydantic.ValidationError`** — arguments don't match the tool's input schema (bad types, missing required fields).
 
 Every call through `dispatch()` can also produce an auditable decision record — inputs, data provenance, and an output hash, replayable later to check whether the result would still reproduce. See [10_auditability.md](10_auditability.md).
@@ -180,14 +180,14 @@ while True:
 Tell the model what tools are available and how to use them together.
 
 The list below is a working subset chosen for a single-agent loop, not the
-whole surface. A prompt that tries to enumerate all 192 stops being
+whole surface. A prompt that tries to enumerate all 213 stops being
 maintainable the day a tool is added; scope the model with a runtime instead
 (see [19_runtimes.md](19_runtimes.md)) and let
 [20_tool_index.md](20_tool_index.md) carry the full catalogue.
 
 ```python
 SYSTEM = """
-You are a quantitative analyst assistant with access to a 192-tool financial
+You are a quantitative analyst assistant with access to a 213-tool financial
 toolkit. The most commonly used are described below (see
 09_advanced_agent_tools.md, and the generated 20_tool_index.md, for the
 rest — execution/diagnostic tools like run_regime_adaptive_walkforward_backtest,
@@ -2165,4 +2165,4 @@ surface.
 
 ## Advanced Tools
 
-Thirty-five further advanced, supplementary, custom-signal, analytics, options, diagnostic, constrained-optimization and risk-decomposition tools compose these primitives into single, LLM-callable operations covering complete research workflows — output reference tables and multi-step chaining examples in [09_advanced_agent_tools.md](09_advanced_agent_tools.md). The remainder of the 192 — the data, microstructure, delta-one, derivatives, discovery and provenance surfaces — are catalogued in [20_tool_index.md](20_tool_index.md) and documented by their own runtime guides, listed in [19_runtimes.md](19_runtimes.md).
+Thirty-five further advanced, supplementary, custom-signal, analytics, options, diagnostic, constrained-optimization and risk-decomposition tools compose these primitives into single, LLM-callable operations covering complete research workflows — output reference tables and multi-step chaining examples in [09_advanced_agent_tools.md](09_advanced_agent_tools.md). The remainder of the 213 — the data, microstructure, delta-one, derivatives, allocation, finance, discovery and provenance surfaces — are catalogued in [20_tool_index.md](20_tool_index.md) and documented by their own runtime guides, listed in [19_runtimes.md](19_runtimes.md).

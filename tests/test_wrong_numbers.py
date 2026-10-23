@@ -1948,12 +1948,12 @@ class TestUserVisibleCountsAreReal:
         from standard_quant_tools.mcp.catalog import build_catalog
 
         runtimes = _build()
-        assert len(runtimes) == 10
-        assert sum(len(r.tool_names) for r in runtimes.values()) == 241
-        assert len(build_catalog()) == 241
-        # 241 minus the 38 modeling and 11 feature_lab tools, which are
+        assert len(runtimes) == 12
+        assert sum(len(r.tool_names) for r in runtimes.values()) == 262
+        assert len(build_catalog()) == 262
+        # 262 minus the 38 modeling and 11 feature_lab tools, which are
         # deliberately outside the analysis facade.
-        assert len(TOOL_CATEGORY) == 192
+        assert len(TOOL_CATEGORY) == 213
 
     def test_every_long_running_name_is_a_real_tool(self):
         """The help text named one that is not."""

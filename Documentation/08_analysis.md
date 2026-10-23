@@ -213,6 +213,38 @@ print("C++ rolling factor loadings active:", HAS_CPP)
 
 ---
 
+## Factor Model for Many Assets
+
+`multi_factor_regression` regresses one asset. `estimate_factor_model`
+(`analysis/factor_model.py`) runs the same fit -- the same least squares,
+the same refusal of linearly dependent factors by name, the same
+(X′X)⁻¹ -- for every column of an asset frame on one factor frame over the
+same dates, and returns the model a risk decomposition needs:
+
+```python
+from standard_quant_tools.analysis import estimate_factor_model
+
+model = estimate_factor_model(asset_returns, factor_returns, periods_per_year=252)
+model["loadings"]            # B: {asset: {factor: loading}}, with standard errors
+model["factor_covariance"]   # F: the factors' sample covariance (n - 1), annualized
+model["specific_variance"]   # D: SSR / (n - p) per asset, annualized
+model["covariance"]          # Σ = B F B' + D, rows parallel to model["assets"]
+```
+
+D divides by n − p, the degrees of freedom left after the p coefficients
+(the factors, plus one for the intercept): SSR / n understates it, by 10%
+with five factors on 60 months. F carries the normal-theory standard
+error √((F_jk² + F_jj F_kk) / (n − 1)) and D the error D √(2 / (n − p)).
+The frames must be on the same dates -- nothing is aligned or filled here.
+Every number is in-sample, and D is diagonal by assumption: the largest
+residual correlation between two assets is reported beside it, and a
+warning names a pair at 0.5 or more. The agent tool is
+`estimate_factor_model` in the `research` runtime, which takes a
+`returns_panel` reference (with optional `columns`) or dated values for
+each side and aligns them.
+
+---
+
 ## Combining with other modules
 
 ### Factor exposure → Screener pipeline
@@ -240,10 +272,12 @@ for ticker in universe.index:
 ### Via Agent Tool
 
 Every function in this document has an agent tool over it in the `research`
-runtime: `run_factor_regression`, `run_cointegration_test`, `scan_pairs`,
-`run_pca_analysis`, `run_hurst_analysis`, `run_kalman_hedge_ratio`,
+runtime: `run_factor_regression`, `estimate_factor_model`,
+`run_cointegration_test`, `scan_pairs`, `run_pca_analysis`,
+`run_hurst_analysis`, `run_kalman_hedge_ratio`,
 `run_garch_volatility_forecast`. They fetch the bars themselves from a
-symbol and return Pydantic models rather than dicts, so nothing needs
+symbol (`estimate_factor_model` takes references or dated values instead)
+and return Pydantic models rather than dicts, so nothing needs
 JSON-serialising by hand. Argument lists are in
 [20_tool_index.md](20_tool_index.md#research--research); the worked
 examples are in [07_agent_tools.md](07_agent_tools.md) and

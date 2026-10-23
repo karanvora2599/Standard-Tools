@@ -1,6 +1,6 @@
 # Derivatives
 
-Twelve tools for what an option is worth and what holding it does to you.
+Thirteen tools for what an option is worth and what holding it does to you.
 Pricing under four models, the second-order greeks that explain why a
 delta-hedged book still loses money, the internal consistency of a quoted
 surface, and what a hedge actually costs to run.
@@ -252,6 +252,46 @@ way.** Equity vol rises when spot falls, reliably enough that "spot −20%,
 vol unchanged" is a cell in the table and not a state of the world. Read the
 down-spot/up-vol diagonal rather than a row.
 
+### `aggregate_option_book`
+
+The greeks of a whole book rather than of one contract: options and shares
+on several underlyings, each option line priced by the batched
+Black-Scholes-Merton kernel and turned into a position by its contract
+multiplier and quantity. Per line, per underlying and for the book it
+reports the dollar delta (Δ · S · multiplier · quantity), the dollar gamma
+per 1% move (Γ · S² / 100 · multiplier · quantity, the change in dollar
+delta when the underlying moves 1%), the dollar vega per volatility
+point, the dollar theta per calendar day (the annual theta / 365) and the
+dollar rho per 1% of rate. Given each underlying's beta to an index, the
+beta-weighted delta Σ β_i · Δ$_i is the book's exposure in index-equivalent
+dollars. A line can give its expiry as a date with a `valuation_date`,
+converted ACT/365F — the basis the per-day theta uses.
+
+**The multiplier is required.** 100 shares a contract is the convention
+of US equity options, not a fact: index, mini, futures and adjusted
+contracts differ, and every dollar greek scales with it, so a line without
+one is refused rather than priced at 100. Spots, rates, dividend yields
+and betas are the caller's; an underlying given no yield is priced as a
+non-payer and the warnings name it.
+
+The book is also revalued in full at each spot shock (default ±1, 2, 5 and
+10%, every underlying moving by the same percentage at once, with
+volatility, rates and time held) beside the delta-gamma estimate
+Δ·dS + Γ·dS²/2, and the error between them is reported per shock, per
+underlying and for the book. It is the Taylor remainder, speed · dS³ / 6
+to leading order, so it shrinks like the cube of the shock: noise at 1%,
+and at 10% on short-dated options the number to read is `full_pnl`.
+Summing across underlyings adds dollars to dollars, and two totals carry
+an assumption: the book's dollar gamma is for every underlying moving 1%
+together, its vega for every volatility rising one point together.
+
+Planted: one option's dollar greeks are the closed forms times multiplier
+and quantity to 1e-12; a conversion (long a call, short the put at the
+same strike, short the shares the contracts control) has a book delta of
+zero, gamma and vega of exactly zero, is worth −K e^{−rT} per unit and
+does not move under full revaluation at ±50%; the delta-gamma error falls
+by 8 when the shock halves.
+
 ## Chains, grids and the gamma flip
 
 Everything above prices one contract per call. A chain is hundreds of
@@ -304,6 +344,7 @@ call per leg: a structure has too few legs for a batch to pay. Numbers:
 | `get_expected_move` | What move is priced — as one standard deviation, not a bound |
 | `simulate_delta_hedge` | What the hedge earns, and how widely that varies |
 | `get_option_risk_scenarios` | Full revaluation over spot × vol, not a Taylor estimate; takes `dividend_yield` (every cell used to price a non-payer), and the grid is served as a resource link at the default inline limit |
+| `aggregate_option_book` | Dollar greeks of a book across underlyings — delta, gamma per 1%, vega, theta per day, rho — with a beta-weighted delta and delta-gamma against full revaluation per spot shock; every option line needs its contract multiplier |
 
 Full argument lists: [20_tool_index.md](20_tool_index.md#derivatives--derivatives).
 

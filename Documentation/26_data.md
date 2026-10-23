@@ -88,7 +88,10 @@ optional `source` — the `DataSource` rule. An undated list is refused: one
 series needs no calendar, several do, and equal lengths are not the same
 dates. `ReturnStreams` maps names to streams, and `resolve_return_streams`
 returns the dated Series that `portfolio.streams.align_return_streams` puts
-on one calendar.
+on one calendar. `combine_return_streams` (in the `allocation` runtime)
+takes `ReturnStreams` and is the tool that fetches a stream by symbol; the
+allocating tools take only dated values or a `returns_ref`, so they stay
+replayable without the data.
 
 ## What the data cannot support is part of the answer
 

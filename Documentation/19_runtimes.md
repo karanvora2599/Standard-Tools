@@ -36,18 +36,20 @@ its own tools, so a name from another runtime is not discouraged — it is
 unroutable. This is the guarantee the modeling registry has had since it
 shipped, generalized to the rest of the surface.
 
-### The ten runtimes
+### The twelve runtimes
 
 | Runtime | Tools | Categories | What it is for |
 |---|---|---|---|
-| `research` | 42 | `screener`, `analysis`, `quant_research` | Describe an asset or a universe, and its statistical structure. Does not run strategies. |
+| `research` | 45 | `screener`, `analysis`, `quant_research` | Describe an asset or a universe, and its statistical structure. Does not run strategies. |
 | `data` | 21 | `data` | Get the bytes — from any configured provider, chosen per call with `source` — and publish them as references every other runtime reads, plus what the source can promise about them. Fetches; does not analyze. |
 | `backtest` | 35 | `backtest_execution`, `backtest_validation`, `custom_signal` | Run a strategy, and establish how much of the result is real. Does not build portfolios. |
 | `meta` | 25 | `discovery`, `provenance` | Questions about the library, the session and what a data source can promise — never about a market. |
 | `portfolio` | 22 | `portfolio_risk` | Turn a view into a position and price what it costs. |
+| `allocation` | 8 | `allocation` | How much capital each strategy, sleeve or model deserves, read from its return stream rather than from tickers. Takes streams by reference or as dated values; does not build books out of assets. |
+| `finance` | 9 | `finance` | What holding a set of positions costs — financing, margin, currency exposure, carry, the FX forward that hedges it — and what a stream of cash is worth. Every rate, FX rate and day count is the caller's; nothing is fetched. |
 | `modeling` | 38 | (one ordered pipeline) | Build, validate and score a model, and join point-in-time records onto its panel. Lives in `modeling/agent`. |
 | `microstructure` | 17 | `microstructure` | What the market will charge you to trade — measured from ticks, or estimated from bars. |
-| `derivatives` | 12 | `derivatives` | What an option is worth and what holding it does to you. Takes quotes as arguments; there is no options provider. |
+| `derivatives` | 13 | `derivatives` | What an option is worth and what holding it does to you. Takes quotes as arguments; there is no options provider. |
 | `delta_one` | 18 | `delta_one` | Which instrument is the cheapest way to own or hedge an exposure: carry, basis, curves, rolls, hedge sizing and instrument comparison. Takes quotes as arguments; there is no futures provider. |
 | `feature_lab` | 11 | (one exploratory surface) | Interrogate the features of a built dataset, before and independently of fitting. Lives in `modeling/agent`. |
 
@@ -66,6 +68,16 @@ afterwards. `screener` sits with `analysis` because you screen in order to
 analyze; `discovery` sits with `provenance` because both ask about the
 session rather than about a market.
 
+`allocation` and `finance` are the newest. `allocation` takes return
+streams — a backtest's, a model's, a sleeve run elsewhere — and `finance`
+takes positions or cash flows; neither takes a ticker, which is what keeps
+both apart from `portfolio`, where a book is built out of assets. Placement
+also answers to what a runtime costs to serve: `backtest_var_forecasts`
+sits in `research` beside `forecast_var_series` rather than in `backtest`,
+and `price_fx_forward_hedge` in `finance` rather than `delta_one`, because
+in either of those it would have made `auto` thin one more tool that is
+described in full today.
+
 `feature_lab` and `modeling` both live under `modeling/agent`, which is
 where the analysis they call lives. The runtime boundary and the package
 layout answer different questions and do not have to agree: `modeling` is
@@ -76,7 +88,7 @@ any model exists.
 ### Runtime is not category
 
 `TOOL_CATEGORY` is unchanged and still drives `agent/router.py`, the MCP
-`--categories` flag, and the sixteen workers in `Multi_Agent_Implementation`.
+`--categories` flag, and the eighteen workers in `Multi_Agent_Implementation`.
 
 - A **category** hints at which tools suit a request.
 - A **runtime** states which tools a caller may execute.
@@ -90,7 +102,7 @@ a runtime works; it can never widen past it.
 from standard_quant_tools.agent.runtimes import resolve, combine
 
 research = resolve("research")
-research.get_tools()                       # 42 schemas, this runtime only
+research.get_tools()                       # 45 schemas, this runtime only
 research.dispatch("run_screener", {...})   # fine
 
 research.dispatch("run_sma_backtest", {...})
@@ -130,6 +142,9 @@ the cluster was big enough to stand alone. That order is the rule, not an
 accident of scheduling: a runtime declared empty and filled later spends
 however long it takes to fill as a boundary that isolates nothing, and the
 tools inside it get designed against a scope nobody is using yet.
+`allocation` and `finance` were made the other way, declared and filled in
+the same release with eight and nine tools, so neither was ever served as
+a boundary that held nothing.
 
 The floor is checked on both sides. At the split `feature_lab` landed at
 nine and `modeling` kept fourteen; neither number was a coincidence — the
@@ -156,9 +171,9 @@ a changelog nobody reads, embedded in an error message everybody does.
 
 `sqt-mcp --runtime research` serves that runtime and nothing else — the
 same partition, over the protocol. This is not only a context-budget
-decision, though the budget forced it: at roughly 2,775 bytes per tool over
+decision, though the budget forced it: at roughly 3,000 bytes per tool over
 the wire at full detail, the 180,000-byte session ceiling the server used to
-enforce buys about 65 tools and the library has 241, so the whole surface
+enforce buys about 60 tools and the library has 262, so the whole surface
 stopped fitting in one session well before it stopped growing.
 
 What it buys beyond the bytes is that the boundary now holds in three
@@ -260,7 +275,8 @@ record beside it, and `resolve(ref, expect="covariance")` returns the named
 frame with that record on `attrs`. `optimize_risk_parity`,
 `optimize_max_diversification`, `get_marginal_risk_contribution`,
 `run_portfolio_scenarios` and `optimize_portfolio` take it as
-`covariance_ref`.
+`covariance_ref`. `estimate_factor_model` publishes one too: the factor
+model's B F B′ + D, annualized.
 
 `list_reference_kinds` returns this table plus what converts to what — the
 map of which producer outputs can reach which consumer inputs.
@@ -343,7 +359,7 @@ Two `meta` tools exist because of the same concern the runtimes address.
 
 `describe_tool` reports one tool's arguments, result fields, owning runtime,
 and whether calling it fetches or writes. The alternative was loading all
-241 schemas — which is exactly what the MCP category budget exists to avoid,
+262 schemas — which is exactly what the MCP category budget exists to avoid,
 so a narrowly-scoped agent could not learn about a tool it had heard of
 without paying for every tool it had not. It answers for any runtime,
 because describing a tool is not calling it.
@@ -401,7 +417,7 @@ forwards the text as it is. An accepted call costs 0.07 µs more.
 
 ## See also
 
-- [13_agent_orchestration.md](13_agent_orchestration.md) — the router and the sixteen workers
+- [13_agent_orchestration.md](13_agent_orchestration.md) — the router and the eighteen workers
 - [18_mcp.md](18_mcp.md) — how runtimes reach an MCP client
 - [15_modeling.md](15_modeling.md) — the modeling runtime
 - [10_auditability.md](10_auditability.md) — what every dispatch records

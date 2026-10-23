@@ -2,7 +2,7 @@
 
 Thirty-five high-level agentic tools that compose the library's existing primitives into single, LLM-callable operations. Each collapses a multi-step reasoning workflow into one structured function call with a Pydantic output model.
 
-> **See also:** [07_agent_tools.md](07_agent_tools.md) covers the 14 core tools (including `run_buy_and_hold` and `compare_strategies`), `dispatch()` wiring, and the cross-field validation rules. The full catalogue — all 192 tools `get_agent_tools()` returns, plus the modeling and feature-lab runtimes, 241 in all — is [20_tool_index.md](20_tool_index.md), generated from the live registry; [19_runtimes.md](19_runtimes.md) explains the ten execution boundaries they are split across. The tools below are the backtest, portfolio and analytics slice, in depth.
+> **See also:** [07_agent_tools.md](07_agent_tools.md) covers the 14 core tools (including `run_buy_and_hold` and `compare_strategies`), `dispatch()` wiring, and the cross-field validation rules. The full catalogue — all 213 tools `get_agent_tools()` returns, plus the modeling and feature-lab runtimes, 262 in all — is [20_tool_index.md](20_tool_index.md), generated from the live registry; [19_runtimes.md](19_runtimes.md) explains the twelve execution boundaries they are split across. The tools below are the backtest, portfolio and analytics slice, in depth.
 
 ---
 
@@ -922,6 +922,8 @@ f* is a POSITION — a multiple of equity, 10.8 at p = 0.55, W = 6%, L = 3%, bec
 With `n_trades` — how many trades the win rate was measured on — the result adds the win rate's 95% Wilson interval and f* at its two ends, holding W and L fixed (so the true range is wider), and a warning when the interval's low end has no edge at all.
 
 When f* ≤ 0 the statistics say the trade loses money (p W − q L ≤ 0): Kelly sizes 0 shares and a warning says so. The fixed-risk figures are still reported — what the risk budget buys behind the stop — but they are not the recommendation for a trade without an edge. A win rate of 1 (no losing trade in the sample) leaves f* unbounded: it is null with a warning and the position is sized at the cap. `win_rate`, `avg_win_pct` and `avg_loss_pct` are given together or not at all, and `n_trades` needs them.
+
+For a whole return stream rather than one trade — a strategy's daily returns, or several strategies held together — `get_kelly_report` in the `allocation` runtime gives the same growth-optimal notional as f* = mu / sigma^2 (Sigma^-1 mu for several), with its standard error, the chance the estimate is more than twice the truth, and the growth and drawdown odds at fractions of it. Its empirical Kelly on a sample of wins of +W and losses of -L is exactly this section's p/L - q/W. Like this tool it reports; unlike this tool it sizes nothing. See [31_allocation.md](31_allocation.md).
 
 `account_equity` and `atr_multiplier` must be positive: at zero or below every position sized at zero shares and came back as a recommendation. A stop distance or a share count past the float range is refused naming the input, where it used to escape from `int()` as an `OverflowError`, and so is a position value past it, which used to come back as an infinity.
 
@@ -2347,6 +2349,15 @@ construction (capacity IS one day of `max_participation` there) and the
 capacity's ratio to each other name's own maximum: it carried no
 information the capacity did not. A warning says when `account_size` is
 above the capacity.
+
+This report holds the target weights still: it asks how large an account the
+positions themselves allow at `max_participation` of each name's volume. What a
+strategy's own trading costs as it grows is `get_strategy_capacity_curve` in
+the `allocation` runtime: from the strategy's gross return stream and weight
+panel, with each instrument's ADV, volatility and spread supplied by the
+caller, it charges spread plus square-root impact on every weight change and
+reports net return and Sharpe against AUM, the break-even AUM and the AUM at
+half the gross Sharpe.
 
 **Output reference:**
 

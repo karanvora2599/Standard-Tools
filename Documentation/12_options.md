@@ -214,7 +214,7 @@ Measured throughput is in [16_performance.md](16_performance.md#option-chains).
 
 Two tools carry this module onto the agent surface, registered in
 `get_agent_tools()` and `dispatch()` like every other tool in the library. They
-are two of the derivatives runtime's twelve — the other ten are in
+are two of the derivatives runtime's thirteen — the other eleven are in
 [21_derivatives.md](21_derivatives.md).
 
 ```python

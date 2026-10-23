@@ -26,15 +26,15 @@ scoping an MCP session -- see [18_mcp.md](18_mcp.md).
 
 Two tools (`run_backtest_optimization`, `scan_pairs`) are long-running and
 are served only with `--enable-long-running`. A default MCP session is also
-scoped to four categories rather than all of them, so it advertises 58 of the
-241 below; `--runtime all --enable-long-running` serves every one.
+scoped to four categories rather than all of them, so it advertises 61 of the
+262 below; `--runtime all --enable-long-running` serves every one.
 
 
 ## The runtimes
 
 | Runtime | Tools | Schema cost | Categories | Deep documentation |
 |---|---:|---:|---|---|
-| `research` | 42 | 64 KB | `screener`, `analysis`, `quant_research` | [08_analysis.md](08_analysis.md), [23_inference.md](23_inference.md) |
+| `research` | 45 | 71 KB | `screener`, `analysis`, `quant_research` | [08_analysis.md](08_analysis.md), [23_inference.md](23_inference.md) |
 | `modeling` | 38 | 204 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
 | `backtest` | 35 | 102 KB | `backtest_execution`, `backtest_validation`, `custom_signal` | [04_backtesting.md](04_backtesting.md), [24_overfitting.md](24_overfitting.md) |
 | `meta` | 25 | 25 KB | `discovery`, `provenance` | [27_meta.md](27_meta.md), [10_auditability.md](10_auditability.md) |
@@ -42,9 +42,11 @@ scoped to four categories rather than all of them, so it advertises 58 of the
 | `data` | 21 | 36 KB | *(one surface)* | [26_data.md](26_data.md) |
 | `delta_one` | 18 | 46 KB | *(one surface)* | [28_delta_one.md](28_delta_one.md) |
 | `microstructure` | 17 | 31 KB | *(one surface)* | [22_microstructure.md](22_microstructure.md) |
-| `derivatives` | 12 | 23 KB | *(one surface)* | [21_derivatives.md](21_derivatives.md) |
+| `derivatives` | 13 | 26 KB | *(one surface)* | [21_derivatives.md](21_derivatives.md) |
 | `feature_lab` | 11 | 50 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
-| **Total** | **241** | | | |
+| `finance` | 9 | 23 KB | *(one surface)* | [32_finance.md](32_finance.md) |
+| `allocation` | 8 | 20 KB | *(one surface)* | [31_allocation.md](31_allocation.md) |
+| **Total** | **262** | | | |
 
 ---
 
@@ -161,6 +163,13 @@ Whether two assets move together IN THE TAIL, which is the only regime a diversi
 **Required:** `x`, `y`, `start_date`, `end_date`  
 **Optional:** `quantile`
 
+#### `backtest_var_forecasts`
+
+Whether a series of VaR and ES forecasts was right against the returns that followed: Kupiec, Christoffersen, the Basel traffic light and Acerbi-Szekely Z2. Returns the exception dates, the coverage, independence and conditional-coverage tests, the zone with its plus factor on the last 250 forecasts at 99%, and Z2 for ES with a p-value simulated under the forecasts. Reads forecast_var_series' reference or dated forecasts inline; a statistic that is undefined is null with the reason.
+
+*No required arguments.*  
+**Optional:** `forecasts_ref`, `forecasts`, `confidence`, `n_simulations`, `random_seed`
+
 #### `compare_distributions`
 
 Whether two samples came from the same distribution -- not whether their means differ. In-sample against out-of-sample, this regime against that one, live against backtest: the question gets answered with a t-test, and a t-test misses every difference in SHAPE. A strategy whose out-of-sample mean matches and whose kurtosis has tripled is not performing as expected. Returns which MOMENT moved, and reports the tail separately because KS's power is concentrated near the median -- a normal against a t(3) gives KS p=0.45 while the 1st percentile has moved by a factor of two.
@@ -189,12 +198,26 @@ Label each observation with a volatility regime, by a Gaussian mixture. A MIXTUR
 **Required:** `symbol`, `start_date`, `end_date`  
 **Optional:** `n_regimes`, `run_id`, `name`
 
+#### `estimate_factor_model`
+
+A factor model from return series: each asset's OLS loadings on the caller's factor returns, the factor covariance F and the specific variances D, with standard errors. They come back as decompose_factor_risk's inputs, and with a run_id the implied covariance B F B' + D is published as a covariance reference for the allocators and optimize_portfolio. D is SSR / (n - p), the residual variance with the degrees-of-freedom correction; F and D are annualized by periods_per_year. Unlike run_factor_regression (one ticker on factor tickers) this takes dated values or a returns_panel reference for many assets, and the factors the same way, on the dates they share. Every number is in-sample, and D sets residual covariances to zero: read largest_residual_correlation.
+
+*No required arguments.*  
+**Optional:** `returns`, `returns_ref`, `columns`, `factors`, `factors_ref`, `factor_columns`, `intercept`, `periods_per_year`, `run_id`
+
 #### `estimate_tail_index`
 
 How fat the tail is, by the Hill estimator. Alpha says which moments EXIST: below 4 the kurtosis is infinite, so a sample kurtosis is an artefact of the sample size; below 2 the variance is infinite and every volatility, Sharpe and correlation on the series is meaningless. The threshold choice is the whole problem and has no good answer, so alpha is reported across several -- if it swings, the threshold is doing the work and there is no tail index to report. Measured as biased LOW (2.39 for a true 3.0, 3.48 for a true 5.0), so read it as a lower bound on tail thinness rather than as a measurement.
 
 **Required:** `values`  
 **Optional:** `tail`, `threshold_quantile`
+
+#### `forecast_var_series`
+
+One-step-ahead VaR and expected shortfall for every date of a return stream, each from the rolling window before it, and the forecast for the next period. Methods: historical, normal, cornish_fisher (refused outside the region where the expansion is a quantile), ewma (RiskMetrics), filtered_historical and evt_garch (GARCH-filtered, the second with a generalized Pareto tail). With run_id the series is published for backtest_var_forecasts. Losses are positive.
+
+*No required arguments.*  
+**Optional:** `returns_ref`, `column`, `returns`, `method`, `confidence`, `window`, `ewma_lambda`, `tail_fraction`, `refit_every`, `run_id`, `name`
 
 #### `get_bootstrap_interval`
 
@@ -1624,6 +1647,13 @@ How volume distributes across trade sizes and times of day, from tick data. Answ
 
 Price an option and understand what holding it does to you: the second-order greeks, multi-leg payoffs, the consistency of a quoted surface, what the market is pricing as a move, and what a delta hedge costs to run. Takes quotes as arguments rather than fetching a chain -- this library has no options data provider, and a tool that pretended to would compute a chain that does not exist.
 
+#### `aggregate_option_book`
+
+Dollar delta, gamma per 1%, vega, theta per day and rho of options and underlying positions on several underlyings, per underlying and for the book, with a beta-weighted delta. Every option line needs its contract multiplier -- 100 is a convention, not a fact, and a line without one is refused. The book is also revalued in full on a grid of spot shocks (default +/-1, 2, 5, 10%) beside the delta-gamma estimate, and the error between them is reported per shock: it grows with the cube of the move, so at 10% on short-dated options read full_pnl. Spots, rates, yields and betas are the caller's; theta is per calendar day.
+
+**Required:** `spots`, `rates`  
+**Optional:** `options`, `dividend_yields`, `underlying_units`, `betas`, `valuation_date`, `spot_shocks`
+
 #### `analyze_option_strategy`
 
 The payoff, breakevens and aggregate greeks of an arbitrary multi-leg position -- any combination of calls, puts and stock, rather than a fixed menu of named structures. Breakevens are found numerically, and an unbounded loss is REPORTED as unbounded: a short call has no worst case, so returning the edge of the scanned range as 'max loss' would be a finite number standing in for an infinite risk. Legs with different expiries (calendars, diagonals) are valued at the FIRST expiry, later legs marked by Black-Scholes at their remaining time; `payoff_basis` says which was done.
@@ -1788,3 +1818,134 @@ Choose a feature set from a built dataset: keep one feature per redundancy clust
 
 **Required:** `dataset_id`  
 **Optional:** `features`, `cluster_threshold`, `min_abs_rank_ic`, `max_features`, `significance`, `alpha`, `correction`, `n_permutations`, `random_seed`, `max_draws`, `selection_end`, `embargo_dates`, `holdout_fraction`, `include_correlation`
+
+---
+
+## `finance` — Finance
+
+What holding a book costs and what a stream of cash is worth: financing, borrow and cash drag on positions, the Reg T and FINRA margin against them and how long a stress path leaves before the first call, currency exposure, carry and the FX forward that hedges it, and NPV, IRR, duration, a cost of capital and a discounted valuation. Every rate, FX rate and day count is the caller's; nothing is fetched.
+
+#### `analyze_book_carry`
+
+Annual carry of each position and of the set in the base currency (Koijen, Moskowitz, Pedersen & Vrugt 2018). A line with spot and years_to_expiry is a future or forward: (S - F)/(F T). One with income_rate and financing_rate is funded: income less financing, less borrow when short. A short earns the opposite of a long.
+
+**Required:** `positions`, `base_currency`  
+**Optional:** `fx_rates`
+
+#### `analyze_cash_flows`
+
+NPV, IRR, MIRR, Macaulay and modified duration, convexity and DV01 of periodic or dated cash flows, listing every real IRR and giving the IRR only when it is unique. Flow 0 of a list is now and is not discounted (not Excel NPV's convention); dated flows run from the first date under the day count given, and annual compounding on ACT/365F is XIRR. Norstrom's condition is reported: cumulative flows that change sign once give exactly one IRR above 0%. A bond's duration takes its coupons and principal, not its price.
+
+*No required arguments.*  
+**Optional:** `flows`, `periods_per_year`, `dated_flows`, `day_count`, `compounding`, `rate`, `finance_rate`, `reinvest_rate`
+
+#### `analyze_margin_runway`
+
+Walks a stress path you supply: the first maintenance call and its amount, the day forced deleveraging starts if calls go unmet, and the least cash today that avoids every call. The path is daily equity changes, or daily returns that revalue holdings.
+
+**Required:** `equity`  
+**Optional:** `equity_changes`, `initial_margin`, `maintenance_margin`, `holdings`, `returns`, `restore_to`, `cure_days`
+
+#### `compute_margin_requirement`
+
+Reg T initial and FINRA 4210 maintenance margin per position and for the account, each line naming its rule: stocks, leveraged ETFs and uncovered equity options. Equity in USD; no offsets for hedges or spreads; a house rate below the rule's is refused.
+
+**Required:** `positions`, `base_currency`  
+**Optional:** `fx_rates`, `house_rates`, `equity`
+
+#### `estimate_cost_of_capital`
+
+CAPM cost of equity, after-tax cost of debt and WACC on market values, with Hamada's unlevered beta and the beta and WACC relevered at a target debt-to-equity. Every rate and value is the caller's. With beta's standard error the cost of equity and WACC are also given at beta -/+ one error. Hamada takes debt as riskless and its amount as fixed; the relevered WACC holds the cost of debt as given.
+
+**Required:** `risk_free_rate`, `beta`, `equity_risk_premium`, `equity_value`, `tax_rate`  
+**Optional:** `beta_standard_error`, `debt_value`, `cost_of_debt`, `target_debt_to_equity`
+
+#### `estimate_financing_cost`
+
+What a set of positions costs to finance over a horizon: debit and credit interest, short borrow, the rebate, the net cost, and its rate on gross exposure and on equity. Simple interest on today's balances; cash is equity less the lines' net, proceeds segregated or not. Leave futures and swaps out.
+
+**Required:** `positions`, `base_currency`, `equity`, `financing`  
+**Optional:** `fx_rates`, `days`, `start_date`, `end_date`
+
+#### `get_currency_exposure`
+
+Currency exposure of a set of positions in the base currency, net and gross per currency after FX forward or spot hedges, with each currency's hedge ratio. With each position's local_return and each currency's fx_return, splits every base-currency return into local, FX and cross terms that add up exactly.
+
+**Required:** `positions`, `base_currency`  
+**Optional:** `fx_rates`, `hedges`, `fx_returns`
+
+#### `price_fx_forward_hedge`
+
+Covered-interest-parity FX forward of a pair, each leg on its own day count plus any cross-currency basis, its points in pips, and the annual pickup or cost of the hedge. The basis is added to the foreign leg. With an asset return and the spot at delivery, the hedged against unhedged return.
+
+**Required:** `pair`, `spot`, `days`, `base_currency`, `base_rate`, `foreign_rate`, `base_day_count`, `foreign_day_count`  
+**Optional:** `basis_bps`, `pip_size`, `start_date`, `asset_return`, `spot_at_maturity`, `hedge_ratio`
+
+#### `value_cash_flows`
+
+DCF value of forecast free cash flows with a Gordon or exit-multiple terminal value, the terminal value's share of it, and a value grid by discount rate and growth or multiple. With target_value it is a reverse DCF: the discount rate, terminal growth or exit multiple the target implies, by a bracketed root with the bracket reported, null when two values fit. Gordon growth at or above the rate is refused.
+
+**Required:** `cash_flows`  
+**Optional:** `discount_rate`, `terminal_method`, `terminal_growth`, `exit_multiple`, `terminal_metric`, `target_value`, `solve_for`, `sensitivity_rates`, `sensitivity_terminal`
+
+---
+
+## `allocation` — Capital Allocation
+
+How much capital each strategy, sleeve or model deserves, from their return streams rather than from tickers: the streams on one calendar, an allocation with its weight bands, a walk-forward test of the rule that chose it against an equal-weight benchmark, the Kelly fraction and how uncertain it is, a volatility-target or CPPI overlay, the capacity curve under impact, Brinson attribution and a book's time- and money-weighted return with external flows.
+
+#### `allocate_across_sleeves`
+
+Splits capital across strategies, sleeves or models by their return streams: equal, inverse volatility, risk parity, HRP, min variance, max Sharpe or shrunk Sharpe. Long-only by default, with a max weight, per-sleeve capacity in currency (the excess to cash or to the others) and a target volatility refused above max_leverage. Reports risk contributions, ex-ante volatility, effective N, the binding caps, block-bootstrap 5th/95th percentile weight bands and their stability. Its Sharpe ratio is IN-SAMPLE.
+
+*No required arguments.*  
+**Optional:** `cash_rate`, `periods_per_year`, `block_size`, `random_seed`, `method`, `covariance_method`, `halflife`, `risk_budgets`, `long_only`, `max_weight`, `target_volatility`, `max_leverage`, `capital`, `capacity`, `capacity_excess`, `returns`, `returns_ref`, `columns`, `n_bootstrap`
+
+#### `apply_risk_overlay`
+
+Runs a volatility-target (lagged EWMA), CPPI or TIPP overlay over one return stream: realized against target volatility, drawdown before and after, floor breaches and turnover. Exposure at t uses returns through t-1 only; the unexposed part earns cash_rate. A run_id publishes the overlaid stream (returns_panel) and the exposure path (analytic_series).
+
+*No required arguments.*  
+**Optional:** `returns`, `returns_ref`, `column`, `periods_per_year`, `method`, `target_volatility`, `ewma_lambda`, `warmup`, `multiplier`, `floor`, `max_leverage`, `cash_rate`, `cost_bps`, `run_id`
+
+#### `attribute_returns_brinson`
+
+Brinson-Fachler allocation, selection and interaction per segment and period, linked by Carino or Menchero so the effects sum to the cumulative active return over a benchmark. Weights and returns are the caller's, {period: {segment: value}}; each period's weights sum to one.
+
+**Required:** `portfolio_weights`, `benchmark_weights`, `portfolio_returns`, `benchmark_returns`  
+**Optional:** `linking`
+
+#### `combine_return_streams`
+
+Puts several return streams on the dates they all share and publishes the aligned panel as one returns_panel reference, with what each stream lost to the common calendar. Each stream is a returns_panel column, {ISO date: return} values, or a symbol with both ends of its window. Refused by name: undated lists, fewer shared dates than min_overlap (naming the stream that limits it), a repeated date, a non-finite value, and levels passed as returns.
+
+**Required:** `run_id`  
+**Optional:** `streams`, `returns_ref`, `columns`, `min_overlap`
+
+#### `evaluate_allocation_rule`
+
+Walks an allocation rule forward over sleeve return streams -- fit on a trailing window, drift, rebalance, pay the cost -- and scores it out of sample against a benchmark rule. Reports each side's Sharpe, return, volatility and drawdown, the Sharpe difference with a block-bootstrap interval, the look-ahead gap to the rule fitted on the full sample, the deflated Sharpe at n_trials, turnover and cost; run_id publishes the streams and weights. No overlay: apply_risk_overlay on that stream is the same, being causal.
+
+**Required:** `rule`, `n_trials`  
+**Optional:** `cash_rate`, `periods_per_year`, `block_size`, `random_seed`, `returns`, `returns_ref`, `columns`, `benchmark_rule`, `estimation_window`, `rebalance_every`, `cost_bps`, `n_bootstrap`, `run_id`
+
+#### `get_kelly_report`
+
+The Kelly leverage of one return stream (mu / sigma^2) or several held together (Sigma^-1 mu), its standard error and the chance the estimate is over twice the truth. Also the growth at fractions of Kelly with and without estimation error, the Kan-Zhou shrunk fraction, the in-sample empirical Kelly, the odds of ever losing a given share of wealth, and bootstrap maximum drawdowns. In-sample throughout; it reports a leverage and applies none.
+
+*No required arguments.*  
+**Optional:** `returns`, `returns_ref`, `columns`, `risk_free_rate`, `periods_per_year`, `fractions`, `drawdown_levels`, `confidence`, `n_bootstrap`, `block_size`, `random_seed`
+
+#### `get_strategy_capacity_curve`
+
+Net return and Sharpe ratio against AUM for a strategy's gross return stream and weight panel under spread plus square-root impact, with its break-even and half-Sharpe AUM. ADV, daily volatility and spread are the caller's per instrument; the instruments whose impact binds are listed.
+
+**Required:** `adv`, `daily_volatility`, `spread_bps`  
+**Optional:** `returns`, `returns_ref`, `column`, `periods_per_year`, `weights`, `weights_ref`, `impact_coefficient`, `aum`, `risk_free_rate`
+
+#### `measure_book_returns`
+
+Time-weighted, linked Modified Dietz and money-weighted returns of a portfolio with deposits and withdrawals (GIPS 2020), from dated valuations and dated external flows. The true TWR needs a valuation on every flow date and is null, naming the dates, without one; the MWR is the IRR of the flows and the end value, null unless unique. Nothing under a year is annualized, and flows above a share of value are flagged.
+
+**Required:** `valuations`  
+**Optional:** `flows`, `flows_in_valuation`, `day_count`, `large_flow_share`

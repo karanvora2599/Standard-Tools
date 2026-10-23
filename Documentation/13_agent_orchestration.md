@@ -1,8 +1,8 @@
 # Agent Orchestration
 
-`get_agent_tools()` returns 192 LLM-callable tools (see
+`get_agent_tools()` returns 213 LLM-callable tools (see
 [07_agent_tools.md](07_agent_tools.md) /
-[09_advanced_agent_tools.md](09_advanced_agent_tools.md)). Handing all 192 to
+[09_advanced_agent_tools.md](09_advanced_agent_tools.md)). Handing all 213 to
 one model on every call — the default behavior of every single-agent script
 in `Implementation/{Anthropic,OpenAI,Gemini}/` — is the largest untreated
 source of tool-selection error: similarly-named or similarly-scoped tools
@@ -16,9 +16,9 @@ This page covers three mechanisms, in increasing order of strictness:
    single cheap classification call that narrows the tool list before the
    real completion call, without spinning up a separate agent session.
    Used by every `Implementation/*/Agent_*.py` script that draws on the
-   192-tool surface.
+   213-tool surface.
 2. **The multi-agent orchestrator** (`Multi_Agent_Implementation/`) — a lead
-   agent that delegates each sub-task to one of 16 specialist worker agents,
+   agent that delegates each sub-task to one of 18 specialist worker agents,
    each with its own independent session and system prompt scoped to a
    small, non-overlapping tool subset.
 3. **Runtimes** (`standard_quant_tools.agent.runtimes`) — the only one of
@@ -34,35 +34,35 @@ categorization only ever needs to be correct in one place.
 > whose dispatch table holds only its own tools and refuses the rest by
 > name.
 
-## Three registries, ten runtimes
+## Three registries, twelve runtimes
 
-Everything above concerns the 192-tool analysis and backtest surface. There
+Everything above concerns the 213-tool analysis and backtest surface. There
 are two more: `standard_quant_tools.modeling.agent`, 38 tools, and the
 11-tool `feature_lab` runtime — neither of which the library merges into the
-first, see [15_modeling.md](15_modeling.md) for why. 192 + 38 + 11 is the
-241-tool whole surface. The example implementations keep the same
+first, see [15_modeling.md](15_modeling.md) for why. 213 + 38 + 11 is the
+262-tool whole surface. The example implementations keep the same
 separation, and it shows up in three places:
 
 | | Analysis registry | Modeling registry |
 |---|---|---|
 | Module | `standard_quant_tools.agent` | `standard_quant_tools.modeling.agent` |
-| Size | 192 tools, 13 categories, 8 runtimes | 38 tools, one ordered pipeline |
+| Size | 213 tools, 15 categories, 10 runtimes | 38 tools, one ordered pipeline |
 | Narrowing | `route_request()` → `categories=` | nothing to narrow — the pipeline runs in sequence |
-| Single-agent script | `Agent_*.py` (eleven of the thirteen; the data runtime has no script of its own yet) | `Agent_Model_Builder.py`; `Agent_Model_Backtester.py` spans both |
-| Workers | 13 | 2 (`model_research`, `model_builder`), plus `feature_lab` on its own runtime |
+| Single-agent script | `Agent_*.py` (eleven of the thirteen, spanning `research`, `backtest`, `portfolio` and `meta`; the other runtimes have no script of their own yet) | `Agent_Model_Builder.py`; `Agent_Model_Backtester.py` spans both |
+| Workers | 15 | 2 (`model_research`, `model_builder`), plus `feature_lab` on its own runtime |
 
 Each `_agent_utils.py` names a registry once and gets that registry's tool
 schemas **and** its dispatch function together:
 
 ```python
 run_agent(..., registry="modeling")     # 38 tools, modeling_dispatch
-run_agent(..., registry="analysis")     # 192 tools, dispatch  (the default)
+run_agent(..., registry="analysis")     # 213 tools, dispatch  (the default)
 ```
 
 `registry=` also accepts a RUNTIME name, and that is the safer choice:
 
 ```python
-run_agent(..., registry="research")             # 42 tools, scoped dispatch
+run_agent(..., registry="research")             # 45 tools, scoped dispatch
 run_agent(..., registry="research+portfolio")   # joined explicitly
 ```
 
@@ -80,18 +80,18 @@ into a wall it was told to walk into. Several of these genuinely span two
 or three runtimes; that is what a real workflow looks like, and the value
 is that the span is now written down instead of being an accident.
 
-The sixteen workers dispatch through their category's runtime for the same
+The eighteen workers dispatch through their category's runtime for the same
 reason. Each already declared a fixed, non-overlapping tool subset — that
 is the architecture — but dispatching through the union made the subset
 advisory.
 
-The analysis registry is itself divided into eight **runtimes** —
-`research`, `backtest`, `portfolio`, `data`, `microstructure`,
-`delta_one`, `derivatives`, `meta` — which are the same idea one level
-down: a dispatch table that refuses what it does not own. The modeling
-registry was the first runtime; the other nine generalize it. Results
-still cross freely between all ten, by value rather than by shared
-dispatch.
+The analysis registry is itself divided into ten **runtimes** —
+`research`, `backtest`, `portfolio`, `allocation`, `finance`, `data`,
+`microstructure`, `delta_one`, `derivatives`, `meta` — which are the same
+idea one level down: a dispatch table that refuses what it does not own.
+The modeling registry was the first runtime; the other eleven generalize
+it. Results still cross freely between all twelve, by value rather than by
+shared dispatch.
 [19_runtimes.md](19_runtimes.md) is the whole story.
 
 That pairing is the whole point. The two registries have identical shapes —
@@ -111,21 +111,23 @@ silently did not is worse off than one who gets an error.
 ## The category taxonomy (`TOOL_CATEGORY`)
 
 `standard_quant_tools.agent.tools.TOOL_CATEGORY: Dict[str, str]` is the
-single source of truth: every one of the 192 tool names mapped to exactly
-one of 13 category keys. Each category belongs to exactly one runtime.
+single source of truth: every one of the 213 tool names mapped to exactly
+one of 15 category keys. Each category belongs to exactly one runtime.
 
 | Category | Tools | Runtime | Covers |
 |---|---|---|---|
 | `screener` | 2 | `research` | Filter a universe, fetch fundamentals |
 | `analysis` | 14 | `research` | Single-asset risk/technical/volatility profiling, multi-asset portfolio metrics, panel indicators, data quality |
-| `quant_research` | 26 | `research` | Factor regression, cointegration/pairs, Kalman hedge ratio, PCA, Hurst, correlation, and the inference layer — bootstrap intervals, tail index, structural breaks, lead-lag |
+| `quant_research` | 29 | `research` | Factor regression, cointegration/pairs, Kalman hedge ratio, PCA, Hurst, correlation, a factor model estimated for many assets from return series, the inference layer — bootstrap intervals, tail index, structural breaks, lead-lag — and VaR as a forecast with its backtest |
 | `backtest_execution` | 12 | `backtest` | Run a built-in strategy / portfolio / pair trade / strategy matrix **once**, fixed parameters |
 | `backtest_validation` | 21 | `backtest` | Optimize/validate/diagnose — grid search, walk-forward, regime-adaptive, robustness, Monte Carlo, cost sweep, drawdown table, and the overfitting layer (deflated Sharpe, PBO, purged combinatorial CV, reality check) |
 | `custom_signal` | 2 | `backtest` | Backtest a signal computed outside this library |
 | `portfolio_risk` | 22 | `portfolio` | Covariance estimation, optimization (mean-variance, efficient frontier, Black-Litterman, risk parity, HRP, maximum diversification, and an exact constrained optimizer under sector, factor-exposure and risk limits), weights from scores, risk decomposition (including factor/specific and component ES/VaR), factor budgets, concentration, scenarios and stress windows, liquidity-adjusted VaR, sizing, capacity, rebalancing, trade cost |
+| `allocation` | 8 | `allocation` | Capital across strategies, sleeves or models from their return streams: align them, allocate with bootstrap weight bands, walk a rule forward against equal weight, Kelly leverage, volatility-target and CPPI overlays, capacity under impact, Brinson attribution, time- against money-weighted returns |
+| `finance` | 9 | `finance` | Financing, borrow and cash drag on positions, Reg T and FINRA 4210 margin and the runway to a call, currency exposure after hedges, carry, the FX forward hedge, and NPV, IRR, duration, cost of capital and DCF, every rate the caller's |
 | `microstructure` | 17 | `microstructure` | Spreads MEASURED from tick data, the eight bar-based estimators for when there is no tick feed, and a check of the OHLCV proxies against them |
 | `delta_one` | 18 | `delta_one` | Carry, basis, futures curves and rolls, hedge sizing, baskets and replication, ETF fair value, swaps and TRFs, and the comparison that normalizes six ways of holding one exposure |
-| `derivatives` | 12 | `derivatives` | Option pricing and second-order greeks, multi-leg payoffs, smile/term-structure fitting, put-call parity, delta-hedge simulation |
+| `derivatives` | 13 | `derivatives` | Option pricing and second-order greeks, multi-leg payoffs, smile/term-structure fitting, put-call parity, delta-hedge simulation, and the dollar greeks of a book across underlyings |
 | `data` | 21 | `data` | Fetch OHLCV, return panels, tick tapes and quotes, build continuous futures, register external datasets too large to copy, and publish them all as `sqt://` references every other runtime reads |
 | `discovery` | 17 | `meta` | What the library accepts and what the provider can serve; describe or validate a tool call before making it; the handoff reference map |
 | `provenance` | 8 | `meta` | Read and verify the decision log. Read-only by design |
@@ -237,7 +239,7 @@ classification call is caught and logged, and the function falls through to
   covers valid JSON, prose-wrapped JSON, the bare-token fallback,
   malformed/empty/all-unknown-key inputs (confirms fail-open fires exactly
   when expected), and deduplication.
-- `TestRoutingAccuracyEval` — an `@pytest.mark.integration`-gated eval: 26
+- `TestRoutingAccuracyEval` — an `@pytest.mark.integration`-gated eval: 50
   labeled representative requests, at least one per category and pinned by
   an offline guard that fails when a category stops being covered, run
   through a real `route_request()` call, asserting ≥70% top-1 accuracy.
@@ -253,19 +255,19 @@ classification call is caught and logged, and the function falls through to
 ## The multi-agent orchestrator (`Multi_Agent_Implementation/`)
 
 A heavier but more thorough answer to the same problem: instead of
-narrowing one model's tool list, delegate to one of 16 independent worker
+narrowing one model's tool list, delegate to one of 18 independent worker
 agents, each with its own session, system prompt, and fixed tool subset —
 the confusable tool is never loaded into the worker's context at all,
 not just deprioritized.
 
 ```
 Multi_Agent_Implementation/
-├── Agent_Orchestrator.py   # lead agent: 16 delegate_to_<worker>_agent tools
+├── Agent_Orchestrator.py   # lead agent: 18 delegate_to_<worker>_agent tools
 ├── worker_agents.py        # WORKER_AGENTS registry + run_worker_agent()
 └── _agent_utils.py         # scoped variant of Implementation/Anthropic's run_agent()
 ```
 
-Thirteen of the sixteen draw from the analysis registry, two from the
+Fifteen of the eighteen draw from the analysis registry, two from the
 modeling one, and one from `feature_lab`. The orchestrator does not need to
 know which is which — a delegate call looks the same either way, and each
 worker carries its own `"registry"` field that `run_agent()` reads. That is
@@ -324,7 +326,7 @@ first and copy the `dataset_id` verbatim into the builder's request. The
 orchestrator's system prompt states that ordering explicitly rather than
 leaving it to the general "chain specialists when needed" rule.
 
-The orchestrator's own "tools" are 16
+The orchestrator's own "tools" are 18
 `delegate_to_<worker>_agent(request)` tools, **auto-generated from
 `WORKER_AGENTS.keys()`** — adding, splitting, or removing a worker in
 `worker_agents.py` changes the orchestrator's delegate-tool set and system
@@ -366,7 +368,7 @@ key or network required:
 - `run_sma_backtest`/`run_backtest_optimization` land in different workers
   (`backtest_execution` vs `backtest_validation` — the same guarantee one
   level narrower)
-- exactly 16 workers exist, by name — a regression guard for the
+- exactly 18 workers exist, by name — a regression guard for the
   execution/validation and research/builder splits, derived from the actual
   registry rather than a magic number that could itself drift
 
@@ -382,7 +384,7 @@ known gap, not a hidden one.
 | | Router | Multi-agent orchestrator |
 |---|---|---|
 | Cost | One cheap classification call, then the normal agent loop | A full independent agent session per delegated worker |
-| Setup | `route_request()` + `categories=` param on an existing `run_agent()` | A lead agent, 16 worker sessions, its own delegation loop |
+| Setup | `route_request()` + `categories=` param on an existing `run_agent()` | A lead agent, 18 worker sessions, its own delegation loop |
 | Isolation | The unrouted tools are absent from *this* completion call | The unrouted tools are absent from that *worker's entire session* |
 | Best for | Single-agent scripts, cost-sensitive deployments, most requests | Complex multi-step requests that genuinely span several specialist domains in one turn (see `Agent_Orchestrator.py`'s example request) |
 

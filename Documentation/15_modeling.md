@@ -1,6 +1,6 @@
 # Modeling Runtime (`standard_quant_tools.modeling`)
 
-A second, independent runtime alongside the 192-tool
+A second, independent runtime alongside the 213-tool
 `standard_quant_tools.agent` analysis/backtest surface — not tool #190.
 This document explains why that split exists, what is built, and what is
 deliberately deferred.
@@ -12,7 +12,7 @@ deliberately deferred.
 `agent/tools.py`'s `TOOL_CATEGORY` router and `Multi_Agent_Implementation/`'s
 worker split (see
 [Documentation/13_agent_orchestration.md](13_agent_orchestration.md))
-exist specifically because handing an LLM 192 similarly-shaped tools on
+exist specifically because handing an LLM 213 similarly-shaped tools on
 every call causes selection ambiguity. Fitting/validating/registering a
 statistical model doesn't fit that surface's shape at all — it isn't a
 point-in-time snapshot (`analyze_stock_risk`) or a single backtest run
@@ -34,7 +34,7 @@ core stays one thing; only the agent-facing vocabulary is separate.
            ┌──────────────┴──────────────┐
            │                              │
      agent.get_agent_tools()      modeling.agent.get_modeling_tools()
-    (192 tools, 8 runtimes)      (38 tools, one pipeline)
+    (213 tools, 10 runtimes)     (38 tools, one pipeline)
            │                              │
            └──────────────┬───────────────┘
                           │
@@ -155,7 +155,7 @@ own worker for the same reason.
 
 `Implementation/{Anthropic,OpenAI,Gemini}/Agent_Model_Builder.py` runs the
 whole pipeline as a single agent, on all three providers. It is the one
-example script that does not use the 192-tool surface: it passes
+example script that does not use the 213-tool surface: it passes
 `registry="modeling"` to `run_agent()`, which loads all thirty-eight
 schemas and `modeling_dispatch` together.
 
@@ -4280,7 +4280,7 @@ three-block calibration make one "fit" of the spec cost seven.
 `run_model_experiment` answers "how did this model do out-of-sample."
 It doesn't answer "does this work as a trading strategy" — that requires
 an actual backtest, and this codebase already has one
-(`run_signal_panel_backtest`, in the *other* 192-tool surface).
+(`run_signal_panel_backtest`, in the *other* 213-tool surface).
 `modeling.bridge.oos_predictions_to_signal_panel` connects the two, and
 `backtest_model_signal` is the tool over it: given a `model_id` and
 nothing else about the task, it publishes a `signal_panel` reference that
@@ -4663,13 +4663,13 @@ own `ValidationError`).
 
 Every modeling tool call routed through
 `modeling.agent.modeling_dispatch` writes a `DecisionRecord`, using the
-same `audit._run_and_record` the 192-tool surface uses — no parallel audit
+same `audit._run_and_record` the 213-tool surface uses — no parallel audit
 implementation.
 
 `audit.verify_replay` covers **both** surfaces: it resolves a record's tool
 against the agent registry and then the modeling registry. (Each is looked
 up lazily, since both tool packages import the audit package, and the
-modeling runtime is deliberately independent of the 192-tool surface rather
+modeling runtime is deliberately independent of the 213-tool surface rather
 than importable from it.)
 
 Replay comparison for modeling is **semantic**, not literal. Modeling mints

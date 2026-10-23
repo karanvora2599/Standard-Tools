@@ -1397,6 +1397,16 @@ result["benchmark_accrual"]               # the per-bar rate a Sharpe subtracts
   `borrow_fee_bps` is null when the shorts paid different rates; in a
   tool's result the financing block's `notes` say why.
 
+**The same terms on a set of positions.** `finance.financing_cost` (the
+`estimate_financing_cost` tool) applies a `FinancingSpec` to positions and
+an account's equity over a horizon without running a backtest: the debit
+and credit interest, each short's borrow, the rebate, the net cost and the
+rate it comes to on gross exposure and on equity. It reads a dated
+benchmark the way the engines do — the rate in force on the day a balance
+is carried from — and refuses a short with no borrow rate as they do.
+`FinancingSpec.benchmark_dates()` gives the dates a dated benchmark has a
+rate for. See [32_finance.md](32_finance.md).
+
 **Liquidity constraint:** pass `max_adv_participation=0.1` to cap any
 rebalance trade at 10% of the ticker's own rolling average dollar volume. A
 trade over the cap is **sized down to it**, not refused: the book then holds
@@ -1420,7 +1430,10 @@ actually caps is therefore correct and merely slower.
 
 **Scope, stated explicitly:** short-sale proceeds are either cash
 (`"net_cash"`) or held by the lender at a rebate (`"segregated"`), with no
-margin haircut modelled beyond the financing above; sector-exposure constraints (as opposed to reporting — see
+margin requirement enforced by the engine beyond the financing
+above (`compute_margin_requirement` reports the Reg T and FINRA 4210
+requirement of a set of positions, and `analyze_margin_runway` the day a
+stress path first breaches it); sector-exposure constraints (as opposed to reporting — see
 `get_capacity_report`) aren't enforced by the engine itself. Neither is
 required for the shared-cash architecture itself to be correct.
 

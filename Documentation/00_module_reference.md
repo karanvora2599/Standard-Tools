@@ -105,6 +105,17 @@ Four providers implement the same `DataProvider` ABC — `DataFactory.get_provid
 
 Computed entirely from data a backtest already produces (`equity_curve`, `trade_log`, the OHLCV frame) — no engine changes required. Exposed together via the `get_backtest_diagnostics` agent tool.
 
+**VaR as a forecast, and its backtest**
+
+| Function | Description |
+|---|---|
+| `forecast_var_series(returns, *, method="historical", confidence=0.99, window=250, ewma_lambda=0.94, tail_fraction=0.1, refit_every=20)` | One-step-ahead VaR and ES for every date after the first window, each from the `window` returns before it — `historical`, `normal`, `cornish_fisher`, `ewma`, `filtered_historical` or `evt_garch` — and the next period's |
+| `backtest_var_series(frame, confidence, *, random_seed=0, n_simulations=10000)` | The exception dates, Kupiec, Christoffersen and conditional coverage, the Basel traffic light, and Acerbi-Szekely Z2 with a simulated p-value; an undefined statistic is None with a `null_reason` |
+
+Exposed as `forecast_var_series` and `backtest_var_forecasts` in the
+`research` runtime; see [03_metrics.md](03_metrics.md) and
+[23_inference.md](23_inference.md).
+
 ---
 
 ## Analysis (`standard_quant_tools.analysis`)
@@ -145,6 +156,15 @@ The same functions over a chain, in one call, with a **C++ fast path** (OpenMP a
 | `zero_gamma_spot(strike, time_to_expiry, volatility, quantity, *, spot_low, spot_high, ...)` | Where the book's net signed gamma crosses zero in the bracket (grid scan, then Brent), or `None` with the reason when it does not |
 
 476 implied vols in 0.2–0.3 ms against 14–27 ms one call at a time, and 29,036 greeks (61 spots × 476 contracts) in 0.3 ms against 100 ms — see [16_performance.md](16_performance.md#option-chains).
+
+`analysis.option_book.aggregate_option_book(options, spots, rates, *,
+dividend_yields=None, underlying_units=None, betas=None,
+valuation_date=None, spot_shocks=None)` prices a book's option lines
+through `black_scholes_greeks_batch` and reports dollar delta, gamma per
+1%, vega, theta per calendar day and rho per line, per underlying and in
+total, the beta-weighted delta, and delta-gamma P&L against full
+revaluation on a grid of spot shocks. Each option line needs its
+`multiplier`.
 
 ### Regression
 
@@ -188,6 +208,13 @@ rolling = rolling_factor_loadings(asset_returns, factors, window=60)
 Linearly dependent factors (a duplicate, a sum or multiple of others, a constant) raise
 `ValidationError` naming the factor to drop; `rolling_factor_loadings` leaves such a
 window NaN instead.
+
+`estimate_factor_model(asset_returns, factor_returns, *, intercept=True,
+periods_per_year=252)` (`analysis/factor_model.py`) fits every asset at
+once on the same dates and returns the loadings B, the factor covariance
+F and the specific variances D (SSR / (n − p)), each with a standard
+error, the alphas, the in-sample R², the implied covariance B F B′ + D and
+the largest residual correlation between two assets.
 
 ### Cointegration & Pairs Spread
 
@@ -414,9 +441,9 @@ result = screen_stocks(sp500_tickers, filters={...}, n_workers=8)
 
 ## AI Agent Tools (`standard_quant_tools.agent`)
 
-192 LLM-callable tools with Pydantic input/output models and OpenAI/Anthropic function-calling schemas — including two tools that backtest a signal you computed yourself rather than one of the built-in indicator strategies.
+213 LLM-callable tools with Pydantic input/output models and OpenAI/Anthropic function-calling schemas — including two tools that backtest a signal you computed yourself rather than one of the built-in indicator strategies.
 
-`Implementation/{Anthropic,OpenAI,Gemini}/` are single-agent reference scripts across all three providers — each narrows the tool list per request via a lightweight **router** (`standard_quant_tools.agent.router`) instead of handing the model all 192 tools on every call: one cheap classification call picks the 1-2 relevant tool categories before the real agent loop starts, no separate agent session required. Each provider folder also carries `Agent_Model_Builder.py`, the one script that drives the separate 38-tool modeling runtime instead — it passes `registry="modeling"` and skips the router, since one ordered pipeline has no selection ambiguity to remove. For a heavier, more thorough split, `Multi_Agent_Implementation/` (Anthropic only for now) is a full **orchestrator-workers** architecture — a lead agent that delegates to 16 specialist sub-agents, thirteen over the analysis runtimes, two over the modeling one and one over `feature_lab`, each with its own independent session scoped to a small, non-overlapping tool subset. The analysis workers build on the same category taxonomy (`TOOL_CATEGORY`), so a tool's categorization only needs to be correct in one place. Splitting tools this way is a direct fix for tool-selection confusion between similar tools (e.g. a built-in strategy backtest vs. a bring-your-own-signal backtest, or "run this strategy" vs. "optimize this strategy's parameters"): a worker/routed request that was never given the other tool cannot call it by mistake. See [Documentation/13_agent_orchestration.md](13_agent_orchestration.md).
+`Implementation/{Anthropic,OpenAI,Gemini}/` are single-agent reference scripts across all three providers — each narrows the tool list per request via a lightweight **router** (`standard_quant_tools.agent.router`) instead of handing the model all 213 tools on every call: one cheap classification call picks the 1-2 relevant tool categories before the real agent loop starts, no separate agent session required. Each provider folder also carries `Agent_Model_Builder.py`, the one script that drives the separate 38-tool modeling runtime instead — it passes `registry="modeling"` and skips the router, since one ordered pipeline has no selection ambiguity to remove. For a heavier, more thorough split, `Multi_Agent_Implementation/` (Anthropic only for now) is a full **orchestrator-workers** architecture — a lead agent that delegates to 18 specialist sub-agents, fifteen over the analysis runtimes, two over the modeling one and one over `feature_lab`, each with its own independent session scoped to a small, non-overlapping tool subset. The analysis workers build on the same category taxonomy (`TOOL_CATEGORY`), so a tool's categorization only needs to be correct in one place. Splitting tools this way is a direct fix for tool-selection confusion between similar tools (e.g. a built-in strategy backtest vs. a bring-your-own-signal backtest, or "run this strategy" vs. "optimize this strategy's parameters"): a worker/routed request that was never given the other tool cannot call it by mistake. See [Documentation/13_agent_orchestration.md](13_agent_orchestration.md).
 
 ```python
 from standard_quant_tools.agent.tools import (
@@ -439,7 +466,7 @@ from standard_quant_tools.agent.models import (
 )
 
 # Get tool schemas for your LLM
-tools = get_agent_tools  # 192 tools ready for function calling
+tools = get_agent_tools  # 213 tools ready for function calling
 
 # Risk analysis
 result = analyze_stock_risk(AnalysisInput(symbol='NVDA', benchmark='SPY', period='1y'))
@@ -492,7 +519,7 @@ A second, independent 38-tool runtime for building walk-forward-validated
 statistical models from this library's own features (31 built-in:
 technical, market, risk, volume, statistical, network, fundamental and
 PCA-derived factors) or from a matrix computed elsewhere and registered
-without copying it — never merged into the 192-tool
+without copying it — never merged into the 213-tool
 `get_agent_tools`/`TOOL_CATEGORY` surface above. A sibling `feature_lab`
 runtime holds 11 more, for interrogating those features before a model
 exists. Every tool with its arguments is in
@@ -679,6 +706,11 @@ functions of their arguments — no price or rate is fetched.
 |---|---|
 | `position_values(positions, base_currency, fx_rates=None)` | Each line valued, in input order: local notional = quantity × price × multiplier in its own currency, base notional = local × its rate, and its side (the sign of the quantity) |
 | `exposure_summary(positions, base_currency, fx_rates=None)` | Gross, net, long and short in the base currency, and per currency its net, gross, long, short, local net and share of gross; rates given for currencies not held are listed as unused |
+| `currency_exposure(positions, base_currency, fx_rates=None, *, hedges=None, fx_returns=None)` | Exposure per currency in the base currency after FX hedges given as `{pair: notional of its first currency}`, each currency's hedge ratio, and — with each position's `local_return` and `fx_returns` — the local / FX / cross split of every position's base-currency return |
+| `book_carry(positions, base_currency, fx_rates=None)` | Each line's annual carry and the set's: (S - F)/(F T) for a line with `spot` and `years_to_expiry`, income less financing (less `borrow_fee_bps` when short) for a line with `income_rate` and `financing_rate` |
+| `fx_forward_hedge(*, pair, spot, days, base_currency, base_rate, foreign_rate, base_day_count, foreign_day_count, basis_bps=0.0, pip_size=None, start_date=None, asset_return=None, spot_at_maturity=None, hedge_ratio=1.0)` | The covered-interest-parity forward, its points, the hedge's annual pickup or cost and, with a period, the hedged and unhedged returns |
+| `covered_interest_forward(spot, *, first_rate, first_years, second_rate, second_years)` | S (1 + r_second t_second) / (1 + r_first t_first), the growth ratio formed first so equal legs give S exactly |
+| `currency_pair(value)` | A market quote's two ISO 4217 codes, 'EURUSD' or 'EUR/USD' to ('EUR', 'USD') |
 | `currency_code(value, argument=...)` | An ISO 4217 code, upper-cased, or a refusal naming the nearest valid code |
 | `exact_product(*factors)` | A product rounded once from its factors' exact values |
 
@@ -703,9 +735,116 @@ positive, a base rate other than 1, one instrument on two lines in one
 currency (net them yourself), and more than 5,000 lines. The currency list
 is ISO 4217 List One as of 2026-10-22, kept in the library.
 
+A hedge in `currency_exposure` is a pair and a notional of its first
+currency, positive bought; its second leg is the equal and opposite
+base-currency value at the caller's rates, so the hedges sum to nothing in
+the base currency and only move exposure between currencies. The return
+split is r_L + r_FX + r_L x r_FX, its `math.fsum` the base return, and a
+base-currency line has no FX or cross term. `book_carry` refuses a line
+with both sets of carry terms, neither or half of one, a funded short with
+no borrow fee and a short future with one. `fx_forward_hedge` adds
+`basis_bps` to the foreign leg (the pair's currency that is not
+`base_currency`); a pip is 0.0001, or 0.01 when the quote currency is JPY.
+
 The tool input for the same thing is `Holdings` — `positions`,
 `base_currency`, `fx_rates` — with a `Position` per line, in
 `standard_quant_tools.agent.runtimes._positions`. A tool subclasses it or
 takes one as a field, and its checks run when the input is built. A
 `Position` may carry `borrow_fee_bps`, read only while the line is short;
 it overrides the account's per-instrument and default borrow.
+
+### Financing and margin on positions
+
+| Function | Description |
+|---|---|
+| `financing_cost(positions, *, equity, financing, base_currency, fx_rates=None, days=None, start=None, end=None)` | Debit and credit interest, each short's borrow, the rebate on segregated proceeds, the net cost, the cash drag and the effective rate on gross and on equity, over `days` (scalar benchmark) or `start` to `end`, under a `FinancingSpec` (or its input model or a mapping of it) |
+| `margin_requirement(positions, base_currency="USD", fx_rates=None, house_rates=None)` | Reg T initial and FINRA 4210 maintenance margin per line, each naming its rule, and the account's initial requirement (the greater of Reg T, maintenance and the $2,000 minimum equity) |
+| `margin_runway(equity, *, equity_changes=None, initial_margin=None, maintenance_margin=None, positions=None, ..., returns=None, restore_to="initial", cure_days=15)` | A stress path walked day by day: the first maintenance call and its amount, the day forced deleveraging starts, and the least cash today that avoids every call |
+
+`financing_cost` takes cash to be equity less the lines' net and charges
+simple interest on today's balances: balance x sum(rate x days) / basis,
+each period at the rate in force on its first date. A position's own
+`borrow_fee_bps` overrides the spec's `borrow_bps` for its instrument,
+which overrides `default_borrow_bps`; a short with none is refused, and a
+short at a negative price is refused. A horizon in days needs a scalar
+benchmark. With no spreads, a book k times its equity long returns
+kR - (k - 1)f on its equity for every k.
+
+`margin_requirement` reads, on each position, `kind` ('equity' by
+default, 'etf', 'call', 'put'), `leverage` (an ETF's factor, 1 to 10) and
+an option's `strike` and `underlying_price`; a plain position is a stock.
+It refuses a negative price, a stock or ETF line with a multiplier other
+than 1, a leverage factor off an ETF, an option without its terms, an
+option on a leveraged ETF, and a base currency other than USD. Every
+requirement is account equity, so the lines add up. `margin_runway`
+compares equity with maintenance on each day: a call when equity is below
+it, cured when equity reaches the call's target within `cure_days`, and
+deleveraging on the deadline otherwise. A path of equity changes holds the
+requirements fixed; a path of returns recomputes them (stocks and ETFs
+only, FX held). The equity path is the exact sum of the changes rounded
+once a day.
+
+The tool inputs are `MarginPosition` (a `Position` with those fields) and
+`MarginHoldings` (positions, base currency, FX rates, `house_rates`), in
+`standard_quant_tools.agent.runtimes.finance.margin_models`.
+
+---
+
+## The time value of money (`standard_quant_tools.finance`)
+
+| Function | Description |
+|---|---|
+| `periodic_cash_flows(flows, *, periods_per_year=1, compounding=None)` | A schedule of flows at regular periods: flow k at k / periods_per_year years, flow 0 now; compounding 'periodic' by default |
+| `dated_cash_flows(flows, *, day_count, compounding=None, periods_per_year=1)` | A schedule of {date: amount} timed from the first date under a required day count; compounding 'annual' (XIRR's) by default |
+| `analyze_cash_flows(schedule, *, rate=None, finance_rate=None, reinvest_rate=None)` | NPV, every real IRR (the IRR only when unique, with `irr_status`), Norstrom's condition, MIRR, Macaulay and modified duration, convexity and DV01 |
+| `rate_roots(times, amounts)` | Every real root of sum amounts_i exp(-u times_i), as continuously compounded rates, with the method ('exact' Rolle isolation up to 20 sign changes, 'grid' beyond) and the Cauchy-bounded range searched |
+| `estimate_cost_of_capital(*, risk_free_rate, beta, equity_risk_premium, equity_value, tax_rate, debt_value=0.0, cost_of_debt=None, beta_standard_error=None, target_debt_to_equity=None)` | CAPM cost of equity, after-tax cost of debt, WACC on market values, Hamada's unlevered beta, the relevered beta and WACC at a target D/E, and the sensitivity at beta -/+ one standard error |
+| `unlever_beta(levered_beta, debt_to_equity, tax_rate)`, `relever_beta(...)` | Hamada's two formulas |
+| `dcf_valuation(cash_flows, *, discount_rate=None, terminal_method="gordon", terminal_growth=None, exit_multiple=None, terminal_metric=None, target_value=None, solve_for=None, sensitivity_rates=None, sensitivity_terminal=None)` | A DCF with a Gordon or exit-multiple terminal value and its share, the reverse DCF for the discount rate, terminal growth or exit multiple a target implies, and the sensitivity grid |
+
+Every rate is the caller's and a decimal; nothing is fetched. A number the
+call did not ask for (an NPV without a rate, the other terminal method's
+inputs) is None; one it asked for that is not defined (an IRR the flows
+give no single value of, a duration of a zero present value) is NaN. An
+IRR is a root of an exponential sum and can have none, one or several:
+the search isolates every one inside bounds read from the amounts (the
+module docstring of `finance.cash_flows` has the method) and reports the
+IRR only when there is exactly one.
+
+The agent tools over these are the `finance` runtime's; see
+[32_finance.md](32_finance.md).
+
+---
+
+## Capital allocation (`standard_quant_tools.allocation`)
+
+Capital across return streams rather than across tickers. Every function
+takes dated return streams (aligned with
+`portfolio.streams.align_return_streams`) or plain arrays, and fetches
+nothing.
+
+| Function | Description |
+|---|---|
+| `SleeveRule(method="risk_parity", covariance_method="ledoit_wolf", ...)` | An allocation rule and its constraints: `equal`, `inverse_volatility`, `risk_parity`, `hrp`, `min_variance`, `max_sharpe` or `shrunk_sharpe` on one of `estimate_covariance`'s estimators, then `max_weight`, `target_volatility` (up to `max_leverage`) and a `capacity` cap, in that order |
+| `allocate_across_sleeves(frame, rule, *, cash_rate=0.0, periods_per_year=252, n_bootstrap=500, block_size=None, random_seed=0)` | The rule's weights, risk contributions and effective N on the aligned sleeve returns, with each weight's 5th and 95th percentile over a circular block bootstrap and the mean L1 distance of a resampled allocation from the point one |
+| `fit_sleeve_rule(frame, rule, *, cash_rate=0.0, periods_per_year=252, capital=None)` | One fit of the rule, without the bootstrap |
+| `evaluate_allocation_rule(frame, rule, *, n_trials, benchmark_rule="equal", estimation_window=252, rebalance_every=21, cost_bps=0.0, ...)` | The rule walked forward against a benchmark rule and against itself fitted on the full sample: out-of-sample Sharpe, return, volatility, drawdown, turnover and cost, the Sharpe difference with a block-bootstrap interval, the look-ahead gap and the deflated Sharpe ratio at `n_trials` |
+| `walk_rule_forward(frame, rule, *, estimation_window, rebalance_every, cost_bps=0.0, cash_rate=0.0, ...)` | The out-of-sample path alone: each refit on the window before it, weights drifting between refits |
+| `kelly_report(returns, *, periods_per_year, risk_free_rate=0.0, fractions=(0.25, 0.5, 1.0), drawdown_levels=(0.2, 0.5), ...)` | Kelly leverage f* = mu / sigma^2 (Sigma^-1 mu for several streams), its standard error, the chance it is more than twice the truth, Kan and Zhou's shrink factor, the empirical Kelly, and growth and drawdown odds at fractions of it |
+| `apply_overlay(returns, *, method, periods_per_year, target_volatility=0.1, multiplier=3.0, floor=0.8, max_leverage=1.0, ...)` | A volatility target, CPPI or TIPP over one stream, each exposure decided from the returns before it: the overlaid stream, its exposure path, and the floor breaches |
+| `capacity_curve(returns, weights, *, adv, daily_volatility, spread_bps, periods_per_year, impact_coefficient=1.0, aum=None, ...)` | Net return and Sharpe against AUM under spread plus square-root impact on every weight change, the break-even AUM, the AUM at half the gross Sharpe and the instruments whose impact binds |
+| `brinson_fachler(periods, portfolio_weights, benchmark_weights, portfolio_returns, benchmark_returns, *, linking="carino")` | Allocation, selection and interaction per segment and period, linked by Carino or Menchero so they sum to the cumulative active return |
+
+### Book returns
+
+`measure_book_returns(valuations, flows=None, *, day_count="ACT/365F",
+flows_in_valuation=False, large_flow_share=0.10)` returns the true
+time-weighted return (NaN, with the dates named, when a flow date has no
+valuation), Modified Dietz per sub-period linked geometrically, and the
+money-weighted return — the IRR of the owner's cash by
+`finance.cash_flows.rate_roots`, NaN unless unique — of a portfolio with
+external flows (GIPS 2020). The annualized figures are None for a period
+under a year; flows above `large_flow_share` of the value are listed.
+
+The agent tools over these are the `allocation` runtime's; see
+[31_allocation.md](31_allocation.md).

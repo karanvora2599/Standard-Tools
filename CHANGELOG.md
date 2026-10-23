@@ -1,5 +1,35 @@
 # Changelog
 
+## The documentation describes the allocation and finance runtimes in their own guides, counts 262 tools in twelve runtimes, and measures the MCP listing again
+
+- **Two guides.** `31_allocation.md` covers the eight allocation tools:
+  streams on one calendar, allocating with how much of the split the
+  sample chose, the walk-forward test of a rule, Kelly leverage, overlays,
+  capacity, Brinson attribution and time- against money-weighted returns.
+  `32_finance.md` covers the nine finance tools: financing and margin on
+  positions, currency exposure, carry and the FX forward, and NPV, IRR,
+  duration, cost of capital and DCF. Each opens with its tool count and a
+  table the docs tests hold to the registry, and the index generator links
+  both.
+- **The pages the new tools touch.** The factor model in `05_portfolio`
+  and `08_analysis`; the VaR forecast and its tests in `03_metrics` and
+  `23_inference`; the option book in `21_derivatives`; the Kelly report
+  and the capacity curve beside the one-trade sizer and the capacity
+  report in `09_advanced_agent_tools`; financing on positions and the
+  margin tools beside the engines' `FinancingSpec` in `04_backtesting`;
+  the function tables in `00_module_reference`; and in `19_runtimes` and
+  `28_delta_one` why the VaR tester sits in `research` and the FX forward
+  hedge in `finance`.
+- **Counts.** 262 tools, 213 in the analysis facade, twelve runtimes,
+  fifteen categories over ten analysis runtimes and eighteen multi-agent
+  workers, in the README and every guide that states them; the runtime
+  tables gain `allocation` and `finance`. The README's runtime sizes were
+  stale before this change and are re-measured, as are `18_mcp`'s
+  per-runtime and per-category tables, the `auto` thinning (research 15
+  of 45, its three new tools and nothing it described before), the whole
+  surface (685 KB of schema) and a default session's 61 tools. The
+  generated tool index is regenerated.
+
 ## A factor model is estimated for the risk tools to read, a VaR is a forecast with the tests that say whether it was right, and an option book's dollar greeks are summed with the multiplier required
 
 - **`estimate_factor_model` (`research`).** `decompose_factor_risk` took

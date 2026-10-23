@@ -991,6 +991,16 @@ and specific variances 0.09 and 0.0625, the book 50/50 and the benchmark
 TE² 0.0061, the tracking error √0.006356 = 0.0797 and the factor 4.0% of
 it.
 
+The model can come from the data: `estimate_factor_model` in the
+`research` runtime fits B by OLS on factor returns the caller supplies,
+takes F as the factors' sample covariance and D as each asset's residual
+variance over n − p, and returns them as `factor_loadings`,
+`factor_covariance` and `specific_variance`, ready to pass here. Given a
+`run_id` it also publishes Σ = BFB′ + D as a `covariance` reference, which
+`optimize_portfolio` and the allocators take as `covariance_ref`. Series
+built so their sample moments are this section's planted book give back
+its tracking error of 0.0797 and factor share of 4.0%.
+
 ## Risk that admits you cannot exit at the mark
 
 ### `get_liquidity_adjusted_var`
@@ -1254,7 +1264,11 @@ curve or a price); undated values; and dates in different time zones.
 date that column was not observed on. `combine_return_streams` resolves
 streams — Series, or `ReturnStream` specs: a `returns_panel` reference and
 its column, {ISO date: return}, or a symbol with both ends of its window —
-aligns them and publishes the panel as a `returns_panel` at a `run_id`.
+aligns them and publishes the panel as a `returns_panel` at a `run_id`. The
+`allocation` runtime's tool of the same name is its door for an agent (see
+[31_allocation.md](31_allocation.md)); `allocate_across_sleeves` and
+`evaluate_allocation_rule` there read the panel it publishes, or dated
+values, and fetch nothing.
 
 ## Planning the transition
 
