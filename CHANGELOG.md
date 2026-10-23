@@ -1,5 +1,33 @@
 # Changelog
 
+## A rally's return z-score that was never computed is null with a reason, not 0.0
+
+- **`return_zscore` read 0.0 when there was no z-score.** `detect_rally`
+  (the `get_rally_signal` tool) z-scores the trailing return against its
+  own rolling window and fell back to 0.0 when the division gave NaN --
+  a trailing return that never varied over the window, as on a halted or
+  pegged instrument. 0.0 says "an exactly ordinary move", a reading of the
+  market. Worse, the fallback did not always fire: after a moving history
+  pandas' rolling standard deviation of the flat window is about 1e-9
+  rather than 0, and 0 / 1e-9 came back as a z-score of exactly 0.0 with
+  no NaN to catch. Now the window's dispersion is tested the way the rest
+  of the library tests it (`metrics.risk_metrics.has_no_dispersion`,
+  relative to the values' magnitude), and with none `return_zscore` is
+  NaN in the library and null on the wire, with a warning naming the
+  lookback and the window and saying that `unusual_positive_return` is
+  false for want of a z-score and counts in `rally_score` as a signal that
+  did not confirm. A z-score that is non-finite for another reason (a
+  zero close in the window) is null with its own warning.
+- **On the wire:** `RallyDetectionResult.return_zscore` is nullable and
+  goes from 0.0 to null in that case; the result's `warnings`, which only
+  ever explained a directional-movement null, now carries the library's
+  line, and `detect_rally` returns a `warnings` list.
+- Tests: a flat 300-bar tail after a moving history (the residue case)
+  gives NaN and the warning, its `rally_score` is the other four signals
+  alone, the tool reports null and says why once; an ordinary series has
+  a finite z-score and no warning. The mutation catalogue gains two
+  entries.
+
 ## A backtest that never traded has no win rate and no average trade: both are null with a reason, not 0.0, on both engines
 
 - **`win_rate` and `avg_trade_return_pct` read 0.0 for a run with no

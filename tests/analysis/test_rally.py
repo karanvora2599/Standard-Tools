@@ -1,5 +1,8 @@
 """Tests for rally detection: analysis.rally.detect_rally."""
 
+import math
+from unittest.mock import AsyncMock, MagicMock
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -202,6 +205,78 @@ class TestAutoTuneAdxThreshold:
                     auto_tune_adx_threshold=True,
                     auto_tune_percentile=bad,
                 )
+
+
+# ── An undefined z-score ──────────────────────────────────────────────────────
+
+
+@pytest.fixture(scope="module")
+def halted_ohlcv():
+    """A moving history, then 300 bars at one price -- a halted or pegged
+    instrument. The trailing 20-bar return is 0.0 on every bar of the
+    252-bar z-score window, so its dispersion is zero and the z-score 0/0.
+    On this seed pandas' rolling std leaves about 1e-9 of residue rather
+    than 0, so the division alone returned a z-score of exactly 0.0."""
+    rng = np.random.default_rng(4)
+    close = 100 * np.cumprod(1 + rng.normal(0.0, 0.01, 600))
+    close[-300:] = close[-301]
+    dates = pd.date_range("2020-01-01", periods=len(close), freq="B")
+    return pd.DataFrame(
+        {"Open": close, "High": close * 1.001, "Low": close * 0.999, "Close": close},
+        index=dates,
+    )
+
+
+class TestAnUndefinedZScore:
+    def test_it_is_nan_with_a_warning_not_zero(self, halted_ohlcv):
+        """It read 0.0 -- "an exactly ordinary move" -- for a z-score that
+        was never computed."""
+        result = detect_rally(halted_ohlcv)
+        assert math.isnan(result["return_zscore"])
+        assert len(result["warnings"]) == 1
+        line = result["warnings"][0]
+        assert line.startswith("return_zscore is null:")
+        assert "20-bar return did not vary over the last 252 bars" in line
+        assert "unusual_positive_return is false for want of a z-score" in line
+
+    def test_the_signal_it_feeds_does_not_confirm(self, halted_ohlcv):
+        """rally_score is the four other signals, each read off its own
+        reported value, and nothing for the return."""
+        result = detect_rally(halted_ohlcv)
+        others = (
+            result["adx"] > result["adx_threshold_used"],
+            result["trend_direction"] == "bullish",
+            result["regime"] == "trending",
+            result["is_new_high"],
+        )
+        assert result["rally_score"] == pytest.approx(sum(others) / 5)
+
+    def test_null_case_a_defined_z_score_says_nothing(self, rising_ohlcv):
+        result = detect_rally(rising_ohlcv)
+        assert math.isfinite(result["return_zscore"])
+        assert result["warnings"] == []
+
+    def test_on_the_wire_it_is_null_and_explained_once(self, halted_ohlcv, monkeypatch):
+        from standard_quant_tools.agent.models import RallyDetectionInput
+        from standard_quant_tools.agent.runtimes.research.tools import (
+            get_rally_signal,
+        )
+        from standard_quant_tools.data.factory import DataFactory
+
+        provider = MagicMock()
+        provider.get_ohlcv.side_effect = lambda *a, **k: halted_ohlcv
+        provider.get_ohlcv_async = AsyncMock(side_effect=lambda *a, **k: halted_ohlcv)
+        monkeypatch.setattr(DataFactory, "get_provider", lambda *a, **k: provider)
+        result = get_rally_signal(
+            RallyDetectionInput(
+                symbol="HALT", start_date="2020-01-01", end_date="2022-04-29"
+            )
+        )
+        assert result.return_zscore is None
+        assert result.model_dump(mode="json")["return_zscore"] is None
+        named = [w for w in result.warnings if w.startswith("return_zscore is null")]
+        assert len(named) == 1
+        assert "did not vary" in named[0]
 
 
 # ── Validation ─────────────────────────────────────────────────────────────────

@@ -3054,7 +3054,7 @@ print(f"threshold used: {auto_result.adx_threshold_used}  "
 |---|---|---|
 | `is_rally` | `bool` | `rally_score >= 0.6` |
 | `rally_score` | `float` | Fraction of the 5 signals that are true (0.0-1.0 in steps of 0.2) |
-| `trailing_return_pct` / `return_zscore` | `float` | The raw trailing return and its z-score vs. the symbol's own history |
+| `trailing_return_pct` / `return_zscore` | `float` / `float?` | The raw trailing return and its z-score vs. the symbol's own history. `return_zscore` is null, and `warnings` says why, when the trailing return did not vary over the z-score window (a halted or pegged instrument) -- it read 0.0, an exactly ordinary move, for a z-score that was never computed |
 | `adx` / `di_plus` / `di_minus` | `float` | Latest ADX/DI+/DI- values |
 | `trend_direction` | `str` | `"bullish"` (DI+ > DI-), `"bearish"` (DI- > DI+), or `"neutral"` |
 | `hurst` / `regime` | `float` / `str` | Latest Hurst exponent and its regime classification |

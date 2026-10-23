@@ -1810,13 +1810,23 @@ _ADX_WARMUP = (
 
 
 class RallyDetectionResult(ExplainsNulls):
-    null_reasons = {"adx": _ADX_WARMUP, "di_plus": _ADX_WARMUP, "di_minus": _ADX_WARMUP}
+    null_reasons = {
+        "adx": _ADX_WARMUP,
+        "di_plus": _ADX_WARMUP,
+        "di_minus": _ADX_WARMUP,
+        "return_zscore": (
+            "the trailing return did not vary over the z-score window, so "
+            "there is no dispersion to scale it by"
+        ),
+    }
 
     symbol: str
     is_rally: bool
     rally_score: float
     trailing_return_pct: float
-    return_zscore: float
+    # Null, with the reason in warnings, when the trailing return never
+    # varied over the window: it read 0.0, "an exactly ordinary move".
+    return_zscore: Stat
     adx: Stat
     di_plus: Stat
     di_minus: Stat
@@ -1829,7 +1839,8 @@ class RallyDetectionResult(ExplainsNulls):
     auto_tuned: bool
     warnings: List[str] = Field(
         default_factory=list,
-        description="Why a directional-movement figure above is null, when one is.",
+        description="Why a directional-movement figure or the return "
+        "z-score above is null, when one is.",
     )
 
 

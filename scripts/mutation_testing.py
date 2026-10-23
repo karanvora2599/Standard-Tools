@@ -241,6 +241,24 @@ MUTATIONS: List[Mutation] = [
         "tests/delta_one/test_a_persistent_basis_is_not_a_shift.py",
     ),
     Mutation(
+        # An undefined return z-score read as an exactly ordinary move, as
+        # it did.
+        "rally: report an undefined return z-score as 0.0",
+        SRC / "analysis/rally.py",
+        '    if has_no_dispersion(window):\n        current_zscore = float("nan")\n',
+        "    if has_no_dispersion(window):\n        current_zscore = 0.0\n",
+        "tests/analysis/test_rally.py",
+    ),
+    Mutation(
+        # The division trusted to find a flat window: pandas' rolling std
+        # leaves 1e-9 of residue there, and 0 / 1e-9 is a z-score of 0.0.
+        "rally: leave no-dispersion to the division",
+        SRC / "analysis/rally.py",
+        "    if has_no_dispersion(window):\n",
+        "    if False:\n",
+        "tests/analysis/test_rally.py",
+    ),
+    Mutation(
         # A strategy that never traded read as a 0% win rate, as it did.
         "trade stats: a run with no trade has a 0.0 win rate",
         SRC / "backtest/engine.py",

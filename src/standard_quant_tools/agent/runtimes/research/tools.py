@@ -1161,7 +1161,13 @@ def get_rally_signal(input_data: RallyDetectionInput) -> RallyDetectionResult:
         is_rally=result["is_rally"],
         rally_score=round(result["rally_score"], 4),
         trailing_return_pct=round(result["trailing_return_pct"], 6),
-        return_zscore=round(result["return_zscore"], 4),
+        # None, not NaN, beside the library's own line naming it, so the
+        # result states the reason once.
+        return_zscore=(
+            round(result["return_zscore"], 4)
+            if math.isfinite(result["return_zscore"])
+            else None
+        ),
         adx=round(result["adx"], 4),
         di_plus=round(result["di_plus"], 4),
         di_minus=round(result["di_minus"], 4),
@@ -1172,6 +1178,7 @@ def get_rally_signal(input_data: RallyDetectionInput) -> RallyDetectionResult:
         n_obs=result["n_obs"],
         adx_threshold_used=round(result["adx_threshold_used"], 4),
         auto_tuned=result["auto_tuned"],
+        warnings=list(result["warnings"]),
     )
 
 

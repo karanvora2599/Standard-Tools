@@ -12,7 +12,8 @@ codebase.
 """
 
 import logging
-from typing import Any, Dict, Literal
+import math
+from typing import Any, Dict, List, Literal
 
 import numpy as np
 import pandas as pd
@@ -123,7 +124,14 @@ def detect_rally(
     ("bullish"/"bearish"/"neutral"), hurst, regime, is_new_high, n_obs,
     adx_threshold_used (the actual threshold `strong_trend` was compared
     against -- equals `adx_threshold` unless auto-tuned), auto_tuned (bool,
-    whether auto-tuning was actually applied).
+    whether auto-tuning was actually applied), and warnings.
+
+    return_zscore is NaN, not 0.0, when it is undefined: the trailing
+    return did not vary over the z-score window (a halted or pegged
+    instrument), so there is no dispersion to scale it by. It read 0.0,
+    "an exactly ordinary move", for a z-score that was never computed.
+    `unusual_positive_return` is then false for want of a z-score, and
+    `warnings` says so.
 
     Raises
     ------
@@ -155,9 +163,36 @@ def detect_rally(
     trailing_return = close.pct_change(periods=lookback, fill_method=None)
     zscore_series = _return_zscore(close, lookback, zscore_window)
     current_return = float(trailing_return.iloc[-1])
-    current_zscore = (
-        float(zscore_series.iloc[-1]) if not np.isnan(zscore_series.iloc[-1]) else 0.0
-    )
+    current_zscore = float(zscore_series.iloc[-1])
+    warnings: List[str] = []
+    # NaN, not 0.0, where there is no z-score: 0.0 says "an exactly ordinary
+    # move", a reading of the market. The window is full here (n >=
+    # zscore_window + lookback), so what can be missing is the dispersion:
+    # a trailing return that never varied. The test is the library's
+    # relative one, not a NaN from the division -- pandas' rolling std
+    # leaves residue of 1e-9 on a constant window that follows a moving
+    # one, and 0 / 1e-9 came back as a z-score of exactly 0.0.
+    from standard_quant_tools.metrics.risk_metrics import has_no_dispersion
+
+    window = trailing_return.iloc[-zscore_window:].to_numpy(dtype=np.float64)
+    if has_no_dispersion(window):
+        current_zscore = float("nan")
+        warnings.append(
+            f"return_zscore is null: the trailing {lookback}-bar return did "
+            f"not vary over the last {zscore_window} bars, so there is no "
+            "dispersion to scale it by. unusual_positive_return is false for "
+            "want of a z-score, not because the move is ordinary, and "
+            "rally_score counts it as a signal that did not confirm."
+        )
+    elif not math.isfinite(current_zscore):
+        current_zscore = float("nan")
+        warnings.append(
+            f"return_zscore is null: the trailing {lookback}-bar return is not "
+            f"a finite number somewhere in the last {zscore_window} bars (a "
+            "zero close), so there is no z-score. unusual_positive_return is "
+            "false for want of one, and rally_score counts it as a signal "
+            "that did not confirm."
+        )
 
     adx_df = adx(df["High"], df["Low"], close, period=adx_period)
     current_adx = float(adx_df["ADX"].iloc[-1])
@@ -191,6 +226,7 @@ def detect_rally(
     is_new_high = bool(close.iloc[-1] > breakout_high.iloc[-1])
 
     signals = {
+        # False with no z-score (NaN compares false): not confirmed.
         "unusual_positive_return": current_zscore > _RETURN_ZSCORE_THRESHOLD,
         "strong_trend": current_adx > effective_adx_threshold,
         "bullish_direction": trend_direction == "bullish",
@@ -224,4 +260,5 @@ def detect_rally(
         "n_obs": n,
         "adx_threshold_used": effective_adx_threshold,
         "auto_tuned": auto_tune_adx_threshold,
+        "warnings": warnings,
     }
