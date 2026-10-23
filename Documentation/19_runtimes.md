@@ -44,7 +44,7 @@ shipped, generalized to the rest of the surface.
 | `data` | 21 | `data` | Get the bytes — from any configured provider, chosen per call with `source` — and publish them as references every other runtime reads, plus what the source can promise about them. Fetches; does not analyze. |
 | `backtest` | 35 | `backtest_execution`, `backtest_validation`, `custom_signal` | Run a strategy, and establish how much of the result is real. Does not build portfolios. |
 | `meta` | 25 | `discovery`, `provenance` | Questions about the library, the session and what a data source can promise — never about a market. |
-| `portfolio` | 19 | `portfolio_risk` | Turn a view into a position and price what it costs. |
+| `portfolio` | 22 | `portfolio_risk` | Turn a view into a position and price what it costs. |
 | `modeling` | 38 | (one ordered pipeline) | Build, validate and score a model, and join point-in-time records onto its panel. Lives in `modeling/agent`. |
 | `microstructure` | 17 | `microstructure` | What the market will charge you to trade — measured from ticks, or estimated from bars. |
 | `derivatives` | 12 | `derivatives` | What an option is worth and what holding it does to you. Takes quotes as arguments; there is no options provider. |
@@ -158,7 +158,7 @@ a changelog nobody reads, embedded in an error message everybody does.
 same partition, over the protocol. This is not only a context-budget
 decision, though the budget forced it: at roughly 2,775 bytes per tool over
 the wire at full detail, the 180,000-byte session ceiling the server used to
-enforce buys about 65 tools and the library has 238, so the whole surface
+enforce buys about 65 tools and the library has 241, so the whole surface
 stopped fitting in one session well before it stopped growing.
 
 What it buys beyond the bytes is that the boundary now holds in three
@@ -258,8 +258,9 @@ further from symmetric than 1e-10 of its largest entry, and stores it as
 given, so it resolves to the same bits; what its scale means is kept in the
 record beside it, and `resolve(ref, expect="covariance")` returns the named
 frame with that record on `attrs`. `optimize_risk_parity`,
-`optimize_max_diversification`, `get_marginal_risk_contribution` and
-`run_portfolio_scenarios` take it as `covariance_ref`.
+`optimize_max_diversification`, `get_marginal_risk_contribution`,
+`run_portfolio_scenarios` and `optimize_portfolio` take it as
+`covariance_ref`.
 
 `list_reference_kinds` returns this table plus what converts to what — the
 map of which producer outputs can reach which consumer inputs.
@@ -342,7 +343,7 @@ Two `meta` tools exist because of the same concern the runtimes address.
 
 `describe_tool` reports one tool's arguments, result fields, owning runtime,
 and whether calling it fetches or writes. The alternative was loading all
-238 schemas — which is exactly what the MCP category budget exists to avoid,
+241 schemas — which is exactly what the MCP category budget exists to avoid,
 so a narrowly-scoped agent could not learn about a tool it had heard of
 without paying for every tool it had not. It answers for any runtime,
 because describing a tool is not calling it.

@@ -27,7 +27,7 @@ scoping an MCP session -- see [18_mcp.md](18_mcp.md).
 Two tools (`run_backtest_optimization`, `scan_pairs`) are long-running and
 are served only with `--enable-long-running`. A default MCP session is also
 scoped to four categories rather than all of them, so it advertises 58 of the
-238 below; `--runtime all --enable-long-running` serves every one.
+241 below; `--runtime all --enable-long-running` serves every one.
 
 
 ## The runtimes
@@ -38,13 +38,13 @@ scoped to four categories rather than all of them, so it advertises 58 of the
 | `modeling` | 38 | 204 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
 | `backtest` | 35 | 102 KB | `backtest_execution`, `backtest_validation`, `custom_signal` | [04_backtesting.md](04_backtesting.md), [24_overfitting.md](24_overfitting.md) |
 | `meta` | 25 | 25 KB | `discovery`, `provenance` | [27_meta.md](27_meta.md), [10_auditability.md](10_auditability.md) |
+| `portfolio` | 22 | 52 KB | `portfolio_risk` | [05_portfolio.md](05_portfolio.md) |
 | `data` | 21 | 36 KB | *(one surface)* | [26_data.md](26_data.md) |
-| `portfolio` | 19 | 44 KB | `portfolio_risk` | [05_portfolio.md](05_portfolio.md) |
 | `delta_one` | 18 | 46 KB | *(one surface)* | [28_delta_one.md](28_delta_one.md) |
 | `microstructure` | 17 | 31 KB | *(one surface)* | [22_microstructure.md](22_microstructure.md) |
 | `derivatives` | 12 | 23 KB | *(one surface)* | [21_derivatives.md](21_derivatives.md) |
 | `feature_lab` | 11 | 50 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
-| **Total** | **238** | | | |
+| **Total** | **241** | | | |
 
 ---
 
@@ -1056,6 +1056,165 @@ Check the audit log's tamper-evident hash chain, for one day or the whole trail,
 
 ---
 
+## `portfolio` — Portfolio & Execution
+
+Turn a view into a position and price what it costs. Construction: a covariance estimate with its diagnostics, optimal weights (mean-variance, the efficient frontier, Black-Litterman, risk parity, hierarchical risk parity, maximum diversification) and weights from alpha scores. Risk: attribution, marginal contribution, factor exposure, concentration, named scenarios and historical stress windows, liquidity-adjusted VaR. Implementation: position sizing, capacity, a rebalance schedule and the itemized cost of a trade. Liquidity here is estimated from OHLCV bars; spreads and order flow measured from ticks are `microstructure`.
+
+#### `analyze_concentration`
+
+How concentrated a portfolio is, in numbers with known interpretations. Effective N is the count of equally weighted positions that would give the same concentration -- a 100-position book with an effective N of 12 holds 100 names and has the concentration of 12, and that is the number to quote. Long-short books are measured on GROSS weights, because net makes the denominator near-zero and the shares meaningless.
+
+**Required:** `weights`
+
+#### `construct_weights_from_scores`
+
+Turn alpha scores into portfolio weights and STOP, so the weights can be looked at before anything is simulated. Rank, top/bottom, z-score or volatility-scaled construction, optionally dollar-neutralised. This is the step that is otherwise buried inside a larger operation: when a model's backtest looks wrong, seeing the weights is what separates a bad signal from bad construction. Returns TARGET weights, not a P&L.
+
+**Required:** `scores_ref`, `run_id`, `name`  
+**Optional:** `method`, `gross_leverage`, `n_long`, `n_short`, `returns_ref`, `vol_lookback`, `net_exposure`, `max_position_weight`, `dollar_neutral`
+
+#### `decompose_factor_risk`
+
+Splits a portfolio's risk under a factor model (B F B' + D) into factor and specific parts, by factor and by asset, with tracking error against a benchmark split the same way. Euler contributions sum to the volatility; a factor's is exposure x volatility x correlation. Units are the inputs'.
+
+**Required:** `weights`, `factor_loadings`, `factor_covariance`, `specific_variance`  
+**Optional:** `benchmark_weights`
+
+#### `decompose_tail_risk`
+
+Which positions a portfolio's expected shortfall and VaR come from: Euler component ES and kernel-smoothed component VaR from a scenario matrix or a returns_ref. Component ES sums to ES exactly, component VaR to the kernel VaR. Losses are positive, as cvar gives them; the tail count is always reported.
+
+**Required:** `weights`  
+**Optional:** `scenarios`, `returns_ref`, `confidence`, `bandwidth`
+
+#### `estimate_covariance`
+
+A covariance matrix plus the diagnostics that say whether to trust it. Shrinkage is the ANSWER to the conditioning warnings the optimizer already emits rather than a caveat about them: a covariance over N assets has N(N+1)/2 parameters, and mean-variance optimization is an error-maximizer over its worst-estimated directions. Read observations_per_parameter and condition_number before the matrix. Returns it annualized.
+
+*No required arguments.*  
+**Optional:** `tickers`, `start_date`, `end_date`, `returns_ref`, `method`, `halflife`, `periods_per_year`, `run_id`
+
+#### `estimate_trade_cost`
+
+Itemized cost of one hypothetical trade under a composed cost model: commission, spread, square-root market impact, short borrow and margin interest. Commission is pct/per-share/directional/maker-taker; spread is fixed bps or a fraction of the bar's range. No market data needed.
+
+**Required:** `notional`  
+**Optional:** `side`, `commission_model`, `commission_pct`, `shares`, `per_share_rate`, `min_commission`, `buy_rate`, `sell_rate`, `taker_rate`, `maker_rate`, `is_maker`, `spread_model`, `spread_bps`, `bar_high`, `bar_low`, `bar_close`, `range_pct`, `avg_dollar_volume`, `volatility`, `impact_coefficient`, `short_borrow_bps`, `holding_days`, `margin_cash`, `margin_annual_rate`, `day_count`
+
+#### `get_capacity_report`
+
+How much account size a target-weight portfolio can support before positions become too large relative to each ticker's own trading volume. It also reports sector exposure and, given an account_size, the days each position takes to liquidate at it.
+
+**Required:** `tickers`, `start_date`, `end_date`, `target_weights`  
+**Optional:** `max_participation`, `adv_lookback`, `include_sector_exposure`, `account_size`
+
+#### `get_efficient_frontier`
+
+The WHOLE efficient frontier in one call, exactly: the closed form when weights are unbounded, Markowitz's critical line algorithm when long-only or capped. Returns the points, a bounded curve's certified corner portfolios, the minimum-variance portfolio, the condition number, and the tangency portfolio at a rate (null with a warning when none exists).
+
+**Required:** `tickers`, `start_date`, `end_date`  
+**Optional:** `n_points`, `risk_free_rate`, `periods_per_year`, `return_range`, `allow_short`, `max_weight`
+
+#### `get_factor_exposure_budget`
+
+What the portfolio is actually betting on, once the names collapse into factors. Answers the failure that sinks more portfolios than any optimizer: 'I hold 40 names so I am diversified' -- 40 names with the same loading are one position with extra transaction costs. Supply factor_covariance for the factor variance and each factor's share of it, and specific_variance as well for each factor's share of the portfolio's TOTAL variance -- the number that answers what you are taking risk on. Shares of the factor variance alone sum to 1 whatever the names' own risk, so they cannot say whether the book is a factor bet; without factor_covariance only exposures can be reported, and a large loading on a quiet factor is not a large risk.
+
+**Required:** `weights`, `factor_loadings`  
+**Optional:** `factor_covariance`, `factors`, `specific_variance`
+
+#### `get_liquidity_adjusted_var`
+
+VaR that accounts for not being able to exit at the mark. A 1-day 95% VaR describes a position you could close today; one that takes 15 days to liquidate at a sane participation rate is exposed for 15 days and carries roughly sqrt(15) times the risk -- a factor of four, and the part usually missed. The liquidation COST is reported separately from the quantile on purpose: cost is an expectation and VaR is a quantile, and adding them produces a number that is neither.
+
+**Required:** `positions`, `volatilities`, `daily_volumes`  
+**Optional:** `confidence`, `participation_rate`, `correlation`, `impact_coefficient`
+
+#### `get_liquidity_metrics`
+
+Amihud illiquidity ratio and Corwin-Schultz spread estimator per ticker — OHLCV-derived proxies for market depth and bid/ask spread.
+
+**Required:** `tickers`, `start_date`, `end_date`  
+**Optional:** `window`
+
+#### `get_marginal_risk_contribution`
+
+Where the risk in a portfolio you ALREADY hold is coming from, and what one more unit of each position costs. Marginal risk is the derivative of portfolio volatility with respect to the weight; contribution is weight times marginal, and these sum exactly to portfolio volatility, which makes it a decomposition rather than an allocation of blame. The diagnostic is the contribution share against the weight share: an asset at 5% of the book carrying 30% of the risk is the position to look at. A NEGATIVE marginal contribution means adding reduces risk -- that position is a hedge whether or not it was meant as one.
+
+**Required:** `weights`  
+**Optional:** `assets`, `covariance`, `covariance_ref`
+
+#### `get_portfolio_risk_attribution`
+
+Deep portfolio risk decomposition: MCR per asset, PCA attribution, optional factor model.
+
+**Required:** `tickers`, `weights`, `start_date`, `end_date`  
+**Optional:** `benchmark`, `n_components`, `factor_tickers`, `factor_names`, `risk_free_rate`
+
+#### `get_position_size`
+
+How large to trade, from a stop distance measured in ATR and an account risk budget. Answers the question a signal does not: a correct direction sized wrong loses money. Kelly is optional and is a CEILING rather than a target -- full Kelly maximizes long-run growth and produces drawdowns almost nobody holds through, which is why half-Kelly is the common practice. Kelly's fraction is a POSITION, a multiple of equity, so the half-Kelly size is capped at max_leverage times equity (1 by default) and a warning says when the cap binds.
+
+**Required:** `symbol`, `start_date`, `end_date`, `account_equity`  
+**Optional:** `risk_per_trade_pct`, `atr_period`, `atr_multiplier`, `win_rate`, `avg_win_pct`, `avg_loss_pct`, `max_leverage`, `n_trades`
+
+#### `optimize_hierarchical_risk_parity`
+
+Allocation that never INVERTS the covariance matrix. Inversion is where an ill-conditioned estimate does its damage -- the smallest eigenvalue becomes the largest, so the direction the data says least about becomes the one the portfolio bets most on, and with 50 assets on 500 observations that eigenvalue is noise. HRP clusters by correlation, orders the assets so similar ones sit adjacent, and splits capital down the tree. It has NO optimality property and does not maximize anything; it buys robustness by giving that up.
+
+*No required arguments.*  
+**Optional:** `returns`, `returns_ref`, `alignment`, `periods_per_year`
+
+#### `optimize_max_diversification`
+
+The portfolio maximizing the DIVERSIFICATION RATIO: the weighted average of the assets' volatilities over the portfolio's own, 1.0 when all are perfectly correlated. Unlike minimum variance it rewards being UNCORRELATED, not quiet. Default: the closed form, which may short; long_only=True (optional max_weight): exact and certified.
+
+*No required arguments.*  
+**Optional:** `assets`, `covariance`, `covariance_ref`, `long_only`, `max_weight`
+
+#### `optimize_portfolio`
+
+Exact constrained portfolio optimization on expected returns and a covariance you supply: min variance, max utility, max Sharpe, min tracking error or max active utility. Takes per-asset bounds, a budget (=, <=, 0 for dollar-neutral), group and factor-exposure limits (min = max for neutrality) and volatility or tracking-error caps. Returns the weights and their risk, every binding constraint with its shadow price, and a KKT certificate computed from the weights: certified is never assumed, and an infeasible set of limits is refused naming the ones that conflict. No tickers: pass a covariance or estimate_covariance's covariance_ref.
+
+*No required arguments.*  
+**Optional:** `assets`, `covariance`, `covariance_ref`, `objective`, `expected_returns`, `benchmark_weights`, `risk_aversion`, `risk_free_rate`, `min_weight`, `max_weight`, `lower_bounds`, `upper_bounds`, `budget`, `budget_type`, `groups`, `group_min`, `group_max`, `factor_loadings`, `exposure_min`, `exposure_max`, `max_volatility`, `max_tracking_error`
+
+#### `optimize_risk_parity`
+
+Weights at which every asset contributes the SAME AMOUNT OF RISK -- not the same weight. An equally weighted portfolio of a bond fund and a biotech stock is a biotech portfolio; the equity contributes nearly all the variance. Uses NO expected returns, which is the reason to prefer it over mean-variance in most real situations: the standard error on a mean return from two years of daily data is about the size of the estimate, and mean-variance is maximally sensitive to exactly that input. Pass `budget` for an unequal risk budget, which is how most mandates are actually written.
+
+*No required arguments.*  
+**Optional:** `assets`, `covariance`, `covariance_ref`, `budget`, `max_iterations`, `tolerance`
+
+#### `plan_rebalance`
+
+A day-by-day path from the weights you hold to the weights you want. Every optimizer here returns a target vector and implicitly assumes you arrive instantly and for free; trading fast costs market impact and trading slow means holding the portfolio you were trying to leave, so this returns the SCHEDULE and both costs rather than one number. Surfaces what nothing else does: a target weight the market cannot supply, with the number of days it would really take.
+
+**Required:** `current_weights`, `target_weights`, `portfolio_value`  
+**Optional:** `adv`, `max_participation`, `max_days`, `urgency`, `impact_coefficient`
+
+#### `run_portfolio_optimization`
+
+Produce portfolio weights via Markowitz mean-variance (max_sharpe/min_volatility/target_return/target_volatility), risk parity, or Black-Litterman. get_portfolio_analysis, by contrast, only scores weights already chosen.
+
+**Required:** `tickers`, `start_date`, `end_date`  
+**Optional:** `method`, `risk_free_rate`, `target_return`, `target_volatility`, `allow_short`, `max_weight`, `risk_budget`, `market_weights`, `views`, `risk_aversion`, `tau`, `periods_per_year`
+
+#### `run_portfolio_scenarios`
+
+What a portfolio does under NAMED shocks rather than under a distribution. A 99% VaR is a quantile of a distribution fitted to history, and its central weakness is that the event you care about is usually not in that history; a named scenario makes the assumption explicit and arguable. Positions absent from a scenario are treated as unchanged and the COVERAGE is reported, because a scenario touching three of forty positions produces a loss that is a lower bound rather than a worst case.
+
+**Required:** `weights`, `scenarios`  
+**Optional:** `assets`, `covariance`, `covariance_ref`
+
+#### `run_stress_test`
+
+Replay a portfolio's weights against a named historical crash window (or custom date range) using real historical returns.
+
+**Required:** `tickers`  
+**Optional:** `weights`, `scenario`, `custom_start_date`, `custom_end_date`
+
+---
+
 ## `data` — Data
 
 Get the data and publish it as an `sqt://` reference every other runtime can read: OHLCV for one name or a whole universe, return panels, tick tapes and quote panels, provider guarantees, temporal contracts, and bundles that pair frames with what their sources promise. Fetches; does not analyze.
@@ -1203,144 +1362,6 @@ Scan a registered dataset in batches and report what would produce wrong numbers
 Check ratios you already hold -- from a vendor, a spreadsheet, another system -- for values that are implausible on their face, without fetching anything. The same check fetch_financial_ratios applies, available for data this library has no provider for.
 
 **Required:** `ratios`
-
----
-
-## `portfolio` — Portfolio & Execution
-
-Turn a view into a position and price what it costs. Construction: a covariance estimate with its diagnostics, optimal weights (mean-variance, the efficient frontier, Black-Litterman, risk parity, hierarchical risk parity, maximum diversification) and weights from alpha scores. Risk: attribution, marginal contribution, factor exposure, concentration, named scenarios and historical stress windows, liquidity-adjusted VaR. Implementation: position sizing, capacity, a rebalance schedule and the itemized cost of a trade. Liquidity here is estimated from OHLCV bars; spreads and order flow measured from ticks are `microstructure`.
-
-#### `analyze_concentration`
-
-How concentrated a portfolio is, in numbers with known interpretations. Effective N is the count of equally weighted positions that would give the same concentration -- a 100-position book with an effective N of 12 holds 100 names and has the concentration of 12, and that is the number to quote. Long-short books are measured on GROSS weights, because net makes the denominator near-zero and the shares meaningless.
-
-**Required:** `weights`
-
-#### `construct_weights_from_scores`
-
-Turn alpha scores into portfolio weights and STOP, so the weights can be looked at before anything is simulated. Rank, top/bottom, z-score or volatility-scaled construction, optionally dollar-neutralised. This is the step that is otherwise buried inside a larger operation: when a model's backtest looks wrong, seeing the weights is what separates a bad signal from bad construction. Returns TARGET weights, not a P&L.
-
-**Required:** `scores_ref`, `run_id`, `name`  
-**Optional:** `method`, `gross_leverage`, `n_long`, `n_short`, `returns_ref`, `vol_lookback`, `net_exposure`, `max_position_weight`, `dollar_neutral`
-
-#### `estimate_covariance`
-
-A covariance matrix plus the diagnostics that say whether to trust it. Shrinkage is the ANSWER to the conditioning warnings the optimizer already emits rather than a caveat about them: a covariance over N assets has N(N+1)/2 parameters, and mean-variance optimization is an error-maximizer over its worst-estimated directions. Read observations_per_parameter and condition_number before the matrix. Returns it annualized.
-
-*No required arguments.*  
-**Optional:** `tickers`, `start_date`, `end_date`, `returns_ref`, `method`, `halflife`, `periods_per_year`, `run_id`
-
-#### `estimate_trade_cost`
-
-Itemized cost of one hypothetical trade under a composed cost model: commission, spread, square-root market impact, short borrow and margin interest. Commission is pct/per-share/directional/maker-taker; spread is fixed bps or a fraction of the bar's range. No market data needed.
-
-**Required:** `notional`  
-**Optional:** `side`, `commission_model`, `commission_pct`, `shares`, `per_share_rate`, `min_commission`, `buy_rate`, `sell_rate`, `taker_rate`, `maker_rate`, `is_maker`, `spread_model`, `spread_bps`, `bar_high`, `bar_low`, `bar_close`, `range_pct`, `avg_dollar_volume`, `volatility`, `impact_coefficient`, `short_borrow_bps`, `holding_days`, `margin_cash`, `margin_annual_rate`, `day_count`
-
-#### `get_capacity_report`
-
-How much account size a target-weight portfolio can support before positions become too large relative to each ticker's own trading volume. It also reports sector exposure and, given an account_size, the days each position takes to liquidate at it.
-
-**Required:** `tickers`, `start_date`, `end_date`, `target_weights`  
-**Optional:** `max_participation`, `adv_lookback`, `include_sector_exposure`, `account_size`
-
-#### `get_efficient_frontier`
-
-The WHOLE efficient frontier in one call, exactly, from the closed form. run_portfolio_optimization(method='target_return') answers for ONE target return, so tracing a curve through it costs a tool call and an agent turn per point, and leaves the caller to guess which target returns are worth asking about. This returns the span, the points on it, the global minimum-variance portfolio, the condition number of the covariance it inverted, and the tangency portfolio at a given rate -- null with a warning when no such portfolio exists rather than a normalization onto the inefficient branch. Weights are unbounded and sum to one, which is the condition the algebra describes; a long-only or capped frontier is a different curve with no closed form and is still run_portfolio_optimization point by point.
-
-**Required:** `tickers`, `start_date`, `end_date`  
-**Optional:** `n_points`, `risk_free_rate`, `periods_per_year`, `return_range`
-
-#### `get_factor_exposure_budget`
-
-What the portfolio is actually betting on, once the names collapse into factors. Answers the failure that sinks more portfolios than any optimizer: 'I hold 40 names so I am diversified' -- 40 names with the same loading are one position with extra transaction costs. Supply factor_covariance for the factor variance and each factor's share of it, and specific_variance as well for each factor's share of the portfolio's TOTAL variance -- the number that answers what you are taking risk on. Shares of the factor variance alone sum to 1 whatever the names' own risk, so they cannot say whether the book is a factor bet; without factor_covariance only exposures can be reported, and a large loading on a quiet factor is not a large risk.
-
-**Required:** `weights`, `factor_loadings`  
-**Optional:** `factor_covariance`, `factors`, `specific_variance`
-
-#### `get_liquidity_adjusted_var`
-
-VaR that accounts for not being able to exit at the mark. A 1-day 95% VaR describes a position you could close today; one that takes 15 days to liquidate at a sane participation rate is exposed for 15 days and carries roughly sqrt(15) times the risk -- a factor of four, and the part usually missed. The liquidation COST is reported separately from the quantile on purpose: cost is an expectation and VaR is a quantile, and adding them produces a number that is neither.
-
-**Required:** `positions`, `volatilities`, `daily_volumes`  
-**Optional:** `confidence`, `participation_rate`, `correlation`, `impact_coefficient`
-
-#### `get_liquidity_metrics`
-
-Amihud illiquidity ratio and Corwin-Schultz spread estimator per ticker — OHLCV-derived proxies for market depth and bid/ask spread.
-
-**Required:** `tickers`, `start_date`, `end_date`  
-**Optional:** `window`
-
-#### `get_marginal_risk_contribution`
-
-Where the risk in a portfolio you ALREADY hold is coming from, and what one more unit of each position costs. Marginal risk is the derivative of portfolio volatility with respect to the weight; contribution is weight times marginal, and these sum exactly to portfolio volatility, which makes it a decomposition rather than an allocation of blame. The diagnostic is the contribution share against the weight share: an asset at 5% of the book carrying 30% of the risk is the position to look at. A NEGATIVE marginal contribution means adding reduces risk -- that position is a hedge whether or not it was meant as one.
-
-**Required:** `weights`  
-**Optional:** `assets`, `covariance`, `covariance_ref`
-
-#### `get_portfolio_risk_attribution`
-
-Deep portfolio risk decomposition: MCR per asset, PCA attribution, optional factor model.
-
-**Required:** `tickers`, `weights`, `start_date`, `end_date`  
-**Optional:** `benchmark`, `n_components`, `factor_tickers`, `factor_names`, `risk_free_rate`
-
-#### `get_position_size`
-
-How large to trade, from a stop distance measured in ATR and an account risk budget. Answers the question a signal does not: a correct direction sized wrong loses money. Kelly is optional and is a CEILING rather than a target -- full Kelly maximizes long-run growth and produces drawdowns almost nobody holds through, which is why half-Kelly is the common practice. Kelly's fraction is a POSITION, a multiple of equity, so the half-Kelly size is capped at max_leverage times equity (1 by default) and a warning says when the cap binds.
-
-**Required:** `symbol`, `start_date`, `end_date`, `account_equity`  
-**Optional:** `risk_per_trade_pct`, `atr_period`, `atr_multiplier`, `win_rate`, `avg_win_pct`, `avg_loss_pct`, `max_leverage`, `n_trades`
-
-#### `optimize_hierarchical_risk_parity`
-
-Allocation that never INVERTS the covariance matrix. Inversion is where an ill-conditioned estimate does its damage -- the smallest eigenvalue becomes the largest, so the direction the data says least about becomes the one the portfolio bets most on, and with 50 assets on 500 observations that eigenvalue is noise. HRP clusters by correlation, orders the assets so similar ones sit adjacent, and splits capital down the tree. It has NO optimality property and does not maximize anything; it buys robustness by giving that up.
-
-*No required arguments.*  
-**Optional:** `returns`, `returns_ref`, `alignment`, `periods_per_year`
-
-#### `optimize_max_diversification`
-
-The portfolio that maximizes the DIVERSIFICATION RATIO -- the weighted average of the assets' volatilities over the portfolio's own. It is 1.0 when everything is perfectly correlated and grows as correlations fall, so maximizing it maximizes the volatility that CANCELS. Not the same as minimum variance, which piles into the quietest assets because quiet is what it minimizes; this normalizes by each asset's own volatility first, so an asset is rewarded for being UNCORRELATED rather than for being quiet. It does invert the correlation matrix and reports the condition number for that reason.
-
-*No required arguments.*  
-**Optional:** `assets`, `covariance`, `covariance_ref`
-
-#### `optimize_risk_parity`
-
-Weights at which every asset contributes the SAME AMOUNT OF RISK -- not the same weight. An equally weighted portfolio of a bond fund and a biotech stock is a biotech portfolio; the equity contributes nearly all the variance. Uses NO expected returns, which is the reason to prefer it over mean-variance in most real situations: the standard error on a mean return from two years of daily data is about the size of the estimate, and mean-variance is maximally sensitive to exactly that input. Pass `budget` for an unequal risk budget, which is how most mandates are actually written.
-
-*No required arguments.*  
-**Optional:** `assets`, `covariance`, `covariance_ref`, `budget`, `max_iterations`, `tolerance`
-
-#### `plan_rebalance`
-
-A day-by-day path from the weights you hold to the weights you want. Every optimizer here returns a target vector and implicitly assumes you arrive instantly and for free; trading fast costs market impact and trading slow means holding the portfolio you were trying to leave, so this returns the SCHEDULE and both costs rather than one number. Surfaces what nothing else does: a target weight the market cannot supply, with the number of days it would really take.
-
-**Required:** `current_weights`, `target_weights`, `portfolio_value`  
-**Optional:** `adv`, `max_participation`, `max_days`, `urgency`, `impact_coefficient`
-
-#### `run_portfolio_optimization`
-
-Produce portfolio weights via Markowitz mean-variance (max_sharpe/min_volatility/target_return/target_volatility), risk parity, or Black-Litterman. get_portfolio_analysis, by contrast, only scores weights already chosen.
-
-**Required:** `tickers`, `start_date`, `end_date`  
-**Optional:** `method`, `risk_free_rate`, `target_return`, `target_volatility`, `allow_short`, `max_weight`, `risk_budget`, `market_weights`, `views`, `risk_aversion`, `tau`, `periods_per_year`
-
-#### `run_portfolio_scenarios`
-
-What a portfolio does under NAMED shocks rather than under a distribution. A 99% VaR is a quantile of a distribution fitted to history, and its central weakness is that the event you care about is usually not in that history; a named scenario makes the assumption explicit and arguable. Positions absent from a scenario are treated as unchanged and the COVERAGE is reported, because a scenario touching three of forty positions produces a loss that is a lower bound rather than a worst case.
-
-**Required:** `weights`, `scenarios`  
-**Optional:** `assets`, `covariance`, `covariance_ref`
-
-#### `run_stress_test`
-
-Replay a portfolio's weights against a named historical crash window (or custom date range) using real historical returns.
-
-**Required:** `tickers`  
-**Optional:** `weights`, `scenario`, `custom_start_date`, `custom_end_date`
 
 ---
 

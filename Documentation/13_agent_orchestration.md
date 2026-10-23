@@ -1,8 +1,8 @@
 # Agent Orchestration
 
-`get_agent_tools()` returns 189 LLM-callable tools (see
+`get_agent_tools()` returns 192 LLM-callable tools (see
 [07_agent_tools.md](07_agent_tools.md) /
-[09_advanced_agent_tools.md](09_advanced_agent_tools.md)). Handing all 189 to
+[09_advanced_agent_tools.md](09_advanced_agent_tools.md)). Handing all 192 to
 one model on every call — the default behavior of every single-agent script
 in `Implementation/{Anthropic,OpenAI,Gemini}/` — is the largest untreated
 source of tool-selection error: similarly-named or similarly-scoped tools
@@ -16,7 +16,7 @@ This page covers three mechanisms, in increasing order of strictness:
    single cheap classification call that narrows the tool list before the
    real completion call, without spinning up a separate agent session.
    Used by every `Implementation/*/Agent_*.py` script that draws on the
-   189-tool surface.
+   192-tool surface.
 2. **The multi-agent orchestrator** (`Multi_Agent_Implementation/`) — a lead
    agent that delegates each sub-task to one of 16 specialist worker agents,
    each with its own independent session and system prompt scoped to a
@@ -36,17 +36,17 @@ categorization only ever needs to be correct in one place.
 
 ## Three registries, ten runtimes
 
-Everything above concerns the 189-tool analysis and backtest surface. There
+Everything above concerns the 192-tool analysis and backtest surface. There
 are two more: `standard_quant_tools.modeling.agent`, 38 tools, and the
 11-tool `feature_lab` runtime — neither of which the library merges into the
-first, see [15_modeling.md](15_modeling.md) for why. 189 + 38 + 11 is the
-238-tool whole surface. The example implementations keep the same
+first, see [15_modeling.md](15_modeling.md) for why. 192 + 38 + 11 is the
+241-tool whole surface. The example implementations keep the same
 separation, and it shows up in three places:
 
 | | Analysis registry | Modeling registry |
 |---|---|---|
 | Module | `standard_quant_tools.agent` | `standard_quant_tools.modeling.agent` |
-| Size | 189 tools, 13 categories, 8 runtimes | 38 tools, one ordered pipeline |
+| Size | 192 tools, 13 categories, 8 runtimes | 38 tools, one ordered pipeline |
 | Narrowing | `route_request()` → `categories=` | nothing to narrow — the pipeline runs in sequence |
 | Single-agent script | `Agent_*.py` (eleven of the thirteen; the data runtime has no script of its own yet) | `Agent_Model_Builder.py`; `Agent_Model_Backtester.py` spans both |
 | Workers | 13 | 2 (`model_research`, `model_builder`), plus `feature_lab` on its own runtime |
@@ -56,7 +56,7 @@ schemas **and** its dispatch function together:
 
 ```python
 run_agent(..., registry="modeling")     # 38 tools, modeling_dispatch
-run_agent(..., registry="analysis")     # 189 tools, dispatch  (the default)
+run_agent(..., registry="analysis")     # 192 tools, dispatch  (the default)
 ```
 
 `registry=` also accepts a RUNTIME name, and that is the safer choice:
@@ -111,7 +111,7 @@ silently did not is worse off than one who gets an error.
 ## The category taxonomy (`TOOL_CATEGORY`)
 
 `standard_quant_tools.agent.tools.TOOL_CATEGORY: Dict[str, str]` is the
-single source of truth: every one of the 189 tool names mapped to exactly
+single source of truth: every one of the 192 tool names mapped to exactly
 one of 13 category keys. Each category belongs to exactly one runtime.
 
 | Category | Tools | Runtime | Covers |
@@ -122,7 +122,7 @@ one of 13 category keys. Each category belongs to exactly one runtime.
 | `backtest_execution` | 12 | `backtest` | Run a built-in strategy / portfolio / pair trade / strategy matrix **once**, fixed parameters |
 | `backtest_validation` | 21 | `backtest` | Optimize/validate/diagnose — grid search, walk-forward, regime-adaptive, robustness, Monte Carlo, cost sweep, drawdown table, and the overfitting layer (deflated Sharpe, PBO, purged combinatorial CV, reality check) |
 | `custom_signal` | 2 | `backtest` | Backtest a signal computed outside this library |
-| `portfolio_risk` | 19 | `portfolio` | Covariance estimation, optimization (mean-variance, efficient frontier, Black-Litterman, risk parity, HRP, maximum diversification), weights from scores, risk decomposition, factor budgets, concentration, scenarios and stress windows, liquidity-adjusted VaR, sizing, capacity, rebalancing, trade cost |
+| `portfolio_risk` | 22 | `portfolio` | Covariance estimation, optimization (mean-variance, efficient frontier, Black-Litterman, risk parity, HRP, maximum diversification, and an exact constrained optimizer under sector, factor-exposure and risk limits), weights from scores, risk decomposition (including factor/specific and component ES/VaR), factor budgets, concentration, scenarios and stress windows, liquidity-adjusted VaR, sizing, capacity, rebalancing, trade cost |
 | `microstructure` | 17 | `microstructure` | Spreads MEASURED from tick data, the eight bar-based estimators for when there is no tick feed, and a check of the OHLCV proxies against them |
 | `delta_one` | 18 | `delta_one` | Carry, basis, futures curves and rolls, hedge sizing, baskets and replication, ETF fair value, swaps and TRFs, and the comparison that normalizes six ways of holding one exposure |
 | `derivatives` | 12 | `derivatives` | Option pricing and second-order greeks, multi-leg payoffs, smile/term-structure fitting, put-call parity, delta-hedge simulation |

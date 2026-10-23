@@ -628,8 +628,9 @@ autocorrelation of `permutation_test_ic`, the per-entity autocorrelation of
 12,000 dates under pandas 3.1 before. The replication basket's solve runs
 under the limit as well, with the products built on its weights (the
 predicted variance, the replicated series, its tracking error and its
-beta): on 12,000 observations its SLSQP weights took other last bits at
-two threads than at one on CI's Linux OpenBLAS, although the covariance it
+beta): on 12,000 observations its weights, then solved by SLSQP, took
+other last bits at two threads than at one on CI's Linux OpenBLAS,
+although the covariance it
 solves already ran on one. The limit makes each of these the same bits at
 any thread count under one pandas. It cannot make two versions of pandas
 agree, because their formulas differ: the hedge correlation of those

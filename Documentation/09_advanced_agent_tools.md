@@ -1,8 +1,8 @@
 # Advanced Agent Tools
 
-Thirty-two high-level agentic tools that compose the library's existing primitives into single, LLM-callable operations. Each collapses a multi-step reasoning workflow into one structured function call with a Pydantic output model.
+Thirty-five high-level agentic tools that compose the library's existing primitives into single, LLM-callable operations. Each collapses a multi-step reasoning workflow into one structured function call with a Pydantic output model.
 
-> **See also:** [07_agent_tools.md](07_agent_tools.md) covers the 14 core tools (including `run_buy_and_hold` and `compare_strategies`), `dispatch()` wiring, and the cross-field validation rules. The full catalogue — all 189 tools `get_agent_tools()` returns, plus the modeling and feature-lab runtimes, 238 in all — is [20_tool_index.md](20_tool_index.md), generated from the live registry; [19_runtimes.md](19_runtimes.md) explains the ten execution boundaries they are split across. The tools below are the backtest, portfolio and analytics slice, in depth.
+> **See also:** [07_agent_tools.md](07_agent_tools.md) covers the 14 core tools (including `run_buy_and_hold` and `compare_strategies`), `dispatch()` wiring, and the cross-field validation rules. The full catalogue — all 192 tools `get_agent_tools()` returns, plus the modeling and feature-lab runtimes, 241 in all — is [20_tool_index.md](20_tool_index.md), generated from the live registry; [19_runtimes.md](19_runtimes.md) explains the ten execution boundaries they are split across. The tools below are the backtest, portfolio and analytics slice, in depth.
 
 ---
 
@@ -28,9 +28,17 @@ and why; see [07_agent_tools.md](07_agent_tools.md#backtestinput--backtestresult
 | `scan_pairs` | Find cointegrated pairs in a universe, ranked by half-life | `pairs[].half_life_days`, `pairs[].signal`, `failed_pairs`, `failed_tickers` |
 | `run_walk_forward_backtest` | Optimise in-sample, validate out-of-sample across rolling windows | `stitched_oos_sharpe`, `pct_windows_profitable`, `param_stability` |
 | `get_portfolio_risk_attribution` | Deep risk decomposition: MCR, PCA, optional factor model | `asset_risk_contributions`, `pca_variance_explained` |
-| `run_portfolio_optimization` | Produce weights — Markowitz mean-variance (max_sharpe/min_volatility/target_return/target_volatility), risk parity, or Black-Litterman — unlike `get_portfolio_risk_attribution`, which only decomposes weights already chosen | `weights`, `expected_return`, `expected_volatility`, `sharpe_ratio`, `converged`, `solver` (iterations/status/objective/multipliers), `condition_number`, `risk_contributions` (risk_parity only), and for Black-Litterman `implied_equilibrium_returns`, `posterior_returns`, `posterior_volatilities`, `view_absorption` |
+| `run_portfolio_optimization` | Produce weights — Markowitz mean-variance (max_sharpe/min_volatility/target_return/target_volatility), risk parity, or Black-Litterman — unlike `get_portfolio_risk_attribution`, which only decomposes weights already chosen | `weights`, `expected_return`, `expected_volatility`, `sharpe_ratio`, `converged`, `solver` (method — `closed_form`, `active_set`, `critical_line` for bounded target_volatility, or `SLSQP` — iterations/status/objective/multipliers, and the KKT `certificate` behind `certified`), `condition_number`, `risk_contributions` (risk_parity only), and for Black-Litterman `implied_equilibrium_returns`, `posterior_returns`, `posterior_volatilities`, `view_absorption` |
 | `get_position_size` | ATR stop-loss sizing, with an optional half-Kelly position capped at `max_leverage` | `shares_fixed_risk`, `kelly_notional_fraction`, `kelly_risk_fraction`, `recommended_shares` |
 | `run_portfolio_simulation` | True shared-cash portfolio: rebalancing, position sizing vs. current equity, weight drift between rebalances | `rebalance_log`, `avg_gross_leverage`, `final_equity`, `final_cash` |
+
+**Constrained optimization & risk decomposition tools (3)** — see [05_portfolio.md](05_portfolio.md) for the full reference
+
+| Tool | What it does | Key output fields |
+|---|---|---|
+| `optimize_portfolio` | Exact constrained optimization on expected returns and a covariance you supply (no tickers): min variance, max utility, max Sharpe, min tracking error or max active utility under per-asset bounds, a budget, group and factor-exposure limits and volatility or tracking-error caps | `weights`, `objective_value`, `expected_return`, `volatility`, `tracking_error`, `sharpe_ratio`, `binding_constraints` (each with its `shadow_price`), `effective_risk_aversion`, `group_totals`, `exposures`, `certified`, `certificate` |
+| `decompose_factor_risk` | Factor and specific risk under Σ = BFB′ + D, by factor (exposure × volatility × correlation) and by asset, and the same for the tracking error against a benchmark; specific variance required | `volatility`, `tracking_error`, `benchmark_volatility`, `portfolio` and `active` (variance split, shares of the total, `exposures`, `by_factor`, `specific_contribution`, `by_asset`, `factor_specific_covariance` = 0), `benchmark_exposures` |
+| `decompose_tail_risk` | Euler component ES and kernel-smoothed component VaR from a scenario matrix or a `returns_ref` | `var`, `es`, `var_kernel`, `n_tail_observations`, `bandwidth`, `bandwidth_rule`, `kernel_effective_scenarios`, `by_asset` (marginal and component ES and VaR, shares), `n_hedges`, `streams` |
 
 **Supplementary tools (6)**
 

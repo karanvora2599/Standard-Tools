@@ -165,24 +165,24 @@ print(result["expected_volatility"])  # annualized
 print(result["converged"])
 ```
 
-`allow_short=True` with `max_weight=None` (the fully unconstrained case) is solved in **closed form** via the standard two-fund efficient-frontier parametrization (Merton 1972) — numpy only, no solver dependency, and `converged` is always `True`. Every other combination (`allow_short=False` and/or a `max_weight` cap) requires **scipy**, and how it is solved depends on the objective:
+`allow_short=True` with `max_weight=None` (the fully unconstrained case) is solved in **closed form** via the standard two-fund efficient-frontier parametrization (Merton 1972) — numpy only, no solver dependency, and `converged` is always `True`. Every other combination (`allow_short=False` and/or a `max_weight` cap) requires **scipy**, except `target_volatility` (below), and how it is solved depends on the objective:
 
 - **`min_volatility`, `target_return`, and long-only `max_sharpe` with no binding cap** are convex quadratic programmes; `max_sharpe` becomes one after y = w / ((μ − rf)'w): minimize y'Σy subject to (μ − rf)'y = 1 and y ≥ 0, then w = y / 1'y. They are solved **exactly** by a primal-dual active-set method. Each pass fixes the weights it judges to be at a bound and solves the KKT system on the rest with one linear solve; when a pass changes nothing, the KKT conditions hold to rounding, which for a convex problem makes the answer the optimum. At 235 assets this takes 2–6 ms, where SLSQP took 0.9–14 s and stopped up to 1.6e-5 short of the optimum in the weights (on 235 zero-drift noise series, `max_sharpe` ran 9 s and ended with status 8, 2e-9 from it). Measured on 240 random problems, every answer certified, and once SLSQP's own constraint residuals are charged at the shadow prices no objective got worse by more than 4e-15 relative.
 - **Capped or shorting `max_sharpe`** runs SLSQP, then is solved exactly on SLSQP's active set (150 of 150 random problems certified).
-- **`target_volatility`** is SLSQP's alone, and every bounded solve comes back with `certified=False` and a warning. It maximizes return subject to w'Σw = σ², a quadratic *equality*, which is not convex: the fully-invested portfolios inside the bounds at exactly one volatility can include several local maxima of expected return, one on the inefficient branch, and SLSQP stops at whichever it reaches. Over 60 random long-only problems of six assets, 6 came back up to 16 percentage points of return below the frontier at the requested volatility; two assets at 25% and 20% volatility correlated −0.5, long-only at a 13% target, return 5.20% where 7.98% is attainable. For a certified answer use `target_return`, which is solved exactly: the efficient portfolio at a volatility is the `target_return` portfolio whose volatility equals it. The closed form (`allow_short=True`, `max_weight=None`) takes the efficient root.
+- **`target_volatility`** is solved on the frontier itself. It maximizes return subject to w'Σw = σ², a quadratic *equality*, which is not convex: SLSQP, which solved it until 2026-10-23, stopped at whichever local maximum it reached first, and over 60 random long-only problems of six assets 6 came back up to 16 percentage points of return below the frontier at the requested volatility, with `converged=True`. Now Markowitz's critical line algorithm (`portfolio.critical_line`, below) traces the corner portfolios of the frontier inside the bounds; volatility rises monotonically along them, so exactly one piece between two adjacent corners holds the target, and on that piece the variance is a quadratic in the mix of the two corners whose root in [0, 1] is the answer. It is certified by the frontier's own KKT conditions at the interpolated risk tolerance λ: the minimum-variance portfolio at its own return under the bounds, which with λ ≥ 0 makes it the maximum-return portfolio at its volatility. Two assets at 25% and 20% volatility correlated −0.5, long-only at a 13% target, returned 5.20% and now return 7.98%. This path needs no scipy. The closed form (`allow_short=True`, `max_weight=None`) is unchanged.
 
 A request that's actually infeasible (e.g. a `target_return` no long-only portfolio can reach) comes back with `converged=False` rather than a silently wrong answer, with the attainable range named in the warning.
 
-`objective="target_return"`/`"target_volatility"` need the matching `target_return`/`target_volatility` argument (annualized). A `target_volatility` below the global minimum-variance portfolio's own volatility is infeasible and raises `ValidationError` immediately.
+`objective="target_return"`/`"target_volatility"` need the matching `target_return`/`target_volatility` argument (annualized). A `target_volatility` below the minimum-variance portfolio's own volatility is infeasible and raises `ValidationError` immediately. With bounds, so does one above the highest-return portfolio's volatility: portfolios that risky exist inside the bounds, but every one earns less than the highest-return portfolio does at less risk, so the answer would be a dominated one. With bounds, both refusals name the attainable range `[minimum volatility, highest-return portfolio's volatility]`; the closed form's names the minimum volatility.
 
 `result["warnings"]` carries the optimizer's own caveats: the small-sample covariance warning, the ill-conditioning warning below, and anything the independent weight check found. `result["condition_number"]` is reported as a number at every level, not only above a threshold. It is computed on one BLAS thread — here, and for the portfolio optimization tool's risk parity and Black-Litterman alike — and so is the covariance it is the condition number of, so the same returns report the same `condition_number` on any machine with the same BLAS, where at 235 assets it used to change in the last bits with the number of threads.
 
 `result["solver"]` holds:
 
-- `method` (`"closed_form"`, `"active_set"` or `"SLSQP"`) and `iterations` (for the active-set method, passes of one linear solve each; none on the closed-form path).
+- `method` (`"closed_form"`, `"active_set"`, `"critical_line"` for bounded `target_volatility`, or `"SLSQP"`) and `iterations` (for the active-set method, passes of one linear solve each; for the critical line, the number of corner portfolios; none on the closed-form path). The critical line's `message` names the two corners whose mix the answer is, their risk tolerances and the share of each.
 - `status`, `message`, `objective`, `n_function_evals` and the equality `multipliers`.
 - `certificate`: the KKT residuals of the returned weights, estimated from the weights alone — `stationarity`, `dual_infeasibility`, `equality_residual` and `bound_violation`, each relative to the size of its terms, and the `tolerance` (1e-12).
-- `certified`: `True` when all four are within the tolerance; `False` for an SLSQP answer the exact solve could not certify, and for every bounded `target_volatility` answer (not convex, see above); `None` where no certificate applies (the closed form, an infeasible target).
+- `certified`: `True` when all four are within the tolerance; `False` for an SLSQP answer the exact solve could not certify; `None` where no certificate applies (the closed form, an infeasible target). For `"critical_line"` the four residuals are those of minimizing ½w'Σw − λμ'w under the budget and the bounds at the λ the message names, with λ ≥ 0 required as well.
 - `fallback`: why the fast method's cold start did not produce the answer, when it did not.
 
 The agent tool's `SolverReport` carries `certificate`, `certified` and `fallback` too.
@@ -363,25 +363,77 @@ minimum-variance portfolio's own return to the highest single-asset mean,
 which is the stretch anybody is choosing among. Pass `return_range` to
 choose the span deliberately.
 
-**The weights are unbounded and sum to one.** That is not a relaxation for
-convenience; it is the condition under which the Merton frontier constants
-describe the frontier at all. A weight may be negative (a short) or above 1
-(levered by that short). A long-only or capped frontier is a different
-curve with no closed form, and it remains `run_portfolio_optimization`
-point by point — which under `allow_short=True, max_weight=None` takes the
+**By default the weights are unbounded and sum to one.** That is not a
+relaxation for convenience; it is the condition under which the Merton
+frontier constants describe the frontier at all. A weight may be negative
+(a short) or above 1 (levered by that short). Under
+`allow_short=True, max_weight=None` `run_portfolio_optimization` takes the
 same closed-form branch this tool does, so the two agree to the last place
-either of them publishes.
+either of them publishes. Every point is exact — none is an optimizer run —
+so a fine curve costs no more turns than a coarse one, and `return_range`
+may extend past the default span: it extrapolates the same closed form,
+including onto the inefficient branch below the minimum-variance return.
 
-`tangency` is the maximum-Sharpe portfolio at `risk_free_rate`, and it is
-**null with a warning** when the rate sits at or above the minimum-variance
-portfolio's own return: there is then no maximum-Sharpe portfolio on the
-efficient branch, and normalizing the same algebra anyway lands on the
-inefficient one and reads as an ordinary answer. The rate itself is a
-decimal within ±10 (1,000%), bounded on magnitude and never on sign; a
-larger magnitude is a unit error and is refused rather than answered with a
-null tangency. `condition_number` is
-reported at every level rather than only above the warning threshold — the
-frontier inverts that covariance for every point it returns.
+**A long-only or capped frontier** (`allow_short=False`, or a `max_weight`;
+with `allow_short=True` the cap is also a short floor at −`max_weight`, as
+in `run_portfolio_optimization`) is a different curve with no closed form,
+and the tool traces it exactly with Markowitz's critical line algorithm
+(Markowitz 1956; Niedermayer & Niedermayer 2006; Bailey & López de Prado
+2013), `method="critical_line"`. At a fixed set of assets held at a bound,
+the solution of minimize ½w'Σw − λμ'w under the budget and the bounds is
+linear in the risk tolerance λ, so as λ falls from infinity (the
+highest-return portfolio) to zero (the minimum-variance one) the frontier
+is a chain of straight pieces in the weights, joined at **corner
+portfolios** where an asset reaches a bound or leaves one. `corners` lists
+them, highest return first, each with its `risk_tolerance` (λ: twice it is
+the frontier's slope of variance against return there), its return,
+volatility and weights, and the `event` that happens there ("BBB leaves its
+lower bound", "AAA reaches its upper bound", the minimum-variance end).
+Every corner is certified by its KKT conditions at its own λ — the
+minimum-variance portfolio at its return under the bounds — and
+`certified` and `largest_kkt_residual` say so for the whole curve. Each of
+the `n_points` points is the mix of the two corners whose returns bracket
+it, exact to the rounding of that mix. The default span runs from the
+minimum-variance portfolio's return to the highest attainable one; a
+`return_range` reaching outside that span is refused with the span named,
+since a bounded frontier has no points beyond it. `tangency` is the maximum
+Sharpe ratio over the pieces, exact on each (the stationary point of a
+ratio of a linear to the root of a quadratic is the root of a linear
+equation), and null with a warning when no portfolio inside the bounds
+earns more than the rate. Every point agrees with
+`run_portfolio_optimization`'s exact `target_return` solve at the same
+return and bounds, and a point's volatility asked of its
+`target_volatility` returns that point: the optimizer now solves on the
+same corners.
+
+**Degenerate frontiers are handled or refused by name.** When expected
+returns tie at the highest-return end, every split among the tied assets
+earns the most, and the frontier starts at the split of least variance (a
+small exact quadratic programme over them). When the highest-return
+portfolio holds no asset strictly inside its bounds, the first two assets
+to move are found together. Coincident events are taken one at a time at
+the same λ, and a sequence of them that cycles is refused naming the
+assets. A covariance that is singular on the free assets — a riskless
+asset, or two collinear ones — is refused naming them, since every piece is
+a solve on it; a frontier on which every expected return is equal is the
+one minimum-variance portfolio, with a warning. The trace is sized for up
+to 500 assets and refuses more. Its linear algebra runs on one BLAS thread,
+so the same input gives the same bits on any machine. The library function
+is `standard_quant_tools.portfolio.critical_line.critical_line(mu, cov,
+lower, upper, budget=1.0, names=None)`, returning the corners and
+`at_return`, `at_volatility` and `max_sharpe` for the points between them.
+
+`tangency` is the maximum-Sharpe portfolio at `risk_free_rate`, and on the
+closed form it is **null with a warning** when the rate sits at or above
+the minimum-variance portfolio's own return: there is then no maximum-Sharpe
+portfolio on the efficient branch, and normalizing the same algebra anyway
+lands on the inefficient one and reads as an ordinary answer. The rate
+itself is a decimal within ±10 (1,000%), bounded on magnitude and never on
+sign; a larger magnitude is a unit error and is refused rather than
+answered with a null tangency. `condition_number` is reported at every
+level rather than only above the warning threshold — the closed form
+inverts that covariance for every point it returns, and the critical line
+solves on its principal blocks.
 
 ### Via Agent Tool
 
@@ -405,6 +457,101 @@ method: neither reads them, and Black-Litterman with `max_weight=0.2` and
 `allow_short=False` used to return weights of 1.787 and −1.120.
 `allow_short` is refused whenever it is given with those methods, `False`
 included — Black-Litterman's holding can short whatever it says.
+
+## Constrained optimization on your own numbers
+
+`optimize_portfolio` optimizes on expected returns and a covariance you
+supply, under the limits a mandate is actually written in, and solves the
+problem exactly. It takes no tickers and fetches nothing: the covariance is
+rows with `assets`, the `matrix` map `estimate_covariance` returns, or its
+`covariance_ref`, so the same arguments always give the same answer.
+
+```python
+from standard_quant_tools.portfolio.general_optimizer import optimize_portfolio
+
+out = optimize_portfolio(
+    covariance,                       # a named DataFrame, annualized
+    expected_returns=mu,              # {asset: return}, same units
+    objective="max_utility",
+    risk_aversion=4.0,
+    upper_bounds=0.05,                # every asset; or a map, asset -> cap
+    groups={"tech": tech_names, "energy": energy_names},
+    group_max={"tech": 0.25},
+    factor_loadings=loadings,         # assets x factors
+    exposure_min={"value": 0.0}, exposure_max={"value": 0.0},  # neutral
+    max_volatility=0.12,
+)
+out["weights"], out["certified"], out["binding_constraints"]
+```
+
+| `objective` | maximizes or minimizes | needs |
+|---|---|---|
+| `min_variance` | w'Sw | — |
+| `max_utility` | mu'w − (λ/2) w'Sw | `expected_returns` |
+| `max_sharpe` | (mu − rf)'w / σ | `expected_returns`, a positive budget held in full, no cap |
+| `min_tracking_error` | (w − b)'S(w − b) | `benchmark_weights` |
+| `max_active_utility` | mu'(w − b) − (λ/2)(w − b)'S(w − b) | both |
+
+The limits: per-asset bounds (the tool's `min_weight` / `max_weight` for
+every asset, overridden per asset by `lower_bounds` / `upper_bounds`; the
+library function takes a scalar, a map or a sequence in `lower_bounds` /
+`upper_bounds`; equal bounds fix a weight, and the default is long-only
+with no cap), a `budget` the weights sum to (`budget_type="equal"`) or stay
+under (`"at_most"`, where the uninvested rest earns nothing), with 0 for a
+dollar-neutral book; `groups` with `group_min` / `group_max` on each
+group's summed weight; `factor_loadings` with `exposure_min` /
+`exposure_max` on B'w, where equal values hold the exposure there (0 is
+neutrality); and `max_volatility` and `max_tracking_error` (which needs
+`benchmark_weights`), in the covariance's units.
+
+**Exact, and certified from the weights.** Every linear limit is a row of
+the library's active-set solver, which ends with one linear solve on the
+final active set. The certificate is computed from the answer, not read
+from the solver: stationarity, the multipliers' signs, every constraint's
+violation and complementary slackness, each at most 1e-12. `certified` is
+True only when all four hold; an answer that is not certified keeps its
+weights and names the condition that failed.
+
+**What each limit costs.** `binding_constraints` lists every constraint at
+its bound with its `shadow_price`: the derivative of `objective_value`
+(variance, utility, or Sharpe ratio) with respect to that bound. A cap of
+5% on a name with price 0.31 says raising it to 6% adds about 0.0031 of
+utility. At a vertex the limits fix by themselves, the price is one valid
+multiplier, between the rates for raising and lowering the bound.
+
+**Caps are found, not approximated.** A volatility or tracking-error cap is
+quadratic, so its multiplier is found by a search that hits the cap to the
+last bits. A cap the unconstrained answer already meets is reported as not
+binding; one below the lowest risk the other limits allow is refused naming
+that floor. Capping a utility on its own risk is the same as raising its
+risk aversion, and `effective_risk_aversion` reports the value.
+
+**Infeasible limits are refused by name.** A linear programme (scipy's
+HiGHS, so the optimizer needs scipy) finds a feasible starting point or
+proves there is none, and the refusal names the constraints in its proof:
+caps of 10% on six names under a fully invested budget name the budget and
+the six caps.
+
+**Max Sharpe** is solved in y = w / τ, where it is convex; it needs some
+portfolio with a positive excess return, and it is refused when the ratio
+is approached only by levering a long-short book without limit (the
+unbounded tangency on the inefficient branch) rather than normalized onto
+the wrong portfolio. It takes no volatility or tracking-error cap: under a
+binding volatility cap the highest Sharpe ratio is the highest return at
+the cap, which `max_utility` with `max_volatility` finds exactly.
+
+**A covariance that is not positive definite is refused, not repaired.**
+Over the assets free to move, a singular or near-singular covariance —
+fewer observations than assets, a duplicated or collinear asset — has a
+direction with no variance, and the optimum along it is not unique. The
+refusal names the smallest eigenvalue and the fixes: a shrunk estimate
+(`estimate_covariance` with `method="ledoit_wolf"`), dropping the asset, or
+more observations. Above a condition number of 1e10 the answer is still
+given, with a warning.
+
+The optimizer is sized for up to 500 assets and refuses a larger universe
+by name; at 500 assets with sector and factor limits a solve takes about a
+second.
 
 ---
 
@@ -446,8 +593,9 @@ Three tools avoid the noisiest input entirely.
 
 **A covariance is accepted in either form this library writes it.** The
 tools that take a covariance — `optimize_risk_parity`,
-`optimize_max_diversification`, `get_marginal_risk_contribution` and the
-optional sigmas of `run_portfolio_scenarios` — take `covariance` as rows
+`optimize_max_diversification`, `get_marginal_risk_contribution`,
+`optimize_portfolio` (above) and the optional sigmas of
+`run_portfolio_scenarios` — take `covariance` as rows
 parallel to `assets`, or as the map of asset → {asset: covariance} that
 `estimate_covariance` returns as `matrix`. Pass that tool's `assets` and
 `matrix` on unchanged. The map is read by **name** and laid out in `assets`
@@ -457,7 +605,7 @@ finiteness are checked by the numeric contract exactly as for rows. The map
 used to be refused as `list_type`, and the rows had to be rebuilt by hand,
 in an order the caller had to get right.
 
-**Or as a reference.** The same four tools take `covariance_ref`, the
+**Or as a reference.** The same five tools take `covariance_ref`, the
 `sqt://covariance/...` reference `estimate_covariance` publishes when it is
 given a `run_id`, in place of `covariance`. Exactly one of the rows, the map
 and the reference is read; two are refused, and an inline matrix still needs
@@ -600,21 +748,42 @@ there and is not diversified in any ordinary sense. Maximum diversification
 normalizes by each asset's own volatility first, so an asset is rewarded for
 being *uncorrelated* rather than for being quiet.
 
-It does invert the correlation matrix, and reports the condition number for
-exactly that reason.
+By default it is the closed form w ∝ Σ⁻¹σ, which may short; it inverts the
+correlation matrix and reports the condition number for exactly that
+reason. **With `long_only=True`** (and optionally a per-asset `max_weight`,
+which needs `long_only=True` and is refused when `max_weight × n < 1`) the
+weights are also non-negative and capped, and the maximum is solved exactly
+and certified. Homogenised, it is the maximum-Sharpe problem with the
+volatilities as the returns and a zero rate: minimize y'Σy subject to
+σ'y = 1 and 0 ≤ yᵢ ≤ cap · 1'y, then w = y / 1'y. The set of assets at
+zero and at the cap comes from the critical line (the maximum ratio is the
+tangency portfolio of the frontier whose returns are the volatilities), and
+the homogenised KKT system is then solved on that set exactly; started
+cold, or from the unconstrained holding clipped to the bounds, the
+homogenised solve stopped without an answer on 3 to 12 in 100 random
+capped problems. The answer is certified against the ratio's own KKT
+conditions (`certified`, `kkt_residual`, `method` — `"active_set"`, or
+`"critical_line"` when the homogenised solve on that set does not certify —
+and `solver_message`). Without a cap the result has the core property of
+the maximum-diversification portfolio (Choueifaty & Coignard 2008): every
+held asset's correlation with the portfolio is exactly 1 / DR, and every
+asset left at zero has at least that.
 
-**A holding with a negative sum is refused.** The maximum is the
-direction Σ⁻¹σ, rescaled to sum to 1, and that sum can be negative — when
-a low-volatility asset is strongly correlated with a combination of the
-others and the holding shorts it heavily. Dividing by it flips every
-position and turns the maximum ratio √(σ'Σ⁻¹σ) into its negative: three
-assets at volatilities 3.17, 4.59 and 0.80 with correlations −0.474,
-0.792 and 0.144 (condition number 204) came back at a diversification
-ratio of −5.32. No fully-invested portfolio attains the maximum then — the
-ratio only approaches it as the positions grow without bound — so the
-request is refused, naming the holding (scaled to a gross of 1) and the
-ratio it would have flipped. The guard that existed tested a different sum,
-and only for exactly zero.
+**A holding with a negative sum is refused by the closed form, and answered
+long-only.** The maximum is the direction Σ⁻¹σ, rescaled to sum to 1, and
+that sum can be negative — when a low-volatility asset is strongly
+correlated with a combination of the others and the holding shorts it
+heavily. Dividing by it flips every position and turns the maximum ratio
+√(σ'Σ⁻¹σ) into its negative: three assets at volatilities 3.17, 4.59 and
+0.80 with correlations −0.474, 0.792 and 0.144 (condition number 204) came
+back at a diversification ratio of −5.32. No fully-invested portfolio
+attains the unconstrained maximum then — the ratio only approaches it as
+the positions grow without bound — so the default request is refused,
+naming the holding (scaled to a gross of 1), the ratio it would have
+flipped, and `long_only=True` as the fix. A long-only maximum always
+exists: on the same three assets it drops the third and holds the first two
+at inverse-volatility weights (0.5910, 0.4090), at a ratio of
+√(2 / (1 − 0.474)) = 1.9499.
 
 ### An indefinite covariance is repaired, and the repair is named
 
@@ -631,7 +800,10 @@ nearest positive semi-definite one by flooring its eigenvalues (Higham's
 clipping, re-symmetrized) and warns with the eigenvalue that was floored;
 the weights returned are for the repaired matrix. The warning is the thing
 to act on: estimate the covariance on complete rows (`estimate_covariance`,
-below) and the repair never runs.
+below) and the repair never runs. `optimize_portfolio` is the exception:
+it refuses a covariance that is not positive definite on the assets free to
+move, naming its smallest eigenvalue, because its optimum would then not be
+unique.
 
 Deciding that no repair is needed costs a Cholesky factorization, not an
 eigendecomposition. A factorization that completes on a matrix of up to 670
@@ -755,6 +927,70 @@ NaN contributions under an infinite volatility; the schema and
 passes the float range from finite weights is refused too, rather than
 reported with every marginal at 0.0.
 
+### `decompose_factor_risk`
+
+The same question as `get_marginal_risk_contribution` — where is the risk
+in a book already held — asked of a **factor model** rather than of a
+covariance matrix, so the answer can say how much of the risk is the
+factors and how much the names' own. The model is the caller's: loadings
+B (`factor_loadings`, asset → {factor: loading}), a factor covariance F
+(`factor_covariance`, factor → {factor: covariance}, read by name) and
+specific variances D (`specific_variance`, asset → variance), with
+Σ = BFB′ + D (Grinold and Kahn, *Active Portfolio Management*, ch. 3).
+
+For the book (`portfolio`) and, given `benchmark_weights`, for the active
+weights w − b (`active`), the result reports:
+
+- the volatility, the factor variance x′Fx of the exposures x = B′w, the
+  specific variance Σ w_i² d_i, and each one's share of the **total**;
+- `exposures` (and `benchmark_exposures`);
+- `by_factor`: each factor's Euler contribution x_k (Fx)_k / σ, and the
+  same number as **exposure × factor volatility × correlation** — x_k,
+  σ_k = √F_kk and ρ_k = (Fx)_k / (σ_k σ), the factor's correlation with
+  the book (Menchero and Davis 2011) — which separates how much of a factor
+  is held from how much it moves from how much it moves *with* the book;
+- `specific_contribution`, the names' own risk, V_s / σ;
+- `by_asset`: each asset's marginal (Σw)_i / σ, its contribution, its
+  share, and the contribution split into the part that comes through the
+  factors and its own specific part;
+- `factor_specific_covariance`, **zero by construction**: the model takes
+  specific returns as uncorrelated with the factors and with each other,
+  which is what makes variance = factor + specific. It is stated rather
+  than measured; a book whose residuals do correlate (two share classes, a
+  merger pair) breaks it, and nothing computed from B, F and D can see
+  that.
+
+The factor contributions plus the specific contribution sum to the
+volatility, and so do the asset contributions, to 1e-12; the active side
+does the same for `tracking_error`. Units are the inputs': F and D in
+annual variance give annual volatility and tracking error, and nothing is
+annualised.
+
+**Specific variance is required.** Without D every name is riskless
+beyond its factors, and the factor share is overstated without limit —
+two names with a beta of 1 to a market at 1% volatility and 40% specific
+volatility each are 100% market without it and 0.12% market with it.
+
+Every name is checked against every other, and a disagreement is refused
+by name: the covariance must be square under its factor names, symmetric,
+finite and give every factor a variance; each asset needs a loading on
+every factor (0.0 where it has none) and on no factor the covariance
+lacks; `specific_variance` and `factor_loadings` must name the same
+assets; and every asset in `weights` or `benchmark_weights` needs
+loadings — a held name with none would be left out of the risk, which
+understates it by exactly that position. An indefinite factor covariance
+is repaired as the allocators' is, with the warning. A book equal to its
+benchmark has a tracking error of exactly 0, and every number that divides
+by it is null with the reason. `portfolio.factor_risk.decompose_factor_risk`
+is the library function, and also takes the loadings and the covariance as
+frames.
+
+Planted: two names with betas 1.2 and 0.8 to one factor at variance 0.04
+and specific variances 0.09 and 0.0625, the book 50/50 and the benchmark
+30/70. The active exposure is 0.08, the factor TE² 0.000256, the specific
+TE² 0.0061, the tracking error √0.006356 = 0.0797 and the factor 4.0% of
+it.
+
 ## Risk that admits you cannot exit at the mark
 
 ### `get_liquidity_adjusted_var`
@@ -817,6 +1053,63 @@ a NaN shock made its scenario's return NaN, sorted anywhere among the
 others. Both are refused by name — the shock naming its scenario — at the
 schema and by `portfolio_scenarios`, and so is a scenario return past the
 float range.
+
+### `decompose_tail_risk`
+
+Which positions the expected shortfall and the VaR come from — on
+**scenarios**, not on a covariance, so a fat-tailed or option-bearing book
+is decomposed in the scenarios it actually loses in. The input is a
+scenario matrix inline (`scenarios`: asset → its value in each scenario,
+scenario *i* at index *i*, exactly the weights' assets) or a published
+`returns_panel` (`returns_ref`: its dates are the scenarios, aligned on the
+dates the weighted columns share and reported in `streams`; columns
+without a weight are not read). The portfolio's P&L in a scenario is
+Σ w_i X_si — a return with returns and book fractions, currency with P&L
+per unit and quantities (1.0 for a column already one position's P&L) —
+summed asset by asset in the weights' order.
+
+**VaR and ES are losses, positive**, as everywhere in the library: on the
+same P&L they are `var_historical`'s and `cvar`'s own bits — the empirical
+(1 − confidence) quantile with numpy's linear interpolation, and the mean
+of the scenarios at or below it.
+
+- **Component ES is exact** (Tasche 1999). The ES is a mean over a tail
+  set that scaling the weights leaves unchanged, so it is homogeneous of
+  degree one, and each asset's component is its weight times minus its
+  own mean in the portfolio's tail. The components sum to the ES to
+  rounding (`sum_of_es_components`), and `es_share` to 1.
+- **Component VaR is smoothed** (Epperlein and Smillie 2006). VaR's
+  marginal is the expectation of −X_i given that the portfolio sits exactly
+  at its VaR — a single scenario in a sample. A Gaussian kernel weights
+  every scenario by its distance from the VaR; the components then sum
+  exactly to the kernel-smoothed VaR, reported as `var_kernel` beside the
+  empirical `var` so the smoothing's bias is visible rather than rescaled
+  away. `var_share` is a share of `var_kernel`.
+- **The bandwidth** is Silverman's rule on the portfolio's P&L,
+  0.9 min(sd, IQR/1.34) n^(−1/5) (the standard deviation alone when the
+  IQR is zero), unless `bandwidth` is given in P&L units; it is reported
+  with `bandwidth_rule` and `kernel_effective_scenarios`, (ΣK)² / ΣK², and
+  a result resting on fewer than ten effective scenarios says so.
+- **The tail count is always reported** (`n_tail_observations`), with the
+  library's shared warning below ten: ES at 99% on 250 scenarios is the
+  mean of three, and so is every component.
+- A **negative component** is an asset that gains, on average, when the
+  book is in its tail: a hedge, named in `n_hedges` and a warning.
+
+Refused by name: weights and scenarios that name different assets, lists
+of different lengths, a non-finite value, fewer than ten scenarios, a
+portfolio P&L that is the same in every scenario, a weight naming a column
+the panel lacks, a bandwidth that is not finite and positive, and both or
+neither of `scenarios` and `returns_ref`. The tool's `confidence` is at
+least 0.5 and below 1. The library function is
+`portfolio.tail_risk.decompose_tail_risk`, which takes the matrix as a
+frame and any confidence strictly between 0 and 1; `silverman_bandwidth`
+is the rule.
+
+Under a normal with zero mean the components converge, as the scenarios
+grow, to w_i (Σw)_i / σ_p times z for VaR and φ(z) / (1 − c) for ES: at two
+million scenarios the largest error is under 0.5% (ES) and 1% (VaR) of the
+total.
 
 ## Related
 

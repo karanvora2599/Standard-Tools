@@ -356,7 +356,8 @@ from standard_quant_tools.portfolio import mean_variance_optimize, risk_parity_w
 
 # Markowitz mean-variance — max_sharpe / min_volatility / target_return / target_volatility.
 # allow_short=True with max_weight=None is closed-form (numpy only); anything
-# constrained (long-only and/or a max_weight cap) uses scipy.
+# constrained (long-only and/or a max_weight cap) uses scipy, except
+# target_volatility, which is solved on the critical line (numpy only).
 result = mean_variance_optimize(returns_df, objective="max_sharpe", allow_short=False, max_weight=0.4)
 print(result["weights"], result["converged"])
 
@@ -372,6 +373,10 @@ print(bl["posterior_returns"], bl["implied_weights"])
 ```
 
 See [Documentation/05_portfolio.md](05_portfolio.md#portfolio-optimization) for the full reference, including exactly which cases are closed-form vs. require scipy, and the `run_portfolio_optimization` agent tool (`method="max_sharpe"|"min_volatility"|"target_return"|"target_volatility"|"risk_parity"|"black_litterman"`).
+
+`standard_quant_tools.portfolio.critical_line` — the efficient frontier under a budget and per-asset bounds, exactly: Markowitz's critical line algorithm. `critical_line(mu, cov, lower, upper, budget=1.0, names=None)` returns the corner portfolios (each with its risk tolerance λ, the events that happen there and a KKT certificate), and `at_return`, `at_volatility` and `max_sharpe` for the exact points between them. `run_portfolio_optimization`'s bounded `target_volatility`, `get_efficient_frontier`'s bounded curve and the long-only `optimize_max_diversification` are built on it.
+
+`standard_quant_tools.portfolio.general_optimizer.optimize_portfolio(covariance, *, assets=None, expected_returns=None, objective="min_variance", risk_aversion=1.0, risk_free_rate=0.0, benchmark_weights=None, lower_bounds=0.0, upper_bounds=None, budget=1.0, budget_type="equal", groups=None, group_min=None, group_max=None, factor_loadings=None, exposure_min=None, exposure_max=None, max_volatility=None, max_tracking_error=None)` — exact constrained optimization on expected returns and a covariance the caller supplies: `min_variance`, `max_utility`, `max_sharpe`, `min_tracking_error` or `max_active_utility` under per-asset bounds, a budget (equal or at most; 0 is dollar-neutral), group and factor-exposure limits and volatility or tracking-error caps. It returns the weights, every binding constraint with its shadow price, and a KKT certificate computed from the weights; an infeasible set of limits is refused naming the ones that conflict. Up to 500 assets; needs scipy. The `optimize_portfolio` agent tool and `optimize_replication_basket` solve through it. Deep guide: [05_portfolio.md](05_portfolio.md#constrained-optimization-on-your-own-numbers).
 
 ---
 
@@ -409,9 +414,9 @@ result = screen_stocks(sp500_tickers, filters={...}, n_workers=8)
 
 ## AI Agent Tools (`standard_quant_tools.agent`)
 
-189 LLM-callable tools with Pydantic input/output models and OpenAI/Anthropic function-calling schemas — including two tools that backtest a signal you computed yourself rather than one of the built-in indicator strategies.
+192 LLM-callable tools with Pydantic input/output models and OpenAI/Anthropic function-calling schemas — including two tools that backtest a signal you computed yourself rather than one of the built-in indicator strategies.
 
-`Implementation/{Anthropic,OpenAI,Gemini}/` are single-agent reference scripts across all three providers — each narrows the tool list per request via a lightweight **router** (`standard_quant_tools.agent.router`) instead of handing the model all 189 tools on every call: one cheap classification call picks the 1-2 relevant tool categories before the real agent loop starts, no separate agent session required. Each provider folder also carries `Agent_Model_Builder.py`, the one script that drives the separate 38-tool modeling runtime instead — it passes `registry="modeling"` and skips the router, since one ordered pipeline has no selection ambiguity to remove. For a heavier, more thorough split, `Multi_Agent_Implementation/` (Anthropic only for now) is a full **orchestrator-workers** architecture — a lead agent that delegates to 16 specialist sub-agents, thirteen over the analysis runtimes, two over the modeling one and one over `feature_lab`, each with its own independent session scoped to a small, non-overlapping tool subset. The analysis workers build on the same category taxonomy (`TOOL_CATEGORY`), so a tool's categorization only needs to be correct in one place. Splitting tools this way is a direct fix for tool-selection confusion between similar tools (e.g. a built-in strategy backtest vs. a bring-your-own-signal backtest, or "run this strategy" vs. "optimize this strategy's parameters"): a worker/routed request that was never given the other tool cannot call it by mistake. See [Documentation/13_agent_orchestration.md](13_agent_orchestration.md).
+`Implementation/{Anthropic,OpenAI,Gemini}/` are single-agent reference scripts across all three providers — each narrows the tool list per request via a lightweight **router** (`standard_quant_tools.agent.router`) instead of handing the model all 192 tools on every call: one cheap classification call picks the 1-2 relevant tool categories before the real agent loop starts, no separate agent session required. Each provider folder also carries `Agent_Model_Builder.py`, the one script that drives the separate 38-tool modeling runtime instead — it passes `registry="modeling"` and skips the router, since one ordered pipeline has no selection ambiguity to remove. For a heavier, more thorough split, `Multi_Agent_Implementation/` (Anthropic only for now) is a full **orchestrator-workers** architecture — a lead agent that delegates to 16 specialist sub-agents, thirteen over the analysis runtimes, two over the modeling one and one over `feature_lab`, each with its own independent session scoped to a small, non-overlapping tool subset. The analysis workers build on the same category taxonomy (`TOOL_CATEGORY`), so a tool's categorization only needs to be correct in one place. Splitting tools this way is a direct fix for tool-selection confusion between similar tools (e.g. a built-in strategy backtest vs. a bring-your-own-signal backtest, or "run this strategy" vs. "optimize this strategy's parameters"): a worker/routed request that was never given the other tool cannot call it by mistake. See [Documentation/13_agent_orchestration.md](13_agent_orchestration.md).
 
 ```python
 from standard_quant_tools.agent.tools import (
@@ -434,7 +439,7 @@ from standard_quant_tools.agent.models import (
 )
 
 # Get tool schemas for your LLM
-tools = get_agent_tools  # 189 tools ready for function calling
+tools = get_agent_tools  # 192 tools ready for function calling
 
 # Risk analysis
 result = analyze_stock_risk(AnalysisInput(symbol='NVDA', benchmark='SPY', period='1y'))
@@ -487,7 +492,7 @@ A second, independent 38-tool runtime for building walk-forward-validated
 statistical models from this library's own features (31 built-in:
 technical, market, risk, volume, statistical, network, fundamental and
 PCA-derived factors) or from a matrix computed elsewhere and registered
-without copying it — never merged into the 189-tool
+without copying it — never merged into the 192-tool
 `get_agent_tools`/`TOOL_CATEGORY` surface above. A sibling `feature_lab`
 runtime holds 11 more, for interrogating those features before a model
 exists. Every tool with its arguments is in
@@ -649,12 +654,14 @@ actually exposed to.
 |---|---|
 | `risk_parity(covariance,...)` | Equal risk contribution, or an explicit risk budget |
 | `hierarchical_risk_parity(returns)` | Allocation without inverting the covariance matrix; columns are sorted by name first, so the weights do not depend on the order the universe was listed in |
-| `max_diversification(covariance)` | Maximizes the diversification ratio |
+| `max_diversification(covariance, *, long_only=False, max_weight=None)` | Maximizes the diversification ratio: the closed form by default (which may short), or with `long_only=True` (and an optional cap) the long-only maximum, solved exactly and certified |
 | `factor_exposure_budget(...)` | What the portfolio is a bet on, once names collapse into factors |
 | `concentration_analysis(weights)` | Effective N, Herfindahl, top-k share |
 | `marginal_risk_contribution(...)` | Where the risk in a held portfolio comes from |
 | `liquidity_adjusted_var(...)` | VaR that admits you cannot exit at the mark |
 | `portfolio_scenarios(...)` | Named shocks rather than a distribution |
+
+`standard_quant_tools.portfolio.factor_risk.decompose_factor_risk(weights, factor_loadings, factor_covariance, specific_variance, *, benchmark_weights=None)` splits a book's volatility — and, given a benchmark, its tracking error — under Σ = BFB′ + D into factor and specific parts, by factor (exposure × factor volatility × correlation) and by asset, with Euler contributions that sum to the volatility; specific variances are required and every name is checked against every other. `standard_quant_tools.portfolio.tail_risk.decompose_tail_risk(scenarios, weights, *, confidence=0.95, bandwidth=None)` splits the ES (exactly, by Euler) and the VaR (by a Gaussian kernel, summing to the reported `var_kernel`) of a scenario matrix by asset; VaR and ES are `var_historical`'s and `cvar`'s on the same P&L, and the tail count is always reported. `silverman_bandwidth(values)` is the default bandwidth rule.
 
 `standard_quant_tools.portfolio.position_sizing.size_position(account_equity, last_close, last_atr, ...)` sizes one position behind an ATR stop and, when the win statistics are given, at half the growth-optimal Kelly position f* = p/L − q/W, capped at `max_leverage` times equity (1 by default); it reports f* and the risk fraction f* × L, and sizes zero shares without an edge. It is the arithmetic `get_position_size` calls, and refuses a stop, share count or position value past the float range by name. `kelly_notional_fraction(p, W, L)` and `kelly_log_growth(f, p, W, L)` are the two formulas.
 

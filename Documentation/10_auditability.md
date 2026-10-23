@@ -762,7 +762,7 @@ Note that `verify_replay` re-executes the tool function directly (not
 through `dispatch()`), so it does not itself write a new decision record.
 ### Replaying modeling records
 
-There are three tool registries, not one: the 189-tool analysis surface,
+There are three tool registries, not one: the 192-tool analysis surface,
 `MODELING_TOOL_DISPATCH` (38 entries) and `FEATURE_TOOL_DISPATCH` (11), the
 latter two deliberately kept separate — see
 [15_modeling.md](15_modeling.md). `verify_replay` resolves the record's

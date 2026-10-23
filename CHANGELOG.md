@@ -1,5 +1,24 @@
 # Changelog
 
+## The documentation describes the constrained optimizer, the bounded frontier and the factor and tail risk decompositions, and counts 241 tools
+
+- **Each change is described beside its tools.** Portfolio (05) has
+  `optimize_portfolio` with its objectives, limits, shadow prices and
+  certificate, the critical-line frontier and the exact bounded target
+  volatility, long-only and capped maximum diversification, and the
+  factor and tail risk decompositions; the module reference (00) has
+  `general_optimizer`, `critical_line`, `factor_risk` and `tail_risk`;
+  the advanced tools guide (09) gains a group of three constrained
+  optimization and risk decomposition tools; delta one (28) says the
+  replication basket solves through the optimizer.
+- **The counts are 241 tools, 192 of them in the analysis facade.** The
+  README, the runtime and orchestration tables, the MCP and testing pages
+  and the tool guides say so, `portfolio` is 22 tools, and the MCP page
+  says `auto` now thins five of them.
+- **Generated and measured figures are current.** The tool index and the
+  modeling reference are regenerated, and the MCP page's `--print-budget`
+  output and per-runtime table are measured again.
+
 ## A portfolio is optimized on the caller's own forecasts and risk model under sector, factor and risk limits, exactly, with the price of every binding limit and a certificate, and the replication basket is solved the same way
 
 - **`optimize_portfolio`, one constrained optimizer.** It takes expected

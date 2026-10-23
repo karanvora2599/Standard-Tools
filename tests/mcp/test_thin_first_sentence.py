@@ -37,7 +37,7 @@ def catalog():
 class TestEveryToolIsAdvertisedByAWholeSentence:
     def test_every_thinned_description_is_a_complete_first_sentence(self, catalog):
         """
-        For all 238 tools: the thin text is the description's first
+        For all 241 tools: the thin text is the description's first
         sentence exactly -- not a prefix cut short -- it fits the limit, and
         it ends at a sentence terminator rather than on an abbreviation.
         """

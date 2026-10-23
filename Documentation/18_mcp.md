@@ -163,15 +163,15 @@ that most often causes the disconnect.
 
 ## Choosing what to serve
 
-The 238 tools cost about **625 KB of schema, ~160,000 tokens**, held for the
+The 241 tools cost about **633 KB of schema, ~162,000 tokens**, held for the
 whole session. That is the constraint the whole design manages, so this is
 the first decision, not a tuning knob.
 
 That wall has already been hit and passed. Over the wire, at full detail, a
-tool averages 3,011 bytes, and the session ceiling that used to be 180,000
-would buy about 60 tools. There are 238. **In registry order the whole
-surface crosses that ceiling at its 71st tool, and taken smallest first only
-127 of the 238 fit.** No amount of schema-shrinking brings it back — which
+tool averages 3,010 bytes, and the session ceiling that used to be 180,000
+would buy about 60 tools. There are 241. **In registry order the whole
+surface crosses that ceiling at its 72nd tool, and taken smallest first only
+127 of the 241 fit.** No amount of schema-shrinking brings it back — which
 is why scoping stopped being an optimization and became the way the server
 is meant to be run. Serving `--runtime all` is a diagnostic, not a deployment.
 
@@ -190,24 +190,24 @@ runtime              tools    bytes   ~tokens
 modeling                38  208,647    52,161
 backtest                35  104,806    26,201
 research                42   65,982    16,495
+portfolio               22   52,995    13,248
 feature_lab             11   51,242    12,810
 delta_one               18   46,746    11,686
-portfolio               19   45,203    11,300
 data                    21   37,336     9,334
 microstructure          17   31,693     7,923
 meta                    25   25,374     6,343
 derivatives             12   23,087     5,771
-all                    238  640,116   160,029
+all                    241  647,908   161,977
 
-  a client is served ONE runtime: modeling is the most expensive at 208,647 bytes (33% of the total).
+  a client is served ONE runtime: modeling is the most expensive at 208,647 bytes (32% of the total).
 
 category             tools    bytes   ~tokens
 modeling                38  208,647    52,161
+portfolio_risk          22   52,995    13,248
 feature_lab             11   51,242    12,810
 backtest_execution      12   49,737    12,434
 backtest_validation     21   46,913    11,728
 delta_one               18   46,746    11,686
-portfolio_risk          19   45,203    11,300
 data                    21   37,336     9,334
 quant_research          26   34,052     8,513
 microstructure          17   31,693     7,923
@@ -221,7 +221,7 @@ screener                 2    3,018       754
 
 **The total is a number nobody pays.** The row that matters is the runtime
 a client is actually served, and the most expensive of those is 204 KB at
-full detail — 33% of the whole surface.
+full detail — 32% of the whole surface.
 
 There is deliberately **no fixed per-runtime limit**. There was one, at
 72 KB, and it was the wrong shape for what it was guarding: what a client
@@ -292,12 +292,12 @@ A **thinned** tool is still listed and still callable. What it loses is its
 argument schema: the listing carries the name, the first sentence of the
 description, and an instruction to call `describe_tool` for the rest. Every
 tool's first sentence is written to stand alone in 180 characters or fewer,
-and a test holds all 238 to it. The cut used to fall at the first ". " or
+and a test holds all 241 to it. The cut used to fall at the first ". " or
 the 180th character: the first split "vs." and the second stopped 43 longer
 first sentences mid-clause, 46 tools in all — `run_portfolio_optimization`
 and `estimate_trade_cost` among them, both thinned by `auto` in
-`portfolio`. Measured across the whole surface, that is 532 bytes a tool
-against 3,011 — **82% smaller**.
+`portfolio`. Measured across the whole surface, that is 533 bytes a tool
+against 3,010 — **82% smaller**.
 
 `auto` is the mode worth using. It thins the **most expensive** tools and
 stops as soon as the runtime fits `--detail-budget` (32 KB by default):
@@ -307,9 +307,9 @@ stops as soon as the runtime fits `--detail-budget` (32 KB by default):
 | `modeling` | 217 KB | 43 KB | 20 | 21 KB |
 | `backtest` | 111 KB | 43 KB | 16 | 19 KB |
 | `research` | 74 KB | 44 KB | 12 | 22 KB |
+| `portfolio` | 59 KB | 39 KB | 5 | 13 KB |
 | `feature_lab` | 54 KB | 30 KB | 1 | 7 KB |
 | `delta_one` | 52 KB | 36 KB | 4 | 10 KB |
-| `portfolio` | 50 KB | 39 KB | 3 | 11 KB |
 | `data` | 42 KB | 38 KB | 1 | 12 KB |
 | `microstructure` | 36 KB | 36 KB | 0 | 10 KB |
 | `meta` | 31 KB | 31 KB | 0 | 14 KB |
@@ -467,7 +467,7 @@ the record of its own decisions is not audited by it.
 
 ### Why `--output-schemas` is off
 
-Every one of the 238 tools has a typed Pydantic return, so the server can
+Every one of the 241 tools has a typed Pydantic return, so the server can
 declare an output schema for all of them — and does return
 `structuredContent` on every call regardless. Declaring the schemas as well
 roughly doubles the surface. That was assumed to be free before it was
@@ -620,7 +620,7 @@ establish. Set `SQT_AUDIT_ENABLED=0` to turn record writing off.
 
 ## Safety
 
-Every one of the 238 tools declares `readOnlyHint: true` and
+Every one of the 241 tools declares `readOnlyHint: true` and
 `destructiveHint: false`, and a test asserts it. This library does not place
 orders, hold positions, or mutate anything outside its own artifact store.
 
@@ -655,7 +655,7 @@ rate limit whether or not anything is mutated. See
 ## Architecture notes
 
 **Ten runtimes, one server.** Thirteen of the fifteen categories come from
-the 189-tool analysis surface, spread across eight runtimes; the other two
+the 192-tool analysis surface, spread across eight runtimes; the other two
 are the separate 38-tool `modeling` and 11-tool `feature_lab` runtimes. They
 stay apart inside — `dispatch_for(entry)` returns that tool's own RUNTIME's
 dispatcher (`modeling_dispatch` for modeling, the Runtime's `dispatch` for
