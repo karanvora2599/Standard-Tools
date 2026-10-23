@@ -48,6 +48,16 @@ Benjamini-Hochberg and carries the same warning this whole document does: it
 controls the error of *those* tests, not the error of having selected the
 candidates on the same sample.
 
+**Returns inline or from a published panel.** The deflated Sharpe, PBO and
+the reality check take `returns_ref`, a `returns_panel` reference, in place
+of their inline returns; exactly one of the two is read and both or neither
+is refused by name. The panel's columns are put on the dates they all share
+as return streams — a level series, a repeated date or an infinity is
+refused, and a short overlap names the column that limits it — and
+`streams` on the result says what each column lost. On the same returns the
+answer is the inline answer to the bit. An equity curve is levels: run
+`convert_reference` to `returns_panel` first.
+
 ### `get_deflated_sharpe_ratio`
 
 After Bailey and Lopez de Prado (2014). Two steps: compute the Sharpe a
@@ -66,6 +76,10 @@ Pass `trial_sharpes` — the Sharpe of every variant you tried — for the
 accurate version. Their **variance** sets the deflation threshold and is far
 more informative than the count alone: 100 near-identical parameter settings
 deflate much less than 100 genuinely different ideas.
+
+With `returns_ref`, the series is one column of the panel, named in
+`returns_column` when the panel has more than one. At least 20 shared
+observations are needed, as inline.
 
 ### `estimate_backtest_overfitting` (PBO)
 
@@ -101,6 +115,10 @@ nudged; every split ranks them identically, so the number the estimator
 returns is arbitrary rather than low. The correlation is the finding; the
 PBO is the thing it invalidates.
 
+With `returns_ref`, every column of the panel is a configuration. The
+columns must share at least five dates per chunk (40 at the default eight),
+and a column that holds them below that is named.
+
 ### `run_reality_check`
 
 Is a result better than luck after a search? The tool asks one of two
@@ -127,6 +145,15 @@ block-bootstrap test of mean(s − a_k) > 0; the statistic is the smallest
 margin and the p-value the largest pairwise one (an intersection-union
 test), with each pair's margin and p-value in `per_alternative` and the
 hardest in `binding_alternative`.
+
+**From a published panel.** With `returns_ref` the columns take the
+question's roles. Under `best_candidate_vs_benchmark` every column but
+`benchmark_column` is a candidate, and without `benchmark_column` the
+benchmark is zero. Under `beats_every_alternative`, `strategy_column` names
+the strategy (it is required) and every other column is an alternative. A
+role the question does not read, a role column the panel lacks, a panel
+with no column beside the named one, or inline series beside the reference
+are refused by name. The columns share at least 30 dates.
 
 **Why there are two.** Until the CHANGELOG entry of 2026-10-22 the tool took
 a strategy and a map of alternatives and tested max_k mean(s − a_k) — the

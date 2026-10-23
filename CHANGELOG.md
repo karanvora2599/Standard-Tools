@@ -1,5 +1,27 @@
 # Changelog
 
+## The documentation describes return streams, the covariance reference, positions and the financing terms where their tools are, and its generated pages follow the code
+
+- **Each change is described beside its tools.** The module reference
+  (00) has the `finance` package and its positions; backtesting (04) has
+  the full financing terms, `run_strategy` and the pair backtest under a
+  spec, the signal panel's opening bar and `return_basis` on the grid;
+  portfolio (05) has `covariance_ref`, `returns_ref` on HRP and
+  `estimate_covariance`, return streams on one calendar and
+  `estimate_trade_cost`'s day count; the agent-tool pages (07, 09) say
+  which strategy tools take which financing rates and carry the new tail
+  counts; overfitting (24) has `returns_ref` on the deflated Sharpe, PBO
+  and the reality check; runtimes (19) lists the `covariance` reference
+  kind; auditability (10) the redaction of a position's instrument;
+  modeling (15) an evaluation measured from its capital and
+  `PortfolioSimSpec.financing`; performance (16) why the library's
+  correlations run on one BLAS thread under pandas 3.1; and the MCP page
+  (18) the 43 tools whose repeat is not idempotent.
+- **Generated and measured figures are current.** The tool index and the
+  modeling reference are regenerated, and the MCP page's `--print-budget`
+  output and per-runtime table are measured again: every runtime lists
+  the same tools in full under `auto` as before.
+
 ## An account is financed over a benchmark with its spreads, each short pays its own borrow, and a dated rate is the one in force when the balance was carried
 
 - **The full terms, as a broker states them.** The engines took one scalar

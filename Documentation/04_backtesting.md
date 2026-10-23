@@ -391,7 +391,12 @@ frame's `attrs`, and so does every tool that returns its `BacktestResult`.
 `run_portfolio_simulation` reads it per held ticker and reports `mixed`,
 with a `RETURN BASIS MIXED` warning naming which ticker is which, when the
 book holds names from both kinds of feed; a ticker whose frame says nothing
-makes the basis `unknown` and is named too.
+makes the basis `unknown` and is named too. `backtest_grid` puts the frame's
+basis on every row, on the native and the Python path alike, and in
+`attrs["return_basis"]`, so a grid row says what the single run with the
+same arguments says; `run_backtest_optimization` and `run_backtest_compact`
+report it as `return_basis`. Each of these reads one frame, so none of them
+can be `mixed`.
 
 **Validation:** `run_strategy` raises `ValidationError` if `initial_capital`
 isn't finite and `> 0`, if `commission_pct`/`slippage_pct` isn't finite
@@ -475,6 +480,25 @@ on cash that earned nothing, and a constant k-times signal returns
 at 5% the same signal read -0.062 at 3x against -0.258 at 1x; both read
 -0.257 now. Pin `cash_rate=0, financing_rate=0` to recover the scoring-only
 behaviour; at `risk_free_rate=0` nothing changes at all.
+
+**The full terms here too.** `run_strategy(..., financing=spec, asset="AAPL")`
+takes the same `FinancingSpec`: cash earns the benchmark less the credit
+spread, exposure beyond 1x pays it plus the debit spread, and a short pays
+the asset's borrow rate (`asset` picks its `borrow_bps` entry; without it
+only `default_borrow_bps` applies). Under a spec each bar accrues
+`rate x days / basis` on its calendar days — so the bars must be dated —
+rather than `rate / periods_per_year`, and the benchmark is the rate the
+Sharpe and Sortino subtract, bar by bar, in place of `risk_free_rate`. A
+spec beside `risk_free_rate`, `cash_rate`, `financing_rate` or
+`borrow_fee_bps` set away from their defaults is refused, as is
+`short_proceeds="segregated"`: a signal is a fraction of one equity whose
+cash holds a short's proceeds. The native `run_strategy`, its summary and
+batch kernels and the Python path read the same four per-bar arrays, and
+`backtest_grid(..., financing=spec, asset=...)` passes them to every path,
+so a grid row is the single run with the same arguments. The full terms are
+a library argument here: the run_strategy-based agent tools take only the
+scalar rates — all three, or fewer where a rate cannot move their answer
+(see [07_agent_tools.md](07_agent_tools.md#backtestinput--backtestresult--full-reference)).
 
 **Nothing accrues on bar 0.** Its return is the placeholder `0.0` of an
 account that has only just opened, so the rate is subtracted from every bar
@@ -1012,6 +1036,17 @@ print(f"Portfolio Return : {result['portfolio_metrics']['total_return']:.1%}")
 print(result["portfolio_returns"].tail())
 ```
 
+The combined row's Sharpe and Sortino follow the engines' convention:
+nothing accrues on the opening bar. It used to subtract `rate /
+periods_per_year` from that bar as well, so a one-ticker panel at 5% on 120
+bars read 0.2206 beside the ticker's own 0.2246 (Sortino 0.3058 against
+0.3113); at a zero rate nothing moves. `run_signal_panel_backtest` also
+takes `cash_rate`, `financing_rate`, `borrow_fee_bps` and (as a library
+argument; the tool takes the three rates only) `financing`, passed to every
+ticker's `run_strategy`; under a spec each ticker pays its own `borrow_bps`
+entry and both the per-ticker rows and the combined row measure against the
+spec's benchmark.
+
 **Output:**
 
 | Key | Type | Description |
@@ -1299,6 +1334,69 @@ print(result["financing"])        # rates, day count, and what each came to
   how far, on how many bars, and what it was charged — or, at a zero margin
   rate, the debit in currency-years and what each 1% of rate would cost.
 
+**The full terms (`financing`).** The six scalar terms above are a
+shorthand. A broker states the same thing as one benchmark rate — a policy
+or overnight rate, which moves — with a spread it keeps on credit balances,
+a spread it charges on debits, a borrow rate per name, and a rebate on
+proceeds it holds. `backtest.financing.FinancingSpec` is those terms, and
+`run_portfolio_simulation(..., financing=spec)` runs on them:
+
+```python
+from standard_quant_tools.backtest.financing import FinancingSpec
+
+spec = FinancingSpec(
+    benchmark_rate={"2024-01-02": 0.0531, "2024-01-03": 0.0530, ...},  # or 0.053
+    day_count="ACT/360",            # required; 30/360 is refused
+    benchmark_fill="refuse",        # or "previous": carry the last rate forward
+    credit_spread_bps=50.0,         # positive cash earns benchmark - 0.50%
+    debit_spread_bps=75.0,          # negative cash pays benchmark + 0.75%
+    borrow_bps={"GME": 2500.0, "TSLA": 30.0},
+    default_borrow_bps=25.0,        # every other name
+    short_proceeds="segregated",    # held by the lender ...
+    rebate_spread_bps=40.0,         # ... earning benchmark - 0.40%
+)
+result = run_portfolio_simulation(price_data, target_weights, financing=spec)
+result["financing"]["benchmark"]          # first, last and mean rate used
+result["financing"]["borrow_charged_by_asset"]
+result["benchmark_accrual"]               # the per-bar rate a Sharpe subtracts
+```
+
+- A balance carried from one bar to the next accrues at the rate in force on
+  the bar it was carried **from**: an overnight rate published for a date is
+  the rate on money lent until the next business day, so Friday's rate
+  covers the weekend. Every bar but the last therefore needs a rate. Under
+  `benchmark_fill="refuse"` (the default) the first bar date without one is
+  named in the refusal; `"previous"` carries the last known rate forward
+  and still refuses a bar before the first rate.
+- `day_count` is required. 30/360 is refused with its reason: it counts
+  every month as 30 days, a coupon convention, while a cash balance, a
+  margin loan and a borrow accrue on the calendar days they are
+  outstanding.
+- A short in a ticker with neither its own `borrow_bps` entry nor a
+  `default_borrow_bps` is refused by name — with the full terms in use
+  nothing borrows for free by default, and the free-borrow warning the
+  scalar path gives does not arise. When every short pays one rate the fee
+  is charged on the short book's summed notional, as it always was; when
+  they differ each pays its own.
+- Neither side is floored: a benchmark below the credit spread charges a
+  credit balance, as a negative policy rate does.
+- The scalars and the spec are one thing stated two ways, so a spec passed
+  beside any scalar term set away from its default is refused by name. The
+  scalars become the same schedule — a constant benchmark with no spreads —
+  and run bit for bit as they did.
+- The Python loop and the native kernel read the same resolved per-bar and
+  per-ticker arrays: on one name they agree bit for bit under a dated
+  benchmark, and on many within the 1e-13 their summation orders leave.
+- `financing` in the result now carries `source` ("scalars" or "spec"),
+  and under a spec the `benchmark` (the scalar, or the first, last and
+  day-weighted mean rate used, with the dates and how many bars took a
+  carried rate), `credit_spread_bps`, `debit_spread_bps`,
+  `rebate_spread_bps`, and per ticker held short `borrow_bps_by_asset` and
+  `borrow_charged_by_asset`. A rate that moved with a dated benchmark
+  (`cash_rate`, `margin_interest_rate`, `short_rebate_rate`) is null, and
+  `borrow_fee_bps` is null when the shorts paid different rates; in a
+  tool's result the financing block's `notes` say why.
+
 **Liquidity constraint:** pass `max_adv_participation=0.1` to cap any
 rebalance trade at 10% of the ticker's own rolling average dollar volume. A
 trade over the cap is **sized down to it**, not refused: the book then holds
@@ -1529,7 +1627,11 @@ used to tell the caller to set `borrow_fee_bps`, an argument this tool did
 not have. In the tool, the cash and margin rates default to
 `risk_free_rate` (plus `margin_spread_bps` for margin), so a pair holding
 its equity plus the short leg's proceeds in cash earns the rate its Sharpe
-subtracts.
+subtracts. Both also take `financing`, the full terms: whichever leg the
+spread holds short pays its own entry in the spec's `borrow_bps` (or its
+`default_borrow_bps`), a short leg with neither is refused by name, and the
+tool's Sharpe measures against the spec's benchmark (the library's result
+carries it per bar as `benchmark_accrual`).
 
 **Position logic:** long the spread (long `symbol_a`, short `symbol_b`)
 when the z-scored spread (`analysis/cointegration.py`'s `compute_spread` +

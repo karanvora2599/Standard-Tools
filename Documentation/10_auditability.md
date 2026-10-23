@@ -1272,6 +1272,12 @@ element of `tags` separately. Naming a list without `[]` at the end
 stopped at the first list, so these redacted nothing — and a policy that
 covers nothing looked exactly like one that matched nothing.
 
+**Holdings name their instruments at `positions[].instrument`.** A tool
+that takes holdings records every line's identifier in its input.
+`SQT_AUDIT_REDACT_FIELDS="positions[].instrument"` keeps the identifiers
+out of the trail, while the quantities, prices and currencies beside them
+stay readable.
+
 **Paths reach mapping keys.** A value path cannot hide a sensitive value
 that is a KEY — positions keyed by account, weights keyed by symbol — so a
 segment ending in `{}` names a mapping whose keys are redacted:

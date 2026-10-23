@@ -4476,7 +4476,11 @@ print(result.target_weights_uri)
 `cash_rate` and, with `margin_spread_bps`, the default
 `margin_interest_rate`, and the Sharpe is the excess over it as cash accrued
 it on `day_count`. The resolved rates and what they came to are in
-`provenance["financing"]`.
+`provenance["financing"]`. `PortfolioSimSpec` also takes `financing`, the
+full terms of
+[04_backtesting.md](04_backtesting.md#true-portfolio-simulation-shared-cash),
+in place of the scalar rates; `evaluate_model_portfolio` and
+`evaluate_predictions_portfolio` both read it.
 
 ### Same leakage discipline as the bridge
 
@@ -4544,6 +4548,16 @@ every date, a "long everything" book dressed up as a signal.
 `metrics` is the economic answer: cumulative return, CAGR, annualized
 volatility, Sharpe, Sortino, max drawdown, Calmar, mean and annualized
 turnover, mean gross/net exposure, position count.
+Cumulative return, CAGR, maximum drawdown and Calmar are measured from
+`PortfolioSimSpec.initial_capital`, the level the account opened at, not
+from the equity curve's first point, which is after any rebalance on the
+first bar and net of its costs; the growth rate spans the curve's own
+bars. The simulation's prices start before the first rebalance, so the
+first bar is normally all cash and its equity is the capital; the
+difference shows where the first rebalance falls on the first simulated
+bar. Volatility, Sharpe and Sortino read the curve's bars after the first,
+whose risk-free benchmark accrues from the second bar as the engine
+credits cash.
 `estimated_cost_drag_pct` is explicitly **derived, not measured** — the
 simulator deducts costs from cash without reporting a total, so this
 reconstructs the commission + spread component from realized turnover and

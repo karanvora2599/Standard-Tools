@@ -80,6 +80,16 @@ writes and model or dataset directories whose registration never committed,
 older than a day by default. Retention of published values is an operator's
 decision; see [09_advanced_agent_tools.md](09_advanced_agent_tools.md).
 
+**A stream is a dated `DataSource`.** `ReturnStream`
+(`agent.runtimes.streams`) is the input for tools that take several return
+series: exactly one of a `returns_panel` `ref` with its `column`, `values`
+as {ISO date: return}, or a `symbol` with both ends of its window and an
+optional `source` — the `DataSource` rule. An undated list is refused: one
+series needs no calendar, several do, and equal lengths are not the same
+dates. `ReturnStreams` maps names to streams, and `resolve_return_streams`
+returns the dated Series that `portfolio.streams.align_return_streams` puts
+on one calendar.
+
 ## What the data cannot support is part of the answer
 
 Silences that used to be invisible, now returned in `warnings`:

@@ -163,13 +163,13 @@ that most often causes the disconnect.
 
 ## Choosing what to serve
 
-The 238 tools cost about **612 KB of schema, ~157,000 tokens**, held for the
+The 238 tools cost about **625 KB of schema, ~160,000 tokens**, held for the
 whole session. That is the constraint the whole design manages, so this is
 the first decision, not a tuning knob.
 
 That wall has already been hit and passed. Over the wire, at full detail, a
-tool averages 2,947 bytes, and the session ceiling that used to be 180,000
-would buy about 61 tools. There are 238. **In registry order the whole
+tool averages 3,011 bytes, and the session ceiling that used to be 180,000
+would buy about 60 tools. There are 238. **In registry order the whole
 surface crosses that ceiling at its 71st tool, and taken smallest first only
 127 of the 238 fit.** No amount of schema-shrinking brings it back — which
 is why scoping stopped being an optimization and became the way the server
@@ -187,40 +187,40 @@ sqt-mcp --print-budget
 
 ```
 runtime              tools    bytes   ~tokens
-modeling                38  204,849    51,212
-backtest                35   98,505    24,626
-research                42   65,437    16,359
+modeling                38  208,647    52,161
+backtest                35  104,806    26,201
+research                42   65,982    16,495
 feature_lab             11   51,242    12,810
-delta_one               18   45,952    11,488
-portfolio               19   42,736    10,684
+delta_one               18   46,746    11,686
+portfolio               19   45,203    11,300
 data                    21   37,336     9,334
 microstructure          17   31,693     7,923
 meta                    25   25,374     6,343
 derivatives             12   23,087     5,771
-all                    238  626,211   156,552
+all                    238  640,116   160,029
 
-  a client is served ONE runtime: modeling is the most expensive at 204,849 bytes (33% of the total).
+  a client is served ONE runtime: modeling is the most expensive at 208,647 bytes (33% of the total).
 
 category             tools    bytes   ~tokens
-modeling                38  204,849    51,212
+modeling                38  208,647    52,161
 feature_lab             11   51,242    12,810
-delta_one               18   45,952    11,488
-backtest_execution      12   45,709    11,427
-backtest_validation     21   44,914    11,228
-portfolio_risk          19   42,736    10,684
+backtest_execution      12   49,737    12,434
+backtest_validation     21   46,913    11,728
+delta_one               18   46,746    11,686
+portfolio_risk          19   45,203    11,300
 data                    21   37,336     9,334
-quant_research          26   33,507     8,376
+quant_research          26   34,052     8,513
 microstructure          17   31,693     7,923
 analysis                14   28,912     7,228
 derivatives             12   23,087     5,771
 discovery               17   17,442     4,360
+custom_signal            2    8,156     2,039
 provenance               8    7,932     1,983
-custom_signal            2    7,882     1,970
 screener                 2    3,018       754
 ```
 
 **The total is a number nobody pays.** The row that matters is the runtime
-a client is actually served, and the most expensive of those is 200 KB at
+a client is actually served, and the most expensive of those is 204 KB at
 full detail — 33% of the whole surface.
 
 There is deliberately **no fixed per-runtime limit**. There was one, at
@@ -234,11 +234,11 @@ preference wearing a limit's clothes.
 What replaces it is measurement. `--print-budget` reports what each runtime
 costs, `estimate_tool_cost` reports it to an agent, and `--tool-detail auto`
 keeps the served size well under the full-detail figure without anyone
-having to pick a threshold: `backtest` serves at 43 KB against 104 KB full.
+having to pick a threshold: `backtest` serves at 43 KB against 111 KB full.
 
 **Tool count and cost are barely related**, which is the useful thing to
 know when picking. `analysis` carries 14 tools for 28.2 KB; `custom_signal`
-carries 2 for 7.7 KB — a seventh of the tools for over a quarter of the
+carries 2 for 8.0 KB — a seventh of the tools for over a quarter of the
 bytes. `modeling` and `backtest_validation` are two categories out of
 fifteen and nearly two-fifths of the surface between them. Choosing by how
 many tools a category holds gets the budget almost exactly backwards.
@@ -283,7 +283,7 @@ as a broken install rather than as two flags disagreeing.
 one is sent at connect.
 
 ```bash
-sqt-mcp --runtime backtest --tool-detail full     # 104 KB, every schema
+sqt-mcp --runtime backtest --tool-detail full     # 111 KB, every schema
 sqt-mcp --runtime backtest                       # 43 KB, 16 tools thinned (the default)
 sqt-mcp --runtime backtest --tool-detail thin    # 19 KB, all thinned
 ```
@@ -297,19 +297,19 @@ the 180th character: the first split "vs." and the second stopped 43 longer
 first sentences mid-clause, 46 tools in all — `run_portfolio_optimization`
 and `estimate_trade_cost` among them, both thinned by `auto` in
 `portfolio`. Measured across the whole surface, that is 532 bytes a tool
-against 2,947 — **82% smaller**.
+against 3,011 — **82% smaller**.
 
 `auto` is the mode worth using. It thins the **most expensive** tools and
 stops as soon as the runtime fits `--detail-budget` (32 KB by default):
 
 | runtime | full | `auto` | thinned by `auto` | thin |
 |---|---:|---:|---:|---:|
-| `modeling` | 213 KB | 43 KB | 20 | 21 KB |
-| `backtest` | 104 KB | 43 KB | 16 | 19 KB |
-| `research` | 74 KB | 44 KB | 12 | 21 KB |
+| `modeling` | 217 KB | 43 KB | 20 | 21 KB |
+| `backtest` | 111 KB | 43 KB | 16 | 19 KB |
+| `research` | 74 KB | 44 KB | 12 | 22 KB |
 | `feature_lab` | 54 KB | 30 KB | 1 | 7 KB |
-| `delta_one` | 51 KB | 36 KB | 4 | 10 KB |
-| `portfolio` | 48 KB | 36 KB | 3 | 11 KB |
+| `delta_one` | 52 KB | 36 KB | 4 | 10 KB |
+| `portfolio` | 50 KB | 39 KB | 3 | 11 KB |
 | `data` | 42 KB | 38 KB | 1 | 12 KB |
 | `microstructure` | 36 KB | 36 KB | 0 | 10 KB |
 | `meta` | 31 KB | 31 KB | 0 | 14 KB |
@@ -628,14 +628,20 @@ The other two hints are derived from the code rather than maintained by
 hand: `openWorldHint` is true when a tool's input schema names a symbol,
 ticker or universe anywhere (including nested specs — `build_model_dataset`
 hides its universe two levels down), and `idempotentHint` is false for the
-40 tools that write an artifact. Eight save a new file on every call (a
-`*_uri` in the result). The other 32 take a `run_id` and answer with the
-`sqt://` reference they published there; publishing never overwrites by
-default, so the same call a second time is **refused** ("a value is already
-published at run_id=..."), not repeated. A `run_id` with no reference in the
-result is a filter (`list_artifacts`), and a reference with no `run_id` is
-one the caller passed in, so neither writes. A test walks the dispatch
-tables and holds every tool that takes a `run_id` to one side or the other.
+43 tools that write an artifact. Eight save a new file on every call (a
+`*_uri` in the result). Two register a dataset under an id they mint
+(`build_model_dataset` and `register_external_panel` answer with a
+`dataset_id` they were not given): the same call a second time succeeds
+with a second dataset in the store. The other 33 take a `run_id` and answer
+with the `sqt://` reference they published there (`estimate_covariance`
+among them, for the matrix it publishes as a `covariance` reference);
+publishing never overwrites by default, so the same call a second time is
+**refused** ("a value is already published at run_id=..."), not repeated. A
+`run_id` with no reference in the result is a filter (`list_artifacts`), a
+reference with no `run_id` is one the caller passed in, and an id the input
+takes (`inspect_dataset`) is one it reads, so none of them writes. A test
+walks the dispatch tables and holds every tool that takes a `run_id` to one
+side or the other.
 
 Read-only is a statement about what the tools do, not about who may call
 them. Over stdio the only caller is the process that launched the server;

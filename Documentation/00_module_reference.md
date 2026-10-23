@@ -659,3 +659,46 @@ actually exposed to.
 `standard_quant_tools.portfolio.position_sizing.size_position(account_equity, last_close, last_atr, ...)` sizes one position behind an ATR stop and, when the win statistics are given, at half the growth-optimal Kelly position f* = p/L − q/W, capped at `max_leverage` times equity (1 by default); it reports f* and the risk fraction f* × L, and sizes zero shares without an edge. It is the arithmetic `get_position_size` calls, and refuses a stop, share count or position value past the float range by name. `kelly_notional_fraction(p, W, L)` and `kelly_log_growth(f, p, W, L)` are the two formulas.
 
 Deep guide: [05_portfolio.md](05_portfolio.md#allocation-without-expected-returns)
+
+---
+
+## Positions and base currency (`standard_quant_tools.finance`)
+
+Holdings valued in one base currency: the arithmetic that financing,
+margin, currency exposure and carry on a set of positions start from. Pure
+functions of their arguments — no price or rate is fetched.
+
+| Function | Description |
+|---|---|
+| `position_values(positions, base_currency, fx_rates=None)` | Each line valued, in input order: local notional = quantity × price × multiplier in its own currency, base notional = local × its rate, and its side (the sign of the quantity) |
+| `exposure_summary(positions, base_currency, fx_rates=None)` | Gross, net, long and short in the base currency, and per currency its net, gross, long, short, local net and share of gross; rates given for currencies not held are listed as unused |
+| `currency_code(value, argument=...)` | An ISO 4217 code, upper-cased, or a refusal naming the nearest valid code |
+| `exact_product(*factors)` | A product rounded once from its factors' exact values |
+
+`positions` are objects or mappings with `instrument`, `quantity`, `price`,
+`currency` and optionally `multiplier` (default 1). `fx_rates` gives units
+of the base currency per ONE unit of each other currency held: with base
+USD and 1 EUR = 1.10 USD, `{"EUR": 1.10}`. Every non-base currency held
+needs a rate; the base's own rate, when given, is exactly 1.
+
+Each notional is the correctly rounded product of its factors, so 3
+contracts × 50 is the same bits as 150 × 1, and every total is `math.fsum`,
+so reordering the positions moves no total by a bit. Long minus short is
+net at any price. A negative price (crude settled at -37.63) gives a long a
+negative notional, and long + short is then not gross.
+
+Refused, naming the argument and the value: a zero or non-finite quantity,
+a non-finite price, a multiplier that is not finite and positive, an
+unknown currency (with the nearest code), a withdrawn one (with its
+successor), a price in pence, cents or agorot ('GBp', 'GBX', 'ZAc', 'ILA'
+— give it in the main unit), a missing rate, a rate that is not finite and
+positive, a base rate other than 1, one instrument on two lines in one
+currency (net them yourself), and more than 5,000 lines. The currency list
+is ISO 4217 List One as of 2026-10-22, kept in the library.
+
+The tool input for the same thing is `Holdings` — `positions`,
+`base_currency`, `fx_rates` — with a `Position` per line, in
+`standard_quant_tools.agent.runtimes._positions`. A tool subclasses it or
+takes one as a field, and its checks run when the input is built. A
+`Position` may carry `borrow_fee_bps`, read only while the line is short;
+it overrides the account's per-instrument and default borrow.

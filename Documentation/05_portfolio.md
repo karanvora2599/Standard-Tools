@@ -457,6 +457,18 @@ finiteness are checked by the numeric contract exactly as for rows. The map
 used to be refused as `list_type`, and the rows had to be rebuilt by hand,
 in an order the caller had to get right.
 
+**Or as a reference.** The same four tools take `covariance_ref`, the
+`sqt://covariance/...` reference `estimate_covariance` publishes when it is
+given a `run_id`, in place of `covariance`. Exactly one of the rows, the map
+and the reference is read; two are refused, and an inline matrix still needs
+`assets`. A reference names its own assets, so `assets` is optional beside
+it: given, it must name exactly the reference's assets (each missing or
+extra name is listed) and fixes the order of the result. A reference of
+another kind — a `returns_panel` handed over by mistake — is refused naming
+both kinds. The answers are the inline matrix's to the bit; the matrix never
+passes through the conversation, and its annualization and estimator travel
+with it.
+
 **A null number says why.** Every construction tool's result writes one
 line into its `warnings` for each null number, naming the field and the
 reason: a factor variance with no factor covariance, a `top_10_share` of
@@ -533,6 +545,16 @@ per series, how many returns were supplied and dropped. The two forms cannot
 be mixed. Undated lists still work — `alignment` is null and a warning says
 their alignment could not be checked — but have no dates to intersect, so
 they refuse `alignment="intersect"`.
+
+**Or a published panel.** `returns_ref` takes a `returns_panel` reference in
+place of `returns`; its columns are the assets. A blank cell is a date that
+column has no return on, and `alignment` applies exactly as it does to dated
+series: under `"exact"` a panel whose columns do not carry the same dates is
+refused with what each lacks, under `"intersect"` the dates every column
+shares are used and `alignment` on the result says what each column lost.
+The columns are checked as return streams first, so a panel of prices is
+refused as levels rather than allocated. On the same returns the weights are
+the inline answer's, bit for bit.
 
 **The weights do not depend on the order you listed the assets in.** The
 clustering's tie-breaks follow column position, and forty permutations of
@@ -887,6 +909,60 @@ the precision matrix it stores by default, which nothing read: that was
 15–27 ms of a 23–33 ms fit at 235 assets, and skipping it leaves the bits
 identical.
 
+**From a published panel, and published in turn.** `returns_ref` takes a
+`returns_panel` reference in place of `tickers` and their window (exactly one
+of the two; the window is refused beside a reference). Its columns are the
+assets, aligned as return streams on the dates they all share; `streams` on
+the result gives, per column, the returns supplied and the ones dropped
+before, after and inside the common window, and `n_rows_dropped` counts the
+panel's dates some column lacked — on a 300-day panel with 20, 10 and 5
+blank days in three columns, the estimate rests on 265 rows and 35 are
+dropped. Given a `run_id`, the matrix is published as
+`sqt://covariance/<run_id>/covariance` and returned as `covariance_ref`, which
+the allocators above take; the reference records the assets, the matrix,
+whether it is annualized, at how many periods a year, the method and the
+observations. A second publish at the same `run_id` is refused, so the tool
+is not advertised as safe to repeat. Without a `run_id` nothing is written
+and the result is what it was.
+
+## Return streams on one calendar
+
+`portfolio.streams` is where the library puts several dated return series on
+the dates they share — the step every allocation across strategies, sleeves
+or funds starts from, and the one an undated list cannot take: two series of
+equal length from different calendars look aligned and correlate each day
+against some other day.
+
+```python
+from standard_quant_tools.portfolio.streams import align_return_streams
+
+frame, report = align_return_streams({"us": us, "eu": eu}, min_overlap=60)
+```
+
+Each stream is a Series on a DatetimeIndex. The frame holds the dates every
+stream has, in date order, each value the stream's own. The report gives the
+window every stream covers (`window_start`, the latest first date, and
+`window_end`, the earliest last date) and the streams that set it, and per
+stream the returns supplied, its first and last date, the rows kept, and the
+returns dropped before the window, after it, and inside it on a date another
+stream lacks. Two ten-return streams, one on business days from 2024-01-02
+and one starting two days later without 2024-01-08, share seven dates: the
+first loses two before the window and one inside it, the second three after
+it.
+
+Refused, each by name: fewer shared dates than `min_overlap`, naming the
+stream whose removal would share the most and the range it covers; a date
+that appears twice; a missing or non-finite value (a gap is a date the
+stream does not have, not a NaN on it); a level series passed as returns
+(the rule `refuse_if_not_returns`: a typical |value| above 1, an equity
+curve or a price); undated values; and dates in different time zones.
+
+`streams_from_panel` reads a wide returns frame as streams, a blank cell a
+date that column was not observed on. `combine_return_streams` resolves
+streams — Series, or `ReturnStream` specs: a `returns_panel` reference and
+its column, {ISO date: return}, or a symbol with both ends of its window —
+aligns them and publishes the panel as a `returns_panel` at a `run_id`.
+
 ## Planning the transition
 
 `plan_rebalance` schedules the path from current to target weights under a
@@ -919,4 +995,8 @@ short's borrow accrues once over `holding_days`. A 90-day short at 7 bps of
 execution and 300 bps of borrow needs 87.97 bps (it reported 161.95). Borrow
 is charged on `side="sell"` only. Margin interest on a negative
 `margin_cash` is the account's, reported as `account_margin_interest` in
-currency and kept out of both totals.
+currency and kept out of both totals. `day_count` (`"ACT/365F"`, the
+default and the arithmetic it always used, or `"ACT/360"`) is the basis the
+borrow and the account margin accrue on over `holding_days`: the same
+90-day, 300 bps short holds 75.00 bps of borrow on ACT/360 against 73.97 on
+ACT/365F. 30/360 is refused with the reason.

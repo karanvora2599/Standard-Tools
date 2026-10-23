@@ -574,7 +574,10 @@ inp = BacktestInput(
     slippage_pct=0.0005,         # Optional: fraction per trade side (default 0.05%)
     fill_price="close",          # Optional: "close" (default), "next_open", "hl2_exploratory"
     risk_free_rate=0.0,          # Optional: annual rate the Sharpe/Sortino excess is measured
-                                 #   against (default 0.0 — a 0% cash rate, which flatters both)
+                                 #   against (default 0.0 — a 0% rate, which flatters both)
+    cash_rate=None,              # Optional: annual rate idle cash earns (None = risk_free_rate)
+    financing_rate=None,         # Optional: annual rate paid beyond 1x (None = risk_free_rate)
+    borrow_fee_bps=0.0,          # Optional: annual bps a short pays on its size
 )
 
 # All BacktestResult fields:
@@ -628,6 +631,31 @@ payload = result.model_dump()
 payload.pop("equity_curve")  # Large list — omit if sending to LLM
 print(json.dumps(payload, indent=2))
 ```
+
+Every run_strategy-based tool takes the financing rates that can move its
+answer. The four strategy backtests, `compare_strategies`,
+`run_custom_signal_backtest`, `run_signal_panel_backtest`,
+`get_robustness_diagnostics`, `run_backtest_optimization`,
+`run_walk_forward_backtest`, `run_regime_adaptive_backtest` and
+`run_regime_adaptive_walkforward_backtest` take all three.
+`run_backtest_compact`, `compare_cost_models`, `run_strategy_matrix` and
+`get_backtest_diagnostics` run registry strategies only, and every registry
+strategy is long or flat, so financing and borrow cannot accrue: they take
+`cash_rate` alone. `run_buy_and_hold` takes none of the three: it is fully
+long, so it never borrows or shorts, and its one possible idle bar (the
+opening bar of a two-leg fill) earns `risk_free_rate`, which is
+`cash_rate`'s default. The rates were the engine's arguments all along; the
+tools ran at their defaults, which are still the defaults, so every earlier
+call answers as before. At constant prices a flat book earns
+`cash_rate / 252` a bar, a 1x short earns the cash rate on its equity and
+its proceeds and pays `borrow_fee_bps` on its size, and a 2x book pays
+`financing_rate` on the borrowed unit. The full terms — a dated benchmark,
+spreads, borrow per asset — are a book's, and are taken by
+`run_portfolio_simulation`, `run_pair_trade_backtest` and `PortfolioSimSpec`
+(read by `evaluate_model_portfolio` and `evaluate_predictions_portfolio`) as
+`financing`, and by the library's `run_strategy` and `backtest_grid`. No
+run_strategy-based tool takes them: each schema would carry the nested
+model.
 
 **A null number says why.** JSON has no NaN or infinity, so a number that
 is undefined (0/0) or unbounded (x/0) on the input given is `None` in the

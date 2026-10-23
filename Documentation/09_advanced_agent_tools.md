@@ -2026,6 +2026,7 @@ the weights to this tool as a `target_weights` panel or a published
 |---|---|---|
 | `n_rebalances`, `rebalance_log` | — | One `RebalanceEvent` per rebalance date: `date`, `turnover_pct`, `gross_leverage_after`, `n_positions`, plus `n_capped`, `capped_notional` and `capped` — how many trades `max_adv_participation` sized down on that date, the notional they gave up, and **which tickers**, so a run that traded three names short of its target can say which three |
 | `total_return`, `annualized_return`, `annualized_volatility`, `sharpe_ratio`, `sortino_ratio`, `max_drawdown`, `calmar_ratio`, `var_95`, `cvar_95` | `float` | Computed from the engine's `equity_curve` via the **existing** metrics functions — no new metric math |
+| `cvar_95_tail_observations` | `int?` | How many returns `cvar_95` is the mean of, the day-0 return included; below 10, `warnings` says the shortfall describes those few days rather than the tail |
 | `information_ratio` | `float?` | Present only when `benchmark` is set |
 | `final_equity`, `final_cash` | `float` | Account state at the last bar |
 | `avg_gross_leverage`, `max_gross_leverage_used` | `float` | `gross_exposure / equity` averaged and maxed across every bar (not just rebalance dates) — shows how far weight drift pushed leverage between rebalances |
@@ -2096,7 +2097,11 @@ model with no constraint. Financing follows the risk-free rate: `cash_rate`
 (`risk_free_rate=0.0`, no spread) nothing accrues; `short_proceeds`,
 `short_rebate_rate` and `day_count` are as in
 [04_backtesting.md](04_backtesting.md#true-portfolio-simulation-shared-cash),
-and the result echoes the rates and totals in `financing`.
+and the result echoes the rates and totals in `financing`. The input
+`financing` takes the full terms instead (see "The full terms" in the same
+section of 04). It and the scalar terms are mutually exclusive: a spec
+passed beside any of them set away from its default, `risk_free_rate`
+included, is refused by name.
 `max_adv_participation` is a **cap**: a trade over it is sized down to the
 cap and the shortfall recorded per rebalance (`n_capped`, `capped_notional`
 on the `RebalanceEvent`, and a warning with the run's total). It used to
@@ -2467,11 +2472,12 @@ equity_curve = load_artifact(result.equity_curve_uri).squeeze("columns")
 | `run_id` | `str` | Identifier for the saved artifacts — auto-generated (UUID) unless supplied in the input |
 | `strategy_name` | `str` | Echoed `strategy_type` |
 | `summary` | `PerformanceSummary` | `total_return`, `annualized_return`, `annualized_volatility`, `sharpe_ratio`, `sortino_ratio`, `calmar_ratio` |
-| `risk` | `RiskSummary` | `max_drawdown`, `var_95`, `cvar_95` |
+| `risk` | `RiskSummary` | `max_drawdown`, `var_95`, `cvar_95`, and `cvar_95_tail_observations` (how many bars `cvar_95` is the mean of; below 10, `warnings` says so, without changing `validation_status`) |
 | `exposure` | `ExposureSummary` | Same shape as `get_backtest_diagnostics`' `exposure` field |
 | `costs` | `CostSummary` | `turnover` (position changed, summed over bars, in units of the signal), `realized_cost_pct` (the commission and slippage the engine actually charged, `turnover × (commission_pct + slippage_pct)`), `total_commission_pct`, `total_slippage_pct`, `total_cost_pct` (sums of per-bar cost drag as a fraction of capital, not dollarized), `num_trades` |
 | `equity_curve_uri`, `trades_uri` | `str`, `str?` | Parquet file paths from `backtest/artifacts.py`'s `save_artifact` — load with `load_artifact(uri)`. `trades_uri` is `None` when the strategy never traded |
 | `equity_curve_ref`, `trades_ref` | `str?` | Typed handoff references (`sqt://equity_curve/...`) for the same two artifacts. Prefer these over the `*_uri` fields when passing the curve to another tool: a reference carries a content kind, so a tool expecting something else refuses it by name instead of failing on the contents |
+| `return_basis` | `str` | `total_return`, `price_return` or `unknown`: whether the compounded bar returns include dividends, as `run_strategy` reports it |
 | `warnings` | `List[str]` | The engine's own warnings first — the split screen (a bar-to-bar move beyond 35%, or a fall of 26% to 35% the size of a 3:2 split, phrased by the provider's `adjusted` flag) and the `fill_price` caveat — then the tool's, e.g. too few trades to draw reliable conclusions |
 | `validation_status` | `str` | `"ok"` or `"warning"` (currently: `< 5` trades) |
 

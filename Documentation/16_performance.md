@@ -610,6 +610,32 @@ reduces over the features, the same bits at 1, 2, 4 and 16 threads at 100
 features, but at 300 other last bits at 4 and 16 threads than at 1, on 6
 to 7 of 5,000 scores.
 
+**And the correlations, because pandas 3.1 forms them from dot
+products.** Up to pandas 3.0 a Pearson `Series.corr` called `np.corrcoef`;
+from 3.1 it centres and scales the two series and takes three `np.dot`
+products, their cross-product and each one's sum of squares, and
+`Series.autocorr` is that correlation of a series with its own lag. A
+correlation over a long history is therefore a reduction with a term per
+observation, and OpenBLAS splits a dot product of more than about 10,000
+terms across threads: the pooled IC of `score_predictions` over 36,000 rows
+took other last bits at two threads than at one. So the library's
+correlations over long histories run under the same one-thread limit as
+its covariances: the pooled IC of `score_predictions`, the IC
+autocorrelation of `permutation_test_ic`, the per-entity autocorrelation of
+`feature_distribution_stats`, the correlation and persistence of
+`order_flow_imbalance`, and the correlations of `hedge_effectiveness` and
+`optimize_replication_basket`, each of which followed the thread count on
+12,000 dates under pandas 3.1 before. The replication basket's solve runs
+under the limit as well, with the products built on its weights (the
+predicted variance, the replicated series, its tracking error and its
+beta): on 12,000 observations its SLSQP weights took other last bits at
+two threads than at one on CI's Linux OpenBLAS, although the covariance it
+solves already ran on one. The limit makes each of these the same bits at
+any thread count under one pandas. It cannot make two versions of pandas
+agree, because their formulas differ: the hedge correlation of those
+12,000 days is 0.8451298330216213 under pandas 2.3 and 3.0 and
+0.8451298330216211 under 3.1.
+
 ---
 ## When a kernel goes parallel
 

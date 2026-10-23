@@ -231,6 +231,7 @@ trade log.
 | `analytic_series` | One per-bar analytic series: a state curve, a rolling statistic, a label sequence |
 | `analytic_frame` | A date-indexed frame of analytic columns: a Kalman path, a basis history |
 | `price_panel` | Wide price frame or stacked OHLCV |
+| `covariance` | A covariance matrix by asset name, with whether it is annualized, its periods a year, its method and its observations |
 | `predictions` | Long `(date, entity, prediction)` frame |
 | `indicator_panel` | Indicator values across a universe |
 | `tick_tape` | Individual trades, `price` and `size`, timestamp-indexed |
@@ -250,6 +251,15 @@ where it lies and read in batches rather than copied into the runs
 directory, because a depth or order-event feed is larger than anything
 worth copying. `data_bundle` holds references rather than frames, which is
 what keeps a bundle immutable — it cannot diverge from what it names.
+
+`covariance` arrived with `estimate_covariance`'s `run_id`. Publishing one
+refuses a matrix that is not square under unique names, not finite, or
+further from symmetric than 1e-10 of its largest entry, and stores it as
+given, so it resolves to the same bits; what its scale means is kept in the
+record beside it, and `resolve(ref, expect="covariance")` returns the named
+frame with that record on `attrs`. `optimize_risk_parity`,
+`optimize_max_diversification`, `get_marginal_risk_contribution` and
+`run_portfolio_scenarios` take it as `covariance_ref`.
 
 `list_reference_kinds` returns this table plus what converts to what — the
 map of which producer outputs can reach which consumer inputs.

@@ -35,12 +35,12 @@ scoped to four categories rather than all of them, so it advertises 58 of the
 | Runtime | Tools | Schema cost | Categories | Deep documentation |
 |---|---:|---:|---|---|
 | `research` | 42 | 64 KB | `screener`, `analysis`, `quant_research` | [08_analysis.md](08_analysis.md), [23_inference.md](23_inference.md) |
-| `modeling` | 38 | 200 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
-| `backtest` | 35 | 96 KB | `backtest_execution`, `backtest_validation`, `custom_signal` | [04_backtesting.md](04_backtesting.md), [24_overfitting.md](24_overfitting.md) |
+| `modeling` | 38 | 204 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
+| `backtest` | 35 | 102 KB | `backtest_execution`, `backtest_validation`, `custom_signal` | [04_backtesting.md](04_backtesting.md), [24_overfitting.md](24_overfitting.md) |
 | `meta` | 25 | 25 KB | `discovery`, `provenance` | [27_meta.md](27_meta.md), [10_auditability.md](10_auditability.md) |
 | `data` | 21 | 36 KB | *(one surface)* | [26_data.md](26_data.md) |
-| `portfolio` | 19 | 42 KB | `portfolio_risk` | [05_portfolio.md](05_portfolio.md) |
-| `delta_one` | 18 | 45 KB | *(one surface)* | [28_delta_one.md](28_delta_one.md) |
+| `portfolio` | 19 | 44 KB | `portfolio_risk` | [05_portfolio.md](05_portfolio.md) |
+| `delta_one` | 18 | 46 KB | *(one surface)* | [28_delta_one.md](28_delta_one.md) |
 | `microstructure` | 17 | 31 KB | *(one surface)* | [22_microstructure.md](22_microstructure.md) |
 | `derivatives` | 12 | 23 KB | *(one surface)* | [21_derivatives.md](21_derivatives.md) |
 | `feature_lab` | 11 | 50 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
@@ -633,21 +633,21 @@ Run, optimize, validate and diagnose a trading strategy — the library's built-
 Run all four strategies on the same symbol and return ranked results vs buy-and-hold.
 
 **Required:** `symbol`, `start_date`, `end_date`  
-**Optional:** `initial_capital`, `commission_pct`, `slippage_pct`, `sort_by`, `sma_parameters`, `rsi_parameters`, `macd_parameters`, `bollinger_parameters`, `fill_price`, `risk_free_rate`
+**Optional:** `initial_capital`, `commission_pct`, `slippage_pct`, `sort_by`, `sma_parameters`, `rsi_parameters`, `macd_parameters`, `bollinger_parameters`, `fill_price`, `risk_free_rate`, `cash_rate`, `financing_rate`, `borrow_fee_bps`
 
 #### `run_backtest_compact`
 
 Compact backtest result: summary/risk/exposure/cost sub-reports plus equity-curve/trade-log artifact URIs, instead of embedding the full data inline like run_sma_backtest etc.
 
 **Required:** `symbol`, `start_date`, `end_date`, `strategy_type`  
-**Optional:** `parameters`, `initial_capital`, `commission_pct`, `slippage_pct`, `fill_price`, `run_id`, `risk_free_rate`
+**Optional:** `parameters`, `initial_capital`, `commission_pct`, `slippage_pct`, `fill_price`, `run_id`, `risk_free_rate`, `cash_rate`
 
 #### `run_bollinger_backtest`
 
 Backtest a Bollinger Band reversion rule: buy the lower band, sell the upper. Mean-reverting like the RSI version but with a volatility-scaled threshold, so it trades less in calm markets and more in volatile ones. That scaling is the reason to prefer it to a fixed threshold, and the reason its trade count varies so much across periods.
 
 **Required:** `symbol`, `start_date`, `end_date`, `strategy_type`  
-**Optional:** `parameters`, `initial_capital`, `commission_pct`, `slippage_pct`, `fill_price`, `risk_free_rate`
+**Optional:** `parameters`, `initial_capital`, `commission_pct`, `slippage_pct`, `fill_price`, `risk_free_rate`, `cash_rate`, `financing_rate`, `borrow_fee_bps`
 
 #### `run_buy_and_hold`
 
@@ -675,42 +675,42 @@ Carry a cash book and its futures hedge together, bar by bar, and report the two
 Backtest a MACD signal-line crossover. Trend-following like the SMA version but on the difference of two exponential averages, so it turns faster and trades more -- which makes it the one most sensitive to transaction costs. Run estimate_break_even_cost on the result: a MACD strategy that breaks even near its assumed cost is a cost assumption rather than an edge.
 
 **Required:** `symbol`, `start_date`, `end_date`, `strategy_type`  
-**Optional:** `parameters`, `initial_capital`, `commission_pct`, `slippage_pct`, `fill_price`, `risk_free_rate`
+**Optional:** `parameters`, `initial_capital`, `commission_pct`, `slippage_pct`, `fill_price`, `risk_free_rate`, `cash_rate`, `financing_rate`, `borrow_fee_bps`
 
 #### `run_pair_trade_backtest`
 
 Backtest a cointegrated pair as one synchronized two-leg trade — both legs enter/exit together and share one cash account, unlike scan_pairs which only screens candidates.
 
 **Required:** `symbol_a`, `symbol_b`, `start_date`, `end_date`, `hedge_ratio`  
-**Optional:** `entry_z`, `exit_z`, `zscore_window`, `initial_capital`, `commission_pct`, `slippage_pct`, `gross_leverage`, `fill_price`, `risk_free_rate`, `borrow_fee_bps`, `margin_interest_rate`, `margin_spread_bps`, `cash_rate`, `short_proceeds`, `short_rebate_rate`, `day_count`, `run_id`
+**Optional:** `entry_z`, `exit_z`, `zscore_window`, `initial_capital`, `commission_pct`, `slippage_pct`, `gross_leverage`, `fill_price`, `risk_free_rate`, `borrow_fee_bps`, `margin_interest_rate`, `margin_spread_bps`, `cash_rate`, `short_proceeds`, `short_rebate_rate`, `day_count`, `financing`, `run_id`
 
 #### `run_portfolio_simulation`
 
 True shared-cash portfolio simulation with rebalancing at target-weight dates. Unlike run_signal_panel_backtest, positions share one account instead of each ticker getting its own capital.
 
 **Required:** `tickers`, `start_date`, `end_date`  
-**Optional:** `target_weights_ref`, `target_weights`, `signal_type`, `construction_method`, `gross_leverage`, `n_long`, `n_short`, `vol_lookback`, `make_dollar_neutral`, `initial_capital`, `commission_pct`, `sell_commission_pct`, `slippage_pct`, `max_gross_leverage`, `max_position_pct`, `fill_price`, `commission_model`, `per_share_rate`, `min_commission`, `use_impact_model`, `impact_coefficient`, `impact_lookback`, `borrow_fee_bps`, `margin_interest_rate`, `margin_spread_bps`, `cash_rate`, `short_proceeds`, `short_rebate_rate`, `day_count`, `max_adv_participation`, `benchmark`, `risk_free_rate`, `run_id`
+**Optional:** `target_weights_ref`, `target_weights`, `signal_type`, `construction_method`, `gross_leverage`, `n_long`, `n_short`, `vol_lookback`, `make_dollar_neutral`, `initial_capital`, `commission_pct`, `sell_commission_pct`, `slippage_pct`, `max_gross_leverage`, `max_position_pct`, `fill_price`, `commission_model`, `per_share_rate`, `min_commission`, `use_impact_model`, `impact_coefficient`, `impact_lookback`, `borrow_fee_bps`, `margin_interest_rate`, `margin_spread_bps`, `cash_rate`, `short_proceeds`, `short_rebate_rate`, `day_count`, `max_adv_participation`, `benchmark`, `risk_free_rate`, `financing`, `run_id`
 
 #### `run_rsi_backtest`
 
 Backtest an RSI mean-reversion rule: buy oversold, sell overbought. The counterpart to the crossover strategies -- it profits when prices revert and loses in a trend, so comparing the two on the same period says more about the period than either does alone. run_stationarity_tests and run_hurst_analysis say in advance which regime the sample is in.
 
 **Required:** `symbol`, `start_date`, `end_date`, `strategy_type`  
-**Optional:** `parameters`, `initial_capital`, `commission_pct`, `slippage_pct`, `fill_price`, `risk_free_rate`
+**Optional:** `parameters`, `initial_capital`, `commission_pct`, `slippage_pct`, `fill_price`, `risk_free_rate`, `cash_rate`, `financing_rate`, `borrow_fee_bps`
 
 #### `run_sma_backtest`
 
 Backtest a moving-average crossover: long when the fast average crosses above the slow one, flat or short when it crosses back. The simplest trend-following rule there is, which makes it the right BASELINE -- a more elaborate strategy that cannot beat it has not earned its complexity. One run at one parameter pair; run_backtest_optimization searches, and run_walk_forward_backtest checks the search survived out of sample.
 
 **Required:** `symbol`, `start_date`, `end_date`, `strategy_type`  
-**Optional:** `parameters`, `initial_capital`, `commission_pct`, `slippage_pct`, `fill_price`, `risk_free_rate`
+**Optional:** `parameters`, `initial_capital`, `commission_pct`, `slippage_pct`, `fill_price`, `risk_free_rate`, `cash_rate`, `financing_rate`, `borrow_fee_bps`
 
 #### `run_strategy_matrix`
 
 Every requested strategy against every requested ticker in one call, ranked. Fetches once per ticker and reuses the bars across strategies, so every cell is priced on identical data — which N separate calls cannot promise.
 
 **Required:** `tickers`, `strategies`, `start_date`, `end_date`  
-**Optional:** `parameters`, `initial_capital`, `commission_pct`, `slippage_pct`, `fill_price`, `sort_by`, `risk_free_rate`
+**Optional:** `parameters`, `initial_capital`, `commission_pct`, `slippage_pct`, `fill_price`, `sort_by`, `risk_free_rate`, `cash_rate`
 
 ### `backtest_validation`
 
@@ -746,14 +746,14 @@ Whether the strategy beats a coin that traded the same instrument the same numbe
 Run one strategy under several cost assumptions on a single fetched signal series, and solve for the commission rate at which its total return reaches zero. Answers 'does this survive costs' in one call.
 
 **Required:** `symbol`, `start_date`, `end_date`, `strategy_type`, `scenarios`  
-**Optional:** `parameters`, `initial_capital`, `fill_price`, `solve_breakeven`, `risk_free_rate`
+**Optional:** `parameters`, `initial_capital`, `fill_price`, `solve_breakeven`, `risk_free_rate`, `cash_rate`
 
 #### `estimate_backtest_overfitting`
 
 PBO: how often the configuration that wins in-sample loses out-of-sample, across every equal split of the period. It measures your SELECTION PROCEDURE, not the strategy -- 0.5 means picking the in-sample best is no better than picking at random, and above 0.5 means the grid is being fitted to noise. Reports the median pairwise correlation between configurations, because a hundred settings correlated at 0.99 are one strategy and the PBO on them is meaningless. Needs two or more configurations in trial_returns, one return series each; compare_models in the modeling runtime compares registered models.
 
-**Required:** `trial_returns`  
-**Optional:** `n_splits`
+*No required arguments.*  
+**Optional:** `trial_returns`, `returns_ref`, `n_splits`
 
 #### `estimate_break_even_cost`
 
@@ -767,14 +767,14 @@ The per-trade cost at which this edge disappears -- the number every backtest sh
 Extended diagnostics for a built-in strategy: top drawdown episodes, trade expectancy/payoff/streaks with MAE/MFE, and exposure stats.
 
 **Required:** `symbol`, `start_date`, `end_date`, `strategy_type`  
-**Optional:** `parameters`, `initial_capital`, `commission_pct`, `slippage_pct`, `top_n_drawdowns`, `fill_price`, `risk_free_rate`
+**Optional:** `parameters`, `initial_capital`, `commission_pct`, `slippage_pct`, `top_n_drawdowns`, `fill_price`, `risk_free_rate`, `cash_rate`
 
 #### `get_deflated_sharpe_ratio`
 
 The probability a Sharpe ratio is real GIVEN how many strategies were tried. Twenty strategies with no edge whatsoever, on two years of daily data, produce a best annualized Sharpe of 1.34 -- measured, not argued. Reporting that without saying 'and I tried 19 others' is false while every individual number is true. Skew and kurtosis widen the Sharpe's sampling distribution, so a short-volatility payoff is penalised here, correctly. Pass trial_sharpes for the accurate version: their VARIANCE sets the threshold, and 100 near-identical settings deflate far less than 100 different ideas.
 
-**Required:** `returns`, `n_trials`  
-**Optional:** `trial_sharpes`, `benchmark_sharpe`, `periods_per_year`
+**Required:** `n_trials`  
+**Optional:** `returns`, `returns_ref`, `returns_column`, `trial_sharpes`, `benchmark_sharpe`, `periods_per_year`
 
 #### `get_drawdown_table`
 
@@ -802,7 +802,7 @@ Performance broken out by regime, because one Sharpe over a mixed sample describ
 Same-sample robustness checks for a grid search: parameter sensitivity, Deflated Sharpe Ratio, and a block-bootstrap confidence interval on the best trial's Sharpe ratio.
 
 **Required:** `symbol`, `start_date`, `end_date`, `strategy`, `param_grid`  
-**Optional:** `initial_capital`, `commission_pct`, `slippage_pct`, `sort_by`, `n_bootstrap_iterations`, `bootstrap_block_size`, `bootstrap_confidence`, `random_seed`, `skew`, `kurtosis`, `risk_free_rate`
+**Optional:** `initial_capital`, `commission_pct`, `slippage_pct`, `sort_by`, `n_bootstrap_iterations`, `bootstrap_block_size`, `bootstrap_confidence`, `random_seed`, `skew`, `kurtosis`, `risk_free_rate`, `cash_rate`, `financing_rate`, `borrow_fee_bps`
 
 #### `run_backtest_optimization`
 
@@ -810,7 +810,7 @@ Grid-search strategy parameters and return the top N combinations ranked by a ch
 *Long-running: served only with `--enable-long-running`.*
 
 **Required:** `symbol`, `strategy`, `start_date`, `end_date`, `param_grid`  
-**Optional:** `initial_capital`, `commission_pct`, `slippage_pct`, `sort_by`, `top_n`, `n_workers`, `fill_price`, `risk_free_rate`
+**Optional:** `initial_capital`, `commission_pct`, `slippage_pct`, `sort_by`, `top_n`, `n_workers`, `fill_price`, `risk_free_rate`, `cash_rate`, `financing_rate`, `borrow_fee_bps`
 
 #### `run_monte_carlo_simulation`
 
@@ -831,21 +831,21 @@ The distribution of outcomes the same edge could have produced, by RESHUFFLING t
 Is a result better than luck after a search, under the hypothesis named in question. The default, best_candidate_vs_benchmark, is White's Reality Check: does the best of every candidate searched beat one benchmark by more than the best of that many would by luck (method='hansen_spa' for Hansen's studentised form). beats_every_alternative asks whether one strategy beats EVERY alternative, and its p-value is the largest pairwise one. The bootstrap is BLOCKED because resampling individual days destroys the serial correlation that drives drawdowns and volatility clustering, making the null too narrow and the p-value too small.
 
 *No required arguments.*  
-**Optional:** `question`, `candidate_returns`, `benchmark_returns`, `strategy_returns`, `alternative_returns`, `method`, `n_bootstrap`, `block_size`, `seed`
+**Optional:** `question`, `candidate_returns`, `benchmark_returns`, `strategy_returns`, `alternative_returns`, `returns_ref`, `benchmark_column`, `strategy_column`, `method`, `n_bootstrap`, `block_size`, `seed`
 
 #### `run_regime_adaptive_backtest`
 
 Classify market regime via Hurst, auto-select and optimise the best strategy.
 
 **Required:** `symbol`, `start_date`, `end_date`  
-**Optional:** `initial_capital`, `commission_pct`, `slippage_pct`, `hurst_method`, `sma_param_grid`, `rsi_param_grid`, `macd_param_grid`, `bollinger_param_grid`, `n_workers`, `risk_free_rate`
+**Optional:** `initial_capital`, `commission_pct`, `slippage_pct`, `hurst_method`, `sma_param_grid`, `rsi_param_grid`, `macd_param_grid`, `bollinger_param_grid`, `n_workers`, `risk_free_rate`, `cash_rate`, `financing_rate`, `borrow_fee_bps`
 
 #### `run_regime_adaptive_walkforward_backtest`
 
 Leakage-free regime-adaptive backtest: regime/strategy/parameter selection per walk-forward window, evaluated strictly out-of-sample.
 
 **Required:** `symbol`, `start_date`, `end_date`  
-**Optional:** `train_bars`, `test_bars`, `initial_capital`, `commission_pct`, `slippage_pct`, `hurst_method`, `sma_param_grid`, `rsi_param_grid`, `macd_param_grid`, `bollinger_param_grid`, `sort_by`, `fill_price`, `risk_free_rate`
+**Optional:** `train_bars`, `test_bars`, `initial_capital`, `commission_pct`, `slippage_pct`, `hurst_method`, `sma_param_grid`, `rsi_param_grid`, `macd_param_grid`, `bollinger_param_grid`, `sort_by`, `fill_price`, `risk_free_rate`, `cash_rate`, `financing_rate`, `borrow_fee_bps`
 
 #### `run_terminal_monte_carlo`
 
@@ -859,7 +859,7 @@ Monte Carlo that keeps only where the paths ENDED, so the simulation count is ca
 Walk-forward validation: optimise in-sample, evaluate out-of-sample, return OOS stats.
 
 **Required:** `symbol`, `start_date`, `end_date`, `strategy`, `param_grid`  
-**Optional:** `train_bars`, `test_bars`, `initial_capital`, `commission_pct`, `slippage_pct`, `sort_by`, `fill_price`, `risk_free_rate`, `run_id`
+**Optional:** `train_bars`, `test_bars`, `initial_capital`, `commission_pct`, `slippage_pct`, `sort_by`, `fill_price`, `risk_free_rate`, `cash_rate`, `financing_rate`, `borrow_fee_bps`, `run_id`
 
 ### `custom_signal`
 
@@ -868,14 +868,14 @@ Walk-forward validation: optimise in-sample, evaluate out-of-sample, return OOS 
 Backtest a signal computed outside this library (your own alpha model) on one symbol.
 
 **Required:** `symbol`, `start_date`, `end_date`, `signals`  
-**Optional:** `signal_type`, `max_abs_weight`, `signal_fill_policy`, `initial_capital`, `commission_pct`, `slippage_pct`, `fill_price`, `risk_free_rate`
+**Optional:** `signal_type`, `max_abs_weight`, `signal_fill_policy`, `initial_capital`, `commission_pct`, `slippage_pct`, `fill_price`, `risk_free_rate`, `cash_rate`, `financing_rate`, `borrow_fee_bps`
 
 #### `run_signal_panel_backtest`
 
 Backtest a pre-computed signal panel across a ticker universe, combined into portfolio metrics.
 
 **Required:** `tickers`, `start_date`, `end_date`  
-**Optional:** `signal_panel`, `signal_panel_ref`, `weights`, `signal_fill_policy`, `initial_capital`, `commission_pct`, `slippage_pct`, `benchmark`, `include_trade_log`, `fill_price`, `signal_type`, `max_abs_weight`, `risk_free_rate`, `run_id`
+**Optional:** `signal_panel`, `signal_panel_ref`, `weights`, `signal_fill_policy`, `initial_capital`, `commission_pct`, `slippage_pct`, `benchmark`, `include_trade_log`, `fill_price`, `signal_type`, `max_abs_weight`, `risk_free_rate`, `cash_rate`, `financing_rate`, `borrow_fee_bps`, `run_id`
 
 ---
 
@@ -1227,15 +1227,15 @@ Turn alpha scores into portfolio weights and STOP, so the weights can be looked 
 
 A covariance matrix plus the diagnostics that say whether to trust it. Shrinkage is the ANSWER to the conditioning warnings the optimizer already emits rather than a caveat about them: a covariance over N assets has N(N+1)/2 parameters, and mean-variance optimization is an error-maximizer over its worst-estimated directions. Read observations_per_parameter and condition_number before the matrix. Returns it annualized.
 
-**Required:** `tickers`, `start_date`, `end_date`  
-**Optional:** `method`, `halflife`, `periods_per_year`
+*No required arguments.*  
+**Optional:** `tickers`, `start_date`, `end_date`, `returns_ref`, `method`, `halflife`, `periods_per_year`, `run_id`
 
 #### `estimate_trade_cost`
 
 Itemized cost of one hypothetical trade under a composed cost model: commission, spread, square-root market impact, short borrow and margin interest. Commission is pct/per-share/directional/maker-taker; spread is fixed bps or a fraction of the bar's range. No market data needed.
 
 **Required:** `notional`  
-**Optional:** `side`, `commission_model`, `commission_pct`, `shares`, `per_share_rate`, `min_commission`, `buy_rate`, `sell_rate`, `taker_rate`, `maker_rate`, `is_maker`, `spread_model`, `spread_bps`, `bar_high`, `bar_low`, `bar_close`, `range_pct`, `avg_dollar_volume`, `volatility`, `impact_coefficient`, `short_borrow_bps`, `holding_days`, `margin_cash`, `margin_annual_rate`
+**Optional:** `side`, `commission_model`, `commission_pct`, `shares`, `per_share_rate`, `min_commission`, `buy_rate`, `sell_rate`, `taker_rate`, `maker_rate`, `is_maker`, `spread_model`, `spread_bps`, `bar_high`, `bar_low`, `bar_close`, `range_pct`, `avg_dollar_volume`, `volatility`, `impact_coefficient`, `short_borrow_bps`, `holding_days`, `margin_cash`, `margin_annual_rate`, `day_count`
 
 #### `get_capacity_report`
 
@@ -1276,7 +1276,8 @@ Amihud illiquidity ratio and Corwin-Schultz spread estimator per ticker — OHLC
 
 Where the risk in a portfolio you ALREADY hold is coming from, and what one more unit of each position costs. Marginal risk is the derivative of portfolio volatility with respect to the weight; contribution is weight times marginal, and these sum exactly to portfolio volatility, which makes it a decomposition rather than an allocation of blame. The diagnostic is the contribution share against the weight share: an asset at 5% of the book carrying 30% of the risk is the position to look at. A NEGATIVE marginal contribution means adding reduces risk -- that position is a hedge whether or not it was meant as one.
 
-**Required:** `weights`, `assets`, `covariance`
+**Required:** `weights`  
+**Optional:** `assets`, `covariance`, `covariance_ref`
 
 #### `get_portfolio_risk_attribution`
 
@@ -1296,21 +1297,22 @@ How large to trade, from a stop distance measured in ATR and an account risk bud
 
 Allocation that never INVERTS the covariance matrix. Inversion is where an ill-conditioned estimate does its damage -- the smallest eigenvalue becomes the largest, so the direction the data says least about becomes the one the portfolio bets most on, and with 50 assets on 500 observations that eigenvalue is noise. HRP clusters by correlation, orders the assets so similar ones sit adjacent, and splits capital down the tree. It has NO optimality property and does not maximize anything; it buys robustness by giving that up.
 
-**Required:** `returns`  
-**Optional:** `alignment`, `periods_per_year`
+*No required arguments.*  
+**Optional:** `returns`, `returns_ref`, `alignment`, `periods_per_year`
 
 #### `optimize_max_diversification`
 
 The portfolio that maximizes the DIVERSIFICATION RATIO -- the weighted average of the assets' volatilities over the portfolio's own. It is 1.0 when everything is perfectly correlated and grows as correlations fall, so maximizing it maximizes the volatility that CANCELS. Not the same as minimum variance, which piles into the quietest assets because quiet is what it minimizes; this normalizes by each asset's own volatility first, so an asset is rewarded for being UNCORRELATED rather than for being quiet. It does invert the correlation matrix and reports the condition number for that reason.
 
-**Required:** `assets`, `covariance`
+*No required arguments.*  
+**Optional:** `assets`, `covariance`, `covariance_ref`
 
 #### `optimize_risk_parity`
 
 Weights at which every asset contributes the SAME AMOUNT OF RISK -- not the same weight. An equally weighted portfolio of a bond fund and a biotech stock is a biotech portfolio; the equity contributes nearly all the variance. Uses NO expected returns, which is the reason to prefer it over mean-variance in most real situations: the standard error on a mean return from two years of daily data is about the size of the estimate, and mean-variance is maximally sensitive to exactly that input. Pass `budget` for an unequal risk budget, which is how most mandates are actually written.
 
-**Required:** `assets`, `covariance`  
-**Optional:** `budget`, `max_iterations`, `tolerance`
+*No required arguments.*  
+**Optional:** `assets`, `covariance`, `covariance_ref`, `budget`, `max_iterations`, `tolerance`
 
 #### `plan_rebalance`
 
@@ -1331,7 +1333,7 @@ Produce portfolio weights via Markowitz mean-variance (max_sharpe/min_volatility
 What a portfolio does under NAMED shocks rather than under a distribution. A 99% VaR is a quantile of a distribution fitted to history, and its central weakness is that the event you care about is usually not in that history; a named scenario makes the assumption explicit and arguable. Positions absent from a scenario are treated as unchanged and the COVERAGE is reported, because a scenario touching three of forty positions produces a loss that is a lower bound rather than a worst case.
 
 **Required:** `weights`, `scenarios`  
-**Optional:** `assets`, `covariance`
+**Optional:** `assets`, `covariance`, `covariance_ref`
 
 #### `run_stress_test`
 
