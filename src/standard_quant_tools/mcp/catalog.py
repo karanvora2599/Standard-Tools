@@ -169,7 +169,8 @@ class ToolEntry:
 
         MCP's `idempotentHint` asks whether repeating a call with the same
         arguments has any additional effect. A call that writes an artifact
-        does: either a new one per call (a `*_uri` field), or a reference
+        does: either a new one per call (a `*_uri` field, or a dataset or
+        model registered under an id the call minted), or a reference
         published at the caller's `run_id`, which a repeat with the same
         arguments is refused for -- "a value is already published at
         run_id=..." -- because publishing never overwrites by default. See
@@ -224,27 +225,45 @@ def _is_reference_field(name: str) -> bool:
     return name in ("ref", "refs") or name.endswith(("_ref", "_refs"))
 
 
+def _is_store_id(name: str) -> bool:
+    """A result field naming a dataset or a model in the modeling store:
+    `dataset_id`, `model_id`, or a name ending in either."""
+    return name.endswith(("dataset_id", "model_id"))
+
+
 def _writes_artifact(input_schema: Dict[str, Any], result_fields: Set[str]) -> bool:
     """
     Whether a call writes an artifact, read off the tool's own signature.
 
-    Two shapes do. A result with a `*_uri` field reports a file the call
-    saved, a new one per call. And a tool that takes a `run_id` and answers
-    with a reference publishes that reference at `sqt://<kind>/<run_id>/
-    <name>`: `handoff.publish` refuses to overwrite, so the same arguments
-    a second time are REFUSED -- the opposite of idempotent.
+    Three shapes do. A result with a `*_uri` field reports a file the call
+    saved, a new one per call. A result naming a dataset or a model
+    (`*dataset_id`, `*model_id`) that the input does not take names one the
+    call registered under an id it minted, a new one per call:
+    `build_model_dataset` and `register_external_panel` answer the same
+    arguments twice with two datasets, each written to the store. A tool
+    that takes the id and echoes it (`inspect_dataset`) reads it. And a
+    tool that takes a `run_id` and answers with a reference publishes that
+    reference at `sqt://<kind>/<run_id>/<name>`: `handoff.publish` refuses
+    to overwrite, so the same arguments a second time are REFUSED -- the
+    opposite of idempotent.
 
-    The second shape was missed while the rule looked only for `*_uri`,
-    and 32 publishing tools were advertised with `idempotentHint: true`; a
-    client that trusts the hint and retries a call gets a refusal. A
-    `run_id` WITHOUT a reference in the result is a filter, not an address
-    (`list_artifacts` narrows its listing by it), and a reference WITHOUT a
-    `run_id` is one the caller passed in and the tool describes or reads
-    (`describe_reference`, `validate_external_dataset`); neither writes.
+    The last shape was missed while the rule looked only for `*_uri`, and
+    32 publishing tools were advertised with `idempotentHint: true`; a
+    client that trusts the hint and retries a call gets a refusal. The
+    minted id was missed after that, and the two tools that register a
+    dataset were advertised as safe to repeat while each repeat added a
+    dataset to the store. A `run_id` WITHOUT a reference in the result is a
+    filter, not an address (`list_artifacts` narrows its listing by it), and
+    a reference WITHOUT a `run_id` is one the caller passed in and the tool
+    describes or reads (`describe_reference`, `validate_external_dataset`);
+    neither writes.
     """
     if any(field.endswith("_uri") for field in result_fields):
         return True
-    takes_address = "run_id" in input_schema.get("properties", {})
+    inputs = input_schema.get("properties", {})
+    if any(_is_store_id(f) and f not in inputs for f in result_fields):
+        return True
+    takes_address = "run_id" in inputs
     return takes_address and any(_is_reference_field(f) for f in result_fields)
 
 

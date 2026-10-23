@@ -1,5 +1,76 @@
 # Changelog
 
+## The last two expected shortfalls say how many days they average, the grid and the compact backtest say which returns they compounded, an evaluation is measured from its capital, and three lags count their nanoseconds on every pandas
+
+- **`run_portfolio_simulation` and `run_backtest_compact` report their
+  shortfall's tail count.** Five doors said how many returns `cvar_95` is
+  the mean of and warned below ten; these two reported the number alone.
+  `cvar_95_tail_observations` is now on the simulation's result and on the
+  compact result's `risk`, counted by `cvar_tail_observations` from the
+  same returns the shortfall averages (the simulation's day-0 return
+  included), and `cvar_tail_warning` adds the warning below ten. Planted:
+  one asset held whole at zero cost with four losing days among 61
+  returns reads a tail of 4 and "the worst 4 of 61 returns"; 400 distinct
+  daily returns read 21 and no warning. The compact result's
+  `validation_status` does not change for it.
+- **The grid's rows and the compact backtest carry `return_basis`.**
+  `run_strategy` reports whether the compounded returns include dividends;
+  `backtest_grid` dropped it from every row, because the native path builds
+  no such column, and `BacktestResultV2` had no field for it. The grid now
+  sets the frame's basis on every row of both paths, and in
+  `attrs["return_basis"]`; `run_backtest_optimization` and
+  `run_backtest_compact` report it. Each reads one frame, so none can be
+  `mixed` and there is no mixed-basis warning to carry.
+- **`evaluate_model_portfolio` measures growth and drawdown from the
+  capital.** Its summary read cumulative return, CAGR, maximum drawdown and
+  Calmar off the equity curve's first point, which is after any rebalance on
+  the first bar and net of its costs. One asset held whole at 10 bps,
+  falling from 100 to 80 and ending at 110 over 60 bars: total return
+  0.100100 became 0.099000, CAGR 0.503020 became 0.496611, maximum drawdown
+  -0.200200 became -0.201000 and Calmar 2.512583 became 2.470699. The total
+  return and drawdown are now `run_portfolio_simulation`'s to the bit. The
+  growth rate still spans the curve's own bars, since the capital and the
+  opening fill are one bar. The evaluation's prices start before its first
+  rebalance, so its first bar is normally all cash, its equity is the
+  capital and nothing moves, to the bit; the change shows where the first
+  rebalance falls on the first simulated bar. Volatility, Sharpe, Sortino,
+  turnover and exposure are unchanged. `_summarize_simulation` takes the
+  capital and refuses one that is not finite and positive.
+- **Three durations are counted from the integer.** pandas'
+  `.dt.total_seconds()` divided a duration's integer by the units in a
+  second up to 3.0 and adds the whole seconds to the fraction from 3.1, and
+  the two round differently wherever a duration has a part under a second:
+  of 200,000 random nanosecond durations under 2**40 ns, 309 read another
+  last bit, and of 200,000 past 2**53 ns (104 days), 49,691. The time-decay
+  sample weights, `validate_pit_records`' publication lag and an event
+  panel's validated lag each read one, and each takes timestamps as given,
+  so an external panel's or a record's nanoseconds reach it. All three now
+  use `_durations.duration_seconds`, which forms the seconds as
+  `analysis.order_events` forms an order's lifetime: 3 days and
+  0.847301324 s read 259200.847301324 on pandas 2.3 and 3.0 and now read
+  259200.84730132401 on all three, as pandas 3.1 did. Whole-second
+  durations, every daily and minute stamp, are exact either way and do not
+  move. The event panel's report rounds its lags to four decimals of a
+  day, so its printed figures were already the same.
+- **`idempotentHint` is false for `build_model_dataset` and
+  `register_external_panel`.** Neither takes a `run_id` nor saves a
+  `*_uri`, so neither shape the rule read saw them, but each call mints a
+  `ds_` id and writes a dataset under it: the same arguments twice succeed
+  with two datasets in the store. The rule gains a third shape, a
+  `*dataset_id` or `*model_id` in the result that the input does not take;
+  it changes no other tool (the other two that mint one,
+  `run_model_experiment` and `join_point_in_time`, already saved a file).
+  `describe_tool`'s `persists_artifact` follows. 42 tools now advertise
+  `idempotentHint: false`.
+- Tests: the planted tail counts and warnings at both doors; the basis on
+  the grid's rows on both paths and at the two tools, on total-return and
+  price-return bars; the planted book from the capital, its agreement with
+  the backtest tool, and a book that trades nothing on its first bar
+  unchanged to the bit; the three durations against the whole seconds plus
+  the fraction on pandas 2.3, 3.0 and 3.1, where the old call sites fail on
+  the first two; and both registrars called twice with the same arguments,
+  returning two datasets.
+
 ## Return streams meet on the dates they share, five tools read a published returns panel, and a covariance travels as a reference
 
 - **Dated return streams, one set of rules.** Two return series of the

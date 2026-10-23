@@ -6,9 +6,11 @@ its dividends, and nothing in a backtest's numbers says which one it
 compounded: yfinance serves total-return bars, Polygon and Databento
 price-return bars, and the old single `adjusted=True` hid the difference
 (see the CHANGELOG entry of 2026-10-22). Each door below -- the two engines,
-the two backtest tools on them, and the dataset build -- now echoes a
-`return_basis` read off the bars' own stamps, and the ones that take several
-inputs say so when the inputs disagree.
+the parameter grid on every row of either path, the backtest tools on them,
+and the dataset build -- now echoes a `return_basis` read off the bars' own
+stamps, and the ones that take several inputs say so when the inputs
+disagree. The grid and the compact backtest read one frame, so they have
+nothing to mix.
 
 The bars are stamped by the real providers' own `get_metadata`, the way a
 provider stamps what it serves.
@@ -20,14 +22,22 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from standard_quant_tools.agent.models import BuyAndHoldInput, PortfolioSimulationInput
+from standard_quant_tools.agent.models import (
+    BacktestCompactInput,
+    BacktestOptInput,
+    BuyAndHoldInput,
+    PortfolioSimulationInput,
+)
 from standard_quant_tools.agent.runtimes.backtest.tools import (
+    run_backtest_compact,
+    run_backtest_optimization,
     run_buy_and_hold,
 )
 from standard_quant_tools.agent.runtimes.backtest.tools import (
     run_portfolio_simulation as run_portfolio_simulation_tool,
 )
-from standard_quant_tools.backtest.engine import run_strategy
+from standard_quant_tools.backtest import engine as engine_module
+from standard_quant_tools.backtest.engine import backtest_grid, run_strategy
 from standard_quant_tools.backtest.portfolio_engine import run_portfolio_simulation
 from standard_quant_tools.data.adjustment import stamp_adjustment
 from standard_quant_tools.data.factory import DataFactory
@@ -129,6 +139,64 @@ def _engine(frames, metadata, serve) -> Tuple[str, Any]:
     return out["return_basis"], out["warnings"]
 
 
+GRID = {"fast_period": [5, 10], "slow_period": [30, 50]}
+
+
+def _grid_rows(frame: pd.DataFrame) -> Tuple[str, Any]:
+    """The grid's basis, held to be every row's: one frame, one basis."""
+    grid = backtest_grid(frame, "sma_crossover", GRID, n_workers=1)
+    assert list(grid["return_basis"]) == [grid.attrs["return_basis"]] * len(grid)
+    return grid.attrs["return_basis"], grid.attrs["warnings"]
+
+
+def _grid(frames, metadata, serve):
+    ((_, frame),) = frames.items()
+    return _grid_rows(frame)
+
+
+def _grid_python_path(frames, metadata, serve):
+    """The fallback loop, which builds each row from run_strategy's own
+    result rather than from the native kernel's metric array."""
+    ((_, frame),) = frames.items()
+    saved = engine_module.HAS_CPP
+    engine_module.HAS_CPP = False
+    try:
+        return _grid_rows(frame)
+    finally:
+        engine_module.HAS_CPP = saved
+
+
+def _optimization_tool(frames, metadata, serve):
+    ((symbol, _),) = frames.items()
+    serve(frames, metadata)
+    out = run_backtest_optimization(
+        BacktestOptInput(
+            symbol=symbol,
+            strategy="sma_crossover",
+            start_date=START,
+            end_date=END,
+            param_grid=GRID,
+            n_workers=1,
+        )
+    )
+    return out.return_basis, out.warnings
+
+
+def _compact_tool(frames, metadata, serve):
+    ((symbol, _),) = frames.items()
+    serve(frames, metadata)
+    out = run_backtest_compact(
+        BacktestCompactInput(
+            symbol=symbol,
+            start_date=START,
+            end_date=END,
+            strategy_type="sma_crossover",
+            parameters={"fast_period": 10, "slow_period": 30},
+        )
+    )
+    return out.return_basis, out.warnings
+
+
 def _portfolio_engine(frames, metadata, serve):
     out = run_portfolio_simulation(frames, _weights(list(frames)))
     return out["return_basis"], out["warnings"]
@@ -177,6 +245,13 @@ def _dataset_build(frames, metadata, serve):
 SINGLE_INPUT_DOORS = {
     "run_strategy": _engine,
     "run_buy_and_hold": _buy_and_hold_tool,
+    # The grid's rows and the compact result dropped the basis run_strategy
+    # computed for them: a grid row is the single run with the same
+    # arguments, and said less than it.
+    "backtest_grid (native)": _grid,
+    "backtest_grid (Python)": _grid_python_path,
+    "run_backtest_optimization": _optimization_tool,
+    "run_backtest_compact": _compact_tool,
 }
 MULTI_INPUT_DOORS = {
     "run_portfolio_simulation (engine)": _portfolio_engine,

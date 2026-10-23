@@ -4170,6 +4170,7 @@ def validate_pit_records(input_data: PitRecordsInput) -> PitValidationResult:
     import numpy as np
     import pandas as pd
 
+    from standard_quant_tools._durations import duration_seconds
     from standard_quant_tools.error import ValidationError as _VE
     from standard_quant_tools.modeling.dataset.point_in_time import (
         AVAILABLE_TIME,
@@ -4187,7 +4188,12 @@ def validate_pit_records(input_data: PitRecordsInput) -> PitValidationResult:
 
     reserved = {EVENT_TIME, AVAILABLE_TIME, ENTITY}
     fields = sorted(c for c in frame.columns if c not in reserved)
-    lag = (frame[AVAILABLE_TIME] - frame[EVENT_TIME]).dt.total_seconds() / 86400.0
+    # Counted from the integers, not by pandas' total_seconds(), whose last
+    # bit moved in pandas 3.1 for a lag with a part under a second.
+    lag = pd.Series(
+        duration_seconds(frame[AVAILABLE_TIME] - frame[EVENT_TIME]) / 86400.0,
+        index=frame.index,
+    )
 
     keys = [EVENT_TIME] + ([ENTITY] if input_data.entity_scoped else [])
     versions = frame.groupby(keys)[AVAILABLE_TIME].nunique()

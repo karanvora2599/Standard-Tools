@@ -870,7 +870,13 @@ class TestEveryDoorCreditsIdleCash:
             data, weights, initial_capital=100_000.0, **_spec_financing(spec)
         )
         metrics = _summarize_simulation(
-            simulation, 252, spec.risk_free_rate, 0.0, 0.0, day_count=spec.day_count
+            simulation,
+            252,
+            spec.risk_free_rate,
+            0.0,
+            0.0,
+            day_count=spec.day_count,
+            initial_capital=100_000.0,
         )
         assert abs(metrics["sharpe_ratio"]) < 1e-9
         assert metrics["cumulative_return"] > 0.0

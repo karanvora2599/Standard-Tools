@@ -1272,8 +1272,8 @@ def _run_grid_job(job: Dict[str, Any]) -> Dict[str, Any]:
     result.pop("trade_log", None)
     result.pop("periods_per_year", None)
     result.pop("periods_per_year_source", None)
-    # One frame for the whole grid, so one basis: a per-row copy would be
-    # a column the native grid path does not build.
+    # One frame for the whole grid, so one basis: `_finish_grid` sets it on
+    # every row of both paths alike, after the rows are built.
     result.pop("return_basis", None)
     result.update(job["params"])
     return result
@@ -1387,6 +1387,7 @@ def _finish_grid(
     ppy_source: str,
     ppy_warnings: List[str],
     dropped: Dict[str, int],
+    return_basis: str,
 ) -> pd.DataFrame:
     """
     Rank the grid and stamp what the ranking and the run depended on.
@@ -1395,8 +1396,14 @@ def _finish_grid(
     same grid differently -- they did once, over a Sharpe of 0.0 against
     NaN. `attrs` carries: n_unrankable, n_combinations (distinct
     combinations run), duplicate_values_dropped, periods_per_year,
-    periods_per_year_source and warnings.
+    periods_per_year_source, return_basis and warnings.
+
+    Every row also carries `return_basis`, the frame's, so a grid row says
+    what run_strategy's result says for the same arguments. It was dropped
+    from each row because the native path builds no such column; it is the
+    whole grid's, one frame, so it is set here for both paths alike.
     """
+    df_out = df_out.assign(return_basis=return_basis)
     ranked = rank_rows(df_out, sort_by, ascending)
     warnings = list(ppy_warnings)
     if dropped:
@@ -1418,6 +1425,7 @@ def _finish_grid(
             "duplicate_values_dropped": dict(dropped),
             "periods_per_year": periods_per_year,
             "periods_per_year_source": ppy_source,
+            "return_basis": return_basis,
             "warnings": warnings,
         }
     )
@@ -1507,9 +1515,10 @@ def backtest_grid(
     Returns:
         pd.DataFrame with one row per distinct parameter combination, ranked
         by sort_by. Columns include all metric keys plus the parameter
-        names. `attrs` carries n_unrankable, n_combinations,
-        duplicate_values_dropped, periods_per_year, periods_per_year_source
-        and warnings.
+        names and `return_basis` (the frame's, the same on every row, as
+        run_strategy reports it). `attrs` carries n_unrankable,
+        n_combinations, duplicate_values_dropped, periods_per_year,
+        periods_per_year_source, return_basis and warnings.
 
     Raises:
         ValidationError: price_data's index is unsorted or duplicated, or a
@@ -1740,7 +1749,14 @@ def backtest_grid(
             params_df = pd.DataFrame(combos, columns=keys)
             df_out = pd.concat([metrics_df, params_df.reset_index(drop=True)], axis=1)
             df_out = _finish_grid(
-                df_out, sort_by, ascending, ppy, ppy_source, ppy_warnings, dropped
+                df_out,
+                sort_by,
+                ascending,
+                ppy,
+                ppy_source,
+                ppy_warnings,
+                dropped,
+                return_basis_of(price_data),
             )
 
             elapsed_ms = (time.perf_counter() - t0) * 1000
@@ -1850,6 +1866,7 @@ def backtest_grid(
         ppy_source,
         ppy_warnings,
         dropped,
+        return_basis_of(price_data),
     )
 
     elapsed_ms = (time.perf_counter() - t0) * 1000

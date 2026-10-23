@@ -33,6 +33,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools._durations import duration_seconds
 from standard_quant_tools.data.external import (
     DEFAULT_BATCH_ROWS,
     DEFAULT_SCAN_LIMIT,
@@ -155,9 +156,12 @@ class _Checker:
             if text not in self.pit_failures and len(self.pit_failures) < 5:
                 self.pit_failures.append(text)
             return
-        lag = (
-            checked[AVAILABLE_TIME] - checked[EVENT_TIME]
-        ).dt.total_seconds() / 86400.0
+        # Counted from the integers, not by pandas' total_seconds(), whose
+        # last bit moved in pandas 3.1 for a lag with a part under a second.
+        lag = pd.Series(
+            duration_seconds(checked[AVAILABLE_TIME] - checked[EVENT_TIME]) / 86400.0,
+            index=checked.index,
+        )
         finite = lag[np.isfinite(lag.to_numpy())]
         if not finite.empty:
             self.lag_sum += float(finite.sum())

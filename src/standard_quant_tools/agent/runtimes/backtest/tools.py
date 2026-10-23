@@ -266,6 +266,8 @@ from standard_quant_tools.metrics.diagnostics import (
 from standard_quant_tools.metrics.return_metrics import annualized_volatility, cagr
 from standard_quant_tools.metrics.risk_metrics import (
     cvar,
+    cvar_tail_observations,
+    cvar_tail_warning,
     drawdown_series,
     information_ratio,
     max_drawdown,
@@ -1245,6 +1247,8 @@ def run_backtest_optimization(input_data: BacktestOptInput) -> BacktestOptResult
         best_return=round(float(best_row.get("total_return", 0.0)), 6),
         top_results=top_results,
         n_unrankable=n_unrankable,
+        # One frame for the whole grid, so one basis for every row.
+        return_basis=str(grid_df.attrs.get("return_basis", "unknown")),
         warnings=opt_warnings,
     )
 
@@ -1825,6 +1829,14 @@ def run_portfolio_simulation(
             )
         simulation_warnings.append(detail)
 
+    # Counted from the same returns cvar_95 averages, the day-0 return
+    # included, as the five other doors that report an expected shortfall
+    # count theirs.
+    cvar_95_tail = cvar_tail_observations(returns, 0.95)
+    cvar_95_caution = cvar_tail_warning("cvar_95", cvar_95_tail, len(returns), 0.95)
+    if cvar_95_caution:
+        simulation_warnings.append(cvar_95_caution)
+
     leverage_series = raw["leverage_curve"]
     avg_gross_leverage = (
         round(float(leverage_series.mean()), 4) if not leverage_series.empty else 0.0
@@ -1884,6 +1896,7 @@ def run_portfolio_simulation(
         calmar_ratio=round(day0_calmar, 4),
         var_95=round(float(var_historical(returns, 0.95)), 6),
         cvar_95=round(float(cvar(returns, 0.95)), 6),
+        cvar_95_tail_observations=cvar_95_tail,
         information_ratio=ir,
         final_equity=round(float(raw["final_equity"]), 2),
         final_cash=round(float(raw["final_cash"]), 2),
@@ -2322,6 +2335,13 @@ def run_backtest_compact(input_data: BacktestCompactInput) -> BacktestResultV2:
             f"Only {results['num_trades']} trade(s) — too few to draw reliable conclusions."
         )
         validation_status = "warning"
+    # Counted from the same returns cvar_95 averages. A caveat on the
+    # estimate rather than on the run, so it does not change the status,
+    # as the engine's own caveats do not.
+    cvar_95_tail = cvar_tail_observations(returns, 0.95)
+    cvar_95_caution = cvar_tail_warning("cvar_95", cvar_95_tail, len(returns), 0.95)
+    if cvar_95_caution:
+        warnings.append(cvar_95_caution)
 
     logger.debug(
         "[backtest_compact] run_id=%s  trades=%d  sharpe=%.3f  status=%s",
@@ -2348,6 +2368,7 @@ def run_backtest_compact(input_data: BacktestCompactInput) -> BacktestResultV2:
             max_drawdown=round(float(results["max_drawdown"]), 6),
             var_95=round(float(var_historical(returns, 0.95)), 6),
             cvar_95=round(float(cvar(returns, 0.95)), 6),
+            cvar_95_tail_observations=cvar_95_tail,
         ),
         exposure=ExposureSummary(**exposure),
         costs=CostSummary(
@@ -2366,6 +2387,7 @@ def run_backtest_compact(input_data: BacktestCompactInput) -> BacktestResultV2:
         trades_uri=trades_uri,
         equity_curve_ref=equity_curve_ref,
         trades_ref=trades_ref,
+        return_basis=results.get("return_basis", "unknown"),
         warnings=warnings,
         validation_status=validation_status,
     )

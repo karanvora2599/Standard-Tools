@@ -71,7 +71,7 @@ from standard_quant_tools.metrics.return_metrics import (
     cagr,
     cumulative_return,
 )
-from standard_quant_tools.metrics.risk_metrics import calmar_ratio, max_drawdown
+from standard_quant_tools.metrics.risk_metrics import max_drawdown
 from standard_quant_tools.modeling.specs import TASKS
 
 from . import artifacts as _artifacts
@@ -651,10 +651,44 @@ def _summarize_simulation(
     commission_pct: float,
     slippage_pct: float,
     day_count: str = DEFAULT_DAY_COUNT,
+    *,
+    initial_capital: float,
 ) -> Dict[str, float]:
     equity = result["equity_curve"].dropna()
     if equity.empty:
         raise ValidationError("simulation produced an empty equity curve")
+    if not (math.isfinite(initial_capital) and initial_capital > 0):
+        raise ValidationError(
+            f"_summarize_simulation: initial_capital={initial_capital!r}. It is "
+            "the level every return and drawdown here is measured from, so "
+            "it must be finite and positive: the capital the simulation "
+            "opened with."
+        )
+    # The account opened at initial_capital on the first bar, and the
+    # curve's first point is that bar AFTER a rebalance on it, net of its
+    # costs: measured from there, a book that paid 10 bps to put itself on
+    # read 10 bps richer, and its drawdown started below the peak it fell
+    # from. Growth is read from the capital, as run_portfolio_simulation's
+    # `_metrics_with_day0_cost` reads it, over the same elapsed bars as
+    # before: the capital and the opening fill are one bar, so the opening
+    # point is replaced, not prepended. The drawdown path keeps both, the
+    # capital first, so an opening cost is a fall from the peak. Where the
+    # first bar trades nothing, its equity IS the capital, and all four
+    # numbers are the curve's own to the bit. The per-bar returns keep the
+    # curve's bars too: their benchmark accrues from the second bar on, as
+    # the engine credits cash.
+    capital = float(initial_capital)
+    from_capital = pd.Series(
+        np.concatenate(([capital], equity.to_numpy(dtype=float)[1:]))
+    )
+    path = pd.Series(np.concatenate(([capital], equity.to_numpy(dtype=float))))
+    growth = float(cagr(from_capital, periods_per_year))
+    drawdown = float(max_drawdown(path))
+    # calmar_ratio's rule, on the two series above.
+    if drawdown == 0.0:
+        calmar = math.inf if growth > 0 else math.nan
+    else:
+        calmar = growth / abs(drawdown)
     returns = equity.pct_change(fill_method=None).dropna()
     # The excess is over the rate as the simulation's cash accrued it: the
     # same rate, day count and calendar days, so a book sitting in cash
@@ -681,8 +715,8 @@ def _summarize_simulation(
     years = max(len(equity) / periods_per_year, 1e-9)
 
     metrics: Dict[str, float] = {
-        "cumulative_return": float(cumulative_return(equity)),
-        "cagr": float(cagr(equity, periods_per_year)),
+        "cumulative_return": float(cumulative_return(from_capital)),
+        "cagr": growth,
         "annualized_volatility": (
             float(annualized_volatility(returns, periods_per_year))
             if not returns.empty
@@ -690,8 +724,8 @@ def _summarize_simulation(
         ),
         "sharpe_ratio": float(sharpe),
         "sortino_ratio": float(sortino),
-        "max_drawdown": float(max_drawdown(equity)),
-        "calmar_ratio": float(calmar_ratio(equity, periods_per_year)),
+        "max_drawdown": drawdown,
+        "calmar_ratio": float(calmar),
         "final_equity": float(result["final_equity"]),
         "n_rebalances": int(len(rebalance_log)),
         "mean_turnover_pct": float(turnover.mean()) if not turnover.empty else 0.0,
@@ -1234,6 +1268,7 @@ def _simulate_predictions_portfolio(
         portfolio.commission_pct,
         portfolio.slippage_pct,
         day_count=portfolio.day_count,
+        initial_capital=portfolio.initial_capital,
     )
 
     equity_curve = simulation["equity_curve"]

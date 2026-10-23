@@ -42,6 +42,7 @@ from typing import Any, Optional
 import numpy as np
 import pandas as pd
 
+from standard_quant_tools._durations import duration_seconds
 from standard_quant_tools.error import ValidationError
 
 # Optional native fast path. This was the worst per-row cost in the module --
@@ -230,7 +231,10 @@ def time_decay_weights(dates: np.ndarray, half_life: float) -> np.ndarray:
     stamps = pd.to_datetime(pd.Series(np.asarray(dates)))
     if stamps.empty:
         return np.empty(0, dtype=np.float64)
-    age_days = (stamps.max() - stamps).dt.total_seconds().to_numpy() / 86400.0
+    # Counted from the integers, not by pandas' total_seconds(), whose last
+    # bit moved in pandas 3.1 for an age with a part under a second -- what
+    # an external panel's stamps can carry -- and with it every weight.
+    age_days = duration_seconds(stamps.max() - stamps) / 86400.0
     weights = np.power(0.5, age_days / float(half_life))
     mean = float(weights.mean())
     return weights / mean if mean > 0 else weights

@@ -3293,6 +3293,15 @@ class BacktestOptResult(ExplainsNulls):
             "every other one instead of competing for first place."
         ),
     )
+    return_basis: str = Field(
+        "unknown",
+        description=(
+            "What every combination's compounded bar returns are -- one "
+            "frame, so one basis: 'total_return' (dividends in), "
+            "'price_return' (dividends out) or 'unknown', as run_strategy "
+            "reports it for a single run."
+        ),
+    )
     warnings: List[str] = Field(default_factory=list)
 
 
@@ -4234,6 +4243,13 @@ class PortfolioSimulationResult(ExplainsNulls):
     calmar_ratio: Stat
     var_95: float
     cvar_95: float
+    cvar_95_tail_observations: Optional[int] = Field(
+        None,
+        description="How many returns cvar_95 is the mean of -- the "
+        "days at or beyond the 95% VaR, the day-0 return included. Below 10 "
+        "the shortfall describes those few days rather than the tail, and "
+        "`warnings` says so.",
+    )
     information_ratio: Optional[float] = None
     final_equity: Stat
     final_cash: Stat
@@ -5319,6 +5335,13 @@ class RiskSummary(BaseModel):
     max_drawdown: float
     var_95: float
     cvar_95: float
+    cvar_95_tail_observations: Optional[int] = Field(
+        None,
+        description="How many returns cvar_95 is the mean of -- the "
+        "bars at or beyond the 95% VaR. Below 10 the shortfall describes "
+        "those few bars rather than the tail, and the result's `warnings` "
+        "says so.",
+    )
 
 
 class ExposureSummary(BaseModel):
@@ -5428,6 +5451,16 @@ class BacktestResultV2(ExplainsNulls):
     )
     trades_ref: Optional[str] = Field(
         None, description="Typed handoff reference for the trade log."
+    )
+    return_basis: str = Field(
+        "unknown",
+        description=(
+            "What the compounded bar returns are: 'total_return' when the "
+            "provider adjusted the bars for dividends, 'price_return' when "
+            "it did not, 'unknown' when the frame does not say -- as "
+            "run_strategy reports it. The two differ by the dividend yield, "
+            "so compare results on one basis."
+        ),
     )
     warnings: List[str] = []
     validation_status: str  # "ok" | "warning"
