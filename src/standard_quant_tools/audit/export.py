@@ -191,10 +191,12 @@ def export_bundle(
         p for p in _iter_day_files(directory) if start_date <= p.stem <= end_date
     ]
     index_path = directory / _INDEX_FILENAME
-    # parents[0]=audit, [1]=standard_quant_tools, [2]=src, [3]=repo root.
-    verifier_script = (
-        Path(__file__).resolve().parents[3] / "scripts" / "verify_audit_log.py"
-    )
+    # The verifier ships inside the package, beside this module. It used to be
+    # read from the repository's scripts/ directory, which a wheel or a git
+    # install does not have, and the `exists()` guard below it then left it
+    # out without a word: every bundle exported outside a source checkout
+    # told its reader to run a file it did not contain.
+    verifier_script = Path(__file__).resolve().with_name("verify_audit_log.py")
 
     manifest: Dict[str, Any] = {
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -241,8 +243,7 @@ def export_bundle(
             if index_path.exists():
                 manifest["files"].append(_describe(index_path))
                 zf.write(index_path, arcname=index_path.name)
-            if verifier_script.exists():
-                zf.write(verifier_script, arcname="verify_audit_log.py")
+            zf.write(verifier_script, arcname="verify_audit_log.py")
             zf.writestr("manifest.json", json.dumps(manifest, indent=2, sort_keys=True))
             zf.writestr("README.txt", _EXPORT_README)
         _publish_exclusively(temporary, out_path)

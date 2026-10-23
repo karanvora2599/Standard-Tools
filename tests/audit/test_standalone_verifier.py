@@ -1,8 +1,8 @@
 """
-Parity test for scripts/verify_audit_log.py against the real
-standard_quant_tools.audit module.
+Parity test for the standalone verifier (audit/verify_audit_log.py) against
+the real standard_quant_tools.audit module.
 
-scripts/verify_audit_log.py is a deliberate, stdlib-only reimplementation of
+The standalone verifier is a deliberate, stdlib-only reimplementation of
 audit.py's hash_payload / verify_audit_log_integrity /
 verify_audit_trail_integrity, so an external auditor can verify a log bundle
 without installing the project. That's a known duplication-by-design
@@ -12,8 +12,12 @@ silently disagree about what counts as tampered. This test is what catches
 that drift -- it must be run (and pass) any time audit.py's hashing changes.
 """
 
+import ast
 import importlib.util
 import json
+import subprocess
+import sys
+import zipfile
 from pathlib import Path
 from types import ModuleType
 
@@ -23,12 +27,14 @@ from standard_quant_tools import audit
 
 from .. import REPO_ROOT
 
-_SCRIPT_PATH = REPO_ROOT / "scripts" / "verify_audit_log.py"
+_SCRIPT_PATH = (
+    REPO_ROOT / "src" / "standard_quant_tools" / "audit" / "verify_audit_log.py"
+)
 
 
 def _load_standalone_module() -> ModuleType:
-    """Load scripts/verify_audit_log.py as a module without adding it to
-    sys.modules permanently or requiring scripts/ to be a package."""
+    """Load the standalone verifier as a module by path, without adding it
+    to sys.modules permanently or importing the package around it."""
     spec = importlib.util.spec_from_file_location(
         "verify_audit_log_standalone", _SCRIPT_PATH
     )
@@ -181,6 +187,79 @@ class TestStandaloneVerifierEndToEnd:
     def test_cli_entrypoint_exits_nonzero_without_args(self, standalone):
         with pytest.raises(SystemExit):
             standalone.main([])
+
+
+def _clean_day(directory: Path) -> Path:
+    w = audit.AuditWriter(audit_dir=directory)
+    day = directory / "2024-01-01.jsonl"
+    head = w._bootstrap_new_day(day)
+    record = audit.DecisionRecord(
+        request_id="r1",
+        timestamp_utc="2024-01-01T00:00:00+00:00",
+        tool_name="t1",
+        input={},
+        cpp_available=False,
+        duration_ms=1.0,
+        status="ok",
+    )
+    record.prev_record_hash = head
+    record.record_hash = audit.hash_payload(
+        {**record.model_dump(exclude={"record_hash"}), "record_hash": None}
+    )
+    day.write_text(record.model_dump_json() + "\n", encoding="utf-8")
+    return day
+
+
+class TestTheVerifierTravelsWithThePackage:
+    """A bundle's README tells its reader to run verify_audit_log.py. The
+    exporter used to read it from the repository's scripts/ directory, which
+    a wheel or a git install does not have, and skipped it without a word
+    when it was missing -- so every bundle exported by an installed copy of
+    the package shipped without the verifier it names."""
+
+    def test_it_lives_inside_the_package(self):
+        package = Path(audit.__file__).resolve().parent
+        assert _SCRIPT_PATH.resolve().parent == package
+
+    def test_it_imports_the_standard_library_only(self):
+        tree = ast.parse(_SCRIPT_PATH.read_text(encoding="utf-8"))
+        roots = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                roots.update(a.name.split(".")[0] for a in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.level == 0:
+                roots.add(node.module.split(".")[0])
+        assert roots and roots <= set(sys.stdlib_module_names) | {"__future__"}
+
+    def test_a_bundle_carries_the_packaged_bytes(self, tmp_path: Path):
+        trail = tmp_path / "trail"
+        trail.mkdir()
+        _clean_day(trail)
+        out = tmp_path / "bundle.zip"
+        audit.export_bundle("2024-01-01", "2024-01-01", out, trail)
+        with zipfile.ZipFile(out) as zf:
+            assert zf.read("verify_audit_log.py") == _SCRIPT_PATH.read_bytes()
+
+    def test_the_checkout_script_runs_it_with_its_exit_codes(self, tmp_path: Path):
+        day = _clean_day(tmp_path)
+        script = REPO_ROOT / "scripts" / "verify_audit_log.py"
+        clean = subprocess.run(
+            [sys.executable, str(script), str(tmp_path)],
+            capture_output=True,
+            text=True,
+        )
+        assert clean.returncode == 0, clean.stdout + clean.stderr
+        assert "OK" in clean.stdout
+
+        record = json.loads(day.read_text(encoding="utf-8").splitlines()[0])
+        record["status"] = "tampered"
+        day.write_text(json.dumps(record) + "\n", encoding="utf-8")
+        tampered = subprocess.run(
+            [sys.executable, str(script), str(tmp_path)],
+            capture_output=True,
+            text=True,
+        )
+        assert tampered.returncode == 1, tampered.stdout + tampered.stderr
 
 
 def _old_writer_day(directory: Path, value) -> Path:

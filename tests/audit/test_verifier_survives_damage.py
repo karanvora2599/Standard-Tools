@@ -36,7 +36,7 @@ DAYS = ("2024-03-01", "2024-03-02", "2024-03-03")
 def standalone() -> ModuleType:
     spec = importlib.util.spec_from_file_location(
         "verify_audit_log_standalone_damage",
-        REPO_ROOT / "scripts" / "verify_audit_log.py",
+        REPO_ROOT / "src" / "standard_quant_tools" / "audit" / "verify_audit_log.py",
     )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)

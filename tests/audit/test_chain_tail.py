@@ -33,7 +33,7 @@ def standalone() -> ModuleType:
     in, and the one an auditor actually runs."""
     spec = importlib.util.spec_from_file_location(
         "verify_audit_log_standalone_tail",
-        REPO_ROOT / "scripts" / "verify_audit_log.py",
+        REPO_ROOT / "src" / "standard_quant_tools" / "audit" / "verify_audit_log.py",
     )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)

@@ -1,5 +1,26 @@
 # Changelog
 
+## An audit bundle carries its verifier however the package was installed
+
+- **The defect.** `export_bundle` read `verify_audit_log.py` from the
+  repository's `scripts/` directory (`parents[3]` of the module) and wrote
+  it into the zip only `if verifier_script.exists()`. A wheel or a git
+  install has no `scripts/`, so every bundle exported by an installed copy
+  of the package shipped without the verifier its own `README.txt` tells
+  the reader to run, and nothing said so. Found in a downstream CI that
+  installs from git: its bundle test had failed on every run since.
+- **The fix.** The standalone verifier moved into the package as
+  `standard_quant_tools/audit/verify_audit_log.py`, beside the exporter,
+  unchanged apart from a paragraph saying where it lives; the package never
+  imports it and it still imports the standard library only. The exporter
+  writes it unconditionally, so a missing verifier is an error rather than
+  a quiet omission. `scripts/verify_audit_log.py` stays as a stdlib-only
+  wrapper that runs the packaged file by path from a source checkout.
+- **Tests.** The verifier sits in the package directory, imports nothing
+  outside the standard library, travels into a bundle byte for byte, and
+  the checkout wrapper keeps its exit codes (0 clean, 1 tampered). The
+  three suites that load the verifier by path read it from its new place.
+
 ## The documentation describes the allocation and finance runtimes in their own guides, counts 262 tools in twelve runtimes, and measures the MCP listing again
 
 - **Two guides.** `31_allocation.md` covers the eight allocation tools:

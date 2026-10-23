@@ -3,7 +3,7 @@
 index's own chain plus every day file it attests to
 (`verify_audit_trail_integrity`).
 
-`scripts/verify_audit_log.py` is a stdlib-only copy of this module for an
+`audit/verify_audit_log.py` is a stdlib-only copy of this module for an
 auditor who will not install the package. Every change here is mirrored
 there, and `tests/audit/test_standalone_verifier.py` holds the two to the
 same answers -- the same problems, notes and verified head, word for word."""

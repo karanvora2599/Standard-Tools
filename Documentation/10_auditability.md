@@ -1141,7 +1141,7 @@ through a storage backend.
 
 ### Standalone verification (no package install required)
 
-`scripts/verify_audit_log.py` in this repo is a **deliberate, stdlib-only
+`verify_audit_log.py` is a **deliberate, stdlib-only
 reimplementation** of the same hashing and chain-walking logic — no
 `pydantic`/`pandas`/`numpy`, no `standard_quant_tools` import — so an
 external auditor can verify an exported log bundle without installing the
@@ -1151,6 +1151,11 @@ project or its dependencies:
 python verify_audit_log.py /path/to/audit_dir
 python verify_audit_log.py --file 2026-07-19.jsonl
 ```
+
+It ships inside the package as `standard_quant_tools/audit/verify_audit_log.py`,
+so every exported bundle carries it however the package was installed, and
+`scripts/verify_audit_log.py` runs it from a source checkout. The package
+never imports it.
 
 This is a known duplication-by-design maintenance risk, called out in the
 script's own docstring: if `audit.hash_payload`'s canonicalization ever
@@ -1351,7 +1356,7 @@ export_bundle("2026-07-01", "2026-07-19", "audit_bundle.zip")
 `export_bundle(start_date, end_date, out_path, audit_dir=None)` zips every
 day file in the inclusive date range, the chain index, a `manifest.json`
 (per-file SHA-256, record counts, package version, git commit, generation
-timestamp), a copy of `scripts/verify_audit_log.py`, and a short
+timestamp), a copy of the standalone verifier, and a short
 `README.txt` with verification instructions — the complete artifact meant
 to be handed to an external auditor, who can verify it offline with only
 the Python standard library:
