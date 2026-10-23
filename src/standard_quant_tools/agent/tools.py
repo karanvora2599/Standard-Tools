@@ -134,6 +134,7 @@ from standard_quant_tools.agent.runtimes.delta_one import (
     solve_forward_carry,
 )
 from standard_quant_tools.agent.runtimes.derivatives import (
+    aggregate_option_book,
     analyze_option_strategy,
     analyze_vol_term_structure,
     check_put_call_parity,
@@ -233,13 +234,16 @@ from standard_quant_tools.agent.runtimes.portfolio import (
 from standard_quant_tools.agent.runtimes.research import (
     analyze_stock_risk,
     analyze_tail_dependence,
+    backtest_var_forecasts,
     calculate_series_metrics,
     compare_distributions,
     compute_indicator_panel,
     decompose_returns,
     detect_change_points,
     detect_regimes,
+    estimate_factor_model,
     estimate_tail_index,
+    forecast_var_series,
     get_advanced_indicators,
     get_bootstrap_interval,
     get_correlation_analysis,

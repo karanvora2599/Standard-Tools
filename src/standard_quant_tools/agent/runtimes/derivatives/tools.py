@@ -50,6 +50,7 @@ from .models import (
     DeltaHedgeInput,
     ExpectedMoveInput,
     ImpliedForwardInput,
+    OptionBookInput,
     OptionGreeksInput,
     OptionScenariosInput,
     OptionStrategyInput,
@@ -62,6 +63,7 @@ from .results import (
     DeltaHedgeResult,
     ExpectedMoveResult,
     ImpliedForwardResult,
+    OptionBookResult,
     OptionGreeksResult,
     OptionScenariosResult,
     OptionStrategyResult,
@@ -443,3 +445,29 @@ def get_implied_volatility(
         at_bound=result["at_bound"],
         warnings=warnings,
     )
+
+
+def aggregate_option_book(input_data: OptionBookInput) -> OptionBookResult:
+    """
+    Dollar greeks across a book of options and underlying positions on
+    several underlyings, the beta-weighted delta, and delta-gamma P&L
+    against full Black-Scholes revaluation on a grid of spot shocks.
+
+    Every number is `analysis.option_book.aggregate_option_book`'s, which
+    prices each line with the batched Black-Scholes-Merton kernel.
+    """
+    from standard_quant_tools.analysis.option_book import (
+        aggregate_option_book as _aggregate,
+    )
+
+    result = _aggregate(
+        [line.model_dump(exclude_none=True) for line in input_data.options],
+        input_data.spots,
+        input_data.rates,
+        dividend_yields=input_data.dividend_yields,
+        underlying_units=input_data.underlying_units,
+        betas=input_data.betas,
+        valuation_date=input_data.valuation_date,
+        spot_shocks=input_data.spot_shocks,
+    )
+    return OptionBookResult(**result)

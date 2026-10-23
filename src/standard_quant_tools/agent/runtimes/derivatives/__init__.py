@@ -3,14 +3,14 @@ execute, built from one list so a tool cannot be advertised without being
 dispatchable or the reverse.
 
 WHY THIS IS ITS OWN RUNTIME. Option pricing lived in `research` under the
-`analysis` category, which was right when it was two tools. It is twelve now,
-and they answer a question `research` does not: `research` describes what an
-asset IS, while these describe what a CONTRACT ON it is worth and what
-holding it does to you. An agent scoped to one rarely wants the other.
+`analysis` category, which was right when it was two tools. It is thirteen
+now, and they answer a question `research` does not: `research` describes
+what an asset IS, while these describe what a CONTRACT ON it is worth and
+what holding it does to you. An agent scoped to one rarely wants the other.
 
 The split clears the floor this library sets for one -- at least eight tools
 in the new runtime, at least eight left in the donor. Derivatives holds
-twelve; `research` was left with thirty-three and has grown since.
+thirteen; `research` was left with thirty-three and has grown since.
 
 `get_option_pricing` and `get_implied_volatility` MOVED here from `research`,
 which is a breaking change for anything scoped to that runtime. MOVED_FROM
@@ -27,6 +27,7 @@ from .models import (
     DeltaHedgeInput,
     ExpectedMoveInput,
     ImpliedForwardInput,
+    OptionBookInput,
     OptionGreeksInput,
     OptionScenariosInput,
     OptionStrategyInput,
@@ -36,6 +37,7 @@ from .models import (
     VolTermStructureInput,
 )
 from .tools import (
+    aggregate_option_book,
     analyze_option_strategy,
     analyze_vol_term_structure,
     check_put_call_parity,
@@ -204,6 +206,20 @@ TOOL_DEFS = [
         "usual.",
         OptionScenariosInput,
     ),
+    (
+        "aggregate_option_book",
+        "Dollar delta, gamma per 1%, vega, theta per day and rho of options "
+        "and underlying positions on several underlyings, per underlying and "
+        "for the book, with a beta-weighted delta. Every "
+        "option line needs its contract multiplier -- 100 is a convention, "
+        "not a fact, and a line without one is refused. The book is also "
+        "revalued in full on a grid of spot shocks (default +/-1, 2, 5, 10%) "
+        "beside the delta-gamma estimate, and the error between them is "
+        "reported per shock: it grows with the cube of the move, so at 10% "
+        "on short-dated options read full_pnl. Spots, rates, yields and "
+        "betas are the caller's; theta is per calendar day.",
+        OptionBookInput,
+    ),
 ]
 
 TOOL_DISPATCH = {
@@ -225,6 +241,7 @@ TOOL_DISPATCH = {
         get_option_risk_scenarios,
         OptionScenariosInput,
     ),
+    "aggregate_option_book": (aggregate_option_book, OptionBookInput),
 }
 
 #: Every tool here belongs to the one category this runtime owns.
@@ -234,6 +251,7 @@ __all__ = [
     "TOOL_CATEGORY",
     "TOOL_DEFS",
     "TOOL_DISPATCH",
+    "aggregate_option_book",
     "analyze_option_strategy",
     "analyze_vol_term_structure",
     "check_put_call_parity",

@@ -30,6 +30,9 @@ from typing import Annotated, Dict, List, Optional
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
 from standard_quant_tools.agent.runtimes._json_safe import (
+    ExplainsNulls,
+)
+from standard_quant_tools.agent.runtimes._json_safe import (
     finite_or_none as _finite_or_none,
 )
 
@@ -380,10 +383,131 @@ class OptionScenariosResult(_Result):
     worst_case: Optional[WorstCase] = None
 
 
+#: Why a beta-weighted number is null.
+_NO_BETAS = "no betas were given, so there is no index to weight the delta to"
+
+
+class OptionBookScenario(ExplainsNulls):
+    """One spot shock: delta-gamma against full revaluation. Its nulls are
+    reported by the result that holds it."""
+
+    model_config = ConfigDict(extra="forbid")
+    null_reasons = {
+        "relative_error": "full_pnl is zero at this shock, so the error has "
+        "nothing to be relative to",
+    }
+
+    shock: Stat = Field(None, description="The fractional spot move.")
+    delta_gamma_pnl: Stat = Field(
+        None, description="sum of (delta dS + gamma dS^2 / 2) x multiplier x qty."
+    )
+    full_pnl: Stat = Field(None, description="Full Black-Scholes revaluation.")
+    error: Stat = Field(None, description="delta_gamma_pnl - full_pnl.")
+    relative_error: Stat = Field(None, description="error / |full_pnl|.")
+
+
+class OptionBookGreeks(ExplainsNulls):
+    """Dollar greeks summed over positions; reported by its result."""
+
+    model_config = ConfigDict(extra="forbid")
+    null_reasons = {"beta_weighted_delta": _NO_BETAS}
+
+    dollar_delta: Stat = None
+    dollar_gamma: Stat = Field(None, description="Per 1% move in the underlying.")
+    dollar_vega: Stat = Field(None, description="Per volatility point.")
+    dollar_theta: Stat = Field(None, description="Per calendar day.")
+    dollar_rho: Stat = Field(None, description="Per 1% of rate.")
+    market_value: Stat = None
+    beta_weighted_delta: Stat = Field(
+        None, description="sum of beta x dollar_delta, index-equivalent $."
+    )
+
+
+class OptionBookUnderlying(OptionBookGreeks):
+    null_reasons = {
+        "beta": _NO_BETAS,
+        "rate": "no option is on this underlying, so no rate was needed",
+    }
+
+    underlying: str = ""
+    spot: Stat = None
+    rate: Stat = None
+    dividend_yield: Stat = None
+    beta: Stat = None
+    n_options: int = 0
+    underlying_units: Stat = Field(None, description="Units held outright.")
+    delta_units: Stat = Field(
+        None, description="Delta in units of the underlying, options and units."
+    )
+    scenarios: List[OptionBookScenario] = Field(default_factory=list)
+
+
+class OptionBookLineResult(ExplainsNulls):
+    """One option line: per-unit greeks and the position's dollar greeks."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    underlying: str = ""
+    option_type: str = ""
+    strike: Stat = None
+    time_to_expiry: Stat = Field(None, description="Years, as priced.")
+    volatility: Stat = None
+    quantity: Stat = None
+    multiplier: Stat = None
+    spot: Stat = None
+    price: Stat = Field(None, description="Of one option on one unit.")
+    delta: Stat = None
+    gamma: Stat = None
+    vega: Stat = Field(None, description="Per unit, per volatility point.")
+    theta: Stat = Field(None, description="Per unit, per calendar day.")
+    rho: Stat = Field(None, description="Per unit, per 1% of rate.")
+    delta_units: Stat = Field(None, description="delta x multiplier x quantity.")
+    dollar_delta: Stat = None
+    dollar_gamma: Stat = None
+    dollar_vega: Stat = None
+    dollar_theta: Stat = None
+    dollar_rho: Stat = None
+    market_value: Stat = None
+
+
+class OptionBookResult(ExplainsNulls):
+    model_config = ConfigDict(extra="forbid")
+    null_reasons = {"largest_error": "there is no shock to compare at"}
+
+    n_options: int = 0
+    n_underlyings: int = 0
+    totals: OptionBookGreeks = Field(
+        default_factory=OptionBookGreeks,
+        description="The book: every underlying's dollar greeks summed.",
+    )
+    by_underlying: List[OptionBookUnderlying] = Field(default_factory=list)
+    scenarios: List[OptionBookScenario] = Field(
+        default_factory=list,
+        description="The book's P&L when every underlying moves by `shock` "
+        "at once, vol, rates and time held.",
+    )
+    largest_error: Stat = Field(
+        None, description="The book's delta-gamma error of largest size."
+    )
+    largest_error_shock: Stat = None
+    spot_shocks: List[float] = Field(default_factory=list)
+    lines: List[OptionBookLineResult] = Field(default_factory=list)
+    units: Dict[str, str] = Field(
+        default_factory=dict, description="What each dollar greek measures."
+    )
+    theta_basis: str = ""
+    warnings: List[str] = Field(default_factory=list)
+
+
 __all__ = [
     "DeltaHedgeResult",
     "ExpectedMoveResult",
     "ImpliedForwardResult",
+    "OptionBookGreeks",
+    "OptionBookLineResult",
+    "OptionBookResult",
+    "OptionBookScenario",
+    "OptionBookUnderlying",
     "OptionGreeksResult",
     "OptionScenariosResult",
     "OptionStrategyResult",

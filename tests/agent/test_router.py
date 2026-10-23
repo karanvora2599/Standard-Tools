@@ -226,6 +226,22 @@ class TestRoutingAccuracyEval:
             "Run a Fama-French factor regression on this fund's returns.",
             "quant_research",
         ),
+        (
+            "Estimate a factor model for these five strategies' returns on my "
+            "factor series: loadings, factor covariance and specific variances.",
+            "quant_research",
+        ),
+        (
+            "Forecast a one-step-ahead 99% VaR and expected shortfall for "
+            "every day of this return series with filtered historical "
+            "simulation.",
+            "quant_research",
+        ),
+        (
+            "Were my daily VaR forecasts right? Run Kupiec, Christoffersen "
+            "and the Basel traffic light on the exceptions.",
+            "quant_research",
+        ),
         # custom_signal
         ("Backtest this signal I already computed: {...}.", "custom_signal"),
         # portfolio_risk
@@ -309,6 +325,11 @@ class TestRoutingAccuracyEval:
         # derivatives -- split out of research; never covered before
         ("What are the vanna and volga on this call?", "derivatives"),
         ("Fit a volatility smile to these strikes and implied vols.", "derivatives"),
+        (
+            "What are the dollar delta, gamma and vega of my options book "
+            "across these five underlyings, beta-weighted to the index?",
+            "derivatives",
+        ),
         # microstructure -- split out of portfolio; never covered before
         (
             "Estimate the effective spread on this name from daily bars.",

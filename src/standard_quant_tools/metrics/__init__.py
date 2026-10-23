@@ -27,6 +27,8 @@ from .risk_metrics import (
     var_historical,
     var_parametric,
 )
+from .var_backtest import backtest_var_series
+from .var_forecast import forecast_var_series
 from .volatility_estimators import (
     garman_klass_volatility,
     parkinson_volatility,

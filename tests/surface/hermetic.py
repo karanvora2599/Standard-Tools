@@ -302,6 +302,23 @@ def publish_fixtures(directory: str) -> Dict[str, Any]:
         )
         if out:
             refs["covariance"] = out["covariance_ref"]
+        # One-step-ahead VaR forecasts of the first column, published by the
+        # tool that makes them, for the tester's forecasts_ref.
+        out = step(
+            "var_forecasts",
+            lambda: _call(
+                "research",
+                "forecast_var_series",
+                dict(
+                    returns_ref=refs["returns_panel"],
+                    column=SYMBOLS[0],
+                    run_id="fx",
+                    name="var_forecasts",
+                ),
+            ),
+        )
+        if out:
+            refs["var_forecasts"] = out["forecasts_ref"]
 
     dates = pd.bdate_range(start, end)
     scores = pd.DataFrame(
@@ -626,6 +643,7 @@ _REF_BY_FIELD = {
     "equity_curve_ref": "equity_curve",
     "covariance_ref": "covariance",
     "weights_ref": "weight_panel",
+    "forecasts_ref": "var_forecasts",
 }
 
 #: Tools whose one `ref` field wants a particular kind.
@@ -781,6 +799,18 @@ def _hand_written(
                 "daily_volatility": {s: 0.02 for s in SYMBOLS},
                 "spread_bps": {s: 2.0 + i for i, s in enumerate(SYMBOLS)},
             }
+        if tool == "estimate_factor_model":
+            # One panel holds both sides: two of its columns are the
+            # factors and the other four the assets.
+            return {
+                "returns": _DELETE,
+                "factors": _DELETE,
+                "columns": list(SYMBOLS[2:]),
+                "factors_ref": refs["returns_panel"],
+                "factor_columns": list(SYMBOLS[:2]),
+            }
+        if tool == "forecast_var_series":
+            return {"returns": _DELETE, "column": SYMBOLS[0]}
         # The sleeve tools: the panel's columns are the sleeves, in place of
         # the synthesized streams (whose references name nothing) or the
         # synthesized inline returns (keyed by tickers, not dates).
@@ -788,6 +818,9 @@ def _hand_written(
             return {"streams": _DELETE}
         if tool in ("allocate_across_sleeves", "evaluate_allocation_rule"):
             return {"returns": _DELETE}
+    if tool == "backtest_var_forecasts" and refs.get("var_forecasts"):
+        # The published forecasts carry their own level.
+        return {"forecasts": _DELETE, "confidence": _DELETE}
     if tool == "build_continuous_futures_series":
         near = pd.bdate_range("2020-01-02", "2020-03-20")
         far = pd.bdate_range("2020-01-02", "2020-06-19")
@@ -1168,6 +1201,37 @@ def _hand_written(
             "basis_bps": -15.0,
             "asset_return": 0.02,
             "spot_at_maturity": 1.08,
+        }
+    if tool == "aggregate_option_book":
+        # Every line's underlying is a key the spots, rates and betas price,
+        # with shares on one of them, so the probes reach the greeks, the
+        # beta weighting and the revaluation grid.
+        a, b = SYMBOLS[:2]
+        line = {"option_type": "call", "time_to_expiry": 0.5, "multiplier": 100}
+        return {
+            "options": [
+                {
+                    **line,
+                    "underlying": a,
+                    "strike": 100.0,
+                    "volatility": 0.25,
+                    "quantity": 3,
+                },
+                {
+                    **line,
+                    "underlying": b,
+                    "option_type": "put",
+                    "strike": 90.0,
+                    "volatility": 0.3,
+                    "quantity": -2,
+                },
+            ],
+            "spots": {a: 101.0, b: 95.0},
+            "rates": {a: 0.04, b: 0.04},
+            "dividend_yields": {a: 0.01},
+            "underlying_units": {b: 200.0},
+            "betas": {a: 1.1, b: 0.8},
+            "valuation_date": _DELETE,
         }
     if tool == "get_sharpe_stability":
         return {

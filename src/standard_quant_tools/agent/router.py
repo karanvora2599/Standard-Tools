@@ -69,7 +69,13 @@ TOOL_CATEGORIES: Dict[str, Dict[str, str]] = {
             "Kalman-filter time-varying hedge ratios, PCA on returns, "
             "Hurst regime detection, and correlation/diversification "
             "analytics across a universe. Statistical structure analysis, "
-            "not strategy backtesting."
+            "not strategy backtesting. Also a factor model estimated from "
+            "return series in hand (loadings, factor covariance, specific "
+            "variances, the covariance they imply), and VaR as a forecast: a "
+            "one-step-ahead VaR and expected shortfall series (historical, "
+            "normal, Cornish-Fisher, EWMA, filtered historical, EVT-GARCH) "
+            "and its backtest -- exceptions, Kupiec, Christoffersen, the "
+            "Basel traffic light, Acerbi-Szekely."
         ),
     },
     "backtest_execution": {
@@ -108,6 +114,8 @@ TOOL_CATEGORIES: Dict[str, Dict[str, str]] = {
             "that explain a hedged book's P&L, multi-leg payoffs, smile and "
             "term-structure fitting with arbitrage checks, put-call parity, "
             "expected move, delta-hedge simulation and revaluation grids. "
+            "Also a whole option book across underlyings: dollar greeks, "
+            "beta-weighted delta, and delta-gamma against full revaluation. "
             "Quotes are passed in rather than fetched."
         ),
     },

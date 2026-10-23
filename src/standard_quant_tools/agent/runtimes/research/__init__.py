@@ -45,6 +45,11 @@ from .diagnostic_tools import (  # noqa: F401
     test_autocorrelation,
     test_structural_break,
 )
+from .factor_model_tools import (  # noqa: F401
+    FACTOR_MODEL_TOOL_DEFS,
+    FACTOR_MODEL_TOOL_DISPATCH,
+    estimate_factor_model,
+)
 from .inference_tools import (  # noqa: F401
     INFERENCE_TOOL_DEFS,
     INFERENCE_TOOL_DISPATCH,
@@ -89,6 +94,12 @@ from .tools import (
     run_stationarity_tests,
     scan_pairs,
     test_granger_causality,
+)
+from .var_tools import (  # noqa: F401
+    VAR_TOOL_DEFS,
+    VAR_TOOL_DISPATCH,
+    backtest_var_forecasts,
+    forecast_var_series,
 )
 
 #: (name, description, input model) — the single source for both
@@ -284,6 +295,10 @@ TOOL_DEFS = TOOL_DEFS + DIAGNOSTIC_TOOL_DEFS
 # unit and cannot half-register.
 TOOL_DEFS = TOOL_DEFS + INFERENCE_TOOL_DEFS
 
+# The factor model estimated from return streams, declared in
+# factor_model_tools.py.
+TOOL_DEFS = TOOL_DEFS + FACTOR_MODEL_TOOL_DEFS
+
 TOOL_DISPATCH = {name: (globals()[name], model) for name, _d, model in TOOL_DEFS}
 
 #: This runtime's slice of the library-wide routing taxonomy.
@@ -329,13 +344,26 @@ TOOL_CATEGORY.update({name: "quant_research" for name in DIAGNOSTIC_TOOL_DISPATC
 TOOL_DISPATCH.update(INFERENCE_TOOL_DISPATCH)
 TOOL_CATEGORY.update({name: "quant_research" for name in INFERENCE_TOOL_DISPATCH})
 
+TOOL_DISPATCH.update(FACTOR_MODEL_TOOL_DISPATCH)
+TOOL_CATEGORY.update({name: "quant_research" for name in FACTOR_MODEL_TOOL_DISPATCH})
+
+# The VaR forecast and its backtest, declared in var_tools.py. Both are
+# here, the tester too: in `backtest` it would have thinned a tool that
+# runtime's listing describes today (see var_tools' docstring).
+TOOL_DEFS = TOOL_DEFS + VAR_TOOL_DEFS
+TOOL_DISPATCH.update(VAR_TOOL_DISPATCH)
+TOOL_CATEGORY.update({name: "quant_research" for name in VAR_TOOL_DISPATCH})
+
 __all__ = [
+    "backtest_var_forecasts",
+    "forecast_var_series",
     "test_normality",
     "estimate_tail_index",
     "get_bootstrap_interval",
     "compare_distributions",
     "get_correlation_stability",
     "decompose_returns",
+    "estimate_factor_model",
     "test_autocorrelation",
     "run_seasonality_analysis",
     "get_entropy_measures",

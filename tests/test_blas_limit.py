@@ -83,6 +83,7 @@ from standard_quant_tools.analysis.cointegration import (
 )
 from standard_quant_tools.analysis.correlation import diversification_ratio
 from standard_quant_tools.analysis.diagnostics import lead_lag_matrix
+from standard_quant_tools.analysis.factor_model import estimate_factor_model
 from standard_quant_tools.analysis.microstructure_estimators import (
     order_flow_imbalance,
 )
@@ -613,6 +614,28 @@ def _factor_model(n_assets, n_factors, seed):
 FACTOR_MODEL = _factor_model(500, 20, 181)
 
 
+def _factor_panel(n_dates, n_assets, n_factors, seed):
+    """Asset and factor returns from a known factor model, for
+    `estimate_factor_model`: its least squares, Gram inverse, factor
+    covariance, residual correlations and B F B'."""
+    rng = np.random.default_rng(seed)
+    index = pd.bdate_range("1975-01-01", periods=n_dates)
+    factors = rng.normal(0.0, 0.01, (n_dates, n_factors))
+    loadings = rng.normal(0.6, 0.5, (n_assets, n_factors))
+    assets = factors @ loadings.T + rng.normal(0.0, 0.012, (n_dates, n_assets))
+    return (
+        pd.DataFrame(
+            assets, index=index, columns=[f"A{i:03d}" for i in range(n_assets)]
+        ),
+        pd.DataFrame(factors, index=index, columns=[f"F{k}" for k in range(n_factors)]),
+    )
+
+
+#: Long: reductions over 12,000 dates. Wide: 300 names on 10 factors.
+FACTOR_PANEL_LONG = _factor_panel(12_000, 6, 3, 191)
+FACTOR_PANEL_WIDE = _factor_panel(800, 300, 10, 193)
+
+
 def _cox_wide():
     """Two Newton steps of the Cox fit over 100 features: where, under
     OpenBLAS 0.3.31, the solve of the Hessian gave other last bits at two
@@ -799,6 +822,11 @@ CALLS = {
         FACTOR_MODEL["specific_variance"],
         benchmark_weights=FACTOR_MODEL["benchmark_weights"],
     ),
+    # The factor model estimated from returns: the least squares and Gram
+    # products over 12,000 dates, and the residual correlations and
+    # B F B' over 300 names.
+    "estimate_factor_model_long": lambda: estimate_factor_model(*FACTOR_PANEL_LONG),
+    "estimate_factor_model_wide": lambda: estimate_factor_model(*FACTOR_PANEL_WIDE),
     "decompose_tail_risk_long": lambda: decompose_tail_risk(
         LONG_NAMES, {"W": 0.4, "X": 0.3, "Y": -0.2, "Z": 0.5}, confidence=0.99
     ),

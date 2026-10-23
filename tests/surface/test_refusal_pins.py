@@ -189,6 +189,12 @@ BAD_VALUES: List[Tuple[str, str, str, Modifier]] = [
         "an ADV of +inf",
         _first_value("adv", float("inf")),
     ),
+    (
+        "derivatives",
+        "aggregate_option_book",
+        "a spot of 1e308",
+        _first_value("spots", 1e308),
+    ),
 ]
 
 
@@ -412,6 +418,61 @@ REFUSED: List[Tuple[str, str, str, Modifier]] = BAD_VALUES + [
         "a NaN equity change",
         _first_change(float("nan")),
     ),
+    (
+        "research",
+        "estimate_factor_model",
+        "a column the panel does not have",
+        _set(columns=["NOT_A_COLUMN"]),
+    ),
+    (
+        "research",
+        "estimate_factor_model",
+        "an asset named as a factor too",
+        _set(factor_columns=[hermetic.SYMBOLS[0], hermetic.SYMBOLS[2]]),
+    ),
+    (
+        "derivatives",
+        "aggregate_option_book",
+        "an option line with no multiplier",
+        _nested_first("options", "multiplier", None),
+    ),
+    (
+        "derivatives",
+        "aggregate_option_book",
+        "a rate given in percent",
+        _first_value("rates", 25.0),
+    ),
+    (
+        "research",
+        "forecast_var_series",
+        "a window longer than the history",
+        _set(window=5000),
+    ),
+    (
+        "research",
+        "forecast_var_series",
+        "evt_garch on a window with fifteen exceedances",
+        _set(method="evt_garch", window=150, tail_fraction=0.1),
+    ),
+    (
+        "research",
+        "forecast_var_series",
+        "a GARCH method on a 60-return window",
+        _set(method="filtered_historical", window=60),
+    ),
+    (
+        "research",
+        "backtest_var_forecasts",
+        "a level the forecasts were not made at",
+        _set(confidence=0.95),
+    ),
+    (
+        "research",
+        "backtest_var_forecasts",
+        "a returns panel as the forecasts",
+        _ref("forecasts_ref", "returns_panel"),
+    ),
+    ("research", "backtest_var_forecasts", "random_seed=-1", _set(random_seed=-1)),
     (
         "allocation",
         "combine_return_streams",

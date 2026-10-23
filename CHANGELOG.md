@@ -1,5 +1,70 @@
 # Changelog
 
+## A factor model is estimated for the risk tools to read, a VaR is a forecast with the tests that say whether it was right, and an option book's dollar greeks are summed with the multiplier required
+
+- **`estimate_factor_model` (`research`).** `decompose_factor_risk` took
+  loadings B, a factor covariance F and specific variances D, and nothing
+  in the library produced them. This fits each asset's OLS loadings on
+  the caller's factor returns, F as the factors' sample covariance and D
+  as each residual variance SSR / (n - p) with the intercept counted
+  (SSR / n would understate D by 10% with five factors on 60 months),
+  annualized by `periods_per_year`, every piece with its standard error.
+  Assets come as `returns` or a `returns_ref` with `columns`, factors as
+  `factors` or a `factors_ref` with `factor_columns`; nothing is fetched.
+  The three maps are `decompose_factor_risk`'s inputs as they stand, and
+  with a `run_id` Sigma = B F B' + D is published as a `covariance`
+  reference for `optimize_portfolio` and the allocators. D being diagonal
+  by assumption, the largest residual correlation is reported, with a
+  warning at 0.5. The least squares, rank refusal and Gram inverse moved
+  into `analysis.multi_factor.fit_least_squares` and `inverse_gram`, which
+  `multi_factor_regression` calls too, so its answers are unchanged.
+  Planted: series whose sample moments are the decomposition's planted
+  book give back its betas, F and D, and through it TE 0.0797 and a 4.0%
+  factor share; loadings equal (X'X)^-1 X'y to 1e-12; the 1.96-error
+  bands cover B, F, D and alpha 94-95% of the time over 400 draws; the
+  published covariance is B F B' + D to 1e-14 of its scale and PSD.
+- **`forecast_var_series` (`research`).** One-step-ahead VaR and ES for
+  every date after the first `window`, each from the returns before it
+  only: `historical`, `normal`, `cornish_fisher`, `ewma` (RiskMetrics),
+  `filtered_historical` and `evt_garch`, the last two on the library's
+  GARCH refitted every `refit_every` forecasts. Cornish-Fisher is refused
+  where the expansion stops being a quantile function -- its derivative
+  in z must stay non-negative (Maillard 2012) -- naming the first date and
+  its moments; its ES is the exact tail mean. `evt_garch` under 20
+  exceedances is refused with the count. With a `run_id` the series is
+  published for the tester. Planted: changing every return from a date on
+  changes no forecast up to it under any method; the EWMA forecast is its
+  recursion by hand; `historical` is `var_historical` and `cvar` to the
+  bit.
+- **`backtest_var_forecasts` (`research`).** The exceptions of a VaR and
+  ES series against realized returns, and Kupiec's proportion of failures,
+  Christoffersen's independence and conditional coverage, the Basel
+  traffic light on the last 250 at 99% with its plus factor, and Acerbi
+  and Szekely's Z2 with a simulated p-value under the forecasts' own
+  normal; a statistic that cannot be defined is null with the reason.
+  Planted: 8 exceptions in 250 at 99% give Kupiec's LR 7.7336; the zones
+  flip at 4/5 and 9/10; two runs of five exceptions give an independence
+  p of 1e-12, ten scattered 0.36; i.i.d. normal returns at 95% VaR give a
+  5.12% mean exception rate and a 4.3% Kupiec rejection rate over 300
+  samples; Z2 averages 0.0012 (s.e. 0.0073) under the true model. It sits
+  in `research` beside the forecaster: in `backtest`, whose listing has
+  954 bytes to spare, `auto` would have thinned `run_terminal_monte_carlo`.
+- **`aggregate_option_book` (`derivatives`).** Dollar delta, gamma per 1%
+  move, vega per volatility point, theta per calendar day and rho per 1%
+  per line, per underlying and for the book, each option priced by
+  `black_scholes_greeks_batch`; a beta-weighted delta when betas are
+  given; delta-gamma P&L beside full revaluation on a grid of spot shocks.
+  The contract multiplier is required: 100 is a convention, not a fact.
+  Planted: one option's dollar greeks are the closed forms times
+  multiplier and quantity to 1e-12; a conversion has zero delta and
+  exactly zero gamma and vega and does not move under full revaluation;
+  the delta-gamma error falls by 8 when the shock halves.
+- **Registered and budgeted.** Router descriptions and evaluation cases,
+  the multi-agent workers' prompts, surface baselines and refusal pins for
+  all four; the factor model is in the same-bits BLAS registry. Under
+  `auto`, `research` thins the three new tools and nothing it described
+  before; `derivatives` thins nothing.
+
 ## Capital is split across return streams with the bands the sample allows and tested walk-forward, and what a set of positions costs to hold and a stream of cash is worth is priced, in two new runtimes
 
 - **Two runtimes, `allocation` (8 tools) and `finance` (9).** Allocation

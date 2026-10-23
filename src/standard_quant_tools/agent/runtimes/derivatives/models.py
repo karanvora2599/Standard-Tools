@@ -20,9 +20,10 @@ is most of what these are used for.
 
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from standard_quant_tools.agent.models import Seed
 
@@ -289,10 +290,156 @@ class OptionScenariosInput(BaseModel):
     )
 
 
+#: The most option lines and underlyings one book takes. Held in the
+#: validators rather than advertised: a guard against a runaway payload.
+MAX_OPTION_LINES = 2000
+MAX_UNDERLYINGS = 500
+
+#: Why a multiplier has no default, for the refusal of a line without one.
+_MULTIPLIER_REQUIRED = (
+    "multiplier is required on every option line: 100 shares a contract is "
+    "the convention of US equity options, not a fact -- index, mini, futures "
+    "and adjusted contracts differ, and every dollar greek scales with it. "
+    "Give the contract's multiplier (100 for a standard US equity option)."
+)
+
+
+class OptionBookLine(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    underlying: str = Field(..., min_length=1, description="Its key in spots.")
+    option_type: Literal["call", "put"]
+    strike: float = Field(..., gt=0)
+    volatility: float = Field(..., gt=0, le=100, description="Annual, decimal.")
+    quantity: float = Field(..., description="Signed contracts; negative is short.")
+    multiplier: float = Field(
+        ..., gt=0, description="Units per contract (100 on US equity). Required."
+    )
+    time_to_expiry: Optional[float] = Field(
+        None, gt=0, le=100, description="Years; or expiry."
+    )
+    expiry: Optional[str] = Field(
+        None, description="ISO date, with valuation_date (ACT/365F)."
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _multiplier_is_a_fact(cls, data: Any) -> Any:
+        if isinstance(data, dict) and data.get("multiplier") is None:
+            raise ValueError(_MULTIPLIER_REQUIRED)
+        return data
+
+    @model_validator(mode="after")
+    def _one_expiry(self) -> "OptionBookLine":
+        if (self.time_to_expiry is None) == (self.expiry is None):
+            raise ValueError(
+                "an option line needs exactly one of time_to_expiry (years) "
+                "and expiry (an ISO date, with valuation_date); got "
+                f"{'both' if self.expiry is not None else 'neither'}."
+            )
+        for name in ("strike", "volatility", "quantity", "multiplier"):
+            if not math.isfinite(getattr(self, name)):
+                raise ValueError(f"{name} must be finite, got {getattr(self, name)}.")
+        if self.quantity == 0:
+            raise ValueError(
+                "quantity is 0, which is not a position; drop the line or give "
+                "the signed number of contracts."
+            )
+        return self
+
+
+class OptionBookInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    options: List[OptionBookLine] = Field(
+        default_factory=list, description="The option lines."
+    )
+    spots: Dict[str, float] = Field(..., description="Underlying -> spot.")
+    rates: Dict[str, float] = Field(
+        ...,
+        description="Underlying -> continuously compounded rate, decimal "
+        "(0.05 = 5%), for every underlying an option is on.",
+    )
+    dividend_yields: Optional[Dict[str, float]] = Field(
+        None, description="Underlying -> continuous yield; one not named pays none."
+    )
+    underlying_units: Optional[Dict[str, float]] = Field(
+        None, description="Underlying -> signed units held (shares)."
+    )
+    betas: Optional[Dict[str, float]] = Field(
+        None,
+        description="Underlying -> beta to an index, for every underlying "
+        "held: the beta-weighted delta.",
+    )
+    valuation_date: Optional[str] = Field(
+        None, description="ISO date the expiry dates count from."
+    )
+    spot_shocks: Optional[List[float]] = Field(
+        None,
+        min_length=1,
+        max_length=41,
+        description="Fractional spot moves; default +/-0.01, 0.02, 0.05, 0.10.",
+    )
+
+    @field_validator("options")
+    @classmethod
+    def _bounded_lines(cls, v: List[OptionBookLine]) -> List[OptionBookLine]:
+        if len(v) > MAX_OPTION_LINES:
+            raise ValueError(
+                f"options has {len(v)} lines, more than the {MAX_OPTION_LINES} "
+                "one call takes; aggregate the book in parts."
+            )
+        return v
+
+    @field_validator("spots", "rates", "dividend_yields", "underlying_units", "betas")
+    @classmethod
+    def _finite_map(cls, v: Optional[Dict[str, float]], info) -> Optional[Dict]:
+        if v is None:
+            return v
+        if len(v) > MAX_UNDERLYINGS:
+            raise ValueError(
+                f"{info.field_name} names {len(v)} underlyings, more than the "
+                f"{MAX_UNDERLYINGS} one call takes."
+            )
+        bad = [k for k, x in v.items() if not math.isfinite(x)]
+        if bad:
+            raise ValueError(
+                f"{info.field_name} is not finite for {bad[:5]}; every entry "
+                "must be a finite number."
+            )
+        if info.field_name == "spots":
+            low = [k for k, x in v.items() if not x > 0]
+            if low:
+                raise ValueError(f"spots must be positive; {low[:5]} are not.")
+        if info.field_name in ("rates", "dividend_yields"):
+            big = [k for k, x in v.items() if abs(x) > 10]
+            if big:
+                raise ValueError(
+                    f"{info.field_name} for {big[:5]} exceed 10 (1,000%) in "
+                    "magnitude; a rate is a decimal, 0.05 and not 5."
+                )
+        return v
+
+    @field_validator("spot_shocks")
+    @classmethod
+    def _shocks_above_minus_one(cls, v: Optional[List[float]]) -> Optional[List]:
+        if v is None:
+            return v
+        bad = [s for s in v if not (math.isfinite(s) and -1.0 < s <= 10.0)]
+        if bad:
+            raise ValueError(
+                f"spot_shocks {bad[:5]} are outside (-1, 10]: a shock is a "
+                "fractional move, -0.10 a 10% fall, and -1 takes spot to zero."
+            )
+        return v
+
+
 __all__ = [
     "DeltaHedgeInput",
     "ExpectedMoveInput",
     "ImpliedForwardInput",
+    "OptionBookInput",
+    "OptionBookLine",
     "OptionGreeksInput",
     "OptionScenariosInput",
     "OptionStrategyInput",

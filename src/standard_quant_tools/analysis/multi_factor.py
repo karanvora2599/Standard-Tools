@@ -137,33 +137,74 @@ def multi_factor_regression(
         return _regress(X, y, n, k, factor_names)
 
 
+def fit_least_squares(
+    X: np.ndarray,
+    y: np.ndarray,
+    columns: List[str],
+    who: str,
+    *,
+    intercept: bool = True,
+) -> "tuple[np.ndarray, np.ndarray, float]":
+    """
+    The least-squares coefficients of `y` on the design `X`, the residuals
+    y - X beta and their sum of squares -- the one fit both
+    `multi_factor_regression` and `factor_model.estimate_factor_model` run.
+
+    `columns` names the design's columns in order (the intercept first when
+    `intercept`), so a refusal can say which to drop. Call it under
+    `single_threaded_blas()`.
+
+    The rank-deficiency policy rolling_factor_loadings already applies,
+    made a refusal here because there is one regression, not a series of
+    windows to leave blank. A design that is not full rank has no unique
+    loadings: lstsq returns the minimum-norm member of an infinite set
+    (two identical factors split their loading 50/50), and inv(X'X) of a
+    singular matrix is rounding noise, so the t-statistics came back NaN
+    or as a confident 1.5e-7 on a factor that is 1.1 times another.
+    """
+    k = X.shape[1]
+    beta, _residuals, rank, _sv = np.linalg.lstsq(X, y, rcond=None)
+    if rank < k:
+        dependent = _dependent_columns(X, columns)
+        including = " including the intercept" if intercept else ""
+        causes = (
+            "A duplicated factor, a factor that is a sum or multiple of "
+            "others, and a constant factor (which duplicates the intercept) "
+            "all do this."
+            if intercept
+            else "A duplicated factor and a factor that is a sum or multiple "
+            "of others both do this."
+        )
+        raise ValidationError(
+            f"{who}: the factors are linearly dependent "
+            f"(rank {rank} of {k} columns{including}), so their "
+            f"loadings are not identified. Dependent on the columns before "
+            f"them: {', '.join(repr(d) for d in dependent)}. {causes} "
+            "Drop the named factor(s) and rerun."
+        )
+    y_pred = X @ beta
+    residuals = y - y_pred
+    return beta, residuals, float(np.sum(residuals**2))
+
+
+def inverse_gram(X: np.ndarray) -> "np.ndarray | None":
+    """(X'X)^-1 of a design, or None when the inversion fails; the standard
+    errors of every coefficient are sqrt(s^2 * diag) of it. Call it under
+    `single_threaded_blas()`."""
+    try:
+        return np.linalg.inv(X.T @ X)
+    except np.linalg.LinAlgError:
+        return None
+
+
 def _regress(
     X: np.ndarray, y: np.ndarray, n: int, k: int, factor_names: List[str]
 ) -> Dict[str, Any]:
     """`multi_factor_regression` on its design and target."""
     _nan = float("nan")
-    beta, _residuals, rank, _sv = np.linalg.lstsq(X, y, rcond=None)
-    # The rank-deficiency policy rolling_factor_loadings already applies,
-    # made a refusal here because there is one regression, not a series of
-    # windows to leave blank. A design that is not full rank has no unique
-    # loadings: lstsq returns the minimum-norm member of an infinite set
-    # (two identical factors split their loading 50/50), and inv(X'X) of a
-    # singular matrix is rounding noise, so the t-statistics came back NaN
-    # or as a confident 1.5e-7 on a factor that is 1.1 times another.
-    if rank < k:
-        dependent = _dependent_columns(X, ["intercept"] + factor_names)
-        raise ValidationError(
-            f"multi_factor_regression: the factors are linearly dependent "
-            f"(rank {rank} of {k} columns including the intercept), so their "
-            f"loadings are not identified. Dependent on the columns before "
-            f"them: {', '.join(repr(d) for d in dependent)}. A duplicated "
-            "factor, a factor that is a sum or multiple of others, and a "
-            "constant factor (which duplicates the intercept) all do this. "
-            "Drop the named factor(s) and rerun."
-        )
-
-    y_pred = X @ beta
-    ss_res = float(np.sum((y - y_pred) ** 2))
+    beta, _residuals, ss_res = fit_least_squares(
+        X, y, ["intercept"] + factor_names, "multi_factor_regression"
+    )
     ss_tot = float(np.sum((y - y.mean()) ** 2))
 
     r_squared = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
@@ -172,10 +213,10 @@ def _regress(
 
     # Standard errors: SE_i = sqrt(s² * [(X'X)^{-1}]_ii)
     s2 = ss_res / dof if dof > 0 else _nan
-    try:
-        XtX_inv = np.linalg.inv(X.T @ X)
+    XtX_inv = inverse_gram(X)
+    if XtX_inv is not None:
         se = np.sqrt(np.maximum(np.diag(XtX_inv) * s2, 0.0))
-    except np.linalg.LinAlgError:
+    else:
         se = np.full(k, _nan)
 
     t_vals = np.where(se > 0, beta / se, np.nan)

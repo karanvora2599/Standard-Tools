@@ -160,7 +160,7 @@ def _dated_map(name: str, length: int) -> Dict[str, float]:
 #: supplies the reference. Without this the one optional reference was
 #: always the first single field that constructed, and the inline path of
 #: every tool given one stopped being fuzzed.
-FIXTURE_REFERENCES = frozenset({"returns_ref", "covariance_ref"})
+FIXTURE_REFERENCES = frozenset({"returns_ref", "covariance_ref", "forecasts_ref"})
 
 
 def names_a_path(model: Any) -> bool:
@@ -303,6 +303,11 @@ def _scalar(annotation: Any, info: Any, name: str, salt: int = 0) -> Any:
             return SYMBOLS[0]
         if PAIR_FIELD.search(name):
             return CURRENCIES[1] + CURRENCIES[0]
+        if name == "underlying":
+            # An option line's underlying is a key of the spots, rates and
+            # betas maps beside it, which are keyed by the symbol set; each
+            # repeated line takes the next symbol.
+            return SYMBOLS[max(salt - 1, 0) % len(SYMBOLS)]
         if CURRENCY_FIELD.search(name):
             if name.startswith("base"):
                 return CURRENCIES[0]
@@ -524,6 +529,13 @@ def _value(annotation: Any, info: Any, name: str, length: int, salt: int = 0) ->
             return dict(FX_RATES)
         if DATED_MAP_FIELD.search(name) and value_type is float:
             return _dated_map(name, length)
+        if name == "forecasts" and get_origin(value_type) in (list, List):
+            # VaR forecasts by date: [return, VaR, ES], ES beyond VaR, as
+            # `backtest_var_forecasts` reads them.
+            return {
+                date: [r, 0.02, 0.025]
+                for date, r in zip(_DATES[:length], _returns(length))
+            }
         if get_origin(value_type) in (list, List):
             return {k: _returns(length) for k in keys}
         if get_origin(value_type) in (dict, Dict):
@@ -542,12 +554,15 @@ def _value(annotation: Any, info: Any, name: str, length: int, salt: int = 0) ->
                     ticker: {"mkt": 0.8 + 0.1 * i, "size": 0.1 * i - 0.2}
                     for i, ticker in enumerate(keys)
                 }
-            if name == "returns":
+            if name in ("returns", "factors"):
                 # {series: {ISO date: return}}: dated return series, one per
-                # ticker -- the shape the allocation tools take inline. Each
-                # series is its own draw, so no two are collinear.
+                # ticker -- the shape the allocation tools take inline -- and
+                # for a factor model's `factors` one per factor, named apart
+                # from the tickers they explain. Each series is its own draw,
+                # so no two are collinear.
+                names = ["mkt", "size"] if name == "factors" else keys
                 dates = _DATES[: min(max(length, 60), len(_DATES))]
-                return {k: dict(zip(dates, _returns(len(dates)))) for k in keys}
+                return {k: dict(zip(dates, _returns(len(dates)))) for k in names}
             if "weight" in name or "panel" in name or "score" in name:
                 # {ticker: {date: value}} -- the panel shape, which is
                 # validated against the companion `tickers` list. The old
@@ -559,6 +574,10 @@ def _value(annotation: Any, info: Any, name: str, length: int, salt: int = 0) ->
                     for ticker in keys
                 }
             return {"shock": {k: -0.05 for k in keys}}
+        if value_type is float and name == "returns":
+            # One dated return stream, {ISO date: return}: a mapping keyed by
+            # ticker is refused as undated.
+            return dict(zip(_DATES[:length], _returns(length)))
         if value_type is float:
             # Term structures and vol maps are keyed by a stringified number.
             if "expiry" in name or "implied" in name:
