@@ -625,6 +625,7 @@ _REF_BY_FIELD = {
     "predictions_ref_b": "predictions",
     "equity_curve_ref": "equity_curve",
     "covariance_ref": "covariance",
+    "weights_ref": "weight_panel",
 }
 
 #: Tools whose one `ref` field wants a particular kind.
@@ -656,6 +657,19 @@ def _date_series(
     return {
         d.strftime("%Y-%m-%d"): round(start + step * i + (i % 7) * 0.1, 4)
         for i, d in enumerate(days)
+    }
+
+
+def _position(
+    instrument: str, quantity: float, price: float, currency: str, **terms: Any
+) -> Dict[str, Any]:
+    """One line of holdings for a finance tool's baseline."""
+    return {
+        "instrument": instrument,
+        "quantity": quantity,
+        "price": price,
+        "currency": currency,
+        **terms,
     }
 
 
@@ -752,6 +766,28 @@ def _hand_written(
             }
         if tool == "decompose_tail_risk":
             return {"scenarios": _DELETE}
+        # The allocation tools read the panel's columns as strategy streams:
+        # every column held together, or one as the stream overlaid or sized.
+        if tool == "get_kelly_report":
+            return {"returns": _DELETE}
+        if tool == "apply_risk_overlay":
+            return {"returns": _DELETE, "column": SYMBOLS[0]}
+        if tool == "get_strategy_capacity_curve" and refs.get("weight_panel"):
+            return {
+                "returns": _DELETE,
+                "column": SYMBOLS[0],
+                "weights": _DELETE,
+                "adv": {s: 5e7 * (i + 1) for i, s in enumerate(SYMBOLS)},
+                "daily_volatility": {s: 0.02 for s in SYMBOLS},
+                "spread_bps": {s: 2.0 + i for i, s in enumerate(SYMBOLS)},
+            }
+        # The sleeve tools: the panel's columns are the sleeves, in place of
+        # the synthesized streams (whose references name nothing) or the
+        # synthesized inline returns (keyed by tickers, not dates).
+        if tool == "combine_return_streams":
+            return {"streams": _DELETE}
+        if tool in ("allocate_across_sleeves", "evaluate_allocation_rule"):
+            return {"returns": _DELETE}
     if tool == "build_continuous_futures_series":
         near = pd.bdate_range("2020-01-02", "2020-03-20")
         far = pd.bdate_range("2020-01-02", "2020-06-19")
@@ -989,6 +1025,150 @@ def _hand_written(
         # A benchmark beside the synthesized model, so every probe reaches
         # the active decomposition and the tracking error too.
         return {"benchmark_weights": {s: (i + 1) / 21 for i, s in enumerate(SYMBOLS)}}
+    if tool == "attribute_returns_brinson":
+        # Three quarters of a three-segment book against its benchmark, so
+        # every probe reaches the effects and the linking.
+        quarters = ("2024-03-31", "2024-06-30", "2024-09-30")
+        segments = ("tech", "energy", "cash")
+
+        def by_quarter(values: Any) -> Dict[str, Dict[str, float]]:
+            return {
+                q: {seg: values[i][j] for j, seg in enumerate(segments)}
+                for i, q in enumerate(quarters)
+            }
+
+        return {
+            "portfolio_weights": by_quarter([[0.6, 0.3, 0.1]] * 3),
+            "benchmark_weights": by_quarter([[0.5, 0.4, 0.1]] * 3),
+            "portfolio_returns": by_quarter(
+                [[0.05, 0.02, 0.01], [-0.02, 0.03, 0.01], [0.04, -0.01, 0.01]]
+            ),
+            "benchmark_returns": by_quarter(
+                [[0.04, 0.02, 0.01], [-0.01, 0.02, 0.01], [0.03, 0.0, 0.01]]
+            ),
+        }
+    if tool == "analyze_cash_flows":
+        # A project: 100 out, then 12 a year and the 100 back. One IRR
+        # (12%), a present value at 6% for the durations, and both MIRR
+        # rates, so every probe reaches each number.
+        return {
+            "flows": [-100.0] + [12.0] * 9 + [112.0],
+            "rate": 0.06,
+            "finance_rate": 0.05,
+            "reinvest_rate": 0.06,
+        }
+    if tool == "estimate_cost_of_capital":
+        # With debt, a standard error and a target, so the relevered and
+        # the sensitivity blocks are reached too.
+        return {
+            "risk_free_rate": 0.04,
+            "beta": 1.2,
+            "equity_risk_premium": 0.055,
+            "equity_value": 800.0,
+            "debt_value": 200.0,
+            "cost_of_debt": 0.06,
+            "tax_rate": 0.21,
+            "beta_standard_error": 0.15,
+            "target_debt_to_equity": 0.5,
+        }
+    if tool == "value_cash_flows":
+        return {
+            "cash_flows": [10.0, 11.0, 12.0, 12.5, 13.0],
+            "discount_rate": 0.09,
+            "terminal_growth": 0.025,
+        }
+    if tool == "measure_book_returns":
+        # Quarterly values over two years, each flow on a valuation date, so
+        # the true TWR, Modified Dietz and the MWR are all defined.
+        return {
+            "valuations": {
+                "2020-01-02": 1000.0,
+                "2020-04-01": 1040.0,
+                "2020-07-01": 1100.0,
+                "2020-10-01": 1080.0,
+                "2021-01-04": 1150.0,
+                "2021-04-01": 1210.0,
+                "2021-07-01": 1190.0,
+                "2021-10-01": 1260.0,
+                "2022-01-03": 1300.0,
+            },
+            "flows": {"2020-04-01": 50.0, "2021-01-04": -80.0, "2021-07-01": 30.0},
+        }
+    if tool == "get_currency_exposure":
+        # Four currencies, a partial forward hedge and a cross hedge, and a
+        # return on every line, so a probe reaches the hedge ratios and the
+        # return split rather than the exposure alone.
+        return {
+            "positions": [
+                _position("SAP", 1000.0, 120.0, "EUR", local_return=0.03),
+                _position("7203", -2000.0, 2900.0, "JPY", local_return=-0.02),
+                _position("VOD", 5000.0, 0.72, "GBP", local_return=0.01),
+                _position("AAPL", 300.0, 190.0, "USD", local_return=0.015),
+            ],
+            "base_currency": "USD",
+            "fx_rates": {"EUR": 1.08, "JPY": 0.0067, "GBP": 1.27},
+            "hedges": {"EURUSD": -60000.0, "EURGBP": -20000.0},
+            "fx_returns": {"EUR": 0.01, "JPY": -0.015, "GBP": 0.004},
+        }
+    if tool == "analyze_book_carry":
+        # A future, an FX forward, a funded long and a funded short, so a
+        # probe reaches both kinds of line and a short's borrow.
+        return {
+            "positions": [
+                _position(
+                    "ESZ6",
+                    2.0,
+                    5050.0,
+                    "USD",
+                    multiplier=50.0,
+                    spot=5000.0,
+                    years_to_expiry=0.25,
+                ),
+                _position(
+                    "EURUSD 3M",
+                    -1e6,
+                    1.1038,
+                    "USD",
+                    spot=1.1,
+                    years_to_expiry=0.25,
+                ),
+                _position(
+                    "SAP",
+                    1000.0,
+                    120.0,
+                    "EUR",
+                    income_rate=0.025,
+                    financing_rate=0.039,
+                ),
+                _position(
+                    "7203",
+                    -2000.0,
+                    2900.0,
+                    "JPY",
+                    borrow_fee_bps=40.0,
+                    income_rate=0.028,
+                    financing_rate=0.001,
+                ),
+            ],
+            "base_currency": "USD",
+            "fx_rates": {"EUR": 1.08, "JPY": 0.0067},
+        }
+    if tool == "price_fx_forward_hedge":
+        # A basis and a period, so a probe reaches the basis leg and the
+        # hedged and unhedged returns.
+        return {
+            "pair": "EURUSD",
+            "spot": 1.1,
+            "days": 90,
+            "base_currency": "USD",
+            "base_rate": 0.053,
+            "foreign_rate": 0.039,
+            "base_day_count": "ACT/360",
+            "foreign_day_count": "ACT/360",
+            "basis_bps": -15.0,
+            "asset_return": 0.02,
+            "spot_at_maturity": 1.08,
+        }
     if tool == "get_sharpe_stability":
         return {
             "returns": [
@@ -1001,6 +1181,30 @@ def _hand_written(
         return {"predictions_ref": outcomes}
     if tool == "score_model":
         return {"as_of": "2021-09-30", "universe": SYMBOLS[:4]}
+    if tool == "estimate_financing_cost":
+        # A horizon, and terms that give every synthesized short a borrow.
+        return {
+            "days": 30,
+            "financing": {
+                "benchmark_rate": 0.053,
+                "day_count": "ACT/360",
+                "debit_spread_bps": 50.0,
+                "default_borrow_bps": 30.0,
+            },
+        }
+    if tool == "compute_margin_requirement":
+        # The synthesized house rates are keyed by symbols no line holds.
+        return {"house_rates": _DELETE, "equity": 1.0e5}
+    if tool == "analyze_margin_runway":
+        # A path losing 100 a day from 9,000 against 10,000 / 8,000 calls
+        # on day 11, so the probes reach the walk and the buffer.
+        return {
+            "equity": 9_000.0,
+            "equity_changes": [-100.0] * 30,
+            "initial_margin": 10_000.0,
+            "maintenance_margin": 8_000.0,
+            "cure_days": 5,
+        }
     return {}
 
 

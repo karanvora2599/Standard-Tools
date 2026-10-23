@@ -299,6 +299,14 @@ class FinancingSpec:
     def segregated(self) -> bool:
         return self.short_proceeds == "segregated"
 
+    def benchmark_dates(self) -> pd.DatetimeIndex:
+        """The dates a dated benchmark gives a rate for, sorted and naive;
+        empty for a scalar benchmark. A calculator over calendar days reads
+        a rate as in force from its date to the next one given."""
+        if not self.is_dated:
+            return pd.DatetimeIndex([])
+        return pd.DatetimeIndex(self._series.index)  # type: ignore[attr-defined]
+
     def borrow_rate_for(self, asset: Optional[str]) -> Optional[float]:
         """The asset's annual borrow fee in bps, its own or the default;
         None when it has neither."""

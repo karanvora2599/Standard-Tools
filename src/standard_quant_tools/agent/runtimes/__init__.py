@@ -98,6 +98,8 @@ RUNTIME_CATEGORIES: Dict[str, Tuple[str, ...]] = {
     "meta": ("discovery", "provenance"),
     "derivatives": ("derivatives",),
     "delta_one": ("delta_one",),
+    "allocation": ("allocation",),
+    "finance": ("finance",),
 }
 
 #: category -> the ONE runtime that owns it. Derived, never written out,
@@ -145,6 +147,8 @@ RUNTIME_LABELS: Dict[str, str] = {
     "derivatives": "Derivatives",
     "delta_one": "Delta One",
     "microstructure": "Microstructure",
+    "allocation": "Capital Allocation",
+    "finance": "Finance",
     "modeling": "Modeling",
     "feature_lab": "Feature Lab",
 }
@@ -209,6 +213,24 @@ RUNTIME_DESCRIPTIONS: Dict[str, str] = {
         "expressing one position -- cash, ETF, future, swap, synthetic -- "
         "ranked on one annualized number. Takes quotes and contract "
         "specifications as arguments; there is no futures data provider."
+    ),
+    "allocation": (
+        "How much capital each strategy, sleeve or model deserves, from "
+        "their return streams rather than from tickers: the streams on one "
+        "calendar, an allocation with its weight bands, a walk-forward test "
+        "of the rule that chose it against an equal-weight benchmark, the "
+        "Kelly fraction and how uncertain it is, a volatility-target or "
+        "CPPI overlay, the capacity curve under impact, Brinson attribution "
+        "and a book's time- and money-weighted return with external flows."
+    ),
+    "finance": (
+        "What holding a book costs and what a stream of cash is worth: "
+        "financing, borrow and cash drag on positions, the Reg T and FINRA "
+        "margin against them and how long a stress path leaves before the "
+        "first call, currency exposure, carry and the FX forward that hedges "
+        "it, and NPV, IRR, duration, a cost of capital and a discounted "
+        "valuation. Every rate, FX rate and day count is the caller's; "
+        "nothing is fetched."
     ),
     "modeling": (
         "Build, validate and score a statistical model from this library's "

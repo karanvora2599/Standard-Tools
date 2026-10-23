@@ -222,6 +222,8 @@ class TestToolCategoryCoverage:
             "microstructure",
             "derivatives",
             "delta_one",
+            "allocation",
+            "finance",
         }
         assert set(TOOL_CATEGORY.values()) <= known_categories
 

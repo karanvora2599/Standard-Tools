@@ -97,6 +97,31 @@ def _swap(low: str, high: str) -> Modifier:
     return lambda args, _fx: {**args, low: args[high], high: args[low]}
 
 
+def _short_first_without_borrow(
+    args: Dict[str, Any], _fx: Dict[str, Any]
+) -> Dict[str, Any]:
+    """The first line held short, and the terms' default borrow dropped, so
+    nothing gives that short a rate."""
+    positions = copy.deepcopy(args["positions"])
+    positions[0]["quantity"] = -abs(positions[0]["quantity"])
+    terms = {k: v for k, v in args["financing"].items() if k != "default_borrow_bps"}
+    return {**args, "positions": positions, "financing": terms}
+
+
+def _house_rate_on_first(rate: float) -> Modifier:
+    return lambda args, _fx: {
+        **args,
+        "house_rates": {args["positions"][0]["instrument"]: rate},
+    }
+
+
+def _first_change(value: float) -> Modifier:
+    return lambda args, _fx: {
+        **args,
+        "equity_changes": [value] + list(args["equity_changes"][1:]),
+    }
+
+
 #: Values past any plausible magnitude, or a non-finite holding. The bounds
 #: are the library's own: rates are decimals within +/-10, prices within
 #: the 1e12 the option pricers use, a spread at most the whole notional.
@@ -132,13 +157,53 @@ BAD_VALUES: List[Tuple[str, str, str, Modifier]] = [
         _first_value("target_weights", float("nan")),
     ),
     ("portfolio", "estimate_trade_cost", "spread_bps=1e308", _set(spread_bps=1e308)),
+    ("finance", "price_fx_forward_hedge", "a spot of 1e308", _set(spot=1e308)),
+    (
+        "finance",
+        "get_currency_exposure",
+        "a NaN local return",
+        _nested_first("positions", "local_return", float("nan")),
+    ),
+    (
+        "finance",
+        "analyze_book_carry",
+        "a future's spot of +inf",
+        _nested_first("positions", "spot", float("inf")),
+    ),
     (
         "portfolio",
         "get_efficient_frontier",
         "risk_free_rate=1e308",
         _set(risk_free_rate=1e308),
     ),
+    (
+        "allocation",
+        "get_kelly_report",
+        "risk_free_rate=1e308",
+        _set(risk_free_rate=1e308),
+    ),
+    ("allocation", "apply_risk_overlay", "cost_bps=1e308", _set(cost_bps=1e308)),
+    (
+        "allocation",
+        "get_strategy_capacity_curve",
+        "an ADV of +inf",
+        _first_value("adv", float("inf")),
+    ),
 ]
+
+
+def _scaled_weights(field: str, factor: float) -> Modifier:
+    """Every weight of the first period scaled, so the period no longer
+    sums to one."""
+
+    def modify(args: Dict[str, Any], _fx: Dict[str, Any]) -> Dict[str, Any]:
+        panel = copy.deepcopy(args[field])
+        first = next(iter(panel))
+        panel[first] = {k: v * factor for k, v in panel[first].items()}
+        return {**args, field: panel}
+
+    return modify
+
 
 #: (runtime, tool, what is wrong, how the baseline is changed). Each must be
 #: REFUSED: every one of these inputs names something that cannot be done.
@@ -310,6 +375,66 @@ REFUSED: List[Tuple[str, str, str, Modifier]] = BAD_VALUES + [
         "run_factor_regression",
         "fewer factor names than factor tickers",
         _set(factor_tickers=["SPY", "IWM", "IWD"], factor_names=["mkt"]),
+    ),
+    (
+        "allocation",
+        "attribute_returns_brinson",
+        "portfolio weights summing to 0.9",
+        _scaled_weights("portfolio_weights", 0.9),
+    ),
+    (
+        "allocation",
+        "apply_risk_overlay",
+        "a CPPI multiplier under vol_target",
+        _set(multiplier=5.0),
+    ),
+    (
+        "allocation",
+        "get_kelly_report",
+        "a weight panel as returns",
+        _ref("returns_ref", "weight_panel"),
+    ),
+    (
+        "finance",
+        "estimate_financing_cost",
+        "a short with no borrow rate",
+        _short_first_without_borrow,
+    ),
+    (
+        "finance",
+        "compute_margin_requirement",
+        "a house rate below the rule's",
+        _house_rate_on_first(0.10),
+    ),
+    (
+        "finance",
+        "analyze_margin_runway",
+        "a NaN equity change",
+        _first_change(float("nan")),
+    ),
+    (
+        "allocation",
+        "combine_return_streams",
+        "min_overlap above the shared dates",
+        _set(min_overlap=100_000),
+    ),
+    (
+        "allocation",
+        "allocate_across_sleeves",
+        "a max_weight that cannot hold the capital across six sleeves",
+        _set(max_weight=0.1),
+    ),
+    (
+        "allocation",
+        "allocate_across_sleeves",
+        "a target volatility past max_leverage",
+        _set(target_volatility=5.0),
+    ),
+    (
+        "allocation",
+        "evaluate_allocation_rule",
+        "an estimation window longer than the data",
+        _set(estimation_window=5000),
     ),
 ]
 

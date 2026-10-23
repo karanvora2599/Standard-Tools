@@ -54,6 +54,9 @@ bits between one thread and two on the CI runners.
 `optimize_portfolio`, which the basket now solves through, runs its dense
 KKT solves, its certificate's least squares and its covariance's
 eigenvalues under the limit from the start; it is held here at 235 assets.
+So do the Kelly report's covariance, solve and Newton steps (235 streams)
+and the capacity curve's cost products (5,000 weight rows of 500
+instruments).
 """
 
 from __future__ import annotations
@@ -70,6 +73,10 @@ import pytest
 from standard_quant_tools import _blas
 from standard_quant_tools._blas import single_threaded_blas
 from standard_quant_tools.agent.runtimes import handoff
+from standard_quant_tools.allocation.capacity import capacity_curve
+from standard_quant_tools.allocation.kelly import kelly_report
+from standard_quant_tools.allocation.sleeves import SleeveRule, allocate_across_sleeves
+from standard_quant_tools.allocation.walk_forward import evaluate_allocation_rule
 from standard_quant_tools.analysis.cointegration import (
     cointegration_test,
     half_life_statistics,
@@ -392,6 +399,8 @@ WEIGHTS = {name: 1.0 / N for name in COVARIANCE.columns}
 #: that measured them: hence the caller's default among the limits below.
 WIDE = _factor_returns(252, 500, seed=67)
 NETWORK = _factor_returns(126, 1000, seed=71)
+#: Sixty sleeves with a positive mean, for the allocations across them.
+SLEEVES = RETURNS.iloc[:, :60] + 0.0004
 VIEWS = np.zeros((2, N))
 VIEWS[0, 0], VIEWS[0, 1], VIEWS[1, 2] = 1.0, -1.0, 1.0
 OPTIMIZER_ARGS = {
@@ -632,6 +641,28 @@ def _cox_predict_wide():
     return model.predict(rng.normal(size=(5_000, 300)))
 
 
+def _capacity_panel(n_dates, n_names, seed):
+    """A strategy's target weights over many instruments, its gross
+    returns on the same dates, and each instrument's liquidity."""
+    rng = np.random.default_rng(seed)
+    index = pd.bdate_range("2000-01-03", periods=n_dates)
+    names = [f"I{i:03d}" for i in range(n_names)]
+    return {
+        "returns": pd.Series(rng.normal(0.0005, 0.01, n_dates), index=index),
+        "weights": pd.DataFrame(
+            rng.uniform(0, 0.004, (n_dates, n_names)), index=index, columns=names
+        ),
+        "maps": {
+            "adv": {name: 1e7 * (1 + i) for i, name in enumerate(names)},
+            "daily_volatility": {name: 0.02 for name in names},
+            "spread_bps": {name: 2.0 for name in names},
+        },
+    }
+
+
+CAPACITY = _capacity_panel(5000, 500, 191)
+
+
 def _corners(frontier):
     """A traced frontier as a comparable structure: each corner's risk
     tolerance, weights, return and variance."""
@@ -781,6 +812,42 @@ CALLS = {
     "optimize_portfolio_max_sharpe": lambda: optimize_portfolio(
         COVARIANCE, **OPTIMIZER_ARGS, objective="max_sharpe"
     ),
+    # The Kelly report over 235 streams: the covariance, Sigma^-1 mu and its
+    # inverse, and the empirical Kelly's Newton steps. The capacity curve's
+    # spread and impact products over 5,000 weight rows of 500 instruments.
+    "kelly_report_multivariate": lambda: kelly_report(
+        RETURNS, periods_per_year=252, n_bootstrap=20
+    ),
+    "capacity_curve_wide": lambda: capacity_curve(
+        CAPACITY["returns"],
+        CAPACITY["weights"],
+        periods_per_year=252,
+        **CAPACITY["maps"],
+    ),
+    # The sleeve allocations: the covariance, the Sharpe estimates'
+    # correlated shrinkage and its solves, the exact tangency, the risk
+    # read off it, and the bootstrap's refits; and a walk forward of the
+    # minimum-variance rule with its paired bootstrap.
+    "allocate_across_sleeves_shrunk_sharpe": lambda: allocate_across_sleeves(
+        SLEEVES, SleeveRule(method="shrunk_sharpe", max_weight=0.05), n_bootstrap=3
+    ),
+    "allocate_across_sleeves_target_volatility": lambda: allocate_across_sleeves(
+        SLEEVES,
+        SleeveRule(method="risk_parity", target_volatility=0.05),
+        n_bootstrap=3,
+    ),
+    "evaluate_allocation_rule": lambda: {
+        key: value
+        for key, value in evaluate_allocation_rule(
+            SLEEVES,
+            SleeveRule(method="min_variance"),
+            n_trials=3,
+            estimation_window=504,
+            rebalance_every=126,
+            n_bootstrap=50,
+        ).items()
+        if key != "dates"
+    },
 }
 
 

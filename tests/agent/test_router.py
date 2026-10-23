@@ -252,6 +252,60 @@ class TestRoutingAccuracyEval:
             "error to the benchmark with sector caps and zero value exposure.",
             "portfolio_risk",
         ),
+        # allocation -- capital across strategy return streams
+        (
+            "How much leverage does Kelly say for this strategy's returns, and "
+            "how sure is that estimate?",
+            "allocation",
+        ),
+        (
+            "Put a 10% volatility target on my strategy's return stream and "
+            "show what it does to the drawdown.",
+            "allocation",
+        ),
+        (
+            "At what AUM does market impact eat half my strategy's Sharpe "
+            "ratio, given its weight panel?",
+            "allocation",
+        ),
+        (
+            "Split my fund's active return over the benchmark into "
+            "allocation and selection by sector, Brinson style.",
+            "allocation",
+        ),
+        # finance -- financing, margin and the runway to a margin call
+        (
+            "What does it cost to carry $10m of longs on $5m of equity at "
+            "5.3% plus 50 bp for 30 days, with borrow on my shorts?",
+            "finance",
+        ),
+        (
+            "What Reg T initial and FINRA maintenance margin do these long, "
+            "short and short-call positions need?",
+            "finance",
+        ),
+        (
+            "If my account loses $1,000 a day, on which day do I get the "
+            "first margin call and how much cash would avoid it?",
+            "finance",
+        ),
+        # finance -- currency exposure, carry and the FX forward that hedges
+        (
+            "My positions are in EUR, JPY and GBP with some FX forwards on "
+            "top: what is my net exposure to each currency in USD and how "
+            "much of it is hedged?",
+            "finance",
+        ),
+        (
+            "Price the three-month EURUSD forward from these deposit rates "
+            "and tell me what hedging my euro assets back to dollars picks up.",
+            "finance",
+        ),
+        (
+            "What do my holdings carry per year: the futures against spot, "
+            "the dividends less what I pay to finance the stocks?",
+            "finance",
+        ),
         # derivatives -- split out of research; never covered before
         ("What are the vanna and volga on this call?", "derivatives"),
         ("Fit a volatility smile to these strikes and implied vols.", "derivatives"),
@@ -264,6 +318,22 @@ class TestRoutingAccuracyEval:
             "What is the Amihud illiquidity for AAPL over the last year?",
             "microstructure",
         ),
+        # allocation -- capital across strategies' return streams
+        (
+            "Line up the daily returns of my three strategies on one calendar "
+            "so I can compare them.",
+            "allocation",
+        ),
+        (
+            "How should I split $50m across these five strategy sleeves by "
+            "risk parity, and how stable are the weights?",
+            "allocation",
+        ),
+        (
+            "Would a max-Sharpe rule for weighting my models have beaten "
+            "equal weight out of sample, after rebalancing costs?",
+            "allocation",
+        ),
         # data -- the newest category
         ("Fetch OHLCV for these fifty tickers and save it for later.", "data"),
         ("Does this provider guarantee point-in-time data?", "data"),
@@ -273,6 +343,26 @@ class TestRoutingAccuracyEval:
         # provenance
         ("Show me the decision record for request abc123.", "provenance"),
         ("Verify that the audit log has not been tampered with.", "provenance"),
+        # finance -- what a stream of cash is worth, and what capital costs
+        (
+            "What are the NPV, IRR and duration of these project cash flows at 8%?",
+            "finance",
+        ),
+        (
+            "Give me the WACC with beta 1.2, a 5.5% equity premium and 30% debt "
+            "at 6% pre-tax.",
+            "finance",
+        ),
+        (
+            "What growth rate does a $40bn valuation imply in a DCF at 9%?",
+            "finance",
+        ),
+        # allocation -- a fund with deposits and withdrawals
+        (
+            "My fund had deposits and withdrawals this year: what were its "
+            "time-weighted and money-weighted returns?",
+            "allocation",
+        ),
     ]
 
     @pytest.mark.integration

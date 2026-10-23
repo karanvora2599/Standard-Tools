@@ -124,6 +124,33 @@ FX_RATES = {
 }
 CURRENCIES = list(FX_RATES)
 
+#: A currency pair as the market quotes it, two ISO 4217 codes ('EURUSD' is
+#: units of the second per one of the first). The generic `"a"` is refused
+#: as a pair; this one is the second currency above quoted in the first, so
+#: a base currency synthesized as USD is one of its two legs.
+PAIR_FIELD = re.compile(r"(^|_)pair$")
+
+
+#: A map keyed by DATE rather than by ticker, by name: a portfolio's
+#: valuations and its external flows, and dated cash flows. Keyed by
+#: ticker they are refused as not dates, which left the tools taking them
+#: unsynthesizable.
+DATED_MAP_FIELD = re.compile(r"(^|_)(valuations|flows|dated_flows)$")
+
+
+def _dated_map(name: str, length: int) -> Dict[str, float]:
+    """Valuations as a positive random walk on business dates; external
+    flows on every twentieth of those dates, never the last, so each is
+    inside the period and has a valuation; dated cash flows one out and
+    the rest in."""
+    count = max(min(length, 300), 3)
+    dates = _DATES[:count]
+    if "valuation" in name:
+        return dict(zip(dates, _prices(count)))
+    if name == "flows":
+        return {dates[i]: (2.0 if i % 40 else -1.5) for i in range(5, count - 1, 20)}
+    return dict(zip(dates, [-100.0] + [1.0] * (count - 1)))
+
 
 #: References that stand in for an input the synthesizer CAN build inline:
 #: a `returns_panel` beside inline or fetched returns, a `covariance` beside
@@ -274,6 +301,8 @@ def _scalar(annotation: Any, info: Any, name: str, salt: int = 0) -> Any:
             return _DATES[salt % (len(_DATES) - _WINDOW)]
         if "symbol" in name or "ticker" in name:
             return SYMBOLS[0]
+        if PAIR_FIELD.search(name):
+            return CURRENCIES[1] + CURRENCIES[0]
         if CURRENCY_FIELD.search(name):
             if name.startswith("base"):
                 return CURRENCIES[0]
@@ -493,6 +522,8 @@ def _value(annotation: Any, info: Any, name: str, length: int, salt: int = 0) ->
             # Keyed by currency, not by ticker: a rate table keyed 'AAPL'
             # is refused as an unknown currency.
             return dict(FX_RATES)
+        if DATED_MAP_FIELD.search(name) and value_type is float:
+            return _dated_map(name, length)
         if get_origin(value_type) in (list, List):
             return {k: _returns(length) for k in keys}
         if get_origin(value_type) in (dict, Dict):
@@ -511,6 +542,12 @@ def _value(annotation: Any, info: Any, name: str, length: int, salt: int = 0) ->
                     ticker: {"mkt": 0.8 + 0.1 * i, "size": 0.1 * i - 0.2}
                     for i, ticker in enumerate(keys)
                 }
+            if name == "returns":
+                # {series: {ISO date: return}}: dated return series, one per
+                # ticker -- the shape the allocation tools take inline. Each
+                # series is its own draw, so no two are collinear.
+                dates = _DATES[: min(max(length, 60), len(_DATES))]
+                return {k: dict(zip(dates, _returns(len(dates)))) for k in keys}
             if "weight" in name or "panel" in name or "score" in name:
                 # {ticker: {date: value}} -- the panel shape, which is
                 # validated against the companion `tickers` list. The old

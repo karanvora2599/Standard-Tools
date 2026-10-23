@@ -26,6 +26,13 @@ puts on the dates they share.
 `returns_panel` reference in place of inline returns: each column is a
 stream, a blank cell a date that column was not observed on.
 
+The tools that take streams but never a symbol -- `returns` as
+{stream: {ISO date: return}}, or `returns_ref` with `columns` -- share the
+rest: `finite_dated_streams` / `finite_dated_series` as their field
+validators, `exactly_one_source` and `columns_only_with_ref` as their model
+validators, and `dated_streams` / `aligned_dated_streams` to read the
+inline form as `resolve_return_streams` reads a stream's values.
+
 This module imports nothing from the tools at load time, so the shared
 result models can name `StreamAlignment` without a cycle.
 """
@@ -40,14 +47,28 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from standard_quant_tools.data.factory import ProviderName
 
 __all__ = [
+    "MAX_DATES",
     "ReturnStream",
     "ReturnStreams",
     "StreamAlignment",
     "StreamCoverage",
+    "aligned_dated_streams",
     "aligned_returns_ref",
+    "aligned_streams",
+    "columns_only_with_ref",
+    "dated_series",
+    "dated_streams",
+    "exactly_one_source",
+    "finite_dated_series",
+    "finite_dated_streams",
     "resolve_return_streams",
     "returns_ref_streams",
 ]
+
+#: The most dates one inline stream takes. Held in the validators rather
+#: than the schema: a guard against a runaway payload, not something a
+#: caller plans around.
+MAX_DATES = 200_000
 
 
 class ReturnStream(BaseModel):
@@ -212,15 +233,148 @@ class StreamAlignment(BaseModel):
     by_stream: Dict[str, StreamCoverage] = Field(default_factory=dict)
 
 
-def _series_from_values(name: str, values: Mapping[str, float], what: str) -> Any:
+def dated_series(values: Mapping[str, float], field: str, what: str) -> Any:
+    """
+    {ISO date: value} as a float Series on its dates, sorted: the keys
+    parsed by `parse_date_keys`, every value finite, and a refusal that
+    names `field` when either is not.
+    """
     import pandas as pd
 
     from standard_quant_tools.agent.runtimes._shared import parse_date_keys
 
-    parsed = parse_date_keys(values, f"streams[{name!r}].values", what, finite=True)
+    parsed = parse_date_keys(values, field, what, finite=True)
     return pd.Series(
         list(parsed.values()), index=pd.DatetimeIndex(list(parsed)), dtype="float64"
     ).sort_index()
+
+
+def dated_streams(
+    values: Mapping[str, Mapping[str, float]], *, what: str, field: str = "returns"
+) -> Dict[str, Any]:
+    """{stream: {ISO date: value}} as dated Series by name, not yet aligned."""
+    return {
+        str(name): dated_series(row, f"{field}[{name!r}]", what)
+        for name, row in values.items()
+    }
+
+
+def aligned_streams(
+    streams: Mapping[str, Any], *, what: str, min_overlap: int
+) -> Tuple[Any, StreamAlignment, List[str]]:
+    """
+    Dated streams on the dates they share: the aligned frame, the report,
+    and a warning when aligning dropped anything.
+    """
+    from standard_quant_tools.portfolio.streams import (
+        align_return_streams,
+        alignment_notes,
+    )
+
+    frame, report = align_return_streams(streams, min_overlap=min_overlap, what=what)
+    return frame, StreamAlignment(**report), alignment_notes(report, what)
+
+
+def aligned_dated_streams(
+    values: Mapping[str, Mapping[str, float]],
+    *,
+    what: str,
+    min_overlap: int,
+    field: str = "returns",
+) -> Tuple[Any, StreamAlignment, List[str]]:
+    """`aligned_returns_ref` for the inline form, {stream: {ISO date: return}}."""
+    return aligned_streams(
+        dated_streams(values, what=what, field=field),
+        what=what,
+        min_overlap=min_overlap,
+    )
+
+
+# ── validators for the inline form ──────────────────────────────────────
+#
+# They raise ValueError, so a pydantic validator that calls one refuses the
+# input by name at the boundary.
+
+
+def finite_dated_series(
+    values: Optional[Mapping[str, float]], field: str, *, max_dates: int = MAX_DATES
+) -> Optional[Mapping[str, float]]:
+    """{ISO date: value} with at most `max_dates` dates, every value finite."""
+    if values is None:
+        return values
+    if len(values) > max_dates:
+        raise ValueError(f"{field} has {len(values)} dates, more than {max_dates}.")
+    bad = [date for date, value in values.items() if not math.isfinite(value)]
+    if bad:
+        raise ValueError(
+            f"{field} is not finite on {bad[:5]}; a gap is a date the stream "
+            "does not have, not a NaN on it. Drop those dates."
+        )
+    return values
+
+
+def finite_dated_streams(
+    values: Optional[Mapping[str, Mapping[str, float]]],
+    field: str,
+    *,
+    most: int,
+    max_dates: int = MAX_DATES,
+) -> Optional[Mapping[str, Mapping[str, float]]]:
+    """{name: {ISO date: value}} with one to `most` entries, each a
+    `finite_dated_series`; a refusal names the entry that is not."""
+    if values is None:
+        return values
+    if not values:
+        raise ValueError(f"{field} is empty; name at least one entry.")
+    if len(values) > most:
+        raise ValueError(f"{field} has {len(values)} entries, more than {most}.")
+    for name, row in values.items():
+        finite_dated_series(row, f"{field}[{name!r}]", max_dates=max_dates)
+    return values
+
+
+def exactly_one_source(model: BaseModel, inline: str, ref: str, who: str) -> None:
+    """Exactly one of the inline field and the reference field is given."""
+    given = [n for n in (inline, ref) if getattr(model, n) is not None]
+    if len(given) != 1:
+        raise ValueError(
+            f"{who} needs exactly one of {inline} / {ref}; got "
+            f"{given or 'neither'}. {inline} is the data inline, {ref} a "
+            "published reference."
+        )
+
+
+def columns_only_with_ref(
+    model: BaseModel, columns: str, ref: str, *, most: Optional[int] = None
+) -> None:
+    """
+    `columns` -- one column name, or a list of them -- is given only with
+    the reference it picks from, and a list names each column once and at
+    most `most` of them. A column named twice is refused rather than read
+    once: it is a caller's mistake, and dropping it would hide which.
+    """
+    picked = getattr(model, columns)
+    if picked is None:
+        return
+    if getattr(model, ref) is None:
+        what = "a column" if isinstance(picked, str) else "columns"
+        raise ValueError(
+            f"{columns} names {what} of {ref} and was given without it. "
+            f"Drop {columns}, or pass {ref}."
+        )
+    if isinstance(picked, str):
+        return
+    repeated = sorted({c for c in picked if picked.count(c) > 1})
+    if repeated:
+        raise ValueError(
+            f"{columns} names {repeated} more than once; each column is one "
+            "stream, so name it once."
+        )
+    if most is not None and len(picked) > most:
+        raise ValueError(
+            f"{columns} names {len(picked)} columns, more than the {most} one "
+            "call takes."
+        )
 
 
 def _panel(ref: str, what: str, field: str) -> Any:
@@ -263,7 +417,7 @@ def resolve_return_streams(
         if not isinstance(stream, ReturnStream):
             stream = ReturnStream.model_validate(stream)
         if stream.values is not None:
-            out[name] = _series_from_values(name, stream.values, what)
+            out[name] = dated_series(stream.values, f"streams[{name!r}].values", what)
         elif stream.ref is not None:
             frame = _panel(stream.ref, what, f"streams[{name!r}].ref")
             columns = [str(c) for c in frame.columns]
@@ -317,11 +471,8 @@ def aligned_returns_ref(
     A `returns_panel` reference on the dates its columns share: the aligned
     frame, the report, and a warning when aligning dropped anything.
     """
-    from standard_quant_tools.portfolio.streams import (
-        align_return_streams,
-        alignment_notes,
+    return aligned_streams(
+        returns_ref_streams(ref, what=what, columns=columns, field=field),
+        what=what,
+        min_overlap=min_overlap,
     )
-
-    streams = returns_ref_streams(ref, what=what, columns=columns, field=field)
-    frame, report = align_return_streams(streams, min_overlap=min_overlap, what=what)
-    return frame, StreamAlignment(**report), alignment_notes(report, what)

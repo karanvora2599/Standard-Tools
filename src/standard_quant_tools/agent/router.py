@@ -184,6 +184,31 @@ TOOL_CATEGORIES: Dict[str, Dict[str, str]] = {
             "itemize one trade's cost."
         ),
     },
+    "allocation": {
+        "label": "Capital Allocation",
+        "description": (
+            "Split capital ACROSS strategies, sleeves or models given their "
+            "return streams, not across tickers: align the streams on one "
+            "calendar, allocate by inverse volatility, risk parity, HRP, "
+            "minimum variance or shrunk Sharpe with bootstrap weight bands, "
+            "walk-forward test an allocation rule against equal weight, the "
+            "Kelly leverage of a stream and its uncertainty, a volatility "
+            "target or CPPI overlay, AUM capacity under market impact, "
+            "Brinson attribution of active return, and time- versus "
+            "money-weighted returns of a fund with deposits and withdrawals."
+        ),
+    },
+    "finance": {
+        "label": "Finance",
+        "description": (
+            "The money side of holding positions and valuing cash: financing "
+            "interest, short borrow and rebate, Reg T and FINRA margin and "
+            "the days to a margin call under stress, currency exposure, FX "
+            "forward hedges and carry, and corporate-finance math -- NPV, "
+            "IRR, MIRR, bond duration and DV01, WACC and levered beta, a DCF "
+            "with terminal value. Every rate is supplied by the caller."
+        ),
+    },
 }
 
 _CATEGORY_KEY_RE = re.compile(r"[a-z_]+")

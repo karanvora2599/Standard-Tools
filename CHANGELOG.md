@@ -1,5 +1,144 @@
 # Changelog
 
+## Capital is split across return streams with the bands the sample allows and tested walk-forward, and what a set of positions costs to hold and a stream of cash is worth is priced, in two new runtimes
+
+- **Two runtimes, `allocation` (8 tools) and `finance` (9).** Allocation
+  takes RETURN STREAMS -- a strategy's, a sleeve's, a model's -- and asks
+  how much capital each deserves; finance takes POSITIONS or CASH FLOWS
+  and asks what holding them costs and what they are worth. Neither takes
+  a ticker, so neither fitted `portfolio`'s grouping, and inside it the
+  seventeen tools would have thinned its flagship tools out of the MCP
+  listing. Each runtime has one category of its own name, a router entry
+  and a multi-agent worker. Nothing moved; every tool is new. Every rate,
+  spread, FX rate, discount rate and day count is the caller's.
+- **Streams in, references out.** `combine_return_streams` puts streams on
+  the dates they all share, reports what each lost before, after and
+  inside the common window, and publishes the panel as a `returns_panel`;
+  it takes `ReturnStreams` and is the one door that fetches a stream by
+  symbol. Every other stream tool takes `returns` ({stream: {ISO date:
+  return}}) or a `returns_ref` with `columns`, never a symbol, so it
+  fetches nothing and runs inside the determinism layer. The parsing,
+  finiteness, one-source and alignment checks are one set of helpers in
+  `agent/runtimes/streams.py` (`dated_series`, `dated_streams`,
+  `aligned_streams`, `aligned_dated_streams`, `finite_dated_series`,
+  `finite_dated_streams`, `exactly_one_source`, `columns_only_with_ref`);
+  a column named twice in `columns` is refused.
+- **`allocate_across_sleeves`.** `equal`, `inverse_volatility`,
+  `risk_parity` with budgets, `hrp`, `min_variance`, `max_sharpe` and
+  `shrunk_sharpe` on `estimate_covariance`'s estimators, the optimized
+  rules through the exact solver. `shrunk_sharpe` is positive-part
+  James-Stein toward the pooled Sharpe ratio on Lo/Mertens standard
+  errors correlated as the sleeves are, then the tangency; with equal true
+  Sharpe ratios the factor follows min(1, (k - 3) / chi^2_{k-1}) at any
+  sample length (mean 0.756 at eight sleeves), and at full pooling the
+  allocation is the long-only maximum-diversification portfolio to 1e-9.
+  `max_weight` caps first, `target_volatility` scales the gross (refused
+  above `max_leverage`, default 1), `capacity` against `capital` caps
+  last, its excess to cash or water-filled. The whole rule is refitted on
+  circular block resamples for 5th/95th percentile weight bands and a
+  stability number; the Sharpe ratio is `in_sample_sharpe`. Planted:
+  closed forms for 1/N and 1/sigma; risk parity's shares equal to 1e-10;
+  min variance and max Sharpe equal the critical line's to 1e-9; ERC's L1
+  distance to the true-covariance weights 0.051 at one year and 0.016 at
+  ten; the 90% band covers the true weight 85-94% of the time; max
+  Sharpe's stability number more than ten times risk parity's.
+- **`evaluate_allocation_rule`.** The rule walked forward on a COPY of its
+  trailing window, so it cannot read past it; weights drift between
+  rebalances, each refit pays `cost_bps` per unit of turnover, idle
+  capital earns `cash_rate`. Against a benchmark rule (equal by default)
+  on the same periods: both sides' Sharpe, return, volatility, drawdown,
+  turnover and cost, the Sharpe difference with a circular-block interval,
+  the look-ahead gap (the rule fitted once on the full sample, held), and
+  the deflated Sharpe ratio at `n_trials`, which is required. Planted:
+  changing every return after a date changes no weight chosen and no
+  return on or before it; on zero-edge sleeves the full-sample fit scores
+  0.71 and the walk 0.08, and the deflated Sharpe flags 5% of walks; a
+  rule peeking past its window matches the honest one bit for bit; the
+  book matches a recursion kept in currency to 1e-12. No overlay
+  parameter: `apply_risk_overlay` on the published stream is the same,
+  being causal.
+- **`get_kelly_report`.** f* = mu / sigma^2, or Sigma^-1 mu for several
+  streams, over the rate the leverage is financed at; its standard error
+  1 / (sigma sqrt(T)); the chance the estimate is more than twice the
+  truth, Phi(-S sqrt(T)), 13% at a Sharpe of 0.5 over five years; growth
+  at quarter, half and full Kelly as truth and in expectation (20% and
+  55% of the optimum there at full and half); Kan and Zhou's shrinkage;
+  the empirical Kelly; the drawdown odds (1 - d)^(2/c - 1); bootstrap
+  maximum drawdowns. A negative edge is a negative f*, never zero. Its
+  empirical Kelly of 55 wins of +6% and 45 losses of -3% is 10.833, the
+  notional `get_position_size` reports for the same statistics.
+- **`apply_risk_overlay`.** A volatility target on EWMA volatility through
+  t - 1, CPPI or TIPP over one stream, capped at `max_leverage`, the rest
+  in cash, `cost_bps` per unit change in exposure; floor breaches and a
+  cash lock reported. Planted: realized/target within [0.95, 1.05] on
+  i.i.d. returns; a -30% day at a multiplier of 4 breaches once by
+  C (1 + m r) (Black & Perold 1992), -24.99% does not; no exposure moves
+  when the future does.
+- **`get_strategy_capacity_curve`.** Net return and Sharpe against AUM
+  from a gross stream and its weight panel, each weight change costing
+  |dw| (s/2 + k sigma sqrt(A |dw| / ADV)) with the caller's ADV, volatility
+  and spread per instrument; the break-even AUM in closed form and the AUM
+  at half the gross Sharpe. Planted: (ADV / tau) ((alpha / tau - s/2) /
+  (k sigma))^2 to 1e-12 for one instrument.
+- **`attribute_returns_brinson` and `measure_book_returns`.**
+  Brinson-Fachler allocation, selection and interaction per segment and
+  period, linked by Carino or Menchero so they sum to the cumulative active
+  return to 1e-12 (planted single period: 0.008 = 0.002 + 0.005 + 0.001).
+  A fund's true time-weighted return (null, the dates named, when a flow
+  has no valuation), Modified Dietz linked across sub-periods and the
+  money-weighted return (GIPS 2020), nothing under a year annualized:
+  TWR +8.000% against MWR -1.2549% on a deposit at the top, Dietz 4.7619%.
+- **`estimate_financing_cost`.** The engines' `FinancingSpec` as a
+  calculator on positions and an account's equity over a horizon: debit
+  and credit interest, each short's borrow (its own fee, else the terms',
+  else the default; none is refused), the rebate on segregated proceeds,
+  the net cost, the cash drag and the effective rate on gross and on
+  equity; a dated benchmark at the rate in force on each day.
+  `FinancingSpec.benchmark_dates()` is new, for this. Planted: $10m long
+  on $5m at 5.30% + 50 bp for 30 days ACT/360 pays 24,166.67; a book k
+  times its equity long returns kR - (k - 1)f to 1e-12.
+- **`compute_margin_requirement` and `analyze_margin_runway`.** Reg T
+  initial and FINRA Rule 4210 maintenance margin line by line, each citing
+  its paragraph (long 25%, the two short tiers, leveraged ETFs, uncovered
+  short options under 4210(f)(2)), house rates only at or above the
+  minimum, no offsets. Along a stress path, the first maintenance call and
+  its amount, the day deleveraging starts after `cure_days` (15, FINRA's
+  limit), and the least cash today that avoids every call. Planted: $100k
+  long 50k/25k; short 1,000 at $4 4,000 and at $20 6,000; a short call
+  S100 K110 premium 2 1,200; IM 10k, MM 8k, equity 12k losing 1k a day
+  calls on day 5 for 3k; the buffer is exact to one unit.
+- **`get_currency_exposure`, `analyze_book_carry`,
+  `price_fx_forward_hedge`.** Exposure per currency after FX hedges given
+  as pair notionals, hedge ratios, and each position's base return split
+  into local, FX and cross terms that add up exactly. Carry per line and
+  for the set (Koijen, Moskowitz, Pedersen & Vrugt 2018): (S - F)/(F T)
+  for a future, q - r to first order with the O(T) error shrinking as T
+  halves; income less financing and borrow for a funded line. The CIP
+  forward with each leg on its own day count and a cross-currency basis on
+  the foreign leg: EURUSD 1.1000, USD 5.30%, EUR 3.90% ACT/360 for 90 days
+  gives 1.103813, +38.13 pips and 1.3865% a year. The forward hedge sits
+  here rather than in `delta_one`, whose MCP listing already thins four
+  tools.
+- **`analyze_cash_flows`, `estimate_cost_of_capital`,
+  `value_cash_flows`.** NPV, every real IRR (Descartes' bound, Rolle
+  isolation, the IRR only when unique, Norstrom's condition), MIRR, and
+  Macaulay and modified duration, convexity and DV01 on periodic or dated
+  flows. CAPM, after-tax cost of debt, WACC, Hamada un- and relevered beta
+  and the sensitivity at beta -/+ one standard error. A DCF with a Gordon
+  or exit-multiple terminal value and its share, and a reverse DCF that
+  finds every rate a target implies. Planted: annuity 399.27100; a
+  10-year 5% semiannual bond's Macaulay 7.989446, modified 7.794581, DV01
+  0.0779458; Excel's XIRR 0.373362535 and MIRR 12.6094%; Lorie-Savage
+  roots 25% and 400% with the IRR null; Hamada 1.3 -> 0.931900 -> 1.3;
+  FCF_1 / (r - g) = 166.667 at any horizon.
+- **The surface learns them.** The synthesizer builds date-keyed
+  `returns`, `valuations`, `flows` and `dated_flows`, a currency `pair`,
+  and option lines; every tool has a hermetic baseline that reaches its
+  numbers, refusals are pinned, and the allocation and Kelly products are
+  in the same-bits BLAS registry. MCP schema bytes: `allocation` 23,519
+  and `finance` 27,211 of their 32,768 each, nothing thinned; no existing
+  runtime's listing changes, and no existing number moves.
+
 ## The paired IC comparison draws circular blocks widened by the block bootstrap's own bias, so its interval covers a known difference near the nominal rate
 
 - **`compare_ic_series` drew moving blocks, and its interval was too

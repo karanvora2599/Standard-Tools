@@ -30,15 +30,29 @@ from typing import Any, Dict, List, Optional
 
 from standard_quant_tools import audit
 from standard_quant_tools._jsonsafe import sanitize_for_json
+from standard_quant_tools.agent.runtimes import allocation as _allocation
 from standard_quant_tools.agent.runtimes import backtest as _backtest
 from standard_quant_tools.agent.runtimes import data as _data
 from standard_quant_tools.agent.runtimes import delta_one as _delta_one
 from standard_quant_tools.agent.runtimes import derivatives as _derivatives
+from standard_quant_tools.agent.runtimes import finance as _finance
 from standard_quant_tools.agent.runtimes import meta as _meta
 from standard_quant_tools.agent.runtimes import microstructure as _microstructure
 from standard_quant_tools.agent.runtimes import portfolio as _portfolio
 from standard_quant_tools.agent.runtimes import research as _research
 from standard_quant_tools.agent.runtimes._inputs import build_input
+from standard_quant_tools.agent.runtimes.allocation import (
+    apply_risk_overlay,
+    attribute_returns_brinson,
+    get_kelly_report,
+    get_strategy_capacity_curve,
+    measure_book_returns,
+)
+from standard_quant_tools.agent.runtimes.allocation.sleeve_tools import (
+    allocate_across_sleeves,
+    combine_return_streams,
+    evaluate_allocation_rule,
+)
 from standard_quant_tools.agent.runtimes.backtest import (
     analyze_parameter_decay,
     analyze_trade_clustering,
@@ -132,6 +146,19 @@ from standard_quant_tools.agent.runtimes.derivatives import (
     get_option_risk_scenarios,
     get_volatility_cone,
     simulate_delta_hedge,
+)
+from standard_quant_tools.agent.runtimes.finance import (
+    analyze_book_carry,
+    analyze_cash_flows,
+    estimate_cost_of_capital,
+    get_currency_exposure,
+    price_fx_forward_hedge,
+    value_cash_flows,
+)
+from standard_quant_tools.agent.runtimes.finance.margin_tools import (
+    analyze_margin_runway,
+    compute_margin_requirement,
+    estimate_financing_cost,
 )
 from standard_quant_tools.agent.runtimes.meta import (
     compare_artifacts,
@@ -259,6 +286,8 @@ _RUNTIME_MODULES = [
     _meta,
     _derivatives,
     _microstructure,
+    _allocation,
+    _finance,
 ]
 
 #: Every tool in the library, from each runtime's own declaration —

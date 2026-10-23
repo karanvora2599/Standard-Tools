@@ -156,6 +156,8 @@ class TestWorkerToolCoverage:
             "derivatives",
             "delta_one",
             "portfolio_risk",
+            "allocation",
+            "finance",
             "discovery",
             "provenance",
             "microstructure",
