@@ -246,8 +246,11 @@ class TestAResumedMonitorCannotBeRebuilt:
         """The null case. Restating what the monitor already is is not a
 
         request to change it, and a caller that echoes its own arguments
-        back on every call is the ordinary way to drive this tool."""
-        state = self._open()
+        back on every call is the ordinary way to drive this tool. Opened
+        with the fixed warm-up of 60 it echoes; the default is adaptive
+        since the CHANGELOG entry "The spread monitor's default warm-up runs
+        until it holds 20 effective observations", tested below."""
+        state = self._open(warmup=60)
         resumed = monitor_spread_stream(
             SpreadMonitorInput(
                 primary_prices=[100.3],
@@ -261,6 +264,31 @@ class TestAResumedMonitorCannotBeRebuilt:
             )
         )
         assert resumed.n_observations == 81
+
+    def test_an_adaptive_monitor_resumes_on_an_echoed_default(self):
+        """Opened without a warm-up, the monitor is adaptive: echoing
+        warmup=None is the same monitor, and a fixed 60 is not -- it would
+        freeze a baseline the adaptive one is still learning."""
+        state = self._open()
+        assert state["adaptive_warmup"] is True
+        resumed = monitor_spread_stream(
+            SpreadMonitorInput(
+                primary_prices=[100.3],
+                reference_prices=[100.0],
+                state=state,
+                warmup=None,
+            )
+        )
+        assert resumed.n_observations == 81
+        with pytest.raises(ValidationError, match="adaptive"):
+            monitor_spread_stream(
+                SpreadMonitorInput(
+                    primary_prices=[100.3],
+                    reference_prices=[100.0],
+                    state=state,
+                    warmup=60,
+                )
+            )
 
     def test_a_resume_that_sends_none_of_them_is_accepted(self):
         """The other null case: silence means "carry on", not "rebuild at

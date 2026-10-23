@@ -772,6 +772,15 @@ class SpreadMonitorResult(_Result):
         "(1 - rho) / (1 + rho). Below 20 the baseline mean is uncertain and "
         "false alarms run above design; a warning says so.",
     )
+    adaptive_warmup: bool = Field(
+        False,
+        description="The warm-up adapts to the spread's memory, running until "
+        "the baseline carries 20 effective observations (the default).",
+    )
+    warmup_used: Optional[int] = Field(
+        None,
+        description="Observations the baseline was fixed on; null while " "warming up.",
+    )
     degenerate_baseline: bool = Field(
         False,
         description="The warm-up saw no variation, so the statistic divides "

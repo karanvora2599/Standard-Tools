@@ -73,6 +73,11 @@ __all__ = [
 #: 4: the warm-up measures its own persistence and the CUSUM is
 #: standardized by the long-run standard deviation, so a version-3
 #: monitor's accumulators are in different units from this one's.
+#:
+#: The adaptive warm-up added `adaptive_warmup` and `min_warmup` without a
+#: bump, deliberately: no accumulator changed its meaning, and a version-4
+#: state written before them resumes as the fixed warm-up it was opened
+#: with (see `_validated`).
 MONITOR_VERSION = 4
 
 #: Below this many effective observations -- the warm-up discounted by its
@@ -91,8 +96,22 @@ _MAX_WARMUP_LAG1 = 0.95
 
 #: Observations gathered before the baseline is fixed. Below about this the
 #: standard deviation is too noisy to standardize against, and a detector
-#: built on it fires on its own estimation error.
+#: built on it fires on its own estimation error. With the default
+#: (adaptive) warm-up this is the least it runs; see `new_spread_monitor`.
 DEFAULT_WARMUP = 60
+
+#: Standard errors above the warm-up's estimated persistence that an
+#: adaptive warm-up must still hold `_MIN_EFFECTIVE_WARMUP` effective
+#: observations at. See `_warmup_too_short`.
+_WARMUP_RHO_MARGIN = 2.0
+
+#: The longest an adaptive warm-up runs. At the most persistence the scale
+#: accounts for, `_MAX_WARMUP_LAG1`, this many observations carry
+#: `_MIN_EFFECTIVE_WARMUP` effective ones, so the extension ends here at the
+#: latest whatever the spread does: 20 x 1.95 / 0.05 = 780.
+_MAX_ADAPTIVE_WARMUP = int(
+    round(_MIN_EFFECTIVE_WARMUP * (1.0 + _MAX_WARMUP_LAG1) / (1.0 - _MAX_WARMUP_LAG1))
+)
 
 #: The shortest warm-up a monitor is opened with, or resumed from.
 _MIN_WARMUP = 10
@@ -190,7 +209,7 @@ def new_spread_monitor(
     *,
     channel: str = "relative_bps",
     label: str = "spread",
-    warmup: int = DEFAULT_WARMUP,
+    warmup: Optional[int] = None,
     threshold: float = STREAMING_THRESHOLD,
     slack: float = DEFAULT_SLACK,
 ) -> Dict[str, Any]:
@@ -202,6 +221,27 @@ def new_spread_monitor(
     arithmetic is shared across jobs and the naming is not -- an ETF premium
     and a cash-futures basis are the same computation and want different
     words in the message.
+
+    THE DEFAULT WARM-UP ADAPTS TO THE SPREAD'S MEMORY. `warmup=None` runs
+    at least `DEFAULT_WARMUP` observations and then keeps going, one tick at
+    a time, until the warm-up holds `_MIN_EFFECTIVE_WARMUP` effective
+    observations -- n (1 - rho) / (1 + rho), with rho its own bias-corrected
+    lag-1 autocorrelation taken at an upper bound (`_warmup_too_short`) --
+    or reaches `_MAX_ADAPTIVE_WARMUP`. Measured on 200 1,500-tick streams
+    per cell, a fixed 60 against the adaptive default:
+
+        no shift, rho = 0 / 0.5 / 0.9      2.5 / 9.5 / 29.0%  ->  2.5 / 7.5 / 1.0%
+        warm-up used (median), same        60 / 60 / 60       ->  60 / 99 / 584
+        3 sd shift at tick 750, rho = 0.9  57% found after it ->  98%, median
+                                           (26% alarmed first)    delay 66 ticks
+
+    The fixed 60 held a median 3.5 effective observations at rho = 0.9. An
+    independent spread is not extended at all, so its monitor is the fixed
+    60 to the bit. THE PRICE is a longer silence: nothing can alarm during
+    the warm-up, and a shift that arrives inside it reads as persistence,
+    lengthens it and is learned as normal. An integer `warmup` is used as
+    given, as before, and a warning says when it is short of 20 effective
+    observations.
     """
     if channel not in CHANNELS:
         raise ValidationError(
@@ -209,12 +249,21 @@ def new_spread_monitor(
             "are three because there are three formulas: a ratio in basis "
             "points, an annualized rate, and a difference in points."
         )
-    warmup, threshold, slack = _detector_settings(warmup, threshold, slack)
+    adaptive = warmup is None
+    warmup, threshold, slack = _detector_settings(
+        DEFAULT_WARMUP if adaptive else warmup, threshold, slack
+    )
     return {
         "version": MONITOR_VERSION,
         "channel": channel,
         "label": str(label),
+        # The warm-up's length: fixed, or for an adaptive monitor the
+        # length reached so far, which grows a tick at a time until the
+        # baseline carries enough effective observations. `min_warmup` is
+        # where it started.
         "warmup": warmup,
+        "adaptive_warmup": adaptive,
+        "min_warmup": warmup,
         "threshold": threshold,
         "slack": slack,
         "n": 0,
@@ -342,8 +391,12 @@ def update_spread_monitor(
                 origin = state["lag_origin"]
                 state["lag_cross"] += (value - origin) * (previous - origin)
             if state["n"] == state["warmup"]:
-                _freeze_baseline(state, warnings)
-                froze_this_call = True
+                if _warmup_too_short(state):
+                    # Adaptive and not yet enough: one more tick of warm-up.
+                    state["warmup"] += 1
+                else:
+                    _freeze_baseline(state, warnings)
+                    froze_this_call = True
             continue
 
         mean = state["baseline_mean"]
@@ -380,7 +433,7 @@ def update_spread_monitor(
         # 1,500-tick streams with no shift alerted 20 of 20 times at
         # rho = 0.9 and 18 of 20 at 0.5. Against the long-run sd the
         # monitor's sums are the size independent noise's are, and the
-        # rates fall to 29% and 12% at the default warm-up of 60 -- what
+        # rates fall to 29% and 12% at a fixed warm-up of 60 -- what
         # remains is a baseline estimated from few effective observations,
         # which `effective_warmup` reports and a longer warm-up removes.
         z = (value - mean) / state["baseline_long_run_std"]
@@ -420,11 +473,34 @@ def update_spread_monitor(
                 ),
             }
 
-    if state["n"] < state["warmup"]:
+    if state["n"] < state["warmup"] and state["adaptive_warmup"]:
+        warnings.append(
+            f"Still warming up: {state['n']} observations so far. The warm-up "
+            f"adapts to the spread's memory: it runs at least "
+            f"{state['min_warmup']} and until the baseline carries "
+            f"{_MIN_EFFECTIVE_WARMUP:.0f} effective observations, at most "
+            f"{_MAX_ADAPTIVE_WARMUP}. Nothing can trigger until the baseline "
+            "is fixed, and a quiet monitor here says nothing about the market."
+        )
+    elif state["n"] < state["warmup"]:
         warnings.append(
             f"Still warming up: {state['n']} of {state['warmup']} "
             "observations. Nothing can trigger until the baseline is fixed, "
             "and a quiet monitor here says nothing about the market."
+        )
+    elif (
+        froze_this_call
+        and state["adaptive_warmup"]
+        and state["warmup"] > state["min_warmup"]
+    ):
+        warnings.append(
+            f"The warm-up ran {state['warmup']} observations rather than "
+            f"{state['min_warmup']}: the spread's lag-1 autocorrelation is "
+            f"{state['baseline_lag1']:.2f}, so {state['min_warmup']} would "
+            f"have carried about "
+            f"{_effective(state['min_warmup'], state['baseline_lag1']):.0f} "
+            "effective observations, and a baseline mean from so few alarms "
+            "on noise. Nothing was tested before the baseline was fixed."
         )
     elif state.get("degenerate_baseline") and not froze_this_call:
         # The freeze warning says this once; a later call that is still
@@ -445,7 +521,7 @@ def update_spread_monitor(
         )
     lag1 = state.get("baseline_lag1")
     effective = (
-        state["warmup"] * (1.0 - lag1) / (1.0 + lag1)
+        _effective(state["warmup"], lag1)
         if lag1 is not None and not state.get("degenerate_baseline")
         else None
     )
@@ -485,6 +561,10 @@ def update_spread_monitor(
         "lag1_autocorrelation": lag1,
         "baseline_long_run_std": state.get("baseline_long_run_std"),
         "effective_warmup": effective,
+        "adaptive_warmup": bool(state["adaptive_warmup"]),
+        "warmup_used": (
+            int(state["warmup"]) if state["n"] >= state["warmup"] else None
+        ),
         "degenerate_baseline": bool(state.get("degenerate_baseline")),
         "warnings": warnings,
     }
@@ -526,6 +606,9 @@ def reset_spread_monitor(
     if not keep_baseline:
         fresh.update(
             {
+                # An adaptive warm-up relearns from its own minimum and
+                # adapts again to whatever the spread now is.
+                "warmup": fresh["min_warmup"],
                 "n": 0,
                 "mean": 0.0,
                 "m2": 0.0,
@@ -691,6 +774,39 @@ def _degenerate(mean: float, std: float) -> bool:
     return bool(coefficient < DEGENERATE_BASELINE_CV)
 
 
+def _effective(count: int, lag1: float) -> float:
+    """Observations' worth of independent information in `count` with
+    lag-1 autocorrelation `lag1`: count (1 - rho) / (1 + rho)."""
+    return count * (1.0 - lag1) / (1.0 + lag1)
+
+
+def _warmup_too_short(state: Dict[str, Any]) -> bool:
+    """
+    Whether an adaptive warm-up, at the end of its current length, may hold
+    fewer than `_MIN_EFFECTIVE_WARMUP` effective observations and may still
+    grow. O(1): the persistence comes from the carried co-moment.
+
+    JUDGED ON AN UPPER BOUND FOR THE PERSISTENCE, rho plus
+    `_WARMUP_RHO_MARGIN` standard errors, not on the estimate. A warm-up
+    that stops the first time its estimate says "enough" stops early
+    exactly where the estimate came out low -- and a low rho is also a
+    narrow long-run scale, so the stop selects the baselines most likely to
+    alarm. Stopping on the estimate, measured over 200 no-shift 1,500-tick
+    streams: 8.5% false alarms at rho = 0.9, where a fixed 300 with no
+    choice in it gave 1.5%. On the bound: 1.0% (and 7.5% at rho = 0.5
+    against 9.5%).
+    """
+    if not state["adaptive_warmup"] or state["n"] >= _MAX_ADAPTIVE_WARMUP:
+        return False
+    n = state["n"]
+    rho = _warmup_lag1(state)
+    upper = min(
+        _MAX_WARMUP_LAG1,
+        rho + _WARMUP_RHO_MARGIN * math.sqrt(max(1.0 - rho * rho, 0.0) / n),
+    )
+    return bool(_effective(n, upper) < _MIN_EFFECTIVE_WARMUP)
+
+
 def _warmup_lag1(state: Dict[str, Any]) -> float:
     """
     The warm-up's lag-1 autocorrelation, bias-corrected, in [0, 0.95].
@@ -795,6 +911,7 @@ def _validated(state: Any) -> Dict[str, Any]:
         out["warmup"], out["threshold"], out["slack"] = _detector_settings(
             out["warmup"], out["threshold"], out["slack"], source="state."
         )
+        _check_warmup_length(out)
         _check_accumulators(out)
     except ValidationError as exc:
         raise ValidationError(
@@ -849,6 +966,34 @@ def _detector_settings(
         positive(threshold, f"{source}threshold"),
         non_negative(slack, f"{source}slack"),
     )
+
+
+def _check_warmup_length(state: Dict[str, Any]) -> None:
+    """
+    The adaptive warm-up's two keys, checked, or supplied for a version-4
+    state written before they existed: that monitor was opened with a fixed
+    warm-up and resumes as one.
+    """
+    if "adaptive_warmup" not in state and "min_warmup" not in state:
+        state["adaptive_warmup"] = False
+        state["min_warmup"] = state["warmup"]
+        return
+    adaptive = state.get("adaptive_warmup")
+    if not isinstance(adaptive, bool):
+        raise ValidationError(f"state.adaptive_warmup={adaptive!r} is not a bool.")
+    minimum = _whole(state.get("min_warmup"), "state.min_warmup", minimum=_MIN_WARMUP)
+    state["min_warmup"] = minimum
+    if not adaptive and state["warmup"] != minimum:
+        raise ValidationError(
+            f"state.warmup={state['warmup']} differs from state.min_warmup="
+            f"{minimum} on a fixed warm-up, which never grows."
+        )
+    ceiling = max(minimum, _MAX_ADAPTIVE_WARMUP)
+    if adaptive and not minimum <= state["warmup"] <= ceiling:
+        raise ValidationError(
+            f"state.warmup={state['warmup']} is outside the adaptive warm-up's "
+            f"range [{minimum}, {ceiling}]."
+        )
 
 
 def _check_accumulators(state: Dict[str, Any]) -> None:

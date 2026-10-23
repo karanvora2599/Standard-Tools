@@ -433,13 +433,35 @@ def _refuse_a_rebuilt_monitor(input_data: SpreadMonitorInput, state: dict) -> No
     Silence on a field that was not sent: leaving these at their defaults
     means "resume what I have", not "rebuild it that way".
     """
-    changed = [
-        (field, getattr(input_data, field), state.get(field))
-        for field in _MONITOR_CONSTRUCTION
-        if field in input_data.model_fields_set
-        and state.get(field) is not None
-        and not _same(getattr(input_data, field), state.get(field))
-    ]
+    changed = []
+    for field in _MONITOR_CONSTRUCTION:
+        if field not in input_data.model_fields_set:
+            continue
+        requested = getattr(input_data, field)
+        if field == "warmup":
+            # The warm-up a monitor was OPENED with: null for an adaptive
+            # one, whose `warmup` grows as it learns, and the fixed length
+            # otherwise (`min_warmup`, or `warmup` in a state written before
+            # the adaptive warm-up existed).
+            stored = (
+                None
+                if state.get("adaptive_warmup")
+                else state.get("min_warmup", state.get("warmup"))
+            )
+            if (requested is None) != (stored is None) or (
+                requested is not None and not _same(requested, stored)
+            ):
+                changed.append(
+                    (
+                        field,
+                        "adaptive" if requested is None else requested,
+                        "adaptive" if stored is None else stored,
+                    )
+                )
+            continue
+        stored = state.get(field)
+        if stored is not None and not _same(requested, stored):
+            changed.append((field, requested, stored))
     if not changed:
         return
     asked = "; ".join(

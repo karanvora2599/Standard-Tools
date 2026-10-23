@@ -1,5 +1,52 @@
 # Changelog
 
+## The spread monitor's default warm-up runs until it holds 20 effective observations, so a persistent spread no longer alarms on noise
+
+- **Sixty ticks of a persistent spread are not sixty observations.**
+  `new_spread_monitor` and `monitor_spread_stream` froze their baseline
+  after a fixed 60 ticks. On an AR(0.9) basis those 60 carried a median
+  3.5 effective observations, and a baseline mean from so little drifts
+  off the true one by enough to cross the threshold: 29.0% of 200
+  no-shift 1,500-tick streams alerted, 9.5% at AR(0.5). The previous
+  entry measured this, reported `effective_warmup` and warned below 20.
+- **The default now adapts.** With `warmup` omitted (now `None`) the
+  warm-up runs at least 60 ticks and then extends one tick at a time,
+  O(1) from the carried co-moment, until n (1 - rho) / (1 + rho) reaches
+  20, at most 780 ticks -- where 0.95, the most persistence the scale
+  accounts for, gives exactly 20. Rho is taken TWO STANDARD ERRORS ABOVE
+  its estimate: a warm-up that stopped the first time its estimate said
+  "enough" stopped where the estimate was low, and a low rho is a narrow
+  long-run scale, so it selected the baselines most likely to alarm --
+  8.5% false alarms at AR(0.9) against 1.5% for a fixed 300.
+- **Measured** on 200 streams per cell, fixed 60 against the default:
+  no shift at rho = 0 / 0.5 / 0.9, 2.5 / 9.5 / 29.0% -> 2.5 / 7.5 / 1.0%,
+  with median warm-ups of 60 / 99 / 584 ticks. A 3 sd shift at tick 750
+  on AR(0.9) was found after it in 57% of streams (26% had alarmed on
+  noise first) and now 98%, at a median delay of 66 ticks against 43; 4
+  sd, 99.5%. An independent spread is not extended, so its monitor is
+  the fixed 60 to the bit. THE PRICE is a longer silence -- nothing can
+  alarm during the warm-up -- and a shift that arrives inside it reads as
+  persistence and is learned as normal. AR(0.5) stays above 5%: what is
+  left there is the uncertainty of the persistence itself over a 99-tick
+  warm-up.
+- **An integer `warmup` is used as given**, as before, with the warning
+  below 20 effective observations. The state gains `adaptive_warmup` and
+  `min_warmup`, and `warmup` is the length reached so far; a reset
+  relearns from the minimum. `MONITOR_VERSION` stays 4: no accumulator
+  changed its meaning, and a version-4 state from before resumes as the
+  fixed warm-up it was opened with. Results report `adaptive_warmup` and
+  `warmup_used`, and say when the warm-up ran long and why. A resumed
+  call that sends `warmup=60` to an adaptive monitor is refused as a
+  different monitor; `warmup=None`, or nothing, resumes it.
+- Tests: the default on persistent streams warms up past 200 ticks with
+  at least 20 effective observations and alerts at most twice in 20 (the
+  fixed 60 at least four times on the same seeds); an independent stream
+  is the fixed 60 to the bit; a shift after the warm-up is found; pieces
+  equal the whole; reset; an older state resumes fixed; the resume guard.
+  The test that echoed `warmup=60` to a default monitor now opens one at
+  60. `Documentation/28_delta_one.md` says what the default does. The
+  mutation catalogue gains two entries, both killed.
+
 ## A z-score that was never computed and trade averages over no trades are null with a reason, not 0.0
 
 - **`current_zscore` read 0.0 when there was no z-score.**

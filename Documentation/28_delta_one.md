@@ -408,6 +408,18 @@ abnormal. Whether that is a spike to acknowledge or a new level to watch
 from are opposite conclusions that look identical in the accumulators, so
 `reset` asks which rather than guessing.
 
+**The default warm-up runs until it holds 20 effective observations.** A
+persistent spread's 60 ticks are worth far fewer independent ones -- at a
+lag-1 autocorrelation of 0.9 a median 3.5 -- and a baseline mean from so
+little made 29% of no-shift 1,500-tick streams alert. With `warmup`
+omitted the warm-up starts at 60 and extends a tick at a time until
+n x (1 - rho) / (1 + rho), with rho taken two standard errors above its
+estimate, reaches 20, at most 780 ticks: 1.0% false alarms there, a median
+warm-up of 584 ticks, and a 3 sd shift afterwards found 98% of the time.
+An independent spread is not extended. The price is a longer silence, and
+a shift inside the warm-up is learned as normal; an integer `warmup` is
+used as given.
+
 **A baseline with no real dispersion is never tested against.** When the
 warm-up's coefficient of variation is below the library's
 `DEGENERATE_BASELINE_CV` (a stale feed, a pegged spread) the baseline is

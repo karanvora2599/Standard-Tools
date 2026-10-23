@@ -159,6 +159,7 @@ class TestTheScan:
 
 
 def _stream(phi, seed, warmup, shift_sd=0.0, at=750, n=1500):
+    """`warmup=None` is the default, adaptive warm-up."""
     spot, futures = _basis(n, phi, seed, shift_sd, at)
     reference = np.full(n, 5000.0)
     return update_spread_monitor(
@@ -166,6 +167,78 @@ def _stream(phi, seed, warmup, shift_sd=0.0, at=750, n=1500):
         primary=(reference * futures / spot).tolist(),
         reference=reference.tolist(),
     )
+
+
+class TestTheDefaultWarmUpAdaptsToTheSpreadsMemory:
+    """
+    A fixed 60-tick warm-up on an AR(0.9) spread held a median 3.5
+    effective observations, and 29% of no-shift 1,500-tick streams alerted
+    (200 streams). The default now runs until the warm-up holds 20
+    effective observations at an upper bound on its persistence: 1.0%,
+    with a median warm-up of 584 ticks.
+    """
+
+    def test_a_persistent_stream_warms_up_long_enough_and_stays_quiet(self):
+        outs = [_stream(0.9, 2000 + seed, None) for seed in range(20)]
+        assert sum(out["triggered"] for out in outs) <= 2
+        for out in outs:
+            assert out["adaptive_warmup"] is True
+            assert out["warmup_used"] > 200
+            assert out["effective_warmup"] >= 20
+            assert not any("longer warm-up" in w for w in out["warnings"])
+            assert any("The warm-up ran" in w for w in out["warnings"])
+        # The fixed 60 on the same streams.
+        fixed = [_stream(0.9, 2000 + seed, 60) for seed in range(20)]
+        assert sum(out["triggered"] for out in fixed) >= 4
+
+    def test_an_independent_stream_is_the_fixed_sixty_to_the_bit(self):
+        adaptive = _stream(0.0, 2000, None)
+        fixed = _stream(0.0, 2000, 60)
+        assert adaptive["warmup_used"] == 60
+        drop = ("adaptive_warmup", "min_warmup")
+        assert {k: v for k, v in adaptive["state"].items() if k not in drop} == {
+            k: v for k, v in fixed["state"].items() if k not in drop
+        }
+
+    def test_a_real_shift_after_the_warm_up_is_still_found(self):
+        """3 sd at tick 750 on AR(0.9): 98% of 200 found after the shift,
+        against 57% with the fixed 60, whose false alarms came first in
+        26%."""
+        found = sum(
+            _stream(0.9, 3000 + seed, None, 3.0)["triggered"] for seed in range(20)
+        )
+        assert found >= 17, found
+
+    def test_feeding_in_pieces_is_feeding_at_once(self):
+        spot, futures = _basis(900, 0.9, 7)
+        reference = np.full(900, 5000.0)
+        primary = (reference * futures / spot).tolist()
+        whole = update_spread_monitor(
+            new_spread_monitor(), primary=primary, reference=reference.tolist()
+        )
+        state = new_spread_monitor()
+        for lo in range(0, 900, 37):
+            state = update_spread_monitor(
+                state,
+                primary=primary[lo : lo + 37],
+                reference=reference[lo : lo + 37].tolist(),
+            )["state"]
+        assert state == whole["state"]
+
+    def test_a_reset_relearns_from_the_minimum(self):
+        from standard_quant_tools.delta_one.streaming import reset_spread_monitor
+
+        out = _stream(0.9, 2000, None)
+        assert out["state"]["warmup"] > 60
+        fresh = reset_spread_monitor(out["state"])
+        assert (fresh["warmup"], fresh["n"], fresh["adaptive_warmup"]) == (60, 0, True)
+
+    def test_a_state_from_before_the_adaptive_warm_up_resumes_as_fixed(self):
+        state = _stream(0.0, 2000, 60)["state"]
+        del state["adaptive_warmup"], state["min_warmup"]
+        resumed = update_spread_monitor(state, primary=[5010.0], reference=[5000.0])
+        assert resumed["adaptive_warmup"] is False
+        assert resumed["state"]["min_warmup"] == 60
 
 
 class TestTheMonitor:

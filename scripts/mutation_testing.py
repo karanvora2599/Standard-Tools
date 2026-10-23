@@ -223,6 +223,24 @@ MUTATIONS: List[Mutation] = [
         "tests/analysis/test_inference.py",
     ),
     Mutation(
+        # The adaptive warm-up never extends: the fixed 60, whose AR(0.9)
+        # baselines held a median 3.5 effective observations.
+        "spread monitor: never extend the default warm-up",
+        SRC / "delta_one/streaming.py",
+        '    if not state["adaptive_warmup"] or state["n"] >= _MAX_ADAPTIVE_WARMUP:\n',
+        '    if not state["adaptive_warmup"] or state["n"] >= 0:\n',
+        "tests/delta_one/test_a_persistent_basis_is_not_a_shift.py",
+    ),
+    Mutation(
+        # Stopping on the estimate instead of its upper bound: the stop
+        # selects the low estimates, and with them the narrow scales.
+        "spread monitor: stop the warm-up on the persistence estimate",
+        SRC / "delta_one/streaming.py",
+        "        rho + _WARMUP_RHO_MARGIN * math.sqrt(max(1.0 - rho * rho, 0.0) / n),\n",
+        "        rho,\n",
+        "tests/delta_one/test_a_persistent_basis_is_not_a_shift.py",
+    ),
+    Mutation(
         # A never-filled z-score window read as a spread at its mean.
         "pairs: report a z-score of 0.0 when the window never filled",
         SRC / "agent/runtimes/research/tools.py",

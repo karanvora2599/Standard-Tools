@@ -809,13 +809,18 @@ class SpreadMonitorInput(BaseModel):
         description="Names the monitor in its alerts. The channel says how "
         "the legs combine; this says what they are.",
     )
-    warmup: int = Field(
-        60,
+    warmup: Optional[int] = Field(
+        None,
         ge=10,
         le=100_000,
         description="Observations before the baseline is fixed and anything "
-        "can trigger. A baseline from fewer than about ten is estimation "
-        "error, and a detector standardized against it fires on that.",
+        "can trigger. OMIT IT and the warm-up adapts to the spread's memory: "
+        "at least 60, extended until the baseline carries 20 effective "
+        "observations, at most 780 -- a fixed 60 on a spread at lag-1 "
+        "autocorrelation 0.9 holds about four, and 29% of such streams "
+        "alerted on noise. An integer is used as given. A baseline from "
+        "fewer than about ten is estimation error, and a detector "
+        "standardized against it fires on that.",
     )
     threshold: float = Field(
         _STREAMING_THRESHOLD,
