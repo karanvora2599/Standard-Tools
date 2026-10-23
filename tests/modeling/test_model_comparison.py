@@ -11,6 +11,8 @@ differential with a known mean must produce a DM statistic of the right
 sign; and Holm on a hand-worked triple must give the hand-worked answer.
 """
 
+import math
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -94,6 +96,61 @@ class TestTheDifferenceInterval:
         a = pd.Series(rng.normal(size=100), index=DATES[:100])
         b = a + rng.normal(size=100) * 0.1
         assert compare_ic_series(a, b, seed=7) == compare_ic_series(a, b, seed=7)
+
+
+class TestAShortSeriesIsCoveredNearTheNominalRate:
+    """
+    The interval drew moving blocks and covered a known mean difference too
+    rarely: 92.2% / 88.9% at 60 dates with the default block (IID /
+    AR(0.3)), and at 60 dates in 20-date blocks 75% on these seeds. The
+    draws now wrap around the sample and are widened by
+    sqrt(n / (n - block_size)), as `bootstrap_statistic`'s are: 88% here,
+    where circular blocks alone measured 80% and widened moving blocks 84%.
+    """
+
+    MU, SIGMA = 0.01, 0.05
+
+    def test_sixty_dates_with_long_blocks(self):
+        dates = pd.bdate_range("2021-01-04", periods=60)
+        base = pd.Series(np.zeros(60), index=dates)
+        covered, trials = 0, 300
+        for seed in range(trials):
+            rng = np.random.default_rng(seed)
+            better = pd.Series(rng.normal(self.MU, self.SIGMA, 60), index=dates)
+            result = compare_ic_series(
+                base, better, block_size=20, n_bootstrap=500, seed=seed
+            )
+            covered += result["ci_lower"] <= self.MU <= result["ci_upper"]
+        rate = covered / trials
+        assert rate >= 0.86, f"a nominal 95% interval covered the truth {rate:.0%}"
+
+    def test_the_result_says_how_it_drew(self):
+        dates = pd.bdate_range("2021-01-04", periods=60)
+        rng = np.random.default_rng(1)
+        a = pd.Series(rng.normal(0.0, 0.05, 60), index=dates)
+        b = a + rng.normal(0.01, 0.02, 60)
+        result = compare_ic_series(a, b, block_size=20)
+        assert result["bootstrap_scheme"] == "circular"
+        assert result["bootstrap_scale"] == pytest.approx(math.sqrt(60 / 40))
+        default = compare_ic_series(a, b)
+        assert default["block_size"] == 4
+        assert default["bootstrap_scale"] == pytest.approx(math.sqrt(60 / 56))
+
+    def test_the_p_value_reads_the_same_draws_as_the_interval(self):
+        """Widened together, so the two still agree about zero: on these
+        forty series fifteen intervals exclude it, and each of those, and
+        only those, has a p-value under 5%."""
+        excluded = 0
+        for seed in range(40):
+            rng = np.random.default_rng(1000 + seed)
+            dates = pd.bdate_range("2021-01-04", periods=60)
+            a = pd.Series(np.zeros(60), index=dates)
+            b = pd.Series(rng.normal(0.008, 0.05, 60), index=dates)
+            result = compare_ic_series(a, b, block_size=10, n_bootstrap=1000, seed=seed)
+            excludes_zero = not (result["ci_lower"] <= 0.0 <= result["ci_upper"])
+            assert excludes_zero == (result["p_value"] < 0.05), seed
+            excluded += excludes_zero
+        assert 0 < excluded < 40
 
 
 class TestDieboldMariano:

@@ -10,6 +10,8 @@ different candidate, and the refusals on a candidate with a different task
 or label.
 """
 
+import math
+
 import pytest
 from pydantic import ValidationError as PydanticValidationError
 
@@ -112,6 +114,12 @@ class TestADifferentCandidate:
         pair = result.pairs[0]
         assert pair.n_dates > 30 and pair.n_rows > pair.n_dates
         assert pair.ci_lower <= pair.mean_difference <= pair.ci_upper
+        # The interval says how it drew: circular blocks, widened by the
+        # block bootstrap's own shortfall.
+        assert pair.bootstrap_scheme == "circular"
+        assert pair.bootstrap_scale == pytest.approx(
+            math.sqrt(pair.n_dates / (pair.n_dates - pair.block_size))
+        )
         assert 0.0 <= pair.p_value <= 1.0
         assert pair.verdict in {
             "candidate_better",

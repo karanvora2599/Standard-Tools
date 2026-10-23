@@ -1880,6 +1880,17 @@ class PairedComparison(BaseModel):
         description="Dates on which the two per-date ICs were exactly equal.",
     )
     block_size: int
+    bootstrap_scheme: str = Field(
+        "circular",
+        description="How the interval's blocks were drawn: `circular`, "
+        "wrapping around the dates so every date is drawn equally often.",
+    )
+    bootstrap_scale: float = Field(
+        1.0,
+        description="What the bootstrap means were widened by about their "
+        "mean, sqrt(n / (n - block_size)): a block bootstrap understates the "
+        "variance of a mean by (1 - block_size / n).",
+    )
     verdict: Literal["candidate_better", "reference_better", "indistinguishable"]
     diebold_mariano: Optional[Dict[str, Any]] = Field(
         None,

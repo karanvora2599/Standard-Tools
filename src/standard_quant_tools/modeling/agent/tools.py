@@ -3438,6 +3438,8 @@ def _paired_against_reference(input_data, reference: str):
             hit_rate=r["hit_rate"] if r["hit_rate"] == r["hit_rate"] else None,
             n_ties=r["n_ties"],
             block_size=r["block_size"],
+            bootstrap_scheme=r["bootstrap_scheme"],
+            bootstrap_scale=r["bootstrap_scale"],
             verdict=verdicts[r["verdict"]],
             diebold_mariano=r["diebold_mariano"],
             warnings=r["warnings"],

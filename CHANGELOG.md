@@ -1,5 +1,39 @@
 # Changelog
 
+## The paired IC comparison draws circular blocks widened by the block bootstrap's own bias, so its interval covers a known difference near the nominal rate
+
+- **`compare_ic_series` drew moving blocks, and its interval was too
+  narrow.** The interval on the per-date IC difference -- what
+  `paired_comparison`, `compare_models(method="paired")` and
+  `compare_signals` in its `paired` and `ic_series` modes report, with the
+  verdict read off it -- drew blocks the way `bootstrap_statistic` did
+  before the CHANGELOG entry of 2026-10-22, and fell short the same way.
+  Measured on 4,000 normal series per cell with a known mean difference,
+  a nominal 95% interval covered it 92.2 / 93.5 / 93.5 / 93.7% at 60 /
+  120 / 250 / 500 dates with the default n^(1/3) block, 88.9 / 90.5 /
+  92.5 / 93.2% under AR(0.3) (one standard error 0.34 points), and at 60
+  dates in 20-date blocks 75%.
+- **It now takes the same treatment.** The draws wrap around the sample
+  (`_resampling.circular_block_indices`) and are widened about their own
+  mean by `_resampling.circular_block_scale`, sqrt(n / (n - b)), before
+  the interval and the p-value are read off them, so the two still agree
+  about zero: 93.5 / 94.2 / 93.8 / 94.0% IID and 90.2 / 91.4 / 93.0 /
+  93.7% under AR(0.3) on the same series, and 88% in 20-date blocks.
+  What is left is a variance read off n / b blocks and, under AR(0.3), a
+  default block too short for the dependence -- the remainder
+  `circular_block_scale` documents. Seeded intervals and p-values differ
+  from those drawn before, and an interval that only just excluded zero
+  can now include it.
+- **The results say what ran.** `compare_ic_series` returns
+  `bootstrap_scheme` ("circular") and `bootstrap_scale`, which reach the
+  wire in `compare_signals`' `comparison` and are declared on
+  `PairedComparison` for `compare_models`.
+- Tests: coverage at 60 dates in 20-date blocks (an 86% floor; moving
+  blocks measured 75% on the same seeds, circular blocks alone 80% and
+  widened moving blocks 84%), the scheme and scale on the result and on
+  `PairedComparison`, and the p-value agreeing with the interval about
+  zero. The mutation catalogue gains two entries.
+
 ## A rally's return z-score that was never computed is null with a reason, not 0.0
 
 - **`return_zscore` read 0.0 when there was no z-score.** `detect_rally`

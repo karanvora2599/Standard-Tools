@@ -241,6 +241,27 @@ MUTATIONS: List[Mutation] = [
         "tests/delta_one/test_a_persistent_basis_is_not_a_shift.py",
     ),
     Mutation(
+        # The IC-difference interval back to moving blocks: the first and
+        # last block - 1 dates under-drawn, the draws centred off the
+        # sample's mean. The moving indexer is bound to the circular name.
+        "ic comparison: draw moving blocks instead of circular ones",
+        SRC / "modeling/validation/comparison.py",
+        "    circular_block_indices,\n    circular_block_scale,\n)\n",
+        "    circular_block_scale,\n)\n"
+        "from standard_quant_tools._resampling import (\n"
+        "    block_indices as circular_block_indices,\n)\n",
+        "tests/modeling/test_model_comparison.py",
+    ),
+    Mutation(
+        # The widening dropped: a short series in long blocks is covered
+        # well under the nominal rate again.
+        "ic comparison: drop the widening of the draws",
+        SRC / "modeling/validation/comparison.py",
+        "        draws = centre + scale * (draws - centre)\n",
+        "        draws = centre + (draws - centre)\n",
+        "tests/modeling/test_model_comparison.py",
+    ),
+    Mutation(
         # An undefined return z-score read as an exactly ordinary move, as
         # it did.
         "rally: report an undefined return z-score as 0.0",
