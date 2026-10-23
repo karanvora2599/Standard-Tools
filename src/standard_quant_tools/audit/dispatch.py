@@ -16,6 +16,7 @@ from .context import (
     _fetch_clock_var,
     _FetchClock,
     _request_id_var,
+    current_tenant,
     new_request_id,
 )
 from .hashing import hash_payload, round_floats
@@ -145,6 +146,10 @@ def _run_and_record(
     require_finite_scalar_fields(model_instance, tool_name)
     recording = _audit_enabled()
     fail_closed = _audit_fail_closed() if recording else False
+    # Read before the tool runs, like the settings above: the record names
+    # the caller the call was made for, whatever the tool does to the
+    # context while it runs.
+    tenant = current_tenant()
 
     request_id = new_request_id()
     token_req = _request_id_var.set(request_id)
@@ -217,6 +222,7 @@ def _run_and_record(
                         request_id=request_id,
                         timestamp_utc=datetime.now(timezone.utc).isoformat(),
                         tool_name=tool_name,
+                        tenant=tenant,
                         input=_redact(raw_input, fields),
                         data_sources=data_sources,
                         cpp_available=_cpp_available(),

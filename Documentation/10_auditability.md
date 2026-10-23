@@ -83,6 +83,7 @@ produces a record like:
   "request_id": "de06f2e1b7db47d7938069970bdc10ab",
   "timestamp_utc": "2026-07-19T16:19:37.695789+00:00",
   "tool_name": "run_sma_backtest",
+  "tenant": null,
   "input": {"symbol": "AAPL", "start_date": "2022-01-01", "end_date": "2022-06-01", "...": "..."},
   "data_sources": [
     {"symbol": "AAPL", "start": "2022-01-01", "end": "2022-06-01", "interval": "1d",
@@ -234,6 +235,40 @@ answered by two datasets. Failed calls still produce a record —
 > `content_hash_version` to `record_data_access`. An entry without the
 > key holds `hash_dataframe` (version 1) and is never rewritten; replay
 > checks it in its own form (see [Replay verification](#replay-verification)).
+
+### Who the call was for: `tenant`
+
+A host that serves several desks, teams or customers from one process and
+one audit directory declares whom each call is for, and every record
+written inside the block names it:
+
+```python
+from standard_quant_tools import audit
+from standard_quant_tools.agent import dispatch
+
+with audit.caller(tenant="desk-a"):
+    result = dispatch("run_sma_backtest", arguments)  # its record says "tenant": "desk-a"
+```
+
+Without it the record carried the call and never the caller, so a host
+exporting one desk's records from a shared trail could not tell them from
+another desk's. `tenant` is `null` outside any block, and absent from
+records written before the field existed; those still verify, because a
+record is hashed as it was stored. It is inside the hash like every other
+field, so moving a record to another desk breaks the chain.
+
+`caller` sets a context variable and restores it on every way out:
+blocks nest and the innermost wins, `tenant=None` declares no caller, a
+dispatch made inside a tool inherits the block, and another thread does
+not see it unless it runs in a copy of this context. The tenant is read
+when the call starts, so nothing the tool does to the context changes
+whom its own record names. A blank or non-string tenant is refused with
+`ValueError`. `audit.current_tenant()` reads the innermost declaration,
+and `explain_decision` reports the record's `tenant`.
+
+The library only records what the host declares: it does not check that a
+caller may act for that tenant, and a record outside any block is
+attributed to nobody, not to a default.
 
 ### Where the time went: `fetch_ms` and `compute_ms`
 

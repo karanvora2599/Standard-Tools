@@ -1,5 +1,35 @@
 # Changelog
 
+## A decision record names who the call was for, as the host declares it with `audit.caller(tenant=...)`
+
+- **The record carried the call and never the caller.** A host that
+  serves several desks from one process and one audit directory had no
+  way to say which desk a dispatch was made for, so a bundle exported for
+  one desk could not be told apart from another's: the host either
+  declared every desk it served or refused to export at all.
+- **`audit.caller(tenant=...)`** is a context manager the host wraps
+  around its calls, and `DecisionRecord` gains `tenant`, which every
+  record written inside the block carries. It is a context variable, set
+  on entry and restored on every way out: blocks nest and the innermost
+  wins, `tenant=None` declares no caller, a dispatch nested inside a tool
+  inherits it, and another thread does not see it unless it runs in a
+  copy of the context. The tenant is read before the tool runs, like the
+  audit settings. A blank or non-string tenant is refused with
+  `ValueError`, because a record naming an empty desk would look
+  attributed and be attributed to nobody. `audit.current_tenant()` reads
+  the innermost declaration.
+- **Records outside any block say `"tenant": null`**, and records written
+  before the field existed have no such key and still verify in both
+  verifiers, with a stamped record chained onto them: a record is hashed
+  as it was stored. The field is inside the hash, so moving a record to
+  another desk breaks the chain.
+- **`explain_decision` reports `tenant`.**
+- **Not done:** the library records what the host declares and checks
+  nothing about it. Whether a caller may act for a tenant is the host's
+  question.
+- Tests: `tests/audit/test_caller_tenant.py`. Docs:
+  `Documentation/10_auditability.md` ("Who the call was for").
+
 ## The spread monitor's default warm-up runs until it holds 20 effective observations, so a persistent spread no longer alarms on noise
 
 - **Sixty ticks of a persistent spread are not sixty observations.**

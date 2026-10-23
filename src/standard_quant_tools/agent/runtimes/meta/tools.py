@@ -212,6 +212,7 @@ def explain_decision(input_data: ExplainDecisionInput) -> ExplainDecisionResult:
         request_id=record["request_id"],
         timestamp_utc=record["timestamp_utc"],
         tool_name=record["tool_name"],
+        tenant=record.get("tenant"),
         status=record.get("status", "unknown"),
         input=record.get("input", {}),
         data_sources=sources,

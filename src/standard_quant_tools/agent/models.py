@@ -6633,6 +6633,14 @@ class ExplainDecisionResult(BaseModel):
     request_id: str
     timestamp_utc: str
     tool_name: str
+    tenant: Optional[str] = Field(
+        None,
+        description=(
+            "Who the call was for, as the host declared it with "
+            "audit.caller (e.g. a desk). None when no caller was declared "
+            "and for records written before the field existed."
+        ),
+    )
     status: str
     input: Dict[str, Any]
     data_sources: List[DataSourceRef] = Field(default_factory=list)

@@ -11,6 +11,12 @@ class DecisionRecord(BaseModel):
     request_id: str
     timestamp_utc: str
     tool_name: str
+    # Who the call was for, as the host declared it with `audit.caller` --
+    # e.g. the desk a multi-tenant service dispatched it for. None when no
+    # caller was declared, and absent from records written before the
+    # field existed; those still verify, because a record is hashed as it
+    # was stored.
+    tenant: Optional[str] = None
     input: Dict[str, Any]
     # One entry per data access: symbol, start, end, interval, source,
     # content_hash, fetch_ms, and `content_hash_version` -- 2 for

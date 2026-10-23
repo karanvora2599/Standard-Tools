@@ -1,22 +1,27 @@
 """Per-call request context: the `request_id`/in-flight `data_sources` list
 threaded through a `dispatch()` call via `contextvars` (so it survives the
 thread-pool hop in async data fetches), the clock that times each data
-access, plus the opt-in correlated-logging helper that reads `request_id`
-back out of that same context."""
+access, the caller a host application declares around its calls (`caller`),
+plus the opt-in correlated-logging helper that reads `request_id` back out
+of that same context."""
 
+import contextlib
 import contextvars
 import logging
 import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
 _request_id_var: "contextvars.ContextVar[Optional[str]]" = contextvars.ContextVar(
     "sqt_request_id", default=None
 )
 _data_sources_var: "contextvars.ContextVar[Optional[List[Dict[str, Any]]]]" = (
     contextvars.ContextVar("sqt_data_sources", default=None)
+)
+_tenant_var: "contextvars.ContextVar[Optional[str]]" = contextvars.ContextVar(
+    "sqt_tenant", default=None
 )
 
 
@@ -62,6 +67,42 @@ _fetch_clock_var: "contextvars.ContextVar[Optional[_FetchClock]]" = (
 
 def new_request_id() -> str:
     return uuid.uuid4().hex
+
+
+@contextlib.contextmanager
+def caller(*, tenant: Optional[str]) -> Iterator[None]:
+    """
+    Declare who the calls made inside this block are for, so each decision
+    record they write names it in `tenant`.
+
+    A host that serves several desks from one process and one audit
+    directory had no way to say which desk a call was made for: the record
+    carried the call and never the caller, so a bundle exported for one
+    desk could not be told apart from another's, and the host had to either
+    declare every desk it served or refuse to export at all.
+
+    It is a context variable, set on entry and restored on every way out, so
+    blocks nest (the innermost wins), a call on another thread does not see
+    it unless that thread runs in a copy of this context, and a dispatch
+    nested inside a tool inherits it. `tenant=None` declares no caller,
+    which is what a record outside any block says. A blank or non-string
+    tenant is refused: a record that names an empty desk would be
+    attributed to nobody while looking attributed.
+    """
+    if tenant is not None and (not isinstance(tenant, str) or not tenant.strip()):
+        raise ValueError(
+            f"tenant must be a non-blank string or None, got {tenant!r}"
+        )
+    token = _tenant_var.set(tenant)
+    try:
+        yield
+    finally:
+        _tenant_var.reset(token)
+
+
+def current_tenant() -> Optional[str]:
+    """The tenant the innermost `caller` block declared, or None."""
+    return _tenant_var.get()
 
 
 class RequestIdFilter(logging.Filter):

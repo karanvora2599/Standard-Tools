@@ -23,7 +23,8 @@ pluggable storage backends, ...):
                   dtype names and datetime resolutions
     json_native — what a record's input is made of before it is hashed
     context     — per-call request context, the data-source entries a
-                  provider reports into it, + correlated-logging helper
+                  provider reports into it, the caller a host declares
+                  (`caller`), + correlated-logging helper
     provenance  — git/package-version/strategy-source best-effort provenance,
                   and the build and platform facts the last bits depend on
     paths       — audit-dir resolution, day-file discovery, advisory locking
@@ -49,7 +50,9 @@ internally organized.
 from .context import (
     DATA_SOURCE_HASH_VERSION,
     RequestIdFilter,
+    caller,
     configure_logging,
+    current_tenant,
     new_request_id,
     record_data_access,
     record_frame_access,
@@ -111,9 +114,11 @@ __all__ = [
     "ReplayResult",
     "RequestIdFilter",
     "TornTail",
+    "caller",
     "canonical_frame_hash",
     "checkpoint_and_sign",
     "configure_logging",
+    "current_tenant",
     "describe_head",
     "export_bundle",
     "gc",
