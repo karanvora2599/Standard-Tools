@@ -1,5 +1,22 @@
 # Changelog
 
+## A target volatility a few rounding units from an end of the frontier is that end, so the minimum-variance answer is the same on every BLAS
+
+- **The flat end no longer turns rounding into weights.** A volatility
+  written as an end corner's own comes back through its square a few
+  units of rounding from that corner's variance. At the minimum-variance
+  corner the variance is flat in the weights, so the quadratic solved for
+  that sliver and moved the weights by 1e-8: the planted minimum-variance
+  weight read 0.42622950 here and 0.42622949994 on the CI runners. A
+  target within 16 rounding units of an end corner's variance now returns
+  that corner, and a test plants targets 0 and 4 units from both ends on
+  every random problem.
+- **The corners' own budget check allows what stepping accumulates.**
+  Each corner is stepped from the one before, and twelve assets with
+  shorts reached a budget residual of 1.5e-13 on one BLAS against the
+  test's 1e-13; the test now holds it to 1e-12, beside its 1e-12 KKT
+  check.
+
 ## The documentation describes the constrained optimizer, the bounded frontier and the factor and tail risk decompositions, and counts 241 tools
 
 - **Each change is described beside its tools.** Portfolio (05) has

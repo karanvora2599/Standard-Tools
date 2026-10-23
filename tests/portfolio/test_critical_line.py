@@ -214,7 +214,9 @@ class TestEveryCornerCertifies:
         assert lams == sorted(lams, reverse=True)
         assert lams[-1] >= 0.0
         for corner in frontier.corners:
-            assert abs(corner.weights.sum() - 1.0) <= 1e-13
+            # Each corner is stepped from the one before, so the budget's
+            # residual accumulates: 1.5e-13 on twelve assets on one BLAS.
+            assert abs(corner.weights.sum() - 1.0) <= 1e-12
             assert np.all(corner.weights >= lo) and np.all(corner.weights <= hi)
             assert _kkt_violation(corner.weights, corner.lam, mu, cov, lo, hi) <= 1e-12
 
@@ -291,6 +293,23 @@ class TestABruteForceAgrees:
             point = frontier.at_volatility(float(target))
             assert point.volatility == pytest.approx(target, abs=1e-12)
             assert point.expected_return == pytest.approx(0.5 * (a + b), abs=1e-8)
+
+    def test_a_target_a_few_units_from_an_end_is_that_end(self, seed, n, kind):
+        """A volatility written as an end corner's own comes back through
+        its square a few rounding units from that corner's variance. At the
+        minimum-variance corner the variance is flat in the weights, so
+        solving for that sliver moved the weights by 1e-8 on one BLAS and not
+        another; within a few units the answer is the corner itself."""
+        frontier = critical_line(*_problem(seed, n), *_bounds(kind, n, seed))
+        eps = float(np.finfo(float).eps)
+        bottom, top = frontier.corners[-1], frontier.corners[0]
+        for units in (0.0, 4.0):
+            near_bottom = float(np.sqrt(bottom.variance * (1.0 + units * eps)))
+            assert np.array_equal(
+                frontier.at_volatility(near_bottom).weights, bottom.weights
+            )
+            near_top = float(np.sqrt(top.variance * (1.0 - units * eps)))
+            assert np.array_equal(frontier.at_volatility(near_top).weights, top.weights)
 
     def test_the_ends_are_the_extremes(self, seed, n, kind):
         """The top corner earns the highest return any portfolio inside the

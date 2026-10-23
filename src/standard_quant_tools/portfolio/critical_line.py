@@ -89,6 +89,11 @@ MAX_ASSETS = 500
 #: reached it, and the event is taken at the current lam.
 _SLACK = 64.0 * float(np.finfo(float).eps)
 
+#: A target variance within this relative distance of a corner's variance is
+#: that corner: squaring a volatility and recomputing a corner's variance each
+#: round by a few units.
+_TARGET_SLACK = 16.0 * float(np.finfo(float).eps)
+
 _EVENT_TEXT = {
     "leaves_lower": "leaves its lower bound",
     "leaves_upper": "leaves its upper bound",
@@ -245,13 +250,19 @@ class Frontier:
                 "volatilities of the efficient portfolios inside these bounds."
             )
         goal = target * target
+        # A target written as a corner's own volatility comes back through
+        # its square a few ulps either side of that corner's variance. At the
+        # minimum-variance corner the variance is flat in the share, so the
+        # root below turned those ulps into weights 1e-8 off on one BLAS and
+        # not another; within this tolerance the target is the corner.
+        tolerance = _TARGET_SLACK
         corners = self.corners
         for k in range(len(corners) - 1):
             high_corner, low_corner = corners[k], corners[k + 1]
             if goal >= low_corner.variance or k == len(corners) - 2:
-                if goal >= high_corner.variance:
+                if goal >= high_corner.variance * (1.0 - tolerance):
                     return self._mix(k, 1.0)
-                if goal <= low_corner.variance:
+                if goal <= low_corner.variance * (1.0 + tolerance):
                     return self._mix(k, 0.0)
                 with single_threaded_blas():
                     step = high_corner.weights - low_corner.weights
@@ -259,6 +270,8 @@ class Frontier:
                     b = float(low_corner.weights @ self.cov @ step)
                     c = float(step @ self.cov @ step)
                 excess = goal - a
+                if excess <= a * tolerance:
+                    return self._mix(k, 0.0)
                 if not c > 0.0:
                     return self._mix(k, 1.0)
                 root = math.sqrt(max(b * b + c * excess, 0.0))
