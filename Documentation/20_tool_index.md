@@ -27,26 +27,26 @@ scoping an MCP session -- see [18_mcp.md](18_mcp.md).
 Two tools (`run_backtest_optimization`, `scan_pairs`) are long-running and
 are served only with `--enable-long-running`. A default MCP session is also
 scoped to four categories rather than all of them, so it advertises 61 of the
-262 below; `--runtime all --enable-long-running` serves every one.
+266 below; `--runtime all --enable-long-running` serves every one.
 
 
 ## The runtimes
 
 | Runtime | Tools | Schema cost | Categories | Deep documentation |
 |---|---:|---:|---|---|
-| `research` | 45 | 71 KB | `screener`, `analysis`, `quant_research` | [08_analysis.md](08_analysis.md), [23_inference.md](23_inference.md) |
-| `modeling` | 38 | 204 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
+| `research` | 46 | 75 KB | `screener`, `analysis`, `quant_research` | [08_analysis.md](08_analysis.md), [23_inference.md](23_inference.md) |
+| `modeling` | 38 | 213 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
 | `backtest` | 35 | 102 KB | `backtest_execution`, `backtest_validation`, `custom_signal` | [04_backtesting.md](04_backtesting.md), [24_overfitting.md](24_overfitting.md) |
 | `meta` | 25 | 25 KB | `discovery`, `provenance` | [27_meta.md](27_meta.md), [10_auditability.md](10_auditability.md) |
-| `portfolio` | 22 | 52 KB | `portfolio_risk` | [05_portfolio.md](05_portfolio.md) |
+| `portfolio` | 23 | 57 KB | `portfolio_risk` | [05_portfolio.md](05_portfolio.md) |
 | `data` | 21 | 36 KB | *(one surface)* | [26_data.md](26_data.md) |
 | `delta_one` | 18 | 46 KB | *(one surface)* | [28_delta_one.md](28_delta_one.md) |
 | `microstructure` | 17 | 31 KB | *(one surface)* | [22_microstructure.md](22_microstructure.md) |
 | `derivatives` | 13 | 26 KB | *(one surface)* | [21_derivatives.md](21_derivatives.md) |
 | `feature_lab` | 11 | 50 KB | *(one surface)* | [15_modeling.md](15_modeling.md) |
+| `allocation` | 10 | 43 KB | *(one surface)* | [31_allocation.md](31_allocation.md) |
 | `finance` | 9 | 23 KB | *(one surface)* | [32_finance.md](32_finance.md) |
-| `allocation` | 8 | 20 KB | *(one surface)* | [31_allocation.md](31_allocation.md) |
-| **Total** | **262** | | | |
+| **Total** | **266** | | | |
 
 ---
 
@@ -165,10 +165,10 @@ Whether two assets move together IN THE TAIL, which is the only regime a diversi
 
 #### `backtest_var_forecasts`
 
-Whether a series of VaR and ES forecasts was right against the returns that followed: Kupiec, Christoffersen, the Basel traffic light and Acerbi-Szekely Z2. Returns the exception dates, the coverage, independence and conditional-coverage tests, the zone with its plus factor on the last 250 forecasts at 99%, and Z2 for ES with a p-value simulated under the forecasts. Reads forecast_var_series' reference or dated forecasts inline; a statistic that is undefined is null with the reason.
+Whether a series of VaR and ES forecasts was right against the returns that followed: Kupiec, Christoffersen, the Basel traffic light and Acerbi-Szekely Z2. Returns the exception dates, the coverage, independence and conditional-coverage tests, the zone with its plus factor on the last 250 forecasts at 99%, and Z2 for ES with a p-value simulated under the forecasts. Reads forecast_var_series' reference or dated forecasts inline; a statistic that is undefined is null with the reason. Also a model's lower quantile as its VaR (q01 is 99%) from a predictions reference with the outcome: each entity tested alone, Kupiec BH-adjusted across entities, a multi-bar target thinned to non-overlapping dates.
 
 *No required arguments.*  
-**Optional:** `forecasts_ref`, `forecasts`, `confidence`, `n_simulations`, `random_seed`
+**Optional:** `forecasts_ref`, `forecasts`, `confidence`, `n_simulations`, `random_seed`, `predictions_ref`, `quantile_column`, `target_column`, `entity`, `horizon`
 
 #### `compare_distributions`
 
@@ -331,6 +331,13 @@ Scan a ticker universe for cointegrated pairs, ranked by half-life. Each pair is
 **Required:** `tickers`, `start_date`, `end_date`  
 **Optional:** `max_pairs`, `min_half_life`, `max_half_life`, `p_value_threshold`, `multiple_testing`, `zscore_window`
 
+#### `screen_factor_candidates`
+
+Which candidate factors earn a place in a risk model, out of sample: incremental R-squared against circular shifts, loading stability, VIF and minimum-variance risk. Walked forward over base_factors (loadings fitted on the trailing estimation_window, applied to the next step), the p-values Benjamini-Hochberg adjusted across the candidates; the minimum-variance book from B F B' + D must be less volatile with the factor than without, Ledoit-Wolf beside them. selected passes all four and every other candidate says why not. Takes estimate_factor_model's inputs.
+
+*No required arguments.*  
+**Optional:** `returns`, `returns_ref`, `columns`, `factors`, `factors_ref`, `factor_columns`, `base_factors`, `estimation_window`, `step`, `periods_per_year`, `n_shifts`, `random_seed`, `fdr`
+
 #### `test_autocorrelation`
 
 A JOINT Ljung-Box test for autocorrelation across lags, rather than one test per lag. Check 20 lags individually at 5% on white noise and you expect one to fire; reporting that as 'returns are autocorrelated at lag 13' is an uncorrected multiple comparison and is how a great many spurious signals begin. Set squared=True to test volatility clustering instead of direction -- clustering is near-universal and is not a directional signal, it is why GARCH exists.
@@ -399,7 +406,7 @@ WHERE a registered model is wrong, not merely how wrong on average. An R2 cannot
 Join predictions to the outcome they were predicting and publish the result -- the step that makes this library's own output scoreable. run_model_experiment's reference and build_model_ensemble's both carry date, entity and prediction and no realized label, so score_predictions refuses them for having no 'target' column; this publishes the same rows with the outcome attached. Takes a model_id (preferred: the manifest resolves the predictions, the dataset and the label the model was actually fit on together, and the predictions artifact is verified against the digest recorded at registration) or any predictions_ref plus the dataset_id whose realized label to join -- an ensemble, a scored universe, predictions this library never produced. Also reports the `horizon` score_predictions wants for the overlapping-label sample-size correction, which an agent otherwise has to remember from dataset-build time. REFUSES rather than guesses when a dataset declares several horizons and none was named: a 30-bar forecast judged against a 1-bar outcome reads as a bad model rather than a wrong join. Refuses a combinatorial-CV model by name, whose several predictions per row would multiply the sample.
 
 **Required:** `run_id`, `name`  
-**Optional:** `model_id`, `predictions_ref`, `dataset_id`, `target`
+**Optional:** `model_id`, `predictions_ref`, `dataset_id`, `target`, `keep_intervals`
 
 #### `attest_model_package`
 
@@ -1201,6 +1208,13 @@ Exact constrained portfolio optimization on expected returns and a covariance yo
 *No required arguments.*  
 **Optional:** `assets`, `covariance`, `covariance_ref`, `objective`, `expected_returns`, `benchmark_weights`, `risk_aversion`, `risk_free_rate`, `min_weight`, `max_weight`, `lower_bounds`, `upper_bounds`, `budget`, `budget_type`, `groups`, `group_min`, `group_max`, `factor_loadings`, `exposure_min`, `exposure_max`, `max_volatility`, `max_tracking_error`
 
+#### `optimize_rebalance`
+
+The trade to make from the weights you hold: exact mean-variance weights net of linear and quadratic trading costs, under turnover, gross and volatility caps. Names inside their no-trade band keep their weight exactly (listed in no_trade). Takes optimize_portfolio's bounds, budget, group and factor limits; returns the trades, every binding constraint's shadow price net of costs (the turnover cap's is what one more unit of turnover is worth), a KKT certificate computed from the weights, and the frictionless target beside it -- its turnover, cost and distance -- to show what the costs held back. No tickers: pass a covariance or covariance_ref.
+
+**Required:** `expected_returns`  
+**Optional:** `assets`, `covariance`, `covariance_ref`, `current_weights`, `risk_aversion`, `linear_cost`, `quadratic_cost`, `min_weight`, `max_weight`, `lower_bounds`, `upper_bounds`, `budget`, `budget_type`, `groups`, `group_min`, `group_max`, `factor_loadings`, `exposure_min`, `exposure_max`, `max_turnover`, `max_gross`, `max_volatility`
+
 #### `optimize_risk_parity`
 
 Weights at which every asset contributes the SAME AMOUNT OF RISK -- not the same weight. An equally weighted portfolio of a bond fund and a biotech stock is a biotech portfolio; the equity contributes nearly all the variance. Uses NO expected returns, which is the reason to prefer it over mean-variance in most real situations: the standard error on a mean return from two years of daily data is about the size of the estimate, and mean-variance is maximally sensitive to exactly that input. Pass `budget` for an unequal risk budget, which is how most mandates are actually written.
@@ -1821,6 +1835,82 @@ Choose a feature set from a built dataset: keep one feature per redundancy clust
 
 ---
 
+## `allocation` — Capital Allocation
+
+How much capital each strategy, sleeve or model deserves, from their return streams rather than from tickers: the streams on one calendar, an allocation with its weight bands, a walk-forward test of the rule that chose it against an equal-weight benchmark, the Kelly fraction and how uncertain it is, a volatility-target or CPPI overlay, the capacity curve under impact, Brinson attribution and a book's time- and money-weighted return with external flows.
+
+#### `allocate_across_sleeves`
+
+Splits capital across strategies, sleeves or models by their return streams: equal, inverse volatility, risk parity, HRP, min variance, max Sharpe or shrunk Sharpe. Long-only by default, with a max weight, per-sleeve capacity in currency (the excess to cash or to the others) and a target volatility refused above max_leverage. Reports risk contributions, ex-ante volatility, effective N, the binding caps, block-bootstrap 5th/95th percentile weight bands and their stability. Its Sharpe ratio is IN-SAMPLE.
+
+*No required arguments.*  
+**Optional:** `cash_rate`, `periods_per_year`, `block_size`, `random_seed`, `method`, `covariance_method`, `halflife`, `risk_budgets`, `long_only`, `max_weight`, `target_volatility`, `max_leverage`, `capital`, `capacity`, `capacity_excess`, `regime`, `returns`, `returns_ref`, `columns`, `n_bootstrap`
+
+#### `apply_risk_overlay`
+
+Runs a volatility-target (lagged EWMA), CPPI or TIPP overlay over one return stream: realized against target volatility, drawdown before and after, floor breaches and turnover. Exposure at t uses returns through t-1 only; the unexposed part earns cash_rate. A run_id publishes the overlaid stream (returns_panel) and the exposure path (analytic_series).
+
+*No required arguments.*  
+**Optional:** `returns`, `returns_ref`, `column`, `periods_per_year`, `method`, `target_volatility`, `ewma_lambda`, `warmup`, `multiplier`, `floor`, `max_leverage`, `cash_rate`, `cost_bps`, `run_id`
+
+#### `attribute_returns_brinson`
+
+Brinson-Fachler allocation, selection and interaction per segment and period, linked by Carino or Menchero so the effects sum to the cumulative active return over a benchmark. Weights and returns are the caller's, {period: {segment: value}}; each period's weights sum to one.
+
+**Required:** `portfolio_weights`, `benchmark_weights`, `portfolio_returns`, `benchmark_returns`  
+**Optional:** `linking`
+
+#### `build_model_sleeves`
+
+Evaluates two to twenty registered models as portfolios and publishes their out-of-sample return streams on one calendar as a returns_panel, with the registry's trial count. Each runs through the evaluation evaluate_model_portfolio makes (a shared transform and portfolio, or the model's own transform); its stream is read from the opening capital, the cash bars before its first trade dropped unless keep_idle. Reports the alignment, each sleeve's Sharpe, return, volatility, drawdown, turnover, rebalances, estimator, dataset and equity_curve_ref, the streams' correlations, and n_trials_lower_bound for evaluate_allocation_rule. Refused by name: fewer than two models, a model or sleeve named twice, a CPCV model, different bar intervals, too little overlap.
+
+**Required:** `models`, `run_id`  
+**Optional:** `transform`, `portfolio`, `min_overlap`, `keep_idle`
+
+#### `combine_return_streams`
+
+Puts several return streams on the dates they all share and publishes the aligned panel as one returns_panel reference, with what each stream lost to the common calendar. Each stream is a returns_panel column, {ISO date: return} values, or a symbol with both ends of its window. Refused by name: undated lists, fewer shared dates than min_overlap (naming the stream that limits it), a repeated date, a non-finite value, and levels passed as returns.
+
+**Required:** `run_id`  
+**Optional:** `streams`, `returns_ref`, `columns`, `min_overlap`
+
+#### `evaluate_allocation_rule`
+
+Walks an allocation rule forward over sleeve return streams -- fit on a trailing window, drift, rebalance, pay the cost -- and scores it out of sample against a benchmark rule. Reports each side's Sharpe, return, volatility and drawdown, the Sharpe difference with a block-bootstrap interval, the look-ahead gap to the rule fitted on the full sample, the deflated Sharpe at n_trials, turnover and cost; run_id publishes the streams and weights. No overlay: apply_risk_overlay on that stream is the same, being causal.
+
+**Required:** `rule`, `n_trials`  
+**Optional:** `cash_rate`, `periods_per_year`, `block_size`, `random_seed`, `returns`, `returns_ref`, `columns`, `benchmark_rule`, `estimation_window`, `rebalance_every`, `cost_bps`, `n_bootstrap`, `run_id`
+
+#### `get_kelly_report`
+
+The Kelly leverage of one return stream (mu / sigma^2) or several held together (Sigma^-1 mu), its standard error and the chance the estimate is over twice the truth. Also the growth at fractions of Kelly with and without estimation error, the Kan-Zhou shrunk fraction, the in-sample empirical Kelly, the odds of ever losing a given share of wealth, and bootstrap maximum drawdowns. In-sample throughout; it reports a leverage and applies none.
+
+*No required arguments.*  
+**Optional:** `returns`, `returns_ref`, `columns`, `risk_free_rate`, `periods_per_year`, `fractions`, `drawdown_levels`, `confidence`, `n_bootstrap`, `block_size`, `random_seed`
+
+#### `get_strategy_capacity_curve`
+
+Net return and Sharpe ratio against AUM for a strategy's gross return stream and weight panel under spread plus square-root impact, with its break-even and half-Sharpe AUM. ADV, daily volatility and spread are the caller's per instrument; the instruments whose impact binds are listed.
+
+**Required:** `adv`, `daily_volatility`, `spread_bps`  
+**Optional:** `returns`, `returns_ref`, `column`, `periods_per_year`, `weights`, `weights_ref`, `impact_coefficient`, `aum`, `risk_free_rate`
+
+#### `measure_book_returns`
+
+Time-weighted, linked Modified Dietz and money-weighted returns of a portfolio with deposits and withdrawals (GIPS 2020), from dated valuations and dated external flows. The true TWR needs a valuation on every flow date and is null, naming the dates, without one; the MWR is the IRR of the flows and the end value, null unless unique. Nothing under a year is annualized, and flows above a share of value are flagged.
+
+**Required:** `valuations`  
+**Optional:** `flows`, `flows_in_valuation`, `day_count`, `large_flow_share`
+
+#### `select_allocation_rule`
+
+Chooses among 2-12 allocation rules as it goes, at each rebalance by their own out-of-sample record before that date, and tests that choosing against equal weight out of sample. Holds an equal blend of the better half by trailing Sharpe (or the best one), switching only past switch_margin and paying for it. Reports the Sharpe difference with its interval, how often each rule was chosen, the HINDSIGHT best and its gap, PBO and deflated Sharpes at n_trials.
+
+**Required:** `candidates`, `n_trials`  
+**Optional:** `cash_rate`, `periods_per_year`, `block_size`, `random_seed`, `returns`, `returns_ref`, `columns`, `estimation_window`, `rebalance_every`, `cost_bps`, `selection_window`, `switch_margin`, `combine`, `top_k`, `n_bootstrap`, `run_id`
+
+---
+
 ## `finance` — Finance
 
 What holding a book costs and what a stream of cash is worth: financing, borrow and cash drag on positions, the Reg T and FINRA margin against them and how long a stress path leaves before the first call, currency exposure, carry and the FX forward that hedges it, and NPV, IRR, duration, a cost of capital and a discounted valuation. Every rate, FX rate and day count is the caller's; nothing is fetched.
@@ -1887,65 +1977,3 @@ DCF value of forecast free cash flows with a Gordon or exit-multiple terminal va
 
 **Required:** `cash_flows`  
 **Optional:** `discount_rate`, `terminal_method`, `terminal_growth`, `exit_multiple`, `terminal_metric`, `target_value`, `solve_for`, `sensitivity_rates`, `sensitivity_terminal`
-
----
-
-## `allocation` — Capital Allocation
-
-How much capital each strategy, sleeve or model deserves, from their return streams rather than from tickers: the streams on one calendar, an allocation with its weight bands, a walk-forward test of the rule that chose it against an equal-weight benchmark, the Kelly fraction and how uncertain it is, a volatility-target or CPPI overlay, the capacity curve under impact, Brinson attribution and a book's time- and money-weighted return with external flows.
-
-#### `allocate_across_sleeves`
-
-Splits capital across strategies, sleeves or models by their return streams: equal, inverse volatility, risk parity, HRP, min variance, max Sharpe or shrunk Sharpe. Long-only by default, with a max weight, per-sleeve capacity in currency (the excess to cash or to the others) and a target volatility refused above max_leverage. Reports risk contributions, ex-ante volatility, effective N, the binding caps, block-bootstrap 5th/95th percentile weight bands and their stability. Its Sharpe ratio is IN-SAMPLE.
-
-*No required arguments.*  
-**Optional:** `cash_rate`, `periods_per_year`, `block_size`, `random_seed`, `method`, `covariance_method`, `halflife`, `risk_budgets`, `long_only`, `max_weight`, `target_volatility`, `max_leverage`, `capital`, `capacity`, `capacity_excess`, `returns`, `returns_ref`, `columns`, `n_bootstrap`
-
-#### `apply_risk_overlay`
-
-Runs a volatility-target (lagged EWMA), CPPI or TIPP overlay over one return stream: realized against target volatility, drawdown before and after, floor breaches and turnover. Exposure at t uses returns through t-1 only; the unexposed part earns cash_rate. A run_id publishes the overlaid stream (returns_panel) and the exposure path (analytic_series).
-
-*No required arguments.*  
-**Optional:** `returns`, `returns_ref`, `column`, `periods_per_year`, `method`, `target_volatility`, `ewma_lambda`, `warmup`, `multiplier`, `floor`, `max_leverage`, `cash_rate`, `cost_bps`, `run_id`
-
-#### `attribute_returns_brinson`
-
-Brinson-Fachler allocation, selection and interaction per segment and period, linked by Carino or Menchero so the effects sum to the cumulative active return over a benchmark. Weights and returns are the caller's, {period: {segment: value}}; each period's weights sum to one.
-
-**Required:** `portfolio_weights`, `benchmark_weights`, `portfolio_returns`, `benchmark_returns`  
-**Optional:** `linking`
-
-#### `combine_return_streams`
-
-Puts several return streams on the dates they all share and publishes the aligned panel as one returns_panel reference, with what each stream lost to the common calendar. Each stream is a returns_panel column, {ISO date: return} values, or a symbol with both ends of its window. Refused by name: undated lists, fewer shared dates than min_overlap (naming the stream that limits it), a repeated date, a non-finite value, and levels passed as returns.
-
-**Required:** `run_id`  
-**Optional:** `streams`, `returns_ref`, `columns`, `min_overlap`
-
-#### `evaluate_allocation_rule`
-
-Walks an allocation rule forward over sleeve return streams -- fit on a trailing window, drift, rebalance, pay the cost -- and scores it out of sample against a benchmark rule. Reports each side's Sharpe, return, volatility and drawdown, the Sharpe difference with a block-bootstrap interval, the look-ahead gap to the rule fitted on the full sample, the deflated Sharpe at n_trials, turnover and cost; run_id publishes the streams and weights. No overlay: apply_risk_overlay on that stream is the same, being causal.
-
-**Required:** `rule`, `n_trials`  
-**Optional:** `cash_rate`, `periods_per_year`, `block_size`, `random_seed`, `returns`, `returns_ref`, `columns`, `benchmark_rule`, `estimation_window`, `rebalance_every`, `cost_bps`, `n_bootstrap`, `run_id`
-
-#### `get_kelly_report`
-
-The Kelly leverage of one return stream (mu / sigma^2) or several held together (Sigma^-1 mu), its standard error and the chance the estimate is over twice the truth. Also the growth at fractions of Kelly with and without estimation error, the Kan-Zhou shrunk fraction, the in-sample empirical Kelly, the odds of ever losing a given share of wealth, and bootstrap maximum drawdowns. In-sample throughout; it reports a leverage and applies none.
-
-*No required arguments.*  
-**Optional:** `returns`, `returns_ref`, `columns`, `risk_free_rate`, `periods_per_year`, `fractions`, `drawdown_levels`, `confidence`, `n_bootstrap`, `block_size`, `random_seed`
-
-#### `get_strategy_capacity_curve`
-
-Net return and Sharpe ratio against AUM for a strategy's gross return stream and weight panel under spread plus square-root impact, with its break-even and half-Sharpe AUM. ADV, daily volatility and spread are the caller's per instrument; the instruments whose impact binds are listed.
-
-**Required:** `adv`, `daily_volatility`, `spread_bps`  
-**Optional:** `returns`, `returns_ref`, `column`, `periods_per_year`, `weights`, `weights_ref`, `impact_coefficient`, `aum`, `risk_free_rate`
-
-#### `measure_book_returns`
-
-Time-weighted, linked Modified Dietz and money-weighted returns of a portfolio with deposits and withdrawals (GIPS 2020), from dated valuations and dated external flows. The true TWR needs a valuation on every flow date and is null, naming the dates, without one; the MWR is the IRR of the flows and the end value, null unless unique. Nothing under a year is annualized, and flows above a share of value are flagged.
-
-**Required:** `valuations`  
-**Optional:** `flows`, `flows_in_valuation`, `day_count`, `large_flow_share`

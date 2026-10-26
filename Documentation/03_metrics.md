@@ -182,6 +182,10 @@ traffic light off 99% or under 250 forecasts, Z2 without ES -- comes back
 `None` with a `null_reason`. The agent tools are `forecast_var_series` and
 `backtest_var_forecasts` in the `research` runtime; see
 [23_inference.md](23_inference.md#value-at-risk-as-a-forecast).
+`backtest_var_forecasts` also takes a model's predictions
+(`predictions_ref`, `quantile_column`): each entity's lower quantile is
+tested as its VaR, the Kupiec p-values adjusted across entities, and a
+multi-bar target thinned to non-overlapping dates.
 
 ---
 

@@ -1,11 +1,13 @@
 # Statistical inference and diagnostics
 
-Twenty-one tools in the `research` runtime that answer questions a summary
+Twenty-two tools in the `research` runtime that answer questions a summary
 statistic hides. Most fall into three groups: **error bars** on estimates
 that are normally reported without any, **structure** in a series that a
 mean and a standard deviation cannot see, and **corrections** for the fact
-that you looked at more than one thing. The last two make a value at risk
-into a **forecast** and check it against the returns that followed.
+that you looked at more than one thing. Two make a value at risk into a
+**forecast** and check it against the returns that followed -- a model's
+own quantiles among them -- and one screens which candidate factors earn
+a place in a risk model, out of sample.
 
 `08_analysis.md` covers the older statistical surface — factor regression,
 cointegration, PCA, Hurst. This document covers what was added around it.
@@ -281,6 +283,37 @@ averages 0.001 under the true model and rejects 9 of 200 at 5%; returns at
 expected count: below five expected exceptions the tool says the
 chi-squared p-values are rough.
 
+### A model's quantiles as VaR forecasts
+
+A model fitted with `ModelSpec.quantiles` has been making VaR forecasts all
+along: its predictions carry `q01`, `q05` ..., and q01 of a return is the
+99% VaR, the loss -q01. `backtest_var_forecasts(predictions_ref=...,
+quantile_column="q01")` tests it against the outcome beside it
+(`target_column`, default `target`), the columns recognised as
+`score_prediction_intervals` recognises them; the level comes from the
+column, and a `confidence` that disagrees is refused. On a panel each
+entity is tested alone -- `entities` holds each one's count, Kupiec and
+Christoffersen p-values and Basel zone, the Kupiec p-values
+Benjamini-Hochberg adjusted across the entities -- and the top level only
+sums the exceptions against the expected. A pooled Kupiec test is not run:
+entities breach their VaR together on a bad day, so the pooled count is far
+more dispersed than a binomial and the test would reject a correct model
+for the market moving together. Over 200 independent entities with exact
+5% quantiles the exception rate is 5% and the Kupiec p-values follow the
+null's exact (discrete) distribution; a 10% quantile labelled q01 is
+rejected at p < 1e-20.
+
+A target that spans several bars, sampled every bar, overlaps the next
+row's, so its exceptions cluster by construction: exact 5% quantiles of a
+five-bar return fail Christoffersen at p < 1e-10. Each entity is thinned to
+every h-th date, h counted from the frame's `label_end_date` or given as
+`horizon`, and the result reports `horizon` and `n_rows_before_thinning`;
+thinned, the same forecasts pass. Without either, an outcome whose lag-1
+autocorrelation says it overlaps draws a warning naming the span. A
+model's predictions carry no outcome: `attach_model_outcomes(model_id=...,
+keep_intervals=True)` joins the realized target beside the quantile and
+interval columns, and the `horizon` it reports is the one to pass here.
+
 `backtest_var_forecasts` sits in `research` beside the forecast rather than
 in `backtest`, where it would have made `auto` thin one more of that
 runtime's tools.
@@ -309,7 +342,8 @@ runtime's tools.
 | `get_partial_correlation` | What is left once the common drivers are removed from both |
 | `analyze_tail_dependence` | Do these move together in the tail, where it matters |
 | `forecast_var_series` | What was each day's VaR and ES, made only from the days before it, and what is the next period's |
-| `backtest_var_forecasts` | Were those forecasts right: exceptions, Kupiec, Christoffersen, the Basel traffic light, Acerbi-Szekely Z2 |
+| `backtest_var_forecasts` | Were those forecasts right: exceptions, Kupiec, Christoffersen, the Basel traffic light, Acerbi-Szekely Z2 -- or a model's own lower quantile (`q01` is a 99% VaR) from its predictions, each entity alone |
+| `screen_factor_candidates` | Which candidate factors earn a place in a risk model, out of sample: incremental R-squared against circular shifts, loading stability, VIF, and the minimum-variance book's volatility with and without each |
 
 Full argument lists: [20_tool_index.md](20_tool_index.md#research--research).
 

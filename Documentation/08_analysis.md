@@ -245,6 +245,55 @@ each side and aligns them.
 
 ---
 
+## Which Factors Belong in the Model
+
+`estimate_factor_model` fits whatever factors it is handed, and every number
+it returns is in-sample, where one more factor never fits worse.
+`screen_factor_candidates` (`analysis/factor_screen.py`) asks of each
+candidate, beside the `base_factors` always in the model, whether it earns
+its place out of sample:
+
+```python
+from standard_quant_tools.analysis import screen_factor_candidates
+
+out = screen_factor_candidates(asset_returns, factor_returns, base_factors=["mkt"])
+out["selected"]                               # the candidates that pass all four
+out["candidates_screened"]["size"]["failed"]  # why one did not
+out["min_variance_volatility"]                # base, ledoit_wolf, all_candidates, selected
+```
+
+Walked forward (loadings fitted on the trailing `estimation_window` rows and
+applied to the next `step` rows' factor returns), a candidate must
+
+1. add out-of-sample R-squared over the base, more than circular shifts of
+   itself do (the feature lab's null, which keeps the candidate's
+   autocorrelation), Benjamini-Hochberg adjusted across the candidates at
+   `fdr`;
+2. keep stable loadings: each asset's full-sample sign in 75% of windows
+   (weighted by |loading|), and an uncentred correlation of 0.5 between the
+   loadings fitted on the two halves of the sample;
+3. have a VIF under 10 against the base and the other candidates;
+4. make the minimum-variance book built from B F B' + D less volatile out
+   of sample than the base model's (the Ledoit-Wolf book is reported
+   beside them).
+
+The fourth is the test a risk model exists to pass: the minimum-variance
+book depends on the covariance and nothing else. It cannot see a factor
+every asset loads on alike -- that adds a multiple of 11' to the
+covariance and leaves the fully invested book where it was -- so such a
+factor fails it however real it is. On planted panels (30 assets, three
+years to screen, the next three to score) no pure-noise candidate of 4,000
+was selected, a factor of 1% of each asset's variance was significant
+every time and selected 62% of the time, and the selected model's book was
+0.0-2.3 bp a year less volatile out of sample than the all-candidates
+model's and 31-34 bp less than Ledoit-Wolf's. Screening k candidates is
+itself a selection: k is reported, and the selected model's volatility,
+scored on the steps that selected it, is labelled hindsight. The agent
+tool is `screen_factor_candidates` in the `research` runtime, which takes
+`estimate_factor_model`'s inputs.
+
+---
+
 ## Combining with other modules
 
 ### Factor exposure → Screener pipeline
@@ -273,10 +322,11 @@ for ticker in universe.index:
 
 Every function in this document has an agent tool over it in the `research`
 runtime: `run_factor_regression`, `estimate_factor_model`,
-`run_cointegration_test`, `scan_pairs`, `run_pca_analysis`,
-`run_hurst_analysis`, `run_kalman_hedge_ratio`,
+`screen_factor_candidates`, `run_cointegration_test`, `scan_pairs`,
+`run_pca_analysis`, `run_hurst_analysis`, `run_kalman_hedge_ratio`,
 `run_garch_volatility_forecast`. They fetch the bars themselves from a
-symbol (`estimate_factor_model` takes references or dated values instead)
+symbol (`estimate_factor_model` and `screen_factor_candidates` take
+references or dated values instead)
 and return Pydantic models rather than dicts, so nothing needs
 JSON-serialising by hand. Argument lists are in
 [20_tool_index.md](20_tool_index.md#research--research); the worked

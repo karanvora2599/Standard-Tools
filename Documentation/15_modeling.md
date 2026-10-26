@@ -1,6 +1,6 @@
 # Modeling Runtime (`standard_quant_tools.modeling`)
 
-A second, independent runtime alongside the 213-tool
+A second, independent runtime alongside the 217-tool
 `standard_quant_tools.agent` analysis/backtest surface — not tool #190.
 This document explains why that split exists, what is built, and what is
 deliberately deferred.
@@ -12,7 +12,7 @@ deliberately deferred.
 `agent/tools.py`'s `TOOL_CATEGORY` router and `Multi_Agent_Implementation/`'s
 worker split (see
 [Documentation/13_agent_orchestration.md](13_agent_orchestration.md))
-exist specifically because handing an LLM 213 similarly-shaped tools on
+exist specifically because handing an LLM 217 similarly-shaped tools on
 every call causes selection ambiguity. Fitting/validating/registering a
 statistical model doesn't fit that surface's shape at all — it isn't a
 point-in-time snapshot (`analyze_stock_risk`) or a single backtest run
@@ -34,7 +34,7 @@ core stays one thing; only the agent-facing vocabulary is separate.
            ┌──────────────┴──────────────┐
            │                              │
      agent.get_agent_tools()      modeling.agent.get_modeling_tools()
-    (213 tools, 10 runtimes)     (38 tools, one pipeline)
+    (217 tools, 10 runtimes)     (38 tools, one pipeline)
            │                              │
            └──────────────┬───────────────┘
                           │
@@ -77,7 +77,7 @@ because the order is the point.
 | `inspect_model` | `model_id` + `view` (`summary` \| `feature_importance` \| `validation` \| `lineage` \| `provenance`) → that slice of the registered model's manifest. `provenance` is the slice no other view returned: the information cutoff `score_model` gates `as_of` on, the conformal band the artifact carries (the precondition for `uncertainty_scaled`), the feature provenance enforced at scoring time, the content hashes, the monitoring references, and a diff of the environment the model was trained in against the current one |
 | `compare_models` | several `model_id`s → ranked side by side on their out-of-sample metrics |
 | `score_model` | `model_id` + `as_of` + `universe` → predictions, persisted as a Parquet artifact and published as a predictions reference (`predictions_ref`) that `attach_model_outcomes` and `convert_reference` read, with `interval_stats` when the model carries a conformal band and a warning when that band is wider than the cross-section's spread. It fetches bars for every name in `universe` through `as_of`; a registered model's out-of-sample metrics need no fetch and are in `inspect_model` |
-| `attach_model_outcomes` | `model_id`, or a predictions reference + `dataset_id` → the predictions joined to the realized target and published as a reference `score_predictions` reads. Refuses a multi-horizon panel rather than guessing its label, and returns the `horizon` to pass on. This is what makes an ensemble's reference scoreable |
+| `attach_model_outcomes` | `model_id`, or a predictions reference + `dataset_id` → the predictions joined to the realized target and published as a reference `score_predictions` reads. Refuses a multi-horizon panel rather than guessing its label, and returns the `horizon` to pass on. This is what makes an ensemble's reference scoreable. With `keep_intervals` the model's `lower`/`upper` and quantile columns ride along, for `score_prediction_intervals` and `backtest_var_forecasts` (research), which tests a lower quantile as a VaR |
 | `backtest_model_signal` | `model_id` → the model's out-of-sample predictions as a `signal_panel` reference for `run_signal_panel_backtest`, through the VERIFIED branch of the bridge: the task comes from the manifest (there is no `task` argument to get wrong), the predictions file is checked against the hash the manifest recorded, and a cpcv model is refused by name with the walk-forward remedy |
 | `score_predictions` | a predictions reference → accuracy metrics, cross-sectional IC and ICIR, a predict-the-mean baseline, `beats_null` and a `headline` block (the test a run makes of its own headline, on these predictions: the mean per-date rank IC against zero by a t over its long-run variance from the series' lowest cosine frequencies, min(⌊0.4 n^(2/3)⌋, ⌊n / (3 × `horizon`)⌋) of them for n dates, read against Student's t with as many degrees of freedom, or an AUC or concordance against 0.5), `prediction_turnover` (the bridge between an IC and a net-of-cost P&L), and an effective sample size adjusted for overlapping forward returns and for outcomes that move together across entities, with the two bounds it lies between. `beats_baseline` compares r2 with the constant, which on a ranked label judges the predictions' scale and not their order: read `beats_null` for the headline. Pass `train_mean`: without it the baseline is the TEST set's own mean, whose R2 is zero by construction — an oracle no forecaster could have met. A `train_mean` off the outcomes' scale (one whose baseline error is past the float range) is refused by name rather than scored as an infinite baseline |
 | `evaluate_model_portfolio` | `model_id` + `PredictionTransformSpec` + `PortfolioSimSpec` → OOS predictions turned into target weights and simulated as one shared-cash account, returning Sharpe/drawdown/turnover/exposure plus a persisted weights artifact |
@@ -155,7 +155,7 @@ own worker for the same reason.
 
 `Implementation/{Anthropic,OpenAI,Gemini}/Agent_Model_Builder.py` runs the
 whole pipeline as a single agent, on all three providers. It is the one
-example script that does not use the 213-tool surface: it passes
+example script that does not use the 217-tool surface: it passes
 `registry="modeling"` to `run_agent()`, which loads all thirty-eight
 schemas and `modeling_dispatch` together.
 
@@ -4280,7 +4280,7 @@ three-block calibration make one "fit" of the spec cost seven.
 `run_model_experiment` answers "how did this model do out-of-sample."
 It doesn't answer "does this work as a trading strategy" — that requires
 an actual backtest, and this codebase already has one
-(`run_signal_panel_backtest`, in the *other* 213-tool surface).
+(`run_signal_panel_backtest`, in the *other* 217-tool surface).
 `modeling.bridge.oos_predictions_to_signal_panel` connects the two, and
 `backtest_model_signal` is the tool over it: given a `model_id` and
 nothing else about the task, it publishes a `signal_panel` reference that
@@ -4454,7 +4454,7 @@ from standard_quant_tools.modeling.specs import (
 result = evaluate_model_portfolio(EvaluateModelPortfolioInput(
     model_id=exp.model_id,
     transform=PredictionTransformSpec(
-        method="cross_sectional_rank",   # or zscore / top_bottom_quantile / sign
+        method="cross_sectional_rank",   # or zscore / top_bottom_quantile / sign / mean_variance
         gross_exposure=1.0,
         net_exposure=0.0,                # dollar neutral
         max_position_weight=0.05,
@@ -4481,6 +4481,13 @@ full terms of
 [04_backtesting.md](04_backtesting.md#true-portfolio-simulation-shared-cash),
 in place of the scalar rates; `evaluate_model_portfolio` and
 `evaluate_predictions_portfolio` both read it.
+
+To allocate across several registered models, `build_model_sleeves` in the
+`allocation` runtime runs this evaluation for each, reads each stream from
+the capital the account opened with, publishes the streams on one calendar
+as a `returns_panel`, and reports how many models are registered on the
+same datasets -- the count `evaluate_allocation_rule` deflates its Sharpe
+ratio by. See [31_allocation.md](31_allocation.md).
 
 ### Same leakage discipline as the bridge
 
@@ -4542,6 +4549,181 @@ is built. Ranking is unaffected (a constant shift is monotone), but it
 makes `method="sign"` mean the same thing for both tasks — a raw
 probability lives in `[0, 1]`, so its sign is `+1` for every name on
 every date, a "long everything" book dressed up as a signal.
+
+### Sizing by the optimizer: `method="mean_variance"`
+
+The five sizing rules above size each name from its own score, one date at
+a time. Two names that move together and score alike each get a full
+position, nothing holds a volatility, and every rebalance pays to reach its
+target however little the view moved; `max_turnover` can only blend toward
+the previous row. `method="mean_variance"` replaces the rule with a
+decision. At each rebalance date the predictions become expected returns, a
+trailing covariance is the risk model, and `optimize_rebalance` chooses the
+trade from the book the account holds: the previous rebalance's target
+drifted by the prices since it was filled (cash on the first), net of the
+commission and spread the simulation will charge for it. A name whose alpha
+moved less than its cost keeps the weight it holds exactly, and the
+simulation trades none of it.
+
+Every input is point in time. A weight dated t reads predictions dated t or
+earlier and prices through t's close:
+
+- **Alpha**, by Grinold's rule: alpha_i = IC · sigma_i · z_i · min(h, H)/√H.
+  Here z is the date's cross-sectional score (`score="rank_normal"`, ranks
+  through the inverse normal so an outlier is one rank, or `"zscore"`),
+  sigma_i the name's per-bar volatility over the risk window, h the bars a
+  rebalance holds, and H the bars the IC is measured over. At h = H this
+  is IC · sigma_h · z.
+- **The IC** is the model's own trailing realized rank IC. It is the mean
+  Spearman correlation between predictions dated s and the close-to-close
+  return from s over H bars, over the last `ic_lookback` dates s whose
+  window had closed by t. The predictions carry no labels, so the returns
+  are read off the prices the simulation already fetches. H defaults to
+  the target's horizon when the model records it (the manifest, or the
+  dataset of a predictions reference), else the rebalance interval.
+  - A negative IC is floored at zero: no view, so the book only manages
+    risk and costs.
+  - Before `ic_min_dates` windows have closed there is no alpha, and the
+    result says how many dates that was.
+  - `optimizer.ic` fixes the IC instead; one measured on the same dates is
+    hindsight, and the result says so.
+  - `ic_shrink=True` multiplies the IC by max(0, 1 − 1/t²). Its
+    t-statistic counts non-overlapping windows, not dates: daily ICs over
+    five bars share four of them.
+- **Risk**: `estimate_covariance` (`ledoit_wolf` by default) over the last
+  `risk_lookback` bar returns, scaled to the holding period. A date with
+  fewer bars holds the book as it stands.
+- **Costs**: `commission_pct + slippage_pct` per unit of weight traded, the
+  simulator's own rates, times `cost_multiplier`, plus quadratic `impact`.
+  `cost_aware=False` charges nothing, which is a comparison.
+- **Constraints**: `net_exposure` is the budget; `gross_exposure` is a
+  ceiling, not a target (not passed for a one-sided book, whose budget
+  already holds it); `max_position_weight` bounds each name, at zero from
+  below when net equals gross; `max_turnover` is an exact cap on each trade
+  except the first build from cash.
+- **Sizing**:
+  - `"target_volatility"` (default): the most expected return at the
+    annualized `target_volatility`, inside gross. Its risk aversion starts
+    at 1, full Kelly, so an alpha too weak to justify the target is not
+    levered up to it.
+  - `"risk_aversion"`: a fixed gamma in per-rebalance units.
+  - `"kelly"`: gamma = 1/`kelly_fraction`, so the unconstrained book is
+    f · S⁻¹ alpha.
+
+A name with no prediction that date is sold to zero. An answer the
+optimizer did not reach, or reached without an optimum (a certificate
+residual above 1e-6), refuses the run and names the date. An answer that
+misses the certificate only by rounding is traded and counted.
+`transform_diagnostics["mean_variance"]` reports:
+
+- dates with no alpha, and how many of those were warm-up;
+- the mean IC raw and used;
+- ex-ante against target volatility, and how often the volatility and
+  turnover caps bound;
+- mean turnover and the share of names left at the weight held;
+- forced exits and Ledoit-Wolf shrinkage;
+- uncertified solves;
+- `solve_seconds`, the one wall-clock number there.
+
+**The starting book is the one held.** The simulator holds share counts
+between rebalances and resizes every position from equity at the next, so
+the trade has to start from the book the account actually holds. That is
+the previous target w, filled at prices F and marked at t's close C, in
+the simulator's own arithmetic:
+
+- each position is w_i · C_i/F_i;
+- the cash is the remainder, 1 − Σw, less the cost the fill paid;
+- each weight is its position over the equity they add up to:
+  w0_i = w_i g_i / (1 − cost + Σ_j w_j (g_j − 1)), with g = C/F.
+
+A short drifts by the same expression, so a dollar-neutral book needs no
+leg-by-leg arithmetic.
+
+- **Close fills.** F is the previous rebalance's close, and the held book
+  is the simulator's to rounding. A name inside its no-trade band is not
+  traded: the engine skips trades under 1e-9 shares, and the match is far
+  inside that.
+- **Next-open fills (the default).** F is the open after the previous
+  rebalance. This trade fills at the open after t, which is not known at
+  t's close, so the book is marked to t's close. The simulator then trades
+  the overnight move from that close to the fill on every name, the
+  untouched ones included.
+- **Financing** (cash credit, margin, borrow) is not marked. Under a
+  financing spec the held book is off by the interest accrued since the
+  last rebalance.
+
+**What it was measured to do.** The planted study:
+
+- a 50-name universe: market, four sectors, a style factor, and
+  idiosyncratic volatility from 0.8% to 3% a day;
+- an AR(1) signal driving the next bar's drift, with predictions equal to
+  the signal plus noise of the same size;
+- realized 5-bar rank IC of 0.040 (an edge), 0 (none), and an edge whose
+  predictions also carry a persistent sector-wide component with no alpha
+  in it ("crowded");
+- weekly rebalances, 15 bps of commission and spread, gross 1, net 0, 5%
+  per name, 20 seeds;
+- everything run through `evaluate_predictions_portfolio`.
+
+Net Sharpe is shown with its standard error across seeds, and the
+difference column is paired against rank weighting damped to
+`max_turnover=0.5`, the best of the existing rules:
+
+| | edge | crowded | none: CAGR | none: max DD |
+|---|---|---|---|---|
+| rank (default) | +0.41 | +0.22 | −6.7% | −35% |
+| rank, `max_turnover=0.5` | +0.72 | +0.34 | −2.9% | −18% |
+| `mean_variance` (defaults: 5% target, no shrink) | +0.73 (vs damped +0.01 ± 0.05) | +0.48 (+0.14 ± 0.07) | −0.26% | −9.4% |
+| same, 3% target | +0.66 (−0.06 ± 0.06) | +0.50 (+0.16 ± 0.07) | −0.28% | −6.6% |
+| same, 10% target (gross binds first; 6.5% realized) | +0.80 (+0.08 ± 0.07) | +0.42 (+0.08 ± 0.05) | +0.14% | −10.3% |
+| same, `cost_aware=False`* | +0.24 | +0.11 | −4.3% | −24% |
+| same, `ic_shrink=True`* | +0.57 | +0.23 | −0.16% | −3% |
+| `sizing="kelly"`, f = 0.25 | +0.79 (+0.07 ± 0.05) | +0.43 (+0.09 ± 0.05) | −0.26% | −9.3% |
+
+\* Measured with the previous target as the starting book; starting from
+the held book moved every other row by +0.01 to +0.04.
+
+With an edge, the optimizer ties the damped rank book; it does not beat
+it. It runs 4.9% realized volatility against a 5% target, the rank book
+2.9%. It wins where names that move together score alike, the case the
+covariance is there for. With no edge it trades 1.8 times a year and
+loses about that much in costs, where the damped rank book trades 21
+times and loses 2.9% a year. The costs are where the gain comes from:
+charged nothing, the same optimizer earns +0.24 with an edge and, with
+none, trades 28 times a year and loses 4.3%.
+
+No target dominates. With an edge, net Sharpe rises with the target up to
+where gross binds; in the crowded case it falls. The default stays at 5%,
+which tracks its target. Paired against the best level in each case it is
+−0.07 ± 0.05 behind 10% with an edge and −0.01 ± 0.02 behind 3% crowded.
+With no edge every level's Sharpe is within noise of zero (−0.09 to
++0.06).
+
+Starting from the held book rather than the previous target made a small
+difference, measured the same way:
+
+- net Sharpe rose by +0.016 to +0.033 with an edge across the four
+  configurations re-run (paired standard error about 0.007);
+- turnover fell by about 0.6 a year;
+- with no edge, turnover fell by a third (2.7 to 1.8 a year at the 5%
+  target) and the drawdown went from −11.2% to −9.4%. A drifted name is no
+  longer bought back to a stale weight.
+
+The IC shrink cost 0.14 ± 0.05 of Sharpe with an edge and 0.24 ± 0.07
+crowded, and with no edge it kept the book in cash on most dates. That is
+a smaller drawdown (−3% against −11%) but no measurable gain in return,
+so it is opt-in.
+
+Kelly sizing is opt-in. The gross limit, not the fraction, sized every
+Kelly book: f = 0.25, 0.5 and 1 gave the same Sharpe, at 6.2–6.6%
+volatility and an 11% drawdown, twice the damped rank book's. Its edge
+over that book, +0.07 ± 0.05, is within 1.5 standard errors, out of the
+13 optimizer configurations measured.
+
+A weekly 50-name run solves about 250 dates. That took 7–9 ms a date for a
+Kelly book and 60–75 ms under the default binding volatility target (one
+process), so 15–20 s a run, of which the covariances and the IC are
+about a second.
 
 ### What the result carries
 
@@ -4663,13 +4845,13 @@ own `ValidationError`).
 
 Every modeling tool call routed through
 `modeling.agent.modeling_dispatch` writes a `DecisionRecord`, using the
-same `audit._run_and_record` the 213-tool surface uses — no parallel audit
+same `audit._run_and_record` the 217-tool surface uses — no parallel audit
 implementation.
 
 `audit.verify_replay` covers **both** surfaces: it resolves a record's tool
 against the agent registry and then the modeling registry. (Each is looked
 up lazily, since both tool packages import the audit package, and the
-modeling runtime is deliberately independent of the 213-tool surface rather
+modeling runtime is deliberately independent of the 217-tool surface rather
 than importable from it.)
 
 Replay comparison for modeling is **semantic**, not literal. Modeling mints

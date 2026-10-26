@@ -1,12 +1,13 @@
 # Capital Allocation
 
-Eight tools for splitting capital ACROSS return streams -- strategies,
+Ten tools for splitting capital ACROSS return streams -- strategies,
 sleeves, models -- rather than across tickers: putting the streams on one
-calendar, allocating among them with the uncertainty of the split, testing
-the rule that chose it out of sample, how hard to lever a stream, an
-overlay that changes its risk over time, how much money it can take before
-its own trading eats it, where active return came from, and what a fund
-with deposits and withdrawals actually returned.
+calendar, registered models' among them, allocating among them with the
+uncertainty of the split, testing the rule that chose it out of sample,
+choosing among rules as you go, how hard to lever a stream, an overlay
+that changes its risk over time, how much money it can take before its own
+trading eats it, where active return came from, and what a fund with
+deposits and withdrawals actually returned.
 
 It is not `portfolio`. That runtime builds a book out of ASSETS: it takes
 tickers or an asset covariance and answers with weights per name. This one
@@ -23,8 +24,10 @@ into this runtime from `backtest` or `modeling` by value.
 | Tool | What it answers |
 |---|---|
 | `combine_return_streams` | Which dates do these streams share, and what did each lose to them? Publishes the aligned panel as one `returns_panel` reference |
+| `build_model_sleeves` | How registered models' out-of-sample portfolios line up as sleeves: each model evaluated as `evaluate_model_portfolio` evaluates it, the streams published on one calendar as a `returns_panel`, with each sleeve's Sharpe, return, drawdown and turnover, the streams' correlations, and the count of models registered on the same datasets as a lower bound for `evaluate_allocation_rule`'s `n_trials` |
 | `allocate_across_sleeves` | How capital should be split across strategies, sleeves or models -- and how much of that split the sample chose: weights, capital per sleeve, risk contributions, effective N, binding caps, bootstrap weight bands and a stability number |
 | `evaluate_allocation_rule` | Whether an allocation rule would have worked out of sample, after drift and rebalancing costs, against equal weight -- and how much of its in-sample look is look-ahead |
+| `select_allocation_rule` | Whether choosing among several allocation rules as you go -- at each rebalance by their own out-of-sample record before that date -- beats equal weight out of sample after switching costs, beside the hindsight-best rule, the probability of backtest overfitting and deflated Sharpe ratios at the trials counted |
 | `get_kelly_report` | How hard to lever a stream or a set of streams held together (f* = mu / sigma^2, or Sigma^-1 mu), how uncertain that is, and the growth and drawdown odds at fractions of it |
 | `apply_risk_overlay` | What a volatility target, CPPI or TIPP does to a stream's volatility, drawdown and floor when each exposure is decided from the day before |
 | `get_strategy_capacity_curve` | How much capital a strategy can take before spread and square-root impact on its own weight changes eat its return: the break-even AUM and the AUM at half the gross Sharpe |
@@ -47,7 +50,46 @@ after and inside the common window, and publishes the aligned panel at a
 `run_id`. Undated lists, a short overlap (naming the stream that limits
 it), repeated dates, non-finite values and levels passed as returns are
 refused by name. An equity curve is levels, not returns: `convert_reference`
-turns it into a `returns_panel` first.
+turns it into a `returns_panel` first. A registered model needs neither
+step: `build_model_sleeves` (below) evaluates it and publishes its stream.
+
+### Registered models as sleeves
+
+`build_model_sleeves` takes two to twenty `model_id`s, each with an
+optional sleeve `name` and its own `transform`, a shared `transform` and
+`portfolio` -- `PredictionTransformSpec` and `PortfolioSimSpec`, with
+`evaluate_model_portfolio`'s defaults -- `min_overlap` and a `run_id`. Each
+model is evaluated as `evaluate_model_portfolio` evaluates it (its weights
+and equity curve are published under the model's id as that tool
+publishes them), its stream is read off the evaluation's own equity curve
+from the capital the account opened with, as the evaluation reads growth,
+so it compounds to that evaluation's `cumulative_return`, and the streams
+are put on the dates they share and published as a `returns_panel` named
+by its content: the same call under the same `run_id` republishes the same
+reference. Per sleeve the result has the evaluation's Sharpe, return,
+volatility, drawdown, turnover and rebalances, the model's estimator,
+dataset and target horizon, and its `equity_curve_ref`; beside them the
+alignment report, the streams' correlations and the `periods_per_year` to
+pass to the allocation tools. Like `evaluate_model_portfolio` it prices the
+books through each model's dataset and provider.
+
+Every evaluation prices the book over its dataset's whole window, and a
+model's first prediction comes after the features' warm-up and its first
+training window, so each curve opens with the account in cash -- 275 of
+1,499 bars in the measured case. Those returns are the cash rate's, not the
+model's, so by default each stream starts at its model's first live bar
+(the first rebalance date under a close fill, the bar after it under the
+next open); the bars left out are counted and compounded as
+`n_idle_returns` and `idle_return`, and `keep_idle=True` keeps them.
+`n_trials_lower_bound` is every model registered on the datasets these
+models were trained on, never fewer than the models passed: pass it, or
+more, as `evaluate_allocation_rule`'s `n_trials`. It is a lower bound --
+a transform tried or a model deleted leaves no trace in the registry --
+and a model's own hyperparameter search, nested in its walk-forward, is
+already paid for and not counted again. Fewer than two models, a model or
+sleeve named twice, a combinatorial-CV model, models whose bars are not
+the same period and too little overlap are refused by name; different
+target horizons are warned about.
 
 ---
 
@@ -69,6 +111,22 @@ Constraints act in order: `max_weight` caps the fully invested rule,
 last, its excess to cash or water-filled to the sleeves with room. Every
 rule's risk is read off the same covariance, so the risk contributions sum
 to the ex-ante volatility.
+
+Any rule can take a `regime`. Every period of the window has a state known
+at its end -- by default the EWMA volatility (half-life `halflife`, 10) of
+the sleeves' equal-weight mix, or a column of the returns the caller names
+as `state_column`, which is then not a sleeve -- and the window's states
+are labelled into two or three regimes by the library's Gaussian mixture
+(`labels="mixture"`, the default) or by the window's own quantiles. A
+period's return is paired with the label of the period before it, so a
+large move never votes itself into the volatile regime, and the current
+regime is the window's last label. The rule's mean and covariance are then
+those of the returns in the current regime, shrunk toward the whole
+window's by n / (n + n0) (`shrinkage` n0, default 126); HRP clusters the
+regime's rows. Too few returns in the regime (fewer than 20), or a state
+that does not vary, and the rule is fitted unconditioned, with a note. The
+result reports the current regime, the returns per regime, the shrink
+weight and the labels' persistence.
 
 The block bootstrap refits the whole rule on circular resamples of the
 dated rows and reports each weight's 5th and 95th percentile and the mean
@@ -92,7 +150,9 @@ turnover and cost; the difference of the two Sharpe ratios with a circular
 block-bootstrap interval; the look-ahead gap, the same rule fitted once on
 the full sample and held minus the walk forward; and the deflated Sharpe
 ratio at `n_trials`, which is required -- count every rule and setting
-tried.
+tried. When the sleeves are registered models, `build_model_sleeves`
+reports `n_trials_lower_bound`, the models registered on their datasets;
+start from it and add the rules tried on the panel.
 
 On eight zero-edge sleeves a max-Sharpe rule fitted on the full sample
 scores about 0.7, walked forward about 0.1, and the deflated Sharpe ratio
@@ -102,11 +162,65 @@ changes no weight chosen and no return reported on or before it. With
 (columns `rule` and `benchmark`) and the chosen weights as a
 `weight_panel`.
 
+A regime rule is tested the same way, and the honest comparison is with its
+unconditioned twin: set `benchmark_rule` to the rule's own method. Measured
+on planted sleeves at 10 bps a unit of turnover (30 ten-year histories a
+case), conditioning earned its keep where the regimes differ in risk and
+the rule reads risk: on two-regime Markov sleeves risk parity at a target
+volatility gained 0.050 of Sharpe ratio over its twin (+- 0.007, ahead in
+28 of 30 histories), risk parity 0.013 and minimum variance 0.015; max
+Sharpe's 0.043 +- 0.028 was not distinguishable from nothing. On sleeves
+with no regimes it cost the risk-reading rules at most 0.006 and max Sharpe
+0.03 to 0.06. A regime is therefore opt-in.
+
 There is no overlay parameter: a volatility target or CPPI is
 `apply_risk_overlay` on the published `rule` column, the same thing because
-those overlays are causal on the stream. Nothing here picks the best rule;
-choosing among several by this result is a selection the trial count must
-include.
+those overlays are causal on the stream. `evaluate_allocation_rule` picks
+no rule; choosing among several by its result is a selection the trial
+count must include, and `select_allocation_rule` (below) makes that choice
+as it goes instead.
+
+### Choosing the rule as you go
+
+`select_allocation_rule` takes 2 to 12 `candidates` (each an allocation
+rule with an optional `name`, by default its method, numbered when the
+method repeats; a candidate takes no `capital` or `capacity`, since the
+selector's book follows each candidate's weights at that candidate's own
+capital) and walks every one of them forward exactly as
+`evaluate_allocation_rule` does. A selector rebalances on the same rows:
+at each it scores every candidate by the Sharpe ratio of that candidate's
+realized out-of-sample returns over the previous `selection_window` periods
+(252) -- strictly before the rebalance -- holds the equal blend of the
+better half (`combine="top_k"`, k = half the candidates; `combine="best"`
+holds the one), leaves a held rule only when a challenger beats it by
+`switch_margin` (0.5 of annual Sharpe), and pays `cost_bps` on its own
+turnover. Until the candidates have a selection window of record it holds
+the first candidate, and those periods are not scored. Changing every
+return after a date changes no choice, weight or return on or before it.
+
+It reports, on the scored periods: the selector's Sharpe, return,
+drawdown, turnover and cost; equal weight's; each candidate's; the paired
+Sharpe difference selector minus equal weight with its block-bootstrap
+interval; how often each candidate was held and how many switches; the
+HINDSIGHT best candidate and its Sharpe minus the selector's -- the number
+a backtest that picked the winner afterwards would have reported; the
+probability of backtest overfitting over the candidates' streams (CSCV,
+eight splits); and the deflated Sharpe ratio of the selector at `n_trials`
+and of the hindsight winner at `n_trials` times the number of candidates.
+With `run_id` the streams (selector, benchmark, each candidate) are
+published as a `returns_panel` and the selector's weights as a
+`weight_panel`.
+
+Measured on six rules over planted sleeves (40 histories of ten years a
+case, 10 bps a unit of turnover): where no rule had an edge the selector
+lost 0.02 of Sharpe ratio to equal weight and never claimed otherwise, and
+the PBO sat at 0.48; where one sleeve had a strong edge it gained 0.28
+(max Sharpe alone gained 0.37) and its interval cleared zero in 45% of
+histories; on regime-switching sleeves, where minimum variance beat equal
+weight by 0.10, it gained 0.01 -- it did not find the better rule, and the
+hindsight gap of 0.18 said so. The defaults (the better half, a
+252-period window, a 0.5 margin) are the settings that lost least without
+an edge and kept most of a real one.
 
 ---
 
@@ -233,9 +347,12 @@ it (10% by default) is listed with whether it has its own valuation.
 
 ## 8. What this runtime will not do
 
-- Pick the best rule, window or method. Choosing among several allocation
-  rules by their out-of-sample result is itself a selection: state the
-  trial count and let the deflated Sharpe ratio see it.
+- Pick the best rule by its backtest. `select_allocation_rule` chooses as
+  it goes, from what each rule had already done, and reports beside it
+  the hindsight pick a backtest would have made and the PBO; choosing among
+  several rules by their full-sample result is still a selection the trial
+  count must include. It does not choose the window or the method's
+  parameters.
 - Size a position or rebalance a book. A Kelly fraction and an overlay are
   reported, never applied.
 - Fetch a stream other than through `combine_return_streams`'s symbol form.

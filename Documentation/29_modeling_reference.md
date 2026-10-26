@@ -139,7 +139,7 @@ Composed in order by `PreprocessingSpec.steps`; each is fitted on the fold's tra
 | `SearchSpec.method` | `grid`, `random`, `tpe` |
 | `SearchSpec.scoring` | `cs_rank_ic`, `cs_rank_ic_net_of_turnover`, `cs_ic`, `r2`, `neg_mae`, `accuracy`, `auc`, `concordance` |
 | `EstimatorSpec.calibration` | `none`, `isotonic`, `sigmoid` |
-| `PredictionTransformSpec.method` | `sign`, `cross_sectional_rank`, `cross_sectional_zscore`, `top_bottom_quantile`, `uncertainty_scaled` |
+| `PredictionTransformSpec.method` | `sign`, `cross_sectional_rank`, `cross_sectional_zscore`, `top_bottom_quantile`, `uncertainty_scaled`, `mean_variance` |
 | `PredictionTransformSpec.rebalance_frequency` | `daily`, `weekly`, `monthly` |
 
 ## Limits

@@ -113,8 +113,9 @@ Computed entirely from data a backtest already produces (`equity_curve`, `trade_
 | `backtest_var_series(frame, confidence, *, random_seed=0, n_simulations=10000)` | The exception dates, Kupiec, Christoffersen and conditional coverage, the Basel traffic light, and Acerbi-Szekely Z2 with a simulated p-value; an undefined statistic is None with a `null_reason` |
 
 Exposed as `forecast_var_series` and `backtest_var_forecasts` in the
-`research` runtime; see [03_metrics.md](03_metrics.md) and
-[23_inference.md](23_inference.md).
+`research` runtime; the second also tests a model's lower quantile column
+from a `predictions` reference, entity by entity. See
+[03_metrics.md](03_metrics.md) and [23_inference.md](23_inference.md).
 
 ---
 
@@ -215,6 +216,14 @@ once on the same dates and returns the loadings B, the factor covariance
 F and the specific variances D (SSR / (n − p)), each with a standard
 error, the alphas, the in-sample R², the implied covariance B F B′ + D and
 the largest residual correlation between two assets.
+
+`screen_factor_candidates(asset_returns, factor_returns, *, base_factors=(),
+estimation_window=252, step=21, periods_per_year=252, n_shifts=500,
+random_seed=0, fdr=0.10)` (`analysis/factor_screen.py`) screens every
+factor not in `base_factors`: walk-forward incremental R² against circular
+shifts with Benjamini-Hochberg, loading stability, VIF, and the
+out-of-sample volatility of the minimum-variance book from B F B′ + D with
+and without it, beside Ledoit-Wolf; `selected` passes all four.
 
 ### Cointegration & Pairs Spread
 
@@ -405,6 +414,8 @@ See [Documentation/05_portfolio.md](05_portfolio.md#portfolio-optimization) for 
 
 `standard_quant_tools.portfolio.general_optimizer.optimize_portfolio(covariance, *, assets=None, expected_returns=None, objective="min_variance", risk_aversion=1.0, risk_free_rate=0.0, benchmark_weights=None, lower_bounds=0.0, upper_bounds=None, budget=1.0, budget_type="equal", groups=None, group_min=None, group_max=None, factor_loadings=None, exposure_min=None, exposure_max=None, max_volatility=None, max_tracking_error=None)` — exact constrained optimization on expected returns and a covariance the caller supplies: `min_variance`, `max_utility`, `max_sharpe`, `min_tracking_error` or `max_active_utility` under per-asset bounds, a budget (equal or at most; 0 is dollar-neutral), group and factor-exposure limits and volatility or tracking-error caps. It returns the weights, every binding constraint with its shadow price, and a KKT certificate computed from the weights; an infeasible set of limits is refused naming the ones that conflict. Up to 500 assets; needs scipy. The `optimize_portfolio` agent tool and `optimize_replication_basket` solve through it. Deep guide: [05_portfolio.md](05_portfolio.md#constrained-optimization-on-your-own-numbers).
 
+`standard_quant_tools.portfolio.rebalance_optimizer.optimize_rebalance(covariance, *, assets=None, expected_returns, current_weights=None, risk_aversion=1.0, linear_cost=0.0, quadratic_cost=0.0, lower_bounds=0.0, upper_bounds=None, budget=1.0, budget_type="equal", groups=None, group_min=None, group_max=None, factor_loadings=None, exposure_min=None, exposure_max=None, max_turnover=None, max_gross=None, max_volatility=None, start=None)` — the exact cost-aware rebalance from the current weights: maximizes mu'w − (γ/2) w'Sw − Σ κ|w − w0| − Σ η(w − w0)² under `optimize_portfolio`'s limits plus turnover, gross and volatility caps. A weight inside its no-trade band is returned as its current weight bit for bit (`no_trade`); every binding constraint carries its shadow price net of costs, and the KKT certificate is computed from the weights. `start` takes a previous answer as a warm start. Up to 500 assets; needs scipy. The `optimize_rebalance` agent tool solves through it. Deep guide: [05_portfolio.md](05_portfolio.md#rebalancing-with-trading-costs).
+
 ---
 
 ## Screener (`standard_quant_tools.screener`)
@@ -441,9 +452,9 @@ result = screen_stocks(sp500_tickers, filters={...}, n_workers=8)
 
 ## AI Agent Tools (`standard_quant_tools.agent`)
 
-213 LLM-callable tools with Pydantic input/output models and OpenAI/Anthropic function-calling schemas — including two tools that backtest a signal you computed yourself rather than one of the built-in indicator strategies.
+217 LLM-callable tools with Pydantic input/output models and OpenAI/Anthropic function-calling schemas — including two tools that backtest a signal you computed yourself rather than one of the built-in indicator strategies.
 
-`Implementation/{Anthropic,OpenAI,Gemini}/` are single-agent reference scripts across all three providers — each narrows the tool list per request via a lightweight **router** (`standard_quant_tools.agent.router`) instead of handing the model all 213 tools on every call: one cheap classification call picks the 1-2 relevant tool categories before the real agent loop starts, no separate agent session required. Each provider folder also carries `Agent_Model_Builder.py`, the one script that drives the separate 38-tool modeling runtime instead — it passes `registry="modeling"` and skips the router, since one ordered pipeline has no selection ambiguity to remove. For a heavier, more thorough split, `Multi_Agent_Implementation/` (Anthropic only for now) is a full **orchestrator-workers** architecture — a lead agent that delegates to 18 specialist sub-agents, fifteen over the analysis runtimes, two over the modeling one and one over `feature_lab`, each with its own independent session scoped to a small, non-overlapping tool subset. The analysis workers build on the same category taxonomy (`TOOL_CATEGORY`), so a tool's categorization only needs to be correct in one place. Splitting tools this way is a direct fix for tool-selection confusion between similar tools (e.g. a built-in strategy backtest vs. a bring-your-own-signal backtest, or "run this strategy" vs. "optimize this strategy's parameters"): a worker/routed request that was never given the other tool cannot call it by mistake. See [Documentation/13_agent_orchestration.md](13_agent_orchestration.md).
+`Implementation/{Anthropic,OpenAI,Gemini}/` are single-agent reference scripts across all three providers — each narrows the tool list per request via a lightweight **router** (`standard_quant_tools.agent.router`) instead of handing the model all 217 tools on every call: one cheap classification call picks the 1-2 relevant tool categories before the real agent loop starts, no separate agent session required. Each provider folder also carries `Agent_Model_Builder.py`, the one script that drives the separate 38-tool modeling runtime instead — it passes `registry="modeling"` and skips the router, since one ordered pipeline has no selection ambiguity to remove. For a heavier, more thorough split, `Multi_Agent_Implementation/` (Anthropic only for now) is a full **orchestrator-workers** architecture — a lead agent that delegates to 18 specialist sub-agents, fifteen over the analysis runtimes, two over the modeling one and one over `feature_lab`, each with its own independent session scoped to a small, non-overlapping tool subset. The analysis workers build on the same category taxonomy (`TOOL_CATEGORY`), so a tool's categorization only needs to be correct in one place. Splitting tools this way is a direct fix for tool-selection confusion between similar tools (e.g. a built-in strategy backtest vs. a bring-your-own-signal backtest, or "run this strategy" vs. "optimize this strategy's parameters"): a worker/routed request that was never given the other tool cannot call it by mistake. See [Documentation/13_agent_orchestration.md](13_agent_orchestration.md).
 
 ```python
 from standard_quant_tools.agent.tools import (
@@ -466,7 +477,7 @@ from standard_quant_tools.agent.models import (
 )
 
 # Get tool schemas for your LLM
-tools = get_agent_tools  # 213 tools ready for function calling
+tools = get_agent_tools  # 217 tools ready for function calling
 
 # Risk analysis
 result = analyze_stock_risk(AnalysisInput(symbol='NVDA', benchmark='SPY', period='1y'))
@@ -519,7 +530,7 @@ A second, independent 38-tool runtime for building walk-forward-validated
 statistical models from this library's own features (31 built-in:
 technical, market, risk, volume, statistical, network, fundamental and
 PCA-derived factors) or from a matrix computed elsewhere and registered
-without copying it — never merged into the 213-tool
+without copying it — never merged into the 217-tool
 `get_agent_tools`/`TOOL_CATEGORY` surface above. A sibling `feature_lab`
 runtime holds 11 more, for interrogating those features before a model
 exists. Every tool with its arguments is in

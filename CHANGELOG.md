@@ -1,5 +1,43 @@
 # Changelog
 
+## The documentation describes the cost-aware rebalance, the optimizer-sized transform, model sleeves, rule selection and regimes, the factor screen and a model's quantiles as VaR, with what each was measured to do, and counts 266 tools
+
+- **The guides say what each new piece does and what it was measured to do,
+  including where it did not help.** `05_portfolio` gains "Rebalancing with
+  trading costs" (`optimize_rebalance`: the objective, the no-trade band,
+  the frictionless target beside the trade, the solve and its timings).
+  `15_modeling` gains "Sizing by the optimizer" (the alpha, the
+  point-in-time IC, the held book, the constraints and sizings, and the
+  planted study: a tie with damped rank weighting with an edge, a win where
+  correlated names score alike, the least lost without one, and why the IC
+  shrink and Kelly stay opt-in). `31_allocation` covers models as sleeves
+  and the trial count they carry, the regime option and its measured effect
+  beside its unconditioned twin, and choosing the rule as you go with the
+  hindsight pick reported beside it. `08_analysis` gains "Which Factors
+  Belong in the Model", and `23_inference` a model's quantiles tested as VaR
+  forecasts, entity by entity, with overlapping outcomes thinned.
+  `24_overfitting`, `03_metrics`, `09_advanced_agent_tools` and
+  `00_module_reference` carry the paragraphs and rows that point at them,
+  and `15_modeling`'s table says what `keep_intervals` adds.
+- **The router's allocation description** names models as sleeves, the
+  regime option and choosing among rules as you go, so a question about them
+  reaches the allocation runtime by its words.
+- **Counts.** 266 tools, 217 in the analysis facade, twelve runtimes:
+  `research` 46, `portfolio` 23 and `allocation` 10 in the README and
+  `19_runtimes` tables, every guide that states the whole surface or the
+  facade, and `test_wrong_numbers`. `18_mcp`'s `--print-budget` output, its
+  per-runtime full, `auto` and thin table, the whole surface (727 KB of
+  schema, ~186,000 tokens; 127 tools fit the old ceiling taken smallest
+  first) and the default session's schema are re-measured, as are the
+  README's runtime sizes. Under `auto`, `research` thins 16 tools (17 with
+  the long-running ones served; `screen_factor_candidates` the one new),
+  `portfolio` 6 of 23 (`optimize_rebalance`), `allocation` 1 of 10
+  (`build_model_sleeves`, whose two modeling specs are most of its 14 KB),
+  and `modeling` the same 20 of 38 at the same 44,122 bytes; no tool
+  described before is newly thinned. The generated tool index and modeling
+  reference are regenerated, and the README and `25_testing` count 19,252
+  tests.
+
 ## A model's predictions can be sized by the cost-aware optimizer from the book actually held, which ties damped rank weighting with an edge, wins where correlated names score alike, and loses almost nothing without one
 
 - **The gap.** `PredictionTransformSpec` turned out-of-sample predictions

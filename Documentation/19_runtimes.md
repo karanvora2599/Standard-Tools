@@ -40,12 +40,12 @@ shipped, generalized to the rest of the surface.
 
 | Runtime | Tools | Categories | What it is for |
 |---|---|---|---|
-| `research` | 45 | `screener`, `analysis`, `quant_research` | Describe an asset or a universe, and its statistical structure. Does not run strategies. |
+| `research` | 46 | `screener`, `analysis`, `quant_research` | Describe an asset or a universe, and its statistical structure. Does not run strategies. |
 | `data` | 21 | `data` | Get the bytes — from any configured provider, chosen per call with `source` — and publish them as references every other runtime reads, plus what the source can promise about them. Fetches; does not analyze. |
 | `backtest` | 35 | `backtest_execution`, `backtest_validation`, `custom_signal` | Run a strategy, and establish how much of the result is real. Does not build portfolios. |
 | `meta` | 25 | `discovery`, `provenance` | Questions about the library, the session and what a data source can promise — never about a market. |
-| `portfolio` | 22 | `portfolio_risk` | Turn a view into a position and price what it costs. |
-| `allocation` | 8 | `allocation` | How much capital each strategy, sleeve or model deserves, read from its return stream rather than from tickers. Takes streams by reference or as dated values; does not build books out of assets. |
+| `portfolio` | 23 | `portfolio_risk` | Turn a view into a position and price what it costs. |
+| `allocation` | 10 | `allocation` | How much capital each strategy, sleeve or model deserves, read from its return stream rather than from tickers. Takes streams by reference or as dated values, or registered models by id; does not build books out of assets. |
 | `finance` | 9 | `finance` | What holding a set of positions costs — financing, margin, currency exposure, carry, the FX forward that hedges it — and what a stream of cash is worth. Every rate, FX rate and day count is the caller's; nothing is fetched. |
 | `modeling` | 38 | (one ordered pipeline) | Build, validate and score a model, and join point-in-time records onto its panel. Lives in `modeling/agent`. |
 | `microstructure` | 17 | `microstructure` | What the market will charge you to trade — measured from ticks, or estimated from bars. |
@@ -173,7 +173,7 @@ a changelog nobody reads, embedded in an error message everybody does.
 same partition, over the protocol. This is not only a context-budget
 decision, though the budget forced it: at roughly 3,000 bytes per tool over
 the wire at full detail, the 180,000-byte session ceiling the server used to
-enforce buys about 60 tools and the library has 262, so the whole surface
+enforce buys about 57 tools and the library has 266, so the whole surface
 stopped fitting in one session well before it stopped growing.
 
 What it buys beyond the bytes is that the boundary now holds in three
@@ -359,7 +359,7 @@ Two `meta` tools exist because of the same concern the runtimes address.
 
 `describe_tool` reports one tool's arguments, result fields, owning runtime,
 and whether calling it fetches or writes. The alternative was loading all
-262 schemas — which is exactly what the MCP category budget exists to avoid,
+266 schemas — which is exactly what the MCP category budget exists to avoid,
 so a narrowly-scoped agent could not learn about a tool it had heard of
 without paying for every tool it had not. It answers for any runtime,
 because describing a tool is not calling it.

@@ -555,6 +555,79 @@ second.
 
 ---
 
+## Rebalancing with trading costs
+
+`optimize_portfolio` answers which portfolio to hold. Asked again a week
+later with forecasts that moved a little, it answers with a portfolio that
+moved a little in every name, and a book that follows it trades everything
+every week. `optimize_rebalance` answers what a rebalance asks -- what to
+trade from the weights held -- with the costs of trading in the objective:
+
+    maximize  mu'w - (gamma/2) w'Sw - sum kappa_i |w_i - w0_i|
+                                    - sum eta_i (w_i - w0_i)^2
+
+`linear_cost` (kappa) is the cost per unit of weight traded, a decimal
+(0.0015 is 15 bps: spread and commission); `quadratic_cost` (eta) prices the
+square of the trade, as impact grows with size. Both are one number or one
+per asset. The limits are `optimize_portfolio`'s -- bounds, a budget, groups,
+factor exposures, read by the same code -- plus `max_turnover` (sum
+|w - w0|), `max_gross` (sum |w|) and `max_volatility`.
+
+```python
+from standard_quant_tools.portfolio.rebalance_optimizer import optimize_rebalance
+
+out = optimize_rebalance(
+    covariance,                    # a named DataFrame, annualized
+    expected_returns=mu,           # {asset: return}, same units
+    current_weights=held,          # {asset: weight}; left out is 0
+    risk_aversion=4.0,
+    linear_cost=0.0015,            # 15 bps per unit traded
+    upper_bounds=0.05,
+    max_turnover=0.20,
+)
+out["trades"], out["no_trade"], out["turnover"], out["binding_constraints"]
+```
+
+**A name inside its no-trade band keeps its weight exactly.** Trading costs
+make a band around each current weight inside which no trade earns its
+cost; a weight there comes back as the weight held, to the bit, and is
+listed in `no_trade`. The band widens with the turnover cap's price: when
+the cap binds, a trade must earn its cost plus what that unit of turnover
+is worth elsewhere. Every binding constraint carries its `shadow_price` in
+utility net of costs -- the turnover cap's is what one more unit of
+turnover would add -- and the KKT certificate is computed from the weights,
+as `optimize_portfolio`'s is.
+
+**What the costs held back.** The tool reports the frictionless target
+beside the answer -- the same problem with no costs and no turnover cap,
+which is `optimize_portfolio`'s `max_utility` -- with the turnover and cost
+of trading to it, its utility after that cost, and the distance and the
+tracking volatility between it and the answer. Without a turnover cap the
+answer's utility is at least the target's after costs; with a cap that
+forbids the target it can be less, and that difference is the cap's, not
+the costs'.
+
+**Exact, and fast enough to call at every rebalance date.** The solve works
+on each weight's pieces between its breakpoints (its bounds, its current
+weight, zero under a gross cap), where the costs are linear: a primal-dual
+active-set pass, then the primal active-set method, each ending in one
+linear solve on the final active set. At 200 assets with a binding turnover
+cap it takes about 25 ms, at 500 about 0.1 s; a cold solve spends two
+passes on each name it trades to a bound. In a walk-forward, pass the
+previous date's answer as `start=`: its states are the first guess, and the
+answer is the same. A book that breaks its limits (a weight drifted over its
+cap) reports `required_turnover`, the least any answer must trade, and a
+turnover cap below it is refused naming the turnover cap among the
+constraints that conflict.
+
+A model's predictions are sized through it at every rebalance date by
+`PredictionTransformSpec(method="mean_variance")`, from the book the account
+holds, with the model's own trailing IC turning scores into expected
+returns; see
+[15_modeling.md](15_modeling.md#sizing-by-the-optimizer-methodmean_variance).
+
+---
+
 ## Async Fetching (Advanced)
 
 For time-sensitive applications, call the async version directly:

@@ -119,6 +119,12 @@ With `returns_ref`, every column of the panel is a configuration. The
 columns must share at least five dates per chunk (40 at the default eight),
 and a column that holds them below that is named.
 
+`select_allocation_rule` (allocation) reports this PBO over the candidate
+rules' walk-forward streams beside a selector that chose among them as it
+went: the PBO says whether choosing by record could have helped at all,
+the selector what it actually earned doing so, and the hindsight gap how
+much a pick made afterwards would have overstated.
+
 ### `run_reality_check`
 
 Is a result better than luck after a search? The tool asks one of two

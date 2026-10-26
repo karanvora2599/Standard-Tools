@@ -2,7 +2,7 @@
 
 Thirty-five high-level agentic tools that compose the library's existing primitives into single, LLM-callable operations. Each collapses a multi-step reasoning workflow into one structured function call with a Pydantic output model.
 
-> **See also:** [07_agent_tools.md](07_agent_tools.md) covers the 14 core tools (including `run_buy_and_hold` and `compare_strategies`), `dispatch()` wiring, and the cross-field validation rules. The full catalogue — all 213 tools `get_agent_tools()` returns, plus the modeling and feature-lab runtimes, 262 in all — is [20_tool_index.md](20_tool_index.md), generated from the live registry; [19_runtimes.md](19_runtimes.md) explains the twelve execution boundaries they are split across. The tools below are the backtest, portfolio and analytics slice, in depth.
+> **See also:** [07_agent_tools.md](07_agent_tools.md) covers the 14 core tools (including `run_buy_and_hold` and `compare_strategies`), `dispatch()` wiring, and the cross-field validation rules. The full catalogue — all 217 tools `get_agent_tools()` returns, plus the modeling and feature-lab runtimes, 262 in all — is [20_tool_index.md](20_tool_index.md), generated from the live registry; [19_runtimes.md](19_runtimes.md) explains the twelve execution boundaries they are split across. The tools below are the backtest, portfolio and analytics slice, in depth.
 
 ---
 
@@ -32,11 +32,12 @@ and why; see [07_agent_tools.md](07_agent_tools.md#backtestinput--backtestresult
 | `get_position_size` | ATR stop-loss sizing, with an optional half-Kelly position capped at `max_leverage` | `shares_fixed_risk`, `kelly_notional_fraction`, `kelly_risk_fraction`, `recommended_shares` |
 | `run_portfolio_simulation` | True shared-cash portfolio: rebalancing, position sizing vs. current equity, weight drift between rebalances | `rebalance_log`, `avg_gross_leverage`, `final_equity`, `final_cash` |
 
-**Constrained optimization & risk decomposition tools (3)** — see [05_portfolio.md](05_portfolio.md) for the full reference
+**Constrained optimization & risk decomposition tools (4)** — see [05_portfolio.md](05_portfolio.md) for the full reference
 
 | Tool | What it does | Key output fields |
 |---|---|---|
 | `optimize_portfolio` | Exact constrained optimization on expected returns and a covariance you supply (no tickers): min variance, max utility, max Sharpe, min tracking error or max active utility under per-asset bounds, a budget, group and factor-exposure limits and volatility or tracking-error caps | `weights`, `objective_value`, `expected_return`, `volatility`, `tracking_error`, `sharpe_ratio`, `binding_constraints` (each with its `shadow_price`), `effective_risk_aversion`, `group_totals`, `exposures`, `certified`, `certificate` |
+| `optimize_rebalance` | The cost-aware trade from the weights held: exact mean-variance weights net of linear and quadratic trading costs, under `optimize_portfolio`'s limits and turnover, gross and volatility caps; names inside their no-trade band keep their weight exactly | `weights`, `trades`, `no_trade`, `turnover`, `linear_cost`, `quadratic_cost`, `utility`, `required_turnover`, `binding_constraints` (each `kind` with its `shadow_price`, net of costs), `effective_risk_aversion`, `target_weights`, `target_turnover`, `target_trading_cost`, `target_utility`, `distance_to_target`, `tracking_to_target`, `certified`, `certificate` |
 | `decompose_factor_risk` | Factor and specific risk under Σ = BFB′ + D, by factor (exposure × volatility × correlation) and by asset, and the same for the tracking error against a benchmark; specific variance required | `volatility`, `tracking_error`, `benchmark_volatility`, `portfolio` and `active` (variance split, shares of the total, `exposures`, `by_factor`, `specific_contribution`, `by_asset`, `factor_specific_covariance` = 0), `benchmark_exposures` |
 | `decompose_tail_risk` | Euler component ES and kernel-smoothed component VaR from a scenario matrix or a `returns_ref` | `var`, `es`, `var_kernel`, `n_tail_observations`, `bandwidth`, `bandwidth_rule`, `kernel_effective_scenarios`, `by_asset` (marginal and component ES and VaR, shares), `n_hedges`, `streams` |
 
