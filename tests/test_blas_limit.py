@@ -60,7 +60,9 @@ instruments), the factor screen's walk-forward fits, null and
 minimum-variance solves (a 10,000-row window, and 300 names), and
 `optimize_rebalance`'s KKT solves on the free weights, its certificate and
 its volatility cap's search, held at 235 assets from a book that breaks the
-limits.
+limits. `mean_variance_weights` chains them: a Ledoit-Wolf covariance and a
+volatility-capped rebalance per date over 120 names, each from the previous
+date's book.
 """
 
 from __future__ import annotations
@@ -119,8 +121,10 @@ from standard_quant_tools.modeling.analysis.feature_stability import (
 from standard_quant_tools.modeling.engine import _headline_report
 from standard_quant_tools.modeling.estimators.survival import CoxPHRegressor
 from standard_quant_tools.modeling.features import network
+from standard_quant_tools.modeling.portfolio_eval import mean_variance_weights
 from standard_quant_tools.modeling.preprocessing.base import FoldContext
 from standard_quant_tools.modeling.preprocessing.steps import PCAWhiten
+from standard_quant_tools.modeling.specs import PredictionTransformSpec
 from standard_quant_tools.modeling.validation.comparison import (
     diebold_mariano,
     mean_vs_null_test,
@@ -434,6 +438,41 @@ REBALANCE_ARGS = {
     "quadratic_cost": 0.002,
     "max_turnover": 0.6,
 }
+
+
+def _mean_variance_book():
+    """Six weekly rebalances of 120 names by the optimizer, from predictions
+    with a fixed IC: each date's Ledoit-Wolf covariance over 252 returns and
+    its volatility-capped solve from the previous date's book. Everything
+    the run returns except the solver's wall-clock time."""
+    returns = RETURNS.iloc[:, :120]
+    closes = (1.0 + returns).cumprod()
+    predictions = pd.DataFrame(
+        np.random.default_rng(79).normal(size=returns.shape),
+        index=returns.index,
+        columns=returns.columns,
+    )
+    spec = PredictionTransformSpec(
+        method="mean_variance",
+        optimizer={"ic": 0.05, "risk_lookback": 252, "target_volatility": 0.04},
+    )
+    weights, diagnostics, per_date = mean_variance_weights(
+        predictions,
+        returns.index[-31::5],
+        closes,
+        spec,
+        linear_cost=0.0015,
+        periods_per_year=252,
+        fill_price="close",
+    )
+    summary = dict(diagnostics["mean_variance"])
+    summary.pop("solve_seconds")
+    numeric = ["ex_ante_volatility", "turnover", "effective_risk_aversion", "shrinkage"]
+    return {
+        "weights": weights,
+        "per_date": per_date[numeric].astype(float),
+        "summary": summary,
+    }
 
 
 def _latent_features(n_rows, n_features, seed, latent):
@@ -884,6 +923,8 @@ CALLS = {
     "optimize_rebalance_volatility_cap": lambda: optimize_rebalance(
         COVARIANCE, **REBALANCE_ARGS, max_volatility=0.06
     ),
+    # Predictions sized by that optimizer, date after date.
+    "mean_variance_weights": _mean_variance_book,
     # The Kelly report over 235 streams: the covariance, Sigma^-1 mu and its
     # inverse, and the empirical Kelly's Newton steps. The capacity curve's
     # spread and impact products over 5,000 weight rows of 500 instruments.

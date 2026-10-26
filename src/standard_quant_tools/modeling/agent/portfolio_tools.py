@@ -82,9 +82,10 @@ EVALUATE_PREDICTIONS_PORTFOLIO_DESCRIPTION = (
 _REQUIRED_EXPLICIT = ("interval", "provider", "start_date", "end_date")
 
 
-def _dataset_spec_fields(dataset_id: str) -> Dict[str, Optional[str]]:
+def _dataset_spec_fields(dataset_id: str) -> Dict[str, Any]:
     """
-    The five price fields off a built dataset's own spec.
+    The five price fields off a built dataset's own spec, and its target's
+    horizon.
 
     Verified against the hash recorded when the dataset was built, for the
     reason run_model_experiment verifies it: an edited `start`, `interval`
@@ -134,12 +135,20 @@ def _dataset_spec_fields(dataset_id: str) -> Dict[str, Optional[str]]:
             "the simulation needs a price window. Give start_date and "
             "end_date explicitly."
         )
+    # The bars the dataset's label looks ahead, which method='mean_variance'
+    # measures the realized IC over. Only when there is one: a dataset
+    # labelled at several horizons does not say which the predictions are.
+    target = spec_dict.get("target") or {}
+    horizons = target.get("horizons") or (
+        [target["horizon"]] if target.get("horizon") else []
+    )
     return {
         "interval": str(spec_dict.get("interval", "1d")),
         "provider": str(spec_dict.get("provider", "yfinance")),
         "calendar": (str(spec_dict["calendar"]) if spec_dict.get("calendar") else None),
         "start": str(spec_dict["start"]),
         "end": str(spec_dict["end"]),
+        "target_horizon": int(horizons[0]) if len(horizons) == 1 else None,
     }
 
 
@@ -219,6 +228,7 @@ def evaluate_predictions_portfolio(
         portfolio=input_data.portfolio,
         run_id=input_data.run_id,
         source=input_data.predictions_ref,
+        target_horizon=fields.get("target_horizon"),
     )
 
     producer = described.get("producer")

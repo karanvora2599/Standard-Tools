@@ -1887,6 +1887,205 @@ class ModelSpec(BaseModel):
         return self
 
 
+#: MeanVarianceSpec fields read under one sizing only, refused beside
+#: another when set away from their defaults.
+_SIZING_FIELDS: Dict[str, str] = {
+    "target_volatility": "target_volatility",
+    "risk_aversion": "risk_aversion",
+    "kelly_fraction": "kelly",
+}
+
+
+# Every other transform sizes a name from its own score. Two names that
+# move together and score alike each get a full position, nothing holds a
+# volatility, and a trade is paid for whether or not it was worth its cost.
+# Under method='mean_variance' the predictions become expected returns by
+# Grinold's rule (alpha = IC * sigma * z), a trailing covariance is the risk
+# model, and the exact cost-aware optimizer chooses the trade from the
+# book held -- the previous target drifted by the prices since its fill --
+# net of the simulator's own commission and spread: a name whose alpha
+# moved less than its cost is left where it is, and the simulator then
+# trades none of it.
+#
+# Every input is point in time. A weight dated t reads predictions dated t
+# or earlier and prices through t's close, and the IC it scales by is the
+# model's own realized rank IC over forward windows that closed by t.
+#
+# THE DEFAULTS ARE MEASURED (see the CHANGELOG entry of 2026-10-26), on a
+# planted 50-name factor universe over five years, weekly, at 15 bps, 20
+# seeds, against rank weighting damped to max_turnover 0.5. A 5% target
+# tracked its realized volatility (4.9%) and tied that baseline's net
+# Sharpe with an IC of 0.04 (0.71 against 0.72); it beat it where names
+# that move together also scored alike (0.47 against 0.34), and with no
+# edge it lost 0.35% a year where the baseline lost 2.9%. The IC shrink cost
+# 0.14 and 0.24 of net Sharpe in the two cases with an edge and gained
+# nothing measurable without one, so it is opt-in. Kelly sizing is opt-in:
+# the gross limit, not the fraction, sized every Kelly book, which ran 6-7%
+# volatility with twice the baseline's drawdown for a Sharpe within one
+# standard error of it; 0.25 is the fraction with the least of that risk.
+#
+# The explanation lives in this comment and not the docstring because the
+# docstring is the schema's description, sent with every listing of the two
+# evaluation tools.
+class MeanVarianceSpec(BaseModel):
+    """How method='mean_variance' turns a date's predictions into a trade
+    from the book already held: the alpha, the risk model, the costs and
+    the sizing."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    score: Literal["rank_normal", "zscore"] = Field(
+        "rank_normal",
+        description="'rank_normal': z from the ranks through the inverse "
+        "normal (an outlier is one rank). 'zscore': the standardized "
+        "prediction.",
+    )
+    ic: Optional[float] = Field(
+        None,
+        gt=0.0,
+        le=1.0,
+        description="A fixed IC in place of the trailing realized one; one "
+        "measured on these same dates is hindsight, and the result says so.",
+    )
+    ic_lookback: int = Field(
+        252,
+        ge=5,
+        le=5000,
+        description="Prediction dates whose forward window had closed by the "
+        "rebalance that the realized IC averages over.",
+    )
+    ic_min_dates: int = Field(
+        20,
+        ge=2,
+        le=5000,
+        description="Closed dates needed before there is any alpha; until then "
+        "the book only manages risk and costs.",
+    )
+    ic_horizon: Optional[int] = Field(
+        None,
+        ge=1,
+        le=520,
+        description="Bars of forward return the realized IC is measured over. "
+        "None: the target's horizon when the model records it, else the "
+        "rebalance interval.",
+    )
+    ic_shrink: bool = Field(
+        False,
+        description="Shrink the realized IC by its own noise, IC * max(0, "
+        "1 - 1/t^2), t its overlap-adjusted t-statistic: an IC the sample "
+        "cannot tell from zero sizes nothing. Off by default: measured, it "
+        "cost net Sharpe with an edge and kept the book in cash without one.",
+    )
+    risk_lookback: int = Field(
+        126,
+        ge=10,
+        le=5000,
+        description="Bars of daily returns through the rebalance date the "
+        "covariance and each name's volatility are estimated from. A date "
+        "with fewer holds its previous book.",
+    )
+    covariance: Literal["ledoit_wolf", "sample", "ewma", "ewma_shrunk"] = Field(
+        "ledoit_wolf", description="The covariance estimator (estimate_covariance)."
+    )
+    sizing: Literal["target_volatility", "risk_aversion", "kelly"] = Field(
+        "target_volatility",
+        description="'target_volatility': the most expected return at "
+        "`target_volatility`, inside gross. 'risk_aversion': mu'w - "
+        "(risk_aversion/2) w'Sw. 'kelly': risk aversion 1/kelly_fraction, so "
+        "unconstrained the book is kelly_fraction * S^-1 alpha.",
+    )
+    target_volatility: float = Field(
+        0.05,
+        gt=0.0,
+        le=2.0,
+        description="Annualized ex-ante volatility cap, sizing='target_volatility'.",
+    )
+    risk_aversion: float = Field(
+        10.0,
+        gt=0.0,
+        le=1e6,
+        description="Risk aversion in per-rebalance-period units, "
+        "sizing='risk_aversion'. 1 is full Kelly.",
+    )
+    kelly_fraction: float = Field(
+        0.25, gt=0.0, le=1.0, description="Kelly fraction f, sizing='kelly'."
+    )
+    cost_aware: bool = Field(
+        True,
+        description="Charge the optimizer the simulator's commission_pct + "
+        "slippage_pct per unit of weight traded. False is a comparison.",
+    )
+    cost_multiplier: float = Field(
+        1.0,
+        gt=0.0,
+        le=100.0,
+        description="Scales the linear cost the optimizer is charged.",
+    )
+    impact: float = Field(
+        0.0,
+        ge=0.0,
+        le=100.0,
+        description="Quadratic impact eta: eta * (w - w0)^2 per name per "
+        "rebalance, on top of the linear cost.",
+    )
+
+    @model_validator(mode="after")
+    def _fields_mean_something(self) -> "MeanVarianceSpec":
+        # A field the chosen sizing never reads is refused rather than
+        # carried: a caller who set kelly_fraction=0.25 beside the default
+        # sizing believed the book was a quarter-Kelly one.
+        defaults = type(self).model_fields
+        for field, sizing in _SIZING_FIELDS.items():
+            if (
+                self.sizing != sizing
+                and getattr(self, field) != defaults[field].default
+            ):
+                raise ValueError(
+                    f"optimizer.{field}={getattr(self, field)!r} is read only "
+                    f"under sizing={sizing!r}, and sizing={self.sizing!r} "
+                    f"ignores it. Set sizing={sizing!r}, or drop {field}."
+                )
+        if self.ic is not None:
+            unread = [
+                field
+                for field in ("ic_lookback", "ic_min_dates", "ic_horizon", "ic_shrink")
+                if getattr(self, field) != defaults[field].default
+            ]
+            if unread:
+                raise ValueError(
+                    f"optimizer.ic={self.ic} fixes the IC, so {unread} -- which "
+                    "only shape the trailing realized IC -- mean nothing. Drop "
+                    "them, or drop ic to measure it point in time."
+                )
+        if self.ic_min_dates > self.ic_lookback:
+            raise ValueError(
+                f"optimizer.ic_min_dates={self.ic_min_dates} exceeds "
+                f"ic_lookback={self.ic_lookback}: the lookback could never hold "
+                "enough dates, so no date would ever have an alpha. Lower "
+                "ic_min_dates or lengthen ic_lookback."
+            )
+        if not self.cost_aware and (
+            self.cost_multiplier != defaults["cost_multiplier"].default
+            or self.impact != defaults["impact"].default
+        ):
+            raise ValueError(
+                "optimizer.cost_aware=False turns the optimizer's costs off, "
+                "so cost_multiplier and impact mean nothing beside it. Drop "
+                "them, or set cost_aware=True."
+            )
+        return self
+
+
+#: PredictionTransformSpec fields the mean-variance method never reads,
+#: with the reason a caller is told when one is set away from its default.
+_UNREAD_BY_MEAN_VARIANCE: Dict[str, str] = {
+    "long_quantile": "it selects quantile membership, and the optimizer sizes every name",
+    "short_quantile": "it selects quantile membership, and the optimizer sizes every name",
+    "volatility_scale": "the covariance already sizes each name by its risk",
+    "volatility_lookback": "the risk window is optimizer.risk_lookback",
+}
+
+
 class PredictionTransformSpec(BaseModel):
     """
     How a model's out-of-sample predictions become portfolio target
@@ -1922,6 +2121,7 @@ class PredictionTransformSpec(BaseModel):
         "cross_sectional_zscore",
         "top_bottom_quantile",
         "uncertainty_scaled",
+        "mean_variance",
     ] = Field(
         "cross_sectional_rank",
         description=(
@@ -1941,7 +2141,14 @@ class PredictionTransformSpec(BaseModel):
             "conformal interval, then standardized within the cross-section: "
             "a confident forecast gets a bigger position than an equal but "
             "uncertain one. Needs a model trained with ModelSpec.intervals; "
-            "refused by name otherwise."
+            "refused by name otherwise. "
+            "'mean_variance' — each rebalance is a trade from the book "
+            "held (the previous target drifted by prices) chosen by the "
+            "exact cost-aware optimizer: Grinold alphas "
+            "(IC * volatility * z, the IC the model's trailing realized one), "
+            "a trailing covariance, and the simulator's own costs; "
+            "net_exposure is the budget, gross_exposure a ceiling, "
+            "max_turnover an exact cap. Configured by `optimizer`."
         ),
     )
     long_quantile: float = Field(
@@ -2032,7 +2239,10 @@ class PredictionTransformSpec(BaseModel):
             "exactly: it lies between two books that each did. That drift "
             "is reported rather than corrected, because re-applying the "
             "targets would change the turnover again — a loop with no fixed "
-            "point worth claiming. None (the default) damps nothing."
+            "point worth claiming. None (the default) damps nothing. Under "
+            "method='mean_variance' it is instead an exact constraint on "
+            "each trade the optimizer chooses (the first build from cash "
+            "excepted), with no blend."
         ),
     )
     rebalance_frequency: Literal["daily", "weekly", "monthly"] = Field(
@@ -2047,6 +2257,31 @@ class PredictionTransformSpec(BaseModel):
             "daily: it is the turnover, not the prediction, that costs money."
         ),
     )
+    optimizer: Optional[MeanVarianceSpec] = Field(
+        None,
+        description="method='mean_variance' only (refused beside another "
+        "method): the alpha, risk model, costs and sizing. None is the "
+        "defaults.",
+    )
+
+    @model_validator(mode="after")
+    def _optimizer_belongs_to_its_method(self) -> "PredictionTransformSpec":
+        if self.method != "mean_variance":
+            if self.optimizer is not None:
+                raise ValueError(
+                    f"optimizer is read only by method='mean_variance', and "
+                    f"method={self.method!r} would ignore it. Set "
+                    "method='mean_variance', or drop optimizer."
+                )
+            return self
+        defaults = type(self).model_fields
+        for field, why in _UNREAD_BY_MEAN_VARIANCE.items():
+            if getattr(self, field) != defaults[field].default:
+                raise ValueError(
+                    f"{field}={getattr(self, field)!r} means nothing under "
+                    f"method='mean_variance': {why}. Drop it."
+                )
+        return self
 
     @model_validator(mode="after")
     def _coherent_exposures(self) -> "PredictionTransformSpec":

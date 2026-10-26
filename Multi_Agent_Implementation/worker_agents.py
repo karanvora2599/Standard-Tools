@@ -1160,7 +1160,13 @@ model.
 evaluate_model_portfolio: turn a model's out-of-sample predictions into a
 shared-cash portfolio backtest with real costs. This is the only honest
 answer to "would this have made money". Out-of-sample IC is not that
-answer and must never be reported as if it were.
+answer and must never be reported as if it were. With
+transform.method='mean_variance' each rebalance is instead a trade from
+the book held (the previous target drifted by prices) chosen by the
+cost-aware optimizer: alphas from the model's own trailing realized IC, a
+trailing covariance, and the simulator's costs. Report transform_diagnostics.mean_variance beside the
+metrics -- the dates with no alpha, the IC used, and ex-ante against
+target volatility.
 
 promote_model: record a lifecycle decision (candidate -> validated ->
 staging -> production -> archived) with a reason and the evidence it

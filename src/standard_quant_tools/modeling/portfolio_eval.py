@@ -44,6 +44,7 @@ artifact/provenance plumbing that makes the result auditable.
 
 import logging
 import math
+import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -89,16 +90,21 @@ from .registry.model_registry import (
     load_manifest,
     resolve_model_artifact,
 )
-from .specs import PortfolioSimSpec, PredictionTransformSpec
+from .specs import MeanVarianceSpec, PortfolioSimSpec, PredictionTransformSpec
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
     "apply_exposure_targets",
+    "cross_sectional_z",
     "evaluate_model_portfolio",
     "evaluate_predictions_portfolio",
+    "holding_period_bars",
+    "mean_variance_weights",
     "predictions_to_score_panel",
+    "realized_rank_ic",
     "select_rebalance_dates",
+    "trailing_ic",
     "transform_predictions_to_weights",
 ]
 
@@ -464,6 +470,17 @@ def transform_predictions_to_weights(
 
     Returns (weights, diagnostics).
     """
+    if spec.method == "mean_variance":
+        # Not a per-date function of the scores: the trade depends on the
+        # book already held, the IC on realized returns, the risk on prices.
+        raise ValidationError(
+            "transform.method='mean_variance' needs prices, the previous book "
+            "and the simulator's cost rates, which this function does not "
+            "take. Call mean_variance_weights(score_panel, rebalance_dates, "
+            "closes, spec, linear_cost=..., periods_per_year=...), or evaluate "
+            "through evaluate_model_portfolio / evaluate_predictions_portfolio, "
+            "which supply them."
+        )
     if score_panel.empty:
         raise ValidationError("score panel is empty — nothing to transform")
 
@@ -640,6 +657,832 @@ def transform_predictions_to_weights(
     diagnostics["warnings"] = notes
 
     return out, diagnostics
+
+
+# ── Predictions into the exact optimizer ────────────────────────────────
+#
+# The five transforms above size a name from its own score, one date at a
+# time. Two names that move together and score alike each get a full
+# position, nothing holds a volatility, and every rebalance pays to reach
+# its target however little the view moved. `method='mean_variance'`
+# replaces the sizing rule with a decision: the date's predictions become
+# expected returns, a trailing covariance is the risk model, and
+# `optimize_rebalance` chooses the trade from the book already held, net of
+# the costs the simulation will charge for it.
+
+#: Rebalances a year under each schedule `select_rebalance_dates` builds
+#: other than daily (which rebalances every bar). With the interval's bars
+#: a year this gives the holding period in bars, from the configuration
+#: alone, so it is the same number at every date of a run.
+_REBALANCES_PER_YEAR = {"weekly": 52.0, "monthly": 12.0}
+
+#: The risk aversion `sizing='target_volatility'` starts from before the
+#: volatility cap's search raises it: 1, the growth-optimal (full Kelly)
+#: investor's. Below it a book takes more risk than maximizes growth, so an
+#: alpha too weak to justify the target's risk is held at full Kelly rather
+#: than levered up to the target; any alpha that does justify it reaches
+#: the cap, where the book is the most expected return at that risk.
+_TARGET_VOLATILITY_RISK_AVERSION = 1.0
+
+#: Fewest names a date's cross-section needs for a rank correlation, and
+#: for a book to allocate across.
+_MIN_IC_NAMES = 3
+
+#: The largest certificate residual (the optimizer's own, relative) an
+#: uncertified answer may carry and still be traded. The certificate's own
+#: tolerance is 1e-12; a miss below this is rounding in an answer that is
+#: the optimum, and one above it is a point the method stopped at, not an
+#: optimum of anything.
+_NEAR_CERTIFIED = 1e-6
+
+
+def holding_period_bars(frequency: str, periods_per_year: float) -> float:
+    """
+    Bars between two rebalances under a schedule: 1 for daily, and the
+    interval's bars a year over 52 or 12 rebalances for weekly or monthly.
+
+    Read from the configuration, not measured off the schedule, so a
+    weight dated t never depends on how many dates came after it.
+    """
+    if frequency == "daily":
+        return 1.0
+    per_year = _REBALANCES_PER_YEAR.get(frequency)
+    if per_year is None:
+        raise ValidationError(
+            f"rebalance_frequency must be one of daily/weekly/monthly, got "
+            f"{frequency!r}"
+        )
+    if not (math.isfinite(periods_per_year) and periods_per_year > 0):
+        raise ValidationError(
+            f"periods_per_year={periods_per_year!r} must be finite and positive."
+        )
+    return max(1.0, float(periods_per_year) / per_year)
+
+
+def cross_sectional_z(values: np.ndarray, score: str) -> np.ndarray:
+    """
+    One date's predictions as z-scores across the names that have one:
+    mean 0 and standard deviation 1 over the finite entries, NaN elsewhere.
+
+    'zscore' standardizes the prediction itself, so its magnitude carries.
+    'rank_normal' sends the ranks through the inverse normal and then
+    standardizes, so a single outlier is one rank and no more: a model
+    whose scale is wrong on a few names cannot hand those names the book.
+    A cross-section with no spread (every finite value equal) has no view
+    and scores 0 throughout.
+    """
+    from scipy.special import ndtri
+    from scipy.stats import rankdata
+
+    values = np.asarray(values, dtype=float)
+    out = np.full(values.shape, np.nan)
+    finite = np.isfinite(values)
+    n = int(finite.sum())
+    if n == 0:
+        return out
+    present = values[finite]
+    if score == "rank_normal":
+        present = ndtri((rankdata(present) - 0.5) / n)
+    elif score != "zscore":
+        raise ValidationError(f"score must be 'rank_normal' or 'zscore', got {score!r}")
+    centred = present - present.mean()
+    spread = float(np.sqrt(np.mean(centred**2)))
+    out[finite] = centred / spread if spread > _EPS else 0.0
+    return out
+
+
+def _rank_correlation(left: np.ndarray, right: np.ndarray) -> float:
+    """Spearman's rho with average ranks for ties; NaN with no spread."""
+    from scipy.stats import rankdata
+
+    a = rankdata(left)
+    b = rankdata(right)
+    a = a - a.mean()
+    b = b - b.mean()
+    denominator = math.sqrt(float(np.sum(a * a)) * float(np.sum(b * b)))
+    if denominator <= 0.0:
+        return math.nan
+    return float(np.sum(a * b)) / denominator
+
+
+def realized_rank_ic(
+    score_panel: pd.DataFrame, closes: pd.DataFrame, horizon: int
+) -> pd.DataFrame:
+    """
+    The model's realized cross-sectional rank IC, one row per prediction
+    date s: Spearman's rho between the predictions dated s and the
+    close-to-close return from s over the next `horizon` bars of `closes`.
+
+    Each row carries `known_at`, the calendar position at which its forward
+    window closed (s's position + horizon). An IC is usable at a rebalance
+    only once that position has been reached, which is what keeps the
+    trailing estimate point in time: the OOS predictions carry no labels,
+    and the returns they are scored against are read off the same prices
+    the simulation runs on.
+
+    A prediction date off the price calendar, a window that runs past its
+    end, or fewer than three names with both a prediction and a return
+    yields no row.
+    """
+    if horizon < 1:
+        raise ValidationError(f"horizon must be at least one bar, got {horizon}.")
+    missing = [c for c in score_panel.columns if c not in closes.columns]
+    if missing:
+        raise ValidationError(
+            f"closes have no column for {missing}; the realized IC needs a price "
+            "for every name the predictions score."
+        )
+    calendar = pd.DatetimeIndex(closes.index)
+    positions = calendar.get_indexer(pd.DatetimeIndex(score_panel.index))
+    prices = closes[list(score_panel.columns)].to_numpy(dtype=float)
+    predictions = score_panel.to_numpy(dtype=float)
+    rows: List[Tuple[Any, int, int, float, int]] = []
+    for k, position in enumerate(positions):
+        if position < 0 or position + horizon >= len(calendar):
+            continue
+        with np.errstate(divide="ignore", invalid="ignore"):
+            forward = prices[position + horizon] / prices[position] - 1.0
+        usable = np.isfinite(forward) & np.isfinite(predictions[k])
+        if int(usable.sum()) < _MIN_IC_NAMES:
+            continue
+        ic = _rank_correlation(predictions[k][usable], forward[usable])
+        if not math.isfinite(ic):
+            continue
+        rows.append(
+            (
+                score_panel.index[k],
+                int(position),
+                int(position + horizon),
+                ic,
+                int(usable.sum()),
+            )
+        )
+    return pd.DataFrame(
+        rows, columns=["date", "position", "known_at", "ic", "n_names"]
+    ).astype({"position": int, "known_at": int, "ic": float, "n_names": int})
+
+
+def trailing_ic(
+    ic_frame: pd.DataFrame,
+    position: int,
+    *,
+    lookback: int,
+    min_dates: int,
+    horizon: int,
+    shrink: bool,
+) -> Dict[str, Any]:
+    """
+    The IC a rebalance at calendar `position` may scale its alphas by.
+
+    The mean of the last `lookback` realized ICs whose forward windows had
+    closed by `position`, floored at 0 and, with `shrink`, multiplied by
+    max(0, 1 - 1/t^2): a James-Stein-style pull toward no view by the
+    estimate's own noise, so an IC the sample cannot tell from zero sizes
+    nothing and one it measures well is barely touched.
+
+    THE T-STATISTIC COUNTS INDEPENDENT WINDOWS, NOT DATES. Daily ICs over a
+    five-bar horizon share four of their five bars with the next date's, so
+    the mean of 250 of them carries about 50 observations' worth of
+    information; dividing by sqrt(250) would overstate t by sqrt(5) and
+    undo the shrink exactly where it matters. The effective count is the
+    number of non-overlapping windows the dates span, capped at the count.
+
+    Fewer than `min_dates` closed dates is the warm-up: no IC at all.
+    """
+    known = ic_frame["known_at"].to_numpy()
+    available = int(np.searchsorted(known, position, side="right"))
+    window = ic_frame.iloc[max(0, available - lookback) : available]
+    n = int(len(window))
+    out: Dict[str, Any] = {
+        "ic_raw": None,
+        "ic_used": 0.0,
+        "ic_t_stat": None,
+        "n_ic_dates": n,
+        "n_ic_effective": None,
+        "ic_warmup": n < min_dates,
+    }
+    if n < min_dates:
+        return out
+    values = window["ic"].to_numpy(dtype=float)
+    spots = window["position"].to_numpy()
+    mean = float(values.mean())
+    spread = float(values.std(ddof=1)) if n > 1 else 0.0
+    effective = min(n, int((int(spots[-1]) - int(spots[0])) // horizon) + 1)
+    if spread > 0.0:
+        t_stat = mean / (spread / math.sqrt(effective))
+    else:
+        t_stat = math.inf if mean > 0 else (-math.inf if mean < 0 else 0.0)
+    used = max(mean, 0.0)
+    if shrink:
+        used *= max(0.0, 1.0 - 1.0 / (t_stat * t_stat)) if t_stat > 0 else 0.0
+    out.update(
+        ic_raw=mean,
+        ic_used=float(used),
+        ic_t_stat=float(t_stat) if math.isfinite(t_stat) else None,
+        n_ic_effective=int(effective),
+    )
+    return out
+
+
+def _closes_on_calendar(
+    closes: pd.DataFrame, columns: Iterable[Any], what: str
+) -> pd.DataFrame:
+    """The closes for `columns`, refused by name when one is missing or the
+    calendar is not a sorted set of dates."""
+    columns = list(columns)
+    missing = [c for c in columns if c not in closes.columns]
+    if missing:
+        raise ValidationError(
+            f"{what}: closes have no column for {missing}. Every name the "
+            "predictions score needs a price series."
+        )
+    index = pd.DatetimeIndex(closes.index)
+    if not (index.is_monotonic_increasing and index.is_unique):
+        raise ValidationError(
+            f"{what}: the closes' dates must be unique and increasing."
+        )
+    return closes[columns]
+
+
+def mean_variance_weights(
+    score_panel: pd.DataFrame,
+    rebalance_dates: Iterable[Any],
+    closes: pd.DataFrame,
+    spec: PredictionTransformSpec,
+    *,
+    linear_cost: float,
+    periods_per_year: float,
+    fill_price: str,
+    opens: Optional[pd.DataFrame] = None,
+    target_horizon: Optional[int] = None,
+) -> Tuple[pd.DataFrame, Dict[str, Any], pd.DataFrame]:
+    """
+    Target weights from the exact cost-aware optimizer, one trade per
+    rebalance from the book actually held: the previous rebalance's target,
+    drifted by the prices since it was filled.
+
+    At each rebalance date t, with nothing dated after t:
+
+    - ALPHA by Grinold's rule, per holding period: alpha_i = IC * sigma_i *
+      z_i * min(h, H) / sqrt(H), with z the date's cross-sectional score,
+      sigma_i the name's per-bar volatility over the risk window, h the
+      bars a rebalance holds and H the bars the IC was measured over. At
+      h == H this is IC * (sigma_i sqrt(h)) * z_i, the textbook form; the
+      factor keeps an IC measured at one horizon from being spent at
+      another as if the two were the same (a five-bar IC traded daily
+      earns a fifth of its five-bar alpha a day, and nothing after H).
+      The IC is the caller's (`optimizer.ic`) or the model's trailing
+      realized one (`trailing_ic`).
+    - RISK: `estimate_covariance` over the last `risk_lookback` bar
+      returns through t, scaled to the holding period.
+    - COSTS: `linear_cost` per unit of weight traded (the simulator's
+      commission + spread, so the optimizer pays what the simulation will
+      charge) times `cost_multiplier`, plus quadratic `impact`.
+    - CONSTRAINTS: the budget sum(w) = net_exposure, sum|w| <=
+      gross_exposure, |w| <= max_position_weight (w >= 0 when net equals
+      gross), and max_turnover as an exact cap on the trade, except the
+      book's first build from cash, which no cap could otherwise allow.
+    - SIZING: a volatility cap at `target_volatility` (annualized), a
+      fixed risk aversion, or risk aversion 1/f for a fractional Kelly
+      book.
+
+    THE STARTING BOOK IS THE ONE HELD, NOT THE ONE LAST ASKED FOR. The
+    simulator holds share counts between rebalances and resizes every
+    position from equity at the next, so a starting book of the previous
+    TARGET put the no-trade band somewhere the account was not: a name the
+    optimizer left alone was still traded back to its old weight, paying
+    for the drift and not the signal. The book held at t is the previous
+    target w filled at prices F, marked at t's close C, in the simulator's
+    own arithmetic: each position w_i * C_i / F_i, the cash the remainder
+    1 - sum(w) less the cost the fill paid (linear_cost on its turnover,
+    charged to cash as the simulator charges it), and every weight that
+    position over the equity they add up to,
+
+        w0_i = w_i g_i / (1 - cost + sum_j w_j (g_j - 1)),  g = C / F.
+
+    Shorts drift by the same expression (a negative weight's value grows
+    more negative as its price rises), so a dollar-neutral book needs no
+    separate leg arithmetic. Under fill_price='close' F is the previous
+    rebalance's close and the held book is the simulator's to rounding, so
+    a name inside its no-trade band comes back at exactly the weight the
+    account holds and the simulator trades none of it. Under 'next_open'
+    F is the open after the previous rebalance, and the trade fills at the
+    open after t, which is not known at t's close: the book is marked to
+    t's close, the last price a decision at t can read, and the simulator
+    trades the overnight move from that close to the fill on every name,
+    the untouched ones included. Financing (cash credit, margin, borrow)
+    is not marked, so under a financing spec the held book is off by the
+    interest accrued since the last rebalance.
+
+    The first rebalance starts from cash. A name with no prediction at t,
+    or no complete return window, is not in the problem and is sold to
+    zero. A date with fewer than two such names, or before `risk_lookback`
+    bars of returns exist, holds the book as it stands.
+
+    `closes` is the close price per date and name on one calendar (the
+    simulation's master calendar), covering the score panel's names and
+    every rebalance date; `opens` the open on the same calendar, required
+    under fill_price='next_open'. `linear_cost` is the simulator's own
+    commission + spread rate, which is both what the optimizer is charged
+    (times `cost_multiplier`) and what marks the held book. Returns
+    (weights, diagnostics, per_date): the weights indexed by the rebalance
+    dates with one column per name, a JSON-safe summary, and one row of
+    what each date's solve saw.
+    """
+    if spec.method != "mean_variance":
+        raise ValidationError(
+            f"mean_variance_weights needs transform.method='mean_variance', got "
+            f"{spec.method!r}; transform_predictions_to_weights sizes the others."
+        )
+    if score_panel.empty:
+        raise ValidationError("score panel is empty — nothing to transform")
+    if not (math.isfinite(linear_cost) and linear_cost >= 0.0):
+        raise ValidationError(
+            f"linear_cost={linear_cost!r} must be a finite, non-negative "
+            "decimal per unit of weight traded (0.0015 is 15 bps)."
+        )
+    if fill_price not in ("close", "next_open"):
+        raise ValidationError(
+            f"fill_price must be 'close' or 'next_open', got {fill_price!r}: the "
+            "convention the book will be simulated under, which sets the "
+            "price the previous rebalance bought at."
+        )
+    optimizer = spec.optimizer or MeanVarianceSpec()
+    holding = holding_period_bars(spec.rebalance_frequency, periods_per_year)
+
+    if optimizer.ic_horizon is not None:
+        horizon, horizon_source = int(optimizer.ic_horizon), "optimizer.ic_horizon"
+    elif target_horizon is not None and int(target_horizon) >= 1:
+        horizon, horizon_source = int(target_horizon), "target_horizon"
+    else:
+        horizon, horizon_source = max(1, int(round(holding))), "rebalance_interval"
+
+    names = list(score_panel.columns)
+    prices = _closes_on_calendar(closes, names, "mean_variance_weights")
+    calendar = pd.DatetimeIndex(prices.index)
+    schedule = pd.DatetimeIndex(rebalance_dates)
+    rebalance_positions = calendar.get_indexer(schedule)
+    if (rebalance_positions < 0).any():
+        absent = [str(d.date()) for d in schedule[rebalance_positions < 0][:3]]
+        raise ValidationError(
+            f"rebalance date(s) {absent} are not in the closes' calendar; a "
+            "trade dated t is priced from t's close."
+        )
+    if not schedule.isin(pd.DatetimeIndex(score_panel.index)).all():
+        raise ValidationError(
+            "every rebalance date must be a prediction date of the score panel."
+        )
+
+    price_values = prices.to_numpy(dtype=float)
+    if fill_price == "next_open":
+        if opens is None:
+            raise ValidationError(
+                "fill_price='next_open' fills each rebalance at the next bar's "
+                "open, so marking the held book needs `opens` (the open per "
+                "date and name on the closes' calendar). Pass it, or "
+                "fill_price='close'."
+            )
+        open_values = (
+            _closes_on_calendar(opens, names, "mean_variance_weights (opens)")
+            .reindex(calendar)
+            .to_numpy(dtype=float)
+        )
+    else:
+        open_values = price_values
+    with np.errstate(divide="ignore", invalid="ignore"):
+        bar_returns = np.full(price_values.shape, np.nan)
+        bar_returns[1:] = price_values[1:] / price_values[:-1] - 1.0
+
+    ic_frame = (
+        realized_rank_ic(score_panel, prices, horizon) if optimizer.ic is None else None
+    )
+    horizon_scale = min(holding, float(horizon)) / math.sqrt(float(horizon))
+    lookback = int(optimizer.risk_lookback)
+    cap = float(spec.max_position_weight)
+    gross = float(spec.gross_exposure)
+    net = float(spec.net_exposure)
+    lower = 0.0 if abs(net - gross) <= 1e-12 else -cap
+    upper = 0.0 if abs(net + gross) <= 1e-12 else cap
+    # A one-sided book's gross IS its net, so the budget already holds it
+    # at gross_exposure; passing the cap as well would hand the optimizer
+    # the same row twice.
+    gross_cap: Optional[float] = None if lower == 0.0 or upper == 0.0 else gross
+    kappa = float(linear_cost) * float(optimizer.cost_multiplier)
+    eta = float(optimizer.impact)
+    if not optimizer.cost_aware:
+        kappa, eta = 0.0, 0.0
+    if optimizer.sizing == "target_volatility":
+        risk_aversion = _TARGET_VOLATILITY_RISK_AVERSION
+        volatility_cap: Optional[float] = float(optimizer.target_volatility) * (
+            math.sqrt(holding / float(periods_per_year))
+        )
+    elif optimizer.sizing == "kelly":
+        risk_aversion, volatility_cap = 1.0 / float(optimizer.kelly_fraction), None
+    else:
+        risk_aversion, volatility_cap = float(optimizer.risk_aversion), None
+    # Per-period volatility to annualized: sqrt(rebalances a year).
+    annualize = math.sqrt(float(periods_per_year) / holding)
+
+    from standard_quant_tools.portfolio.covariance import estimate_covariance
+    from standard_quant_tools.portfolio.rebalance_optimizer import optimize_rebalance
+
+    scores_on = score_panel.loc[schedule].to_numpy(dtype=float)
+    weights = np.zeros((len(schedule), len(names)))
+    # The last target, the prices it filled at, and the cost the fill
+    # paid as a fraction of the equity it was sized from.
+    target = np.zeros(len(names))
+    filled_at = np.ones(len(names))
+    fill_cost = 0.0
+    records: List[Dict[str, Any]] = []
+    solve_seconds = 0.0
+    covariance_warnings: List[str] = []
+    for row, (date, position) in enumerate(zip(schedule, rebalance_positions)):
+        record: Dict[str, Any] = {
+            "status": "solved",
+            "n_names": 0,
+            "ic_raw": None,
+            "ic_used": None,
+            "ic_t_stat": None,
+            "n_ic_dates": None,
+            "ic_warmup": False,
+            "ex_ante_volatility": None,
+            "turnover": 0.0,
+            "share_held": None,
+            "n_forced_exits": 0,
+            "certified": None,
+            "effective_risk_aversion": None,
+            "volatility_cap_binding": False,
+            "turnover_cap_binding": False,
+            "shrinkage": None,
+            "n_covariance_warnings": 0,
+        }
+        previous = _held_book(
+            target, filled_at, price_values[position], fill_cost, names, date
+        )
+        window = (
+            bar_returns[position - lookback + 1 : position + 1]
+            if position >= lookback
+            else None
+        )
+        prediction = scores_on[row]
+        tradable = np.isfinite(prediction) & np.isfinite(price_values[position])
+        if window is not None:
+            tradable &= np.isfinite(window).all(axis=0)
+        else:
+            tradable[:] = False
+        present = np.flatnonzero(tradable)
+        exits = (~tradable) & (previous != 0.0)
+        record["n_forced_exits"] = int(exits.sum())
+        record["n_names"] = int(present.size)
+
+        if present.size < 2:
+            record["status"] = "no_risk_model" if window is None else "too_few_names"
+            new = previous.copy()
+            new[exits] = 0.0
+            record["turnover"] = float(np.abs(new - previous).sum())
+            weights[row] = new
+            target, fill_cost = new, float(linear_cost) * record["turnover"]
+            filled_at = _fill_prices(fill_price, price_values, open_values, position)
+            records.append(record)
+            continue
+
+        if ic_frame is None:
+            ic_used = float(optimizer.ic)
+            record.update(ic_raw=ic_used, ic_used=ic_used)
+        else:
+            estimate = trailing_ic(
+                ic_frame,
+                int(position),
+                lookback=int(optimizer.ic_lookback),
+                min_dates=int(optimizer.ic_min_dates),
+                horizon=horizon,
+                shrink=bool(optimizer.ic_shrink),
+            )
+            ic_used = float(estimate["ic_used"])
+            record.update(
+                ic_raw=estimate["ic_raw"],
+                ic_used=ic_used,
+                ic_t_stat=estimate["ic_t_stat"],
+                n_ic_dates=estimate["n_ic_dates"],
+                ic_warmup=estimate["ic_warmup"],
+            )
+
+        names_now = [names[i] for i in present]
+        sample = window[:, present]
+        volatility = sample.std(axis=0, ddof=1)
+        covariance = estimate_covariance(
+            pd.DataFrame(sample, columns=names_now),
+            method=optimizer.covariance,
+            periods_per_year=1,
+        )
+        matrix = covariance["matrix"]
+        record["shrinkage"] = covariance["shrinkage_intensity"]
+        record["n_covariance_warnings"] = len(covariance["warnings"])
+        if covariance["warnings"]:
+            covariance_warnings = [
+                f"{pd.Timestamp(date).date()}: {w}" for w in covariance["warnings"]
+            ]
+        per_bar = np.array(
+            [[matrix[a][b] for b in names_now] for a in names_now], dtype=float
+        )
+        z = cross_sectional_z(prediction[present], optimizer.score)
+        alpha = ic_used * volatility * z * horizon_scale
+        start = previous[present]
+        turnover_cap = spec.max_turnover if np.any(previous != 0.0) else None
+
+        clock = time.perf_counter()
+        try:
+            solved = optimize_rebalance(
+                pd.DataFrame(per_bar * holding, index=names_now, columns=names_now),
+                expected_returns=alpha,
+                current_weights=start,
+                risk_aversion=risk_aversion,
+                linear_cost=kappa,
+                quadratic_cost=eta,
+                lower_bounds=lower,
+                upper_bounds=upper,
+                budget=net,
+                budget_type="equal",
+                max_turnover=turnover_cap,
+                max_gross=gross_cap,
+                max_volatility=volatility_cap,
+            )
+        except ValidationError as exc:
+            raise ValidationError(
+                f"method='mean_variance' could not solve the rebalance on "
+                f"{pd.Timestamp(date).date()} ({present.size} names): {exc} "
+                + (
+                    f"A target_volatility of {optimizer.target_volatility} may "
+                    "sit below the least volatile book the budget allows (a "
+                    "long-only book carries the market's volatility): raise "
+                    "it, or use sizing='risk_aversion'."
+                    if volatility_cap is not None
+                    else ""
+                )
+            ) from exc
+        finally:
+            solve_seconds += time.perf_counter() - clock
+
+        # AN ANSWER THAT IS NOT AN OPTIMUM IS REFUSED; ONE THAT MISSES ITS
+        # CERTIFICATE BY ROUNDING IS TRADED AND COUNTED. A solve that
+        # reached no point returns no weights, and one that stopped short
+        # (a singular system, a cycle) returns the last feasible point it
+        # held: a book the constraints allow but no rule chose. Simulating
+        # either would report a rule nobody ran, so the date is named and
+        # the run refused. Holding the previous book instead would be the
+        # same fiction (on the first date it is cash, which a long-only
+        # budget forbids). An answer whose residuals are rounding above the
+        # certificate's tolerance is the optimum to that rounding.
+        certificate = solved.get("certificate") or {}
+        residual = max(
+            (
+                float(value)
+                for key, value in certificate.items()
+                if key != "tolerance" and value is not None
+            ),
+            default=math.inf,
+        )
+        if not solved.get("weights") or (
+            not solved["certified"] and not residual <= _NEAR_CERTIFIED
+        ):
+            reason = (solved.get("warnings") or [str(solved.get("method"))])[-1]
+            raise ValidationError(
+                f"method='mean_variance': the optimizer returned no optimum on "
+                f"{pd.Timestamp(date).date()} ({present.size} names, largest "
+                f"certificate residual {residual:.3g}): {reason} The run is "
+                "refused rather than simulated on a book no rule chose. "
+                "Loosen the limits that bind there (max_turnover, "
+                "max_position_weight, gross_exposure, target_volatility), or "
+                "evaluate with another method."
+            )
+        chosen = np.array([solved["weights"][a] for a in names_now], dtype=float)
+        new = np.zeros(len(names))
+        new[present] = chosen
+        kinds = {str(c.get("kind")) for c in solved.get("binding_constraints") or []}
+        effective = solved.get("effective_risk_aversion")
+        record.update(
+            ex_ante_volatility=float(solved["volatility"]) * annualize,
+            turnover=float(np.abs(new - previous).sum()),
+            share_held=len(solved.get("no_trade") or []) / float(present.size),
+            certified=bool(solved["certified"]),
+            effective_risk_aversion=None if effective is None else float(effective),
+            volatility_cap_binding=any("volatil" in k for k in kinds),
+            turnover_cap_binding=any("turnover" in k for k in kinds),
+        )
+        weights[row] = new
+        target, fill_cost = new, float(linear_cost) * record["turnover"]
+        filled_at = _fill_prices(fill_price, price_values, open_values, position)
+        records.append(record)
+
+    index = score_panel.loc[schedule].rename_axis(index=None).index
+    out = pd.DataFrame(weights, index=index, columns=score_panel.columns)
+    per_date = pd.DataFrame(records, index=index)
+    diagnostics = _mean_variance_diagnostics(
+        out,
+        per_date,
+        spec,
+        optimizer,
+        horizon=horizon,
+        horizon_source=horizon_source,
+        holding=holding,
+        linear_cost=kappa,
+        solve_seconds=solve_seconds,
+        covariance_warnings=covariance_warnings,
+    )
+    return out, diagnostics, per_date
+
+
+def _fill_prices(
+    fill_price: str, closes: np.ndarray, opens: np.ndarray, position: int
+) -> np.ndarray:
+    """The prices a rebalance decided at calendar `position` fills at, as
+    the simulator fills it: that bar's close, or the next bar's open. A
+    decision on the last bar has no next open and no later rebalance to
+    mark it, so its row is all NaN."""
+    if fill_price == "close":
+        return closes[position]
+    if position + 1 < len(opens):
+        return opens[position + 1]
+    return np.full(closes.shape[1], np.nan)
+
+
+def _held_book(
+    target: np.ndarray,
+    filled_at: np.ndarray,
+    marks: np.ndarray,
+    fill_cost: float,
+    names: List[Any],
+    date: Any,
+) -> np.ndarray:
+    """
+    The previous target as weights of the equity it has become: each
+    position grown by mark / fill price, the cash the remainder less the
+    fill's cost, everything over the new equity. All cash stays all cash.
+    """
+    held = target != 0.0
+    if not held.any():
+        return np.zeros_like(target)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        growth = np.where(held, marks / filled_at, 1.0)
+    unmarked = held & ~(np.isfinite(growth) & (growth > 0.0))
+    if unmarked.any():
+        missing = [names[i] for i in np.flatnonzero(unmarked)][:5]
+        raise ValidationError(
+            f"mean_variance_weights: on {pd.Timestamp(date).date()} the held "
+            f"book cannot be marked for {missing}: a fill or close price there "
+            "is missing or not positive. Every name held needs a price at "
+            "its fill and at each later rebalance."
+        )
+    equity = 1.0 - fill_cost + float(np.sum(target * (growth - 1.0)))
+    if not equity > 0.0:
+        raise ValidationError(
+            f"mean_variance_weights: on {pd.Timestamp(date).date()} the held "
+            f"book's equity is {equity:.4g} of what it was at the last "
+            "rebalance -- insolvent, as the simulator would refuse it."
+        )
+    return np.where(held, target * growth / equity, 0.0)
+
+
+def _mean_or_none(values: pd.Series) -> Optional[float]:
+    values = pd.to_numeric(values, errors="coerce").dropna()
+    return float(values.mean()) if len(values) else None
+
+
+def _mean_variance_diagnostics(
+    weights: pd.DataFrame,
+    per_date: pd.DataFrame,
+    spec: PredictionTransformSpec,
+    optimizer: MeanVarianceSpec,
+    *,
+    horizon: int,
+    horizon_source: str,
+    holding: float,
+    linear_cost: float,
+    solve_seconds: float,
+    covariance_warnings: List[str],
+) -> Dict[str, Any]:
+    """The run's summary: the keys every transform reports, read off the
+    weights, plus what the optimizer saw and did under `mean_variance`."""
+    values = weights.to_numpy(dtype=float)
+    solved = per_date["status"] == "solved"
+    no_alpha = solved & (pd.to_numeric(per_date["ic_used"], errors="coerce") <= 0.0)
+    warmup = solved & per_date["ic_warmup"].astype(bool)
+    uncertified = solved & (per_date["certified"] == False)  # noqa: E712
+    gross = np.abs(values).sum(axis=1)
+    summary: Dict[str, Any] = {
+        "sizing": optimizer.sizing,
+        "score": optimizer.score,
+        "ic_source": "given" if optimizer.ic is not None else "trailing_realized",
+        "ic_horizon": int(horizon),
+        "ic_horizon_source": horizon_source,
+        "holding_period_bars": float(holding),
+        "linear_cost": float(linear_cost),
+        "n_dates_solved": int(solved.sum()),
+        "n_dates_without_risk_model": int(
+            (per_date["status"] == "no_risk_model").sum()
+        ),
+        "n_dates_too_few_names": int((per_date["status"] == "too_few_names").sum()),
+        "n_dates_without_alpha": int(no_alpha.sum()),
+        "n_dates_ic_warmup": int(warmup.sum()),
+        "mean_ic_raw": _mean_or_none(per_date.loc[solved, "ic_raw"]),
+        "mean_ic_used": _mean_or_none(per_date.loc[solved, "ic_used"]),
+        "mean_ex_ante_volatility": _mean_or_none(
+            per_date.loc[solved, "ex_ante_volatility"]
+        ),
+        "target_volatility": (
+            float(optimizer.target_volatility)
+            if optimizer.sizing == "target_volatility"
+            else None
+        ),
+        "n_dates_volatility_cap_binding": int(
+            per_date.loc[solved, "volatility_cap_binding"].astype(bool).sum()
+        ),
+        "n_dates_turnover_cap_binding": int(
+            per_date.loc[solved, "turnover_cap_binding"].astype(bool).sum()
+        ),
+        "mean_turnover": _mean_or_none(per_date["turnover"]),
+        "mean_share_held_at_previous": _mean_or_none(
+            per_date.loc[solved, "share_held"]
+        ),
+        "n_forced_exits": int(per_date["n_forced_exits"].sum()),
+        "mean_effective_risk_aversion": _mean_or_none(
+            per_date.loc[solved, "effective_risk_aversion"]
+        ),
+        "mean_shrinkage_intensity": _mean_or_none(per_date.loc[solved, "shrinkage"]),
+        "n_dates_covariance_warned": int(
+            (per_date.loc[solved, "n_covariance_warnings"] > 0).sum()
+        ),
+        "n_uncertified": int(uncertified.sum()),
+        # Wall-clock seconds in the solver: the one number here that is not
+        # a function of the inputs.
+        "solve_seconds": float(solve_seconds),
+    }
+    notes: List[str] = []
+    if summary["n_dates_without_risk_model"]:
+        notes.append(
+            f"{summary['n_dates_without_risk_model']} rebalance date(s) came "
+            f"before {optimizer.risk_lookback} bars of returns existed and held "
+            "the previous book (cash at the start). Lower optimizer."
+            "risk_lookback or fetch a longer price history to trade them."
+        )
+    if summary["n_dates_too_few_names"]:
+        notes.append(
+            f"{summary['n_dates_too_few_names']} rebalance date(s) had fewer "
+            "than two names with a prediction and a complete return window, "
+            "and held the previous book."
+        )
+    if summary["n_dates_without_alpha"]:
+        notes.append(
+            f"{summary['n_dates_without_alpha']} of {int(solved.sum())} solved "
+            f"date(s) had no alpha ({summary['n_dates_ic_warmup']} before "
+            f"{optimizer.ic_min_dates} realized ICs had closed, the rest with "
+            "a trailing IC at or below zero"
+            + (" or shrunk to zero by its t-statistic" if optimizer.ic_shrink else "")
+            + "): on those the book only managed risk and costs."
+        )
+    if summary["n_dates_covariance_warned"]:
+        notes.append(
+            f"The covariance estimate warned on "
+            f"{summary['n_dates_covariance_warned']} solved date(s); the last: "
+            + " ".join(covariance_warnings)
+        )
+    if summary["n_uncertified"]:
+        notes.append(
+            f"{summary['n_uncertified']} solve(s) missed the optimizer's "
+            "certificate tolerance by rounding (every residual under "
+            f"{_NEAR_CERTIFIED:g}); their weights were traded."
+        )
+    if optimizer.ic is not None:
+        notes.append(
+            f"optimizer.ic={optimizer.ic} is the caller's number and was used "
+            "on every date. An IC measured over these same out-of-sample dates "
+            "is hindsight, and the result is then a hindsight result."
+        )
+    if not optimizer.cost_aware:
+        notes.append(
+            "optimizer.cost_aware=False: the optimizer was charged no costs, "
+            "while the simulation charges them. A comparison, not a book to run."
+        )
+    return {
+        "n_dates": int(values.shape[0]),
+        "n_entities": int(values.shape[1]),
+        "mean_names_per_date": float(per_date["n_names"].mean()),
+        "min_names_per_date": int(per_date["n_names"].min()),
+        "mean_n_long": float((values > _EPS).sum(axis=1).mean()),
+        "mean_n_short": float((values < -_EPS).sum(axis=1).mean()),
+        "mean_realized_gross": float(gross.mean()),
+        "mean_realized_net": float(values.sum(axis=1).mean()),
+        # gross_exposure is a ceiling under this method, not a target, so a
+        # book below it is the optimizer's choice and not a shortfall.
+        "n_dates_below_target_gross": None,
+        "n_dates_with_no_position": int((gross <= _EPS).sum()),
+        "max_abs_weight": float(np.abs(values).max()) if values.size else 0.0,
+        "max_turnover": spec.max_turnover,
+        "n_dates_damped": None,
+        "mean_rebalance_turnover": summary["mean_turnover"],
+        "mean_variance": summary,
+        "warnings": notes,
+    }
 
 
 # ── Full evaluation ─────────────────────────────────────────────────────
@@ -862,6 +1705,9 @@ def evaluate_model_portfolio(
     )
     predictions_df = _artifacts.load_artifact(predictions_uri)
     skipped_folds = (manifest.validation_report or {}).get("skipped_folds") or None
+    # The horizon the model was trained to forecast, which is the horizon
+    # its realized IC is measured over under method='mean_variance'.
+    target_horizon = (manifest.validation_report or {}).get("target_horizon")
 
     result = _simulate_predictions_portfolio(
         predictions_df,
@@ -877,6 +1723,7 @@ def evaluate_model_portfolio(
         source=predictions_uri,
         skipped_folds=skipped_folds,
         extra_warnings=manifest.dataset_warnings,
+        target_horizon=target_horizon,
     )
     # Every input that determined the numbers above, so a reported Sharpe
     # can be traced back to the exact predictions and weights that produced
@@ -907,6 +1754,7 @@ def evaluate_predictions_portfolio(
     portfolio: Optional[PortfolioSimSpec] = None,
     run_id: str,
     source: str = "<predictions>",
+    target_horizon: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     The same evaluation for predictions that are not a registered model's:
@@ -922,6 +1770,10 @@ def evaluate_predictions_portfolio(
     the reference it resolved is recorded in the result's provenance
     instead. That is a weaker claim than `evaluate_model_portfolio`'s and
     is spelled differently on purpose.
+
+    `target_horizon` is the bars the predictions forecast, when the caller
+    knows it (a dataset's target): method='mean_variance' measures the
+    realized IC over it, and over the rebalance interval without it.
 
     Returns the same dict shape, with `source_ref` in place of `model_id`.
     """
@@ -956,6 +1808,7 @@ def evaluate_predictions_portfolio(
         portfolio=portfolio,
         run_id=run_id,
         source=source,
+        target_horizon=target_horizon,
     )
     return {"source_ref": source, **result}
 
@@ -996,6 +1849,7 @@ def _simulate_predictions_portfolio(
     source: str,
     skipped_folds: Optional[List[Any]] = None,
     extra_warnings: Iterable[str] = (),
+    target_horizon: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Predictions -> score panel -> weights -> shared-cash simulation ->
@@ -1203,10 +2057,43 @@ def _simulate_predictions_portfolio(
     # `canonical_frame_hash` covers the index's name, so identical weights
     # were hashed and their artifact named differently under 3.1. The
     # index is left unnamed, as every earlier pandas left it.
-    rebalance_scores = score_panel.loc[rebalance_dates].rename_axis(index=None)
-    weights, transform_diagnostics = transform_predictions_to_weights(
-        rebalance_scores, transform, returns_df
-    )
+    if transform.method == "mean_variance":
+        # The whole score panel, not only the rebalance rows: the realized
+        # IC is measured on every prediction date whose forward window has
+        # closed. The closes are the master calendar's, the bars the
+        # simulation prices the book on.
+        closes = pd.DataFrame(
+            {column: price_data[str(column)]["Close"] for column in score_panel.columns}
+        ).reindex(master_index)
+        # The opens the simulator fills a next_open rebalance at, which is
+        # what the held book is marked from.
+        opens = (
+            pd.DataFrame(
+                {
+                    column: price_data[str(column)]["Open"]
+                    for column in score_panel.columns
+                }
+            ).reindex(master_index)
+            if portfolio.fill_price == "next_open"
+            else None
+        )
+        weights, transform_diagnostics, _ = mean_variance_weights(
+            score_panel,
+            rebalance_dates,
+            closes,
+            transform,
+            linear_cost=portfolio.commission_pct + portfolio.slippage_pct,
+            periods_per_year=periods_per_year,
+            fill_price=portfolio.fill_price,
+            opens=opens,
+            target_horizon=target_horizon,
+        )
+        warnings.extend(transform_diagnostics["warnings"])
+    else:
+        rebalance_scores = score_panel.loc[rebalance_dates].rename_axis(index=None)
+        weights, transform_diagnostics = transform_predictions_to_weights(
+            rebalance_scores, transform, returns_df
+        )
 
     if transform_diagnostics["n_dates_below_target_gross"]:
         warnings.append(
@@ -1218,7 +2105,10 @@ def _simulate_predictions_portfolio(
             f"{transform_diagnostics['mean_realized_gross']:.4f}); the residual "
             "sat in cash."
         )
-    if transform_diagnostics["n_dates_with_no_position"]:
+    if (
+        transform_diagnostics["n_dates_with_no_position"]
+        and transform.method != "mean_variance"
+    ):
         warnings.append(
             f"{transform_diagnostics['n_dates_with_no_position']} rebalance "
             "date(s) produced no position at all (no entity scored on either "

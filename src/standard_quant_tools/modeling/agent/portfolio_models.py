@@ -98,7 +98,9 @@ class EvaluatePredictionsPortfolioInput(BaseModel):
         default_factory=PredictionTransformSpec,
         description="How the predictions become target weights. Defaults to "
         "a dollar-neutral, weekly-rebalanced, rank-weighted portfolio capped "
-        "at 5% per name.",
+        "at 5% per name. "
+        "method='mean_variance' trades each rebalance from the book held "
+        "with the cost-aware optimizer instead.",
     )
     portfolio: PortfolioSimSpec = Field(
         default_factory=PortfolioSimSpec,
@@ -142,7 +144,10 @@ class EvaluatePredictionsPortfolioResult(ExplainsNulls):
         description="What the prediction -> weight step actually produced: "
         "names per date, book sizes, realized gross/net exposure, dates that "
         "could not reach the target gross under the position cap, and dates "
-        "with no position at all.",
+        "with no position at all. Under method='mean_variance', a "
+        "`mean_variance` block: dates without alpha, the IC used, ex-ante "
+        "against target volatility, turnover, the share of names left "
+        "untraded, and uncertified solves.",
     )
     coverage: Dict[str, Any] = Field(
         ...,

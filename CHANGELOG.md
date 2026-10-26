@@ -1,5 +1,93 @@
 # Changelog
 
+## A model's predictions can be sized by the cost-aware optimizer from the book actually held, which ties damped rank weighting with an edge, wins where correlated names score alike, and loses almost nothing without one
+
+- **The gap.** `PredictionTransformSpec` turned out-of-sample predictions
+  into weights by five rules that each size a name from its own score.
+  Two names that move together and score alike each got a full position,
+  nothing held a volatility, and every rebalance paid to reach its target
+  however little the view had moved; `max_turnover` could only blend toward
+  the previous row.
+- **`method="mean_variance"`.** At each rebalance the date's predictions
+  become Grinold alphas, IC x sigma x z. The IC is the model's own trailing
+  realized rank IC, measured against the prices the evaluation already
+  fetches, over forward windows that had closed by that date. A negative
+  IC is floored at zero, and the result says how many dates had no alpha.
+  The risk model is `estimate_covariance` over a trailing window, and the
+  costs are the simulator's own commission and spread. `optimize_rebalance`
+  then chooses the trade from the book held.
+  `net_exposure` is the budget, `gross_exposure` a ceiling, and
+  `max_turnover` an exact cap rather than a blend. Everything is set in one
+  nested `optimizer` spec (`MeanVarianceSpec`): the score, the IC and its
+  horizon, the risk window and estimator, costs, and sizing by volatility
+  target, risk aversion or fractional Kelly. It is refused beside another
+  method, as are the quantile and volatility-scaling fields beside this
+  one. `mean_variance_weights` is the same arithmetic as a function, with
+  one row per date of what each solve saw.
+- **The trade starts from the book the account holds.** The simulator
+  holds share counts between rebalances, so the starting book is the
+  previous target marked to the decision's close, in the simulator's own
+  arithmetic:
+  - each position grows by mark over fill price;
+  - cash is the remainder, less the cost the fill paid;
+  - each weight is its position over the equity they add up to.
+
+  A name whose alpha moved less than its cost keeps the weight it holds,
+  to the bit. At close fills the simulator then trades none of it: a test
+  passes the optimizer's book through `run_portfolio_simulation` and finds
+  no turnover on a date the optimizer left alone. Starting from the
+  previous target instead, the engine traded each untouched name back to
+  a stale weight.
+
+  At next-open fills (the default) the trade fills at an open the decision
+  cannot see. The book is marked to the decision's close, and the overnight
+  move is still traded. Financing accrued since the last rebalance is not
+  marked.
+- **Point in time, and refusing what is not an answer.** A weight dated t
+  reads predictions dated t or earlier and prices through t's close. A
+  test changes every close, open and prediction after t, including the
+  open that fills t's own trade, and finds every weight and per-date
+  diagnostic at or before t unchanged. The IC's t-statistic counts
+  non-overlapping forward windows, not dates. A date the optimizer did not
+  solve to an optimum refuses the run and names the date, rather than
+  simulating a book no rule chose. An answer that misses its certificate
+  only by rounding is traded and counted.
+- **Measured before its defaults were set.** The planted universe:
+  - 50 names on market, sector and style factors with an AR(1) signal;
+  - a realized 5-bar IC of 0.04, of 0, and an edge whose predictions also
+    carry a sector-wide component with no alpha in it;
+  - weekly rebalances at 15 bps, 20 seeds.
+
+  At its defaults (a 5% volatility target, no IC shrink) the optimizer's
+  net Sharpe was 0.73 with the edge, against 0.72 for rank weighting
+  damped to `max_turnover=0.5`: a tie (paired +0.01 +- 0.05), not a win.
+  Where correlated names scored alike it earned 0.48 against 0.34
+  (+0.14 +- 0.07). With no edge it traded 1.8 times a year and lost
+  0.26% a year, against 2.9% for the damped book and 6.7% for the default
+  rank book. Charged nothing for costs, the same optimizer earned 0.24 with
+  the edge and lost 4.3% a year without one.
+
+  Starting from the held book rather than the previous target added 0.02
+  to 0.03 of net Sharpe with the edge (paired +- 0.007). With no edge it
+  cut turnover by a third and the drawdown from 11.2% to 9.4%.
+- **Two rules stay opt-in, because measured they did not help.**
+  - The IC shrink, IC x max(0, 1 - 1/t^2), cost 0.14 +- 0.05 of net
+    Sharpe with the edge and 0.24 +- 0.07 in the crowded case. Without an
+    edge it kept the book in cash on most dates, for a smaller drawdown
+    but no measurable gain in return.
+  - Kelly sizing was sized by the gross limit, not the fraction: f = 0.25,
+    0.5 and 1 gave the same Sharpe at about twice the damped book's
+    drawdown. Its gain over the damped book, +0.07 +- 0.05, is within 1.5
+    standard errors over 13 configurations tried. Its default fraction is
+    0.25.
+- **Cost.** A weekly 50-name run solves about 250 dates: 7 to 9 ms a date
+  for a Kelly book and 60 to 75 ms under the default binding volatility
+  target, so 15 to 20 seconds a run.
+  `transform_diagnostics["mean_variance"]` carries the solver's wall-clock
+  seconds, the one number there that is not a function of the inputs.
+- **Existing methods are unchanged**, and so is every existing weight and
+  equity-curve hash.
+
 ## A model's band and quantiles can be joined to the outcome they were predicting, so the interval scorer and the VaR backtest read a registered model
 
 - **`attach_model_outcomes(keep_intervals=True)`.**

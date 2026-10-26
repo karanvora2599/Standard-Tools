@@ -17,6 +17,7 @@ from .features.registry import list_features, register_feature
 from .model_sleeves import build_model_sleeves
 from .portfolio_eval import (
     evaluate_model_portfolio,
+    mean_variance_weights,
     transform_predictions_to_weights,
 )
 from .scoring import score_model
@@ -24,6 +25,7 @@ from .specs import (
     DatasetSpec,
     EstimatorSpec,
     FeatureSpec,
+    MeanVarianceSpec,
     ModelSpec,
     PortfolioSimSpec,
     PredictionTransformSpec,
@@ -35,6 +37,7 @@ __all__ = [
     "DatasetSpec",
     "EstimatorSpec",
     "FeatureSpec",
+    "MeanVarianceSpec",
     "ModelSpec",
     "PortfolioSimSpec",
     "PredictionTransformSpec",
@@ -44,6 +47,7 @@ __all__ = [
     "build_model_sleeves",
     "evaluate_model_portfolio",
     "list_features",
+    "mean_variance_weights",
     "oos_predictions_to_signal_panel",
     "register_feature",
     "run_experiment",
