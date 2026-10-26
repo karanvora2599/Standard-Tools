@@ -242,6 +242,16 @@ class TestRoutingAccuracyEval:
             "and the Basel traffic light on the exceptions.",
             "quant_research",
         ),
+        (
+            "Which of these candidate factors deserve a place in my risk "
+            "model beside the market factor? Screen them out of sample.",
+            "quant_research",
+        ),
+        (
+            "Backtest my quantile model's q01 predictions as 99% VaR "
+            "forecasts, entity by entity.",
+            "quant_research",
+        ),
         # custom_signal
         ("Backtest this signal I already computed: {...}.", "custom_signal"),
         # portfolio_risk

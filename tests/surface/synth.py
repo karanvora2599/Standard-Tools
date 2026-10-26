@@ -479,6 +479,10 @@ def _value(annotation: Any, info: Any, name: str, length: int, salt: int = 0) ->
                 return _DATES[:count]
             if "regime" in name:
                 return [("calm" if i < count // 2 else "storm") for i in range(count)]
+            if name == "base_factors":
+                # Factors always in the model: one of the factor series the
+                # `factors` mapping beside it is synthesized under.
+                return ["mkt"]
             # Capped at the real symbol set on purpose. Padding it out to
             # `count` would make every universe-shaped tool fetch hundreds
             # of tickers per fuzz case.

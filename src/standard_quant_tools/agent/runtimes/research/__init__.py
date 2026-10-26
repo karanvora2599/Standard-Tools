@@ -50,6 +50,11 @@ from .factor_model_tools import (  # noqa: F401
     FACTOR_MODEL_TOOL_DISPATCH,
     estimate_factor_model,
 )
+from .factor_screen_tools import (  # noqa: F401
+    FACTOR_SCREEN_TOOL_DEFS,
+    FACTOR_SCREEN_TOOL_DISPATCH,
+    screen_factor_candidates,
+)
 from .inference_tools import (  # noqa: F401
     INFERENCE_TOOL_DEFS,
     INFERENCE_TOOL_DISPATCH,
@@ -354,6 +359,12 @@ TOOL_DEFS = TOOL_DEFS + VAR_TOOL_DEFS
 TOOL_DISPATCH.update(VAR_TOOL_DISPATCH)
 TOOL_CATEGORY.update({name: "quant_research" for name in VAR_TOOL_DISPATCH})
 
+# Which candidate factors earn a place in the factor model, declared in
+# factor_screen_tools.py.
+TOOL_DEFS = TOOL_DEFS + FACTOR_SCREEN_TOOL_DEFS
+TOOL_DISPATCH.update(FACTOR_SCREEN_TOOL_DISPATCH)
+TOOL_CATEGORY.update({name: "quant_research" for name in FACTOR_SCREEN_TOOL_DISPATCH})
+
 __all__ = [
     "backtest_var_forecasts",
     "forecast_var_series",
@@ -364,6 +375,7 @@ __all__ = [
     "get_correlation_stability",
     "decompose_returns",
     "estimate_factor_model",
+    "screen_factor_candidates",
     "test_autocorrelation",
     "run_seasonality_analysis",
     "get_entropy_measures",

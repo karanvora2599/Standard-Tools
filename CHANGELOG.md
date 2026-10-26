@@ -1,5 +1,76 @@
 # Changelog
 
+## A model's quantiles are tested as the VaR forecasts they are, and a candidate factor has to make the risk model's minimum-variance book less volatile out of sample before it is selected
+
+- **`backtest_var_forecasts` takes a model's predictions.** A model fitted
+  with `ModelSpec.quantiles` writes `q01`, `q05` ... into its predictions,
+  and a lower quantile is a VaR forecast: `predictions_ref` with
+  `quantile_column` tests it, q01 a 99% VaR, the loss -q01, an exception an
+  outcome below q01 in `target_column` (default `target`). The columns are
+  recognised as `score_prediction_intervals` recognises them, and a
+  `confidence` that disagrees with the column's level is refused. Over a
+  panel each entity is tested alone: `entities` carries every entity's
+  count, Kupiec and Christoffersen p-values and Basel zone, the Kupiec
+  p-values Benjamini-Hochberg adjusted across them, `zone_counts` the zones,
+  and the top level sums the exceptions against the expected. No test is run
+  on the pooled exceptions, because entities breach their VaR together on a
+  bad day and the pooled count is no binomial. `entity` tests one series,
+  and each line of the pooled table is that call's.
+- **Overlapping outcomes are thinned.** A five-bar forward return sampled
+  every bar shares four bars with the next row's, so one bad week is five
+  exceptions in a row whatever the model did: on exact 5% quantiles,
+  Christoffersen rejected at p < 1e-10. Each entity is thinned to every h-th
+  date, h counted from the frame's `label_end_date` or given as `horizon` (a
+  disagreement between the two is refused), and the result says how many
+  rows that left; thinned, the same forecasts pass. With neither, an outcome
+  whose lag-1 autocorrelation says it overlaps draws a warning naming the
+  span it implies. A frame with no quantile column, no outcome column, an
+  upper quantile, 0/1 class labels for outcomes or a repeated (entity, date)
+  is refused by name. The forecasts paths are unchanged: 206 result fields
+  over ten calls are the same bits as before, and the new fields stay at
+  their defaults there.
+- **`screen_factor_candidates` (`research`).** `estimate_factor_model` fits
+  whatever factors it is handed, all of it in-sample, where one more factor
+  never fits worse. The screen takes the same inputs plus `base_factors` and
+  walks forward (loadings on the trailing `estimation_window`, applied to
+  the next `step` rows' factor returns). Each candidate's out-of-sample
+  incremental R-squared over the base is tested against circular shifts of
+  itself -- the feature lab's null, which keeps the candidate's
+  autocorrelation -- solved for every shift at once by Frisch-Waugh-Lovell,
+  and Benjamini-Hochberg adjusted across the candidates at `fdr`. Its
+  loadings must keep their full-sample sign (weighted by |loading|, in 75%
+  of windows) and agree between the two halves of the sample (uncentred
+  correlation 0.5); its VIF against the base and the other candidates, from
+  the feature lab's `redundancy_report`, must be under 10; and the
+  minimum-variance book built at each step from B F B' + D with it must be
+  less volatile out of sample than without it, with Ledoit-Wolf reported
+  beside them. `selected` passes all four, every other candidate carries its
+  reasons, the count screened is reported, and the selected model's
+  volatility is labelled hindsight. A row after t changes nothing computed
+  for a window ending by t.
+- **Measured on planted panels** (30 assets, six years of daily returns with
+  t(5) residuals, a market base, the screen on the first three years and the
+  books scored on the next three, 60-100 seeds a case): 0 of 4,000
+  pure-noise candidates were selected at fdr 0.10 (BH alone passed 2-6% of
+  them, a false discovery proportion of 0.08-0.11; the stability test
+  removes nearly all of those), and their p-values were uniform (KS p
+  0.26-0.88). A factor of 0.27% of each asset's variance was significant 83%
+  of the time and selected 39%; one of 1.05% significant 100% and selected
+  62%, the minimum-variance test binding because such a factor moves the
+  book by under half a basis point a year. Out of sample the selected
+  model's minimum-variance book was on average 0.0-2.3 bp less volatile than
+  the all-candidates model's (2.3 bp with 20 noise candidates), within half
+  a basis point of the true model's, 42-45 bp below the market model's and
+  31-34 bp below Ledoit-Wolf's. `n_shifts` defaults to 500, so a lone true
+  factor among 50 candidates can clear `fdr` 0.10.
+- **What the minimum-variance test cannot see.** A factor every asset loads
+  on alike adds a multiple of 11' to the covariance, which leaves the fully
+  invested minimum-variance book where it was, so such a factor fails the
+  test however real it is; the module says so.
+- **Listing.** `research` now has 46 tools; under `auto` it thins
+  `screen_factor_candidates` (3.3 KB in full) and nothing it described
+  before, and `backtest_var_forecasts` (3.1 KB in full) was thinned already.
+
 ## The portfolio worker is told about the frontier, the factor and tail risk splits, and what Kelly sizes now
 
 - **`portfolio_risk`'s prose** named `optimize_portfolio` but not

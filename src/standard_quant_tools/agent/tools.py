@@ -273,6 +273,7 @@ from standard_quant_tools.agent.runtimes.research import (
     run_seasonality_analysis,
     run_stationarity_tests,
     scan_pairs,
+    screen_factor_candidates,
     test_autocorrelation,
     test_granger_causality,
     test_normality,

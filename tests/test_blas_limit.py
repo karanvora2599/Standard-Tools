@@ -56,7 +56,8 @@ KKT solves, its certificate's least squares and its covariance's
 eigenvalues under the limit from the start; it is held here at 235 assets.
 So do the Kelly report's covariance, solve and Newton steps (235 streams)
 and the capacity curve's cost products (5,000 weight rows of 500
-instruments).
+instruments), and the factor screen's walk-forward fits, null and
+minimum-variance solves (a 10,000-row window, and 300 names).
 """
 
 from __future__ import annotations
@@ -84,6 +85,7 @@ from standard_quant_tools.analysis.cointegration import (
 from standard_quant_tools.analysis.correlation import diversification_ratio
 from standard_quant_tools.analysis.diagnostics import lead_lag_matrix
 from standard_quant_tools.analysis.factor_model import estimate_factor_model
+from standard_quant_tools.analysis.factor_screen import screen_factor_candidates
 from standard_quant_tools.analysis.microstructure_estimators import (
     order_flow_imbalance,
 )
@@ -827,6 +829,24 @@ CALLS = {
     # B F B' over 300 names.
     "estimate_factor_model_long": lambda: estimate_factor_model(*FACTOR_PANEL_LONG),
     "estimate_factor_model_wide": lambda: estimate_factor_model(*FACTOR_PANEL_WIDE),
+    # The factor screen: its walk-forward least squares, the Frisch-Waugh-
+    # Lovell null's products over every shift, each window's B F B' + D and
+    # Ledoit-Wolf covariance and their minimum-variance solves -- over a
+    # 10,000-row window, and across 300 names.
+    "screen_factor_candidates_long": lambda: screen_factor_candidates(
+        *FACTOR_PANEL_LONG,
+        base_factors=["F0"],
+        estimation_window=10_000,
+        step=500,
+        n_shifts=20,
+    ),
+    "screen_factor_candidates_wide": lambda: screen_factor_candidates(
+        *FACTOR_PANEL_WIDE,
+        base_factors=["F0"],
+        estimation_window=252,
+        step=100,
+        n_shifts=20,
+    ),
     "decompose_tail_risk_long": lambda: decompose_tail_risk(
         LONG_NAMES, {"W": 0.4, "X": 0.3, "Y": -0.2, "Z": 0.5}, confidence=0.99
     ),

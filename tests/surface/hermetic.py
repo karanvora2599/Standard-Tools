@@ -809,6 +809,21 @@ def _hand_written(
                 "factors_ref": refs["returns_panel"],
                 "factor_columns": list(SYMBOLS[:2]),
             }
+        if tool == "screen_factor_candidates":
+            # The same panel: its first column the base factor, its second
+            # the one candidate, the other four the assets; a one-year
+            # window refit monthly and twenty shifts keep every probe cheap.
+            return {
+                "returns": _DELETE,
+                "factors": _DELETE,
+                "columns": list(SYMBOLS[2:]),
+                "factors_ref": refs["returns_panel"],
+                "factor_columns": list(SYMBOLS[:2]),
+                "base_factors": [SYMBOLS[0]],
+                "estimation_window": 252,
+                "step": 21,
+                "n_shifts": 20,
+            }
         if tool == "forecast_var_series":
             return {"returns": _DELETE, "column": SYMBOLS[0]}
         # The sleeve tools: the panel's columns are the sleeves, in place of
@@ -819,8 +834,17 @@ def _hand_written(
         if tool in ("allocate_across_sleeves", "evaluate_allocation_rule"):
             return {"returns": _DELETE}
     if tool == "backtest_var_forecasts" and refs.get("var_forecasts"):
-        # The published forecasts carry their own level.
-        return {"forecasts": _DELETE, "confidence": _DELETE}
+        # The published forecasts carry their own level, and they are the
+        # one source: the predictions reference named by field is not.
+        return {
+            "forecasts": _DELETE,
+            "confidence": _DELETE,
+            "predictions_ref": _DELETE,
+            "quantile_column": _DELETE,
+            "target_column": _DELETE,
+            "entity": _DELETE,
+            "horizon": _DELETE,
+        }
     if tool == "build_continuous_futures_series":
         near = pd.bdate_range("2020-01-02", "2020-03-20")
         far = pd.bdate_range("2020-01-02", "2020-06-19")

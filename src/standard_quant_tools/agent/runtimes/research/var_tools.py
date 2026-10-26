@@ -9,7 +9,10 @@ series, and the tests that say whether a series of forecasts was right.
   `analytic_frame` (realized, var, es, confidence by date).
 - `backtest_var_forecasts` -- that series, or dated forecasts from anywhere,
   against the returns that followed: the exception dates, Kupiec,
-  Christoffersen, the Basel traffic light and Acerbi-Szekely Z2.
+  Christoffersen, the Basel traffic light and Acerbi-Szekely Z2. Or a
+  model's own VaR forecasts: a lower quantile column of its predictions
+  (`q01` is a 99% VaR) against the outcome beside it, each entity of a
+  panel tested alone (see "a model's quantiles as VaR forecasts" below).
 
 WHY BOTH ARE HERE, not the second in `backtest`. The backtest runtime's
 listing is at its 32 KB budget with about 0.8 KB to spare, and the smallest
@@ -20,17 +23,18 @@ itself (its schema from `describe_tool`) and nothing else changes.
 
 INLINE DATA OR A REFERENCE, NEVER TICKERS: a `returns_panel` reference or
 {ISO date: return}, and the forecasts as the reference the first tool
-publishes or as {ISO date: [return, VaR, ES]}. Nothing is fetched, so the
-same input gives the same bits. The library functions are
-`metrics.var_forecast.forecast_var_series` and
+publishes, as {ISO date: [return, VaR, ES]}, or as a `predictions`
+reference. Nothing is fetched, so the same input gives the same bits. The
+library functions are `metrics.var_forecast.forecast_var_series` and
 `metrics.var_backtest.backtest_var_series`.
 """
 
 from __future__ import annotations
 
 import math
-from typing import Annotated, Dict, List, Literal, Optional
+from typing import Annotated, Dict, List, Literal, Optional, Sequence
 
+import numpy as np
 import pandas as pd
 from pydantic import (
     BaseModel,
@@ -65,6 +69,27 @@ MAX_OBSERVATIONS = 100_000
 
 #: The columns of the published forecast frame, in order.
 FORECAST_COLUMNS = ("realized", "var", "es", "confidence")
+
+#: The longest target horizon, in bars, a predictions frame is thinned for.
+MAX_HORIZON = 1000
+
+#: The most entities one call tests separately: a row each in `entities`.
+MAX_ENTITIES = 1000
+
+#: The column a predictions frame records each outcome's last bar in, as
+#: `modeling.dataset.alignment.LABEL_END_COL` names it.
+LABEL_END_COLUMN = "label_end_date"
+
+#: The fields that read a predictions frame, refused without one.
+_PREDICTION_FIELDS = ("quantile_column", "target_column", "entity", "horizon")
+
+#: The FDR at which `entities_rejected_bh` counts an entity's Kupiec test.
+_ENTITY_FDR = 0.05
+
+#: A target whose lag-1 autocorrelation within entities is above this, with
+#: no horizon known, is said to look overlapping: (h - 1) / h is what an
+#: h-bar return sampled every bar has, so 0.5 is a two-bar target.
+_OVERLAP_AUTOCORRELATION = 0.5
 
 _WHO_FORECAST = "forecast_var_series"
 _WHO_BACKTEST = "backtest_var_forecasts"
@@ -209,6 +234,27 @@ class VarBacktestInput(BaseModel):
         10_000, ge=100, le=100_000, description="Draws for Z2's p-value."
     )
     random_seed: Seed = Field(0, description="Seeds Z2's simulated p-value.")
+    predictions_ref: Optional[str] = Field(
+        None,
+        description="A model's predictions in place of forecasts: its "
+        "quantile_column is the VaR, its target_column the outcome.",
+    )
+    quantile_column: Optional[str] = Field(
+        None, description="The quantile tested: 'q01' is a 99% VaR."
+    )
+    target_column: Optional[str] = Field(
+        None, description="The outcome the quantile was fitted for; 'target'."
+    )
+    entity: Optional[str] = Field(
+        None, description="One entity's series; default each entity, pooled."
+    )
+    horizon: Optional[int] = Field(
+        None,
+        ge=1,
+        le=MAX_HORIZON,
+        description="Bars the target spans, if the frame has no "
+        "label_end_date; rows are thinned to every horizon-th date.",
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -224,6 +270,21 @@ class VarBacktestInput(BaseModel):
 
     @model_validator(mode="after")
     def _one_source(self) -> "VarBacktestInput":
+        if self.predictions_ref is not None:
+            return self._predictions_source()
+        given = [name for name in _PREDICTION_FIELDS if getattr(self, name) is not None]
+        if given:
+            raise ValueError(
+                f"{given} read the columns of predictions_ref and were given "
+                "without it. Drop them, or pass predictions_ref."
+            )
+        if self.forecasts is None and self.forecasts_ref is None:
+            raise ValueError(
+                f"{_WHO_BACKTEST} needs exactly one of forecasts / forecasts_ref "
+                "/ predictions_ref; got neither. forecasts is the data inline, "
+                "forecasts_ref forecast_var_series' reference, predictions_ref "
+                "a model's quantiles with their outcomes."
+            )
         exactly_one_source(self, "forecasts", "forecasts_ref", _WHO_BACKTEST)
         if self.forecasts is not None:
             _finite_rows(self.forecasts)
@@ -233,6 +294,26 @@ class VarBacktestInput(BaseModel):
                     "is counted against the rate 1 - confidence, and nothing in "
                     "the numbers says what it was. Pass the VaR level, e.g. 0.99."
                 )
+        if self.confidence is not None and not math.isfinite(self.confidence):
+            raise ValueError(f"confidence must be finite, got {self.confidence!r}.")
+        return self
+
+    def _predictions_source(self) -> "VarBacktestInput":
+        both = [
+            n for n in ("forecasts", "forecasts_ref") if getattr(self, n) is not None
+        ]
+        if both:
+            raise ValueError(
+                f"{_WHO_BACKTEST} needs exactly one of forecasts / forecasts_ref "
+                f"/ predictions_ref; got predictions_ref and {both}. Test one "
+                "series of forecasts per call."
+            )
+        if self.quantile_column is None:
+            raise ValueError(
+                "quantile_column is required with predictions_ref: it names "
+                "the quantile that is the VaR ('q01' for 99%, 'q05' for 95%), "
+                "and a frame of several quantiles does not say which is meant."
+            )
         if self.confidence is not None and not math.isfinite(self.confidence):
             raise ValueError(f"confidence must be finite, got {self.confidence!r}.")
         return self
@@ -282,6 +363,28 @@ class VarForecastResult(ExplainsNulls):
         "(cornish_fisher); ewma_lambda and ewma_seed_variance (ewma).",
     )
     warnings: List[str] = Field(default_factory=list)
+
+
+class VarEntityBacktest(ExplainsNulls):
+    """One entity's line of a pooled predictions backtest: the same numbers
+    a call with `entity` set gives for it."""
+
+    model_config = ConfigDict(extra="forbid")
+    null_reasons = {
+        "christoffersen_p_value": "independence is undefined for this entity: "
+        "no exception, nothing but exceptions, or no transition out of one "
+        "state (a call with entity set says which)",
+    }
+
+    n_observations: int = 0
+    n_exceptions: int = 0
+    expected_exceptions: Stat = None
+    kupiec_p_value: Stat = None
+    kupiec_p_value_bh: Stat = Field(
+        None, description="Benjamini-Hochberg adjusted across the entities."
+    )
+    christoffersen_p_value: Stat = None
+    basel_zone: Optional[Literal["green", "yellow", "red"]] = None
 
 
 class VarBacktestResult(ExplainsNulls):
@@ -342,6 +445,34 @@ class VarBacktestResult(ExplainsNulls):
     z2_simulations: Optional[int] = None
     z2_null_distribution: Optional[str] = Field(
         None, description="What each date's return is drawn from for the p-value."
+    )
+    quantile_column: Optional[str] = Field(
+        None, description="With predictions_ref: the quantile tested as the VaR."
+    )
+    horizon: Optional[int] = Field(
+        None,
+        description="With predictions_ref: bars the target spans. Above 1, "
+        "every horizon-th date of each entity was kept, so no two outcomes "
+        "tested overlap.",
+    )
+    n_rows_before_thinning: Optional[int] = Field(
+        None, description="The rows tested before that thinning."
+    )
+    entities: Dict[str, VarEntityBacktest] = Field(
+        default_factory=dict,
+        description="predictions_ref over several entities, no entity named: "
+        "each entity's series tested alone. The top-level counts are their "
+        "sums; the tests are per entity only.",
+    )
+    entities_rejected_bh: Optional[int] = Field(
+        None,
+        description="Entities whose Kupiec p-value, Benjamini-Hochberg "
+        "adjusted across the entities, is at most 0.05.",
+    )
+    zone_counts: Dict[str, int] = Field(
+        default_factory=dict,
+        description="Entities by Basel zone; 'none' where the light is "
+        "undefined (not 99%, or under 250 forecasts).",
     )
     warnings: List[str] = Field(default_factory=list)
 
@@ -472,6 +603,8 @@ def _referenced_frame(ref: str, confidence: Optional[float]):
 
 
 def backtest_var_forecasts(input_data: VarBacktestInput) -> VarBacktestResult:
+    if input_data.predictions_ref is not None:
+        return _backtest_predictions(input_data)
     if input_data.forecasts_ref is not None:
         frame, confidence = _referenced_frame(
             input_data.forecasts_ref, input_data.confidence
@@ -487,6 +620,13 @@ def backtest_var_forecasts(input_data: VarBacktestInput) -> VarBacktestResult:
         n_simulations=input_data.n_simulations,
         who=_WHO_BACKTEST,
     )
+    return _series_result(out)
+
+
+def _series_result(out: Dict, notes: Sequence[str] = (), **extra) -> VarBacktestResult:
+    """The result of one series' backtest, as the forecasts paths have always
+    returned it; `notes` follow its own warnings and `extra` sets the
+    predictions fields."""
     warnings = list(out["warnings"])
     christoffersen = out["christoffersen"]
     if christoffersen["null_reason"]:
@@ -527,7 +667,400 @@ def backtest_var_forecasts(input_data: VarBacktestInput) -> VarBacktestResult:
         z2_p_value=z2["p_value"],
         z2_simulations=z2["n_simulations"],
         z2_null_distribution=z2["null_distribution"],
-        warnings=warnings,
+        warnings=warnings + list(notes),
+        **extra,
+    )
+
+
+# ── a model's quantiles as VaR forecasts ────────────────────────────────
+#
+# A model fitted with `ModelSpec.quantiles` writes each quantile of the
+# outcome into its out-of-sample predictions as a column (`q01`, `q05`), and
+# a lower quantile IS a VaR forecast: q01 of a return is the 99% VaR, as a
+# loss -q01, and an exception is an outcome below it. Read here with the
+# column detection `score_prediction_intervals` uses, so a column one tool
+# recognises the other does too.
+#
+# ONE ENTITY IS ONE SERIES, AND ONLY ONE SERIES IS TESTED. Over a panel each
+# entity's series is backtested on its own and the Kupiec p-values are
+# Benjamini-Hochberg adjusted across the entities; the counts are summed,
+# and no test is run on the pooled exceptions. Entities' exceptions on one
+# date are not independent draws -- a selloff breaches every long VaR at
+# once -- so the pooled count is far more dispersed than a binomial with
+# that many trials, and a pooled Kupiec would reject a correct model for
+# what is only the market moving together.
+#
+# OVERLAPPING OUTCOMES ARE THINNED. A target that spans h bars, sampled
+# every bar, shares h - 1 bars with the next row's, so one bad week is five
+# exceptions in a row whatever the model did, and Christoffersen reads that
+# clustering as a failure. Every h-th date of each entity is kept (h from
+# the frame's label_end_date, or `horizon`), so no two outcomes tested
+# overlap, and the result says how many rows that left.
+
+
+def _predictions_frame(input_data: VarBacktestInput):
+    """The predictions frame with its quantile, outcome and level checked:
+    (frame, quantile column, target column, confidence)."""
+    from standard_quant_tools.modeling.agent.statistics_tools import (
+        _detect_quantile_columns,
+    )
+
+    frame = handoff.resolve_frame(
+        input_data.predictions_ref,
+        expect="predictions",
+        who=_WHO_BACKTEST,
+        produced_by="A model fitted with quantiles writes them (q01, q05) into "
+        "its out-of-sample predictions; the outcome goes beside them.",
+    )
+    columns = [str(c) for c in frame.columns]
+    target = input_data.target_column or "target"
+    if target not in frame.columns:
+        raise ValidationError(
+            f"{_WHO_BACKTEST}: predictions_ref has no {target!r} column to count "
+            f"exceptions against; it holds {columns[:12]}. An exception is a "
+            "REALIZED outcome below the quantile, so pass target_column=<the "
+            "outcome the quantile was fitted for>, or publish the predictions "
+            "with that outcome beside them."
+        )
+    levels = _detect_quantile_columns(frame)
+    if not levels:
+        raise ValidationError(
+            f"{_WHO_BACKTEST}: predictions_ref carries no quantile column; it "
+            f"holds {columns[:12]}. A VaR is a lower quantile of a continuous "
+            "outcome, written as 'q01' or 'q05' by a regression model fitted "
+            "with quantiles; a classification model's probabilities and a "
+            "point prediction have none."
+        )
+    column = str(input_data.quantile_column)
+    if column not in levels:
+        raise ValidationError(
+            f"{_WHO_BACKTEST}: quantile_column={column!r} is not a quantile "
+            f"column of predictions_ref, which holds {sorted(levels)}. Pass one "
+            "of those, or refit the model with that quantile."
+        )
+    level = levels[column]
+    if level >= 0.5:
+        raise ValidationError(
+            f"{_WHO_BACKTEST}: {column!r} is the {level:.4g} quantile, not a "
+            "lower tail. A VaR is the loss at a lower quantile of the outcome "
+            "('q01' for 99%, 'q05' for 95%); pass one below the median."
+        )
+    confidence = round(1.0 - level, 12)
+    given = input_data.confidence
+    if given is not None and abs(given - confidence) > 1e-12:
+        raise ValidationError(
+            f"{_WHO_BACKTEST}: confidence={given} but {column!r} is the "
+            f"{level:.4g} quantile, a {confidence:.4g} VaR. Counting its "
+            "exceptions against another rate would test a claim the model never "
+            "made; drop confidence, or pass the quantile fitted at that level."
+        )
+    for name in ("date",):
+        if name not in frame.columns:
+            raise ValidationError(
+                f"{_WHO_BACKTEST}: predictions_ref has no 'date' column; it holds "
+                f"{columns[:12]}. Each forecast is tested against the outcome of "
+                "its own date."
+            )
+    try:
+        outcome = pd.to_numeric(frame[target], errors="raise").astype("float64")
+    except (TypeError, ValueError) as exc:
+        raise ValidationError(
+            f"{_WHO_BACKTEST}: {target!r} holds values that are not numbers "
+            f"({exc}); a VaR is tested against a realized return."
+        ) from exc
+    observed = set(np.unique(outcome[np.isfinite(outcome)]).tolist())
+    if observed == {0.0, 1.0}:
+        raise ValidationError(
+            f"{_WHO_BACKTEST}: {target!r} holds only 0 and 1, a class label "
+            "rather than a return. These are a classification model's "
+            "predictions; a VaR is a quantile of a continuous outcome and a "
+            "classifier fits none. Test a regression model fitted with "
+            "quantiles."
+        )
+    quantile = pd.to_numeric(frame[column], errors="raise").to_numpy(dtype="float64")
+    for name, values in ((target, outcome.to_numpy()), (column, quantile)):
+        n_inf = int(np.isinf(values).sum())
+        if n_inf:
+            raise ValidationError(
+                f"{_WHO_BACKTEST}: {name!r} is infinite on {n_inf} row(s). An "
+                "infinity is a failed computation upstream, not a forecast or "
+                "an outcome; a row with none to test is left empty (NaN)."
+            )
+    if input_data.entity is not None and "entity" not in frame.columns:
+        raise ValidationError(
+            f"{_WHO_BACKTEST}: entity={input_data.entity!r} but predictions_ref "
+            f"has no 'entity' column; it holds {columns[:12]}, one series. Drop "
+            "entity."
+        )
+    out = pd.DataFrame(
+        {
+            "date": pd.to_datetime(frame["date"], errors="raise").to_numpy(),
+            "realized": outcome.to_numpy(),
+            "var": -quantile,
+        }
+    )
+    has_entity = "entity" in frame.columns
+    out["entity"] = frame["entity"].astype(str).to_numpy() if has_entity else ""
+    if LABEL_END_COLUMN in frame.columns:
+        out[LABEL_END_COLUMN] = pd.to_datetime(frame[LABEL_END_COLUMN]).to_numpy()
+    return out, column, target, confidence
+
+
+def _horizon(frame: pd.DataFrame, given: Optional[int]) -> Optional[int]:
+    """Bars the target spans: counted from label_end_date on each entity's
+    own dates where the frame has it, else `given`; None when neither says.
+
+    Counted on the rows whose end date is itself a date of the frame, and
+    the largest count taken: a fold boundary can drop dates between a row
+    and its end, which only ever makes a count smaller."""
+    if LABEL_END_COLUMN not in frame.columns:
+        return given
+    counted: List[int] = []
+    for _name, rows in frame.groupby("entity", sort=False):
+        dates = pd.DatetimeIndex(rows["date"]).sort_values()
+        ends = pd.DatetimeIndex(rows[LABEL_END_COLUMN])
+        found = dates.get_indexer(ends)
+        start = dates.get_indexer(pd.DatetimeIndex(rows["date"]))
+        exact = found >= 0
+        if exact.any():
+            counted.append(int(np.max(found[exact] - start[exact])))
+    if not counted:
+        if given is not None:
+            return given
+        raise ValidationError(
+            f"{_WHO_BACKTEST}: predictions_ref has a {LABEL_END_COLUMN} column "
+            "but no row's end date is one of its dates, so the target's span "
+            "cannot be counted in bars. Pass horizon=<bars the target spans>."
+        )
+    found_horizon = max(max(counted), 1)
+    if given is not None and given != found_horizon:
+        raise ValidationError(
+            f"{_WHO_BACKTEST}: horizon={given} but the frame's "
+            f"{LABEL_END_COLUMN} puts each outcome {found_horizon} bar(s) after "
+            "its date. Drop horizon to use the frame's, or check which target "
+            "these predictions are for."
+        )
+    return found_horizon
+
+
+def _lag_one_autocorrelation(frame: pd.DataFrame) -> Optional[float]:
+    """The outcome's lag-1 autocorrelation within entities, pooled over the
+    pairs of consecutive dates; sums only, so no BLAS thread count reaches
+    it."""
+    left: List[np.ndarray] = []
+    right: List[np.ndarray] = []
+    for _name, rows in frame.groupby("entity", sort=True):
+        values = rows.sort_values("date")["realized"].to_numpy(dtype=float)
+        values = values[np.isfinite(values)]
+        if len(values) > 2:
+            left.append(values[:-1] - values[:-1].mean())
+            right.append(values[1:] - values[1:].mean())
+    if not left:
+        return None
+    x, y = np.concatenate(left), np.concatenate(right)
+    scale = math.sqrt(float(np.sum(x * x)) * float(np.sum(y * y)))
+    return float(np.sum(x * y)) / scale if scale > 0 else None
+
+
+def _bars(rho: float) -> float:
+    """The span h whose overlapping returns have lag-1 autocorrelation rho,
+    (h - 1) / h = rho, held below the longest horizon thinned for."""
+    return min(1.0 / (1.0 - rho), float(MAX_HORIZON)) if rho < 1 else MAX_HORIZON
+
+
+def _entity_series(frame: pd.DataFrame, horizon: int):
+    """Each entity's (realized, var) by date, thinned to every horizon-th
+    date of its own, then without the rows that have no outcome or quantile:
+    ({entity: frame}, rows before thinning, rows without one)."""
+    series: Dict[str, pd.DataFrame] = {}
+    before = 0
+    missing = 0
+    for name, rows in frame.groupby("entity", sort=True):
+        rows = rows.sort_values("date")
+        before += len(rows)
+        kept = rows.iloc[::horizon]
+        usable = kept[np.isfinite(kept["realized"]) & np.isfinite(kept["var"])]
+        missing += len(kept) - len(usable)
+        series[str(name)] = pd.DataFrame(
+            {
+                "realized": usable["realized"].to_numpy(),
+                "var": usable["var"].to_numpy(),
+            },
+            index=pd.DatetimeIndex(usable["date"]),
+        )
+    return series, before, missing
+
+
+def _backtest_predictions(input_data: VarBacktestInput) -> VarBacktestResult:
+    frame, column, target, confidence = _predictions_frame(input_data)
+    repeated = frame.duplicated(subset=["entity", "date"])
+    if repeated.any():
+        sample = frame.loc[repeated, ["entity", "date"]].head(3)
+        raise ValidationError(
+            f"{_WHO_BACKTEST}: predictions_ref has {int(repeated.sum())} repeated "
+            f"(entity, date) row(s), e.g. {sample.astype(str).to_dict('records')}. "
+            "One forecast per entity and date: a frame from combinatorial "
+            "cross-validation predicts a date once per path; test one path."
+        )
+    if input_data.entity is not None:
+        entities = sorted(set(frame["entity"]))
+        if input_data.entity not in entities:
+            raise ValidationError(
+                f"{_WHO_BACKTEST}: entity={input_data.entity!r} is not in "
+                f"predictions_ref, whose entities include {entities[:8]}."
+            )
+    horizon = _horizon(frame, input_data.horizon)
+    notes: List[str] = []
+    if horizon is None:
+        rho = _lag_one_autocorrelation(frame)
+        if rho is not None and rho > _OVERLAP_AUTOCORRELATION:
+            notes.append(
+                f"{target!r} has a lag-1 autocorrelation of {rho:.2f} within "
+                f"entities, what a target spanning about {_bars(rho):.0f} "
+                "bars sampled every bar has. If it does, its outcomes overlap "
+                "and its exceptions cluster by construction, which "
+                "Christoffersen reads as a failure: pass horizon to thin them."
+            )
+        horizon = 1
+    if input_data.entity is not None:
+        frame = frame[frame["entity"] == input_data.entity]
+    series, before, missing = _entity_series(frame, horizon)
+    if len(series) > MAX_ENTITIES:
+        raise ValidationError(
+            f"{_WHO_BACKTEST}: predictions_ref holds {len(series)} entities, more "
+            f"than the {MAX_ENTITIES} one call tests separately. Name one with "
+            "entity, or publish a narrower frame."
+        )
+    tested = sum(len(s) for s in series.values())
+    if horizon > 1:
+        notes.append(
+            f"The target spans {horizon} bars, so consecutive outcomes "
+            f"overlap; every {horizon}th date of each entity was kept, "
+            f"{tested + missing} of {before} rows, so no two outcomes tested "
+            "share a bar."
+        )
+    if missing:
+        notes.append(
+            f"{missing} row(s) have no {target!r} or {column!r} (an outcome "
+            "not yet realized, at the end of a sample) and were not tested."
+        )
+    extra = dict(quantile_column=column, horizon=horizon, n_rows_before_thinning=before)
+    if len(series) == 1:
+        (only,) = series.values()
+        out = backtest_lib.backtest_var_series(
+            only,
+            confidence,
+            random_seed=input_data.random_seed,
+            n_simulations=input_data.n_simulations,
+            who=_WHO_BACKTEST,
+        )
+        return _series_result(out, notes, **extra)
+    return _pooled_result(series, confidence, input_data, notes, extra)
+
+
+def _pooled_result(
+    series: Dict[str, pd.DataFrame],
+    confidence: float,
+    input_data: VarBacktestInput,
+    notes: List[str],
+    extra: Dict,
+) -> VarBacktestResult:
+    """
+    Each entity tested alone, the Kupiec p-values Benjamini-Hochberg
+    adjusted across them, and the counts summed.
+
+    NEVER ONE KUPIEC TEST OVER THE POOLED EXCEPTIONS. Kupiec's likelihood
+    ratio is the binomial's: n independent trials at rate p. The entities of
+    a panel are not independent on a date -- a selloff breaches every long
+    VaR at once, a calm month breaches none -- so the pooled count of n x
+    entities forecasts varies far more than that binomial says, and the
+    test rejects a correct model for the cross-section moving together.
+    Each entity's own series is a series of one-step forecasts that can be
+    independent; across entities the family is adjusted for being many
+    tests, and the zones are counted.
+    """
+    from standard_quant_tools.modeling.validation.comparison import bh_adjust
+
+    outs: Dict[str, Dict] = {}
+    short: List[str] = []
+    for name, one in series.items():
+        if len(one) < 2:
+            short.append(name)
+            continue
+        outs[name] = backtest_lib.backtest_var_series(
+            one,
+            confidence,
+            random_seed=input_data.random_seed,
+            n_simulations=input_data.n_simulations,
+            who=_WHO_BACKTEST,
+        )
+    if not outs:
+        raise ValidationError(
+            f"{_WHO_BACKTEST}: no entity of predictions_ref has two forecasts with "
+            "an outcome to test, after thinning; a backtest needs at least two."
+        )
+    names = list(outs)
+    adjusted = bh_adjust([outs[n]["kupiec"]["p_value"] for n in names])
+    rows: Dict[str, VarEntityBacktest] = {}
+    zones: Dict[str, int] = {}
+    for name, p_adjusted in zip(names, adjusted):
+        out = outs[name]
+        zone = out["basel"]["zone"]
+        zones[zone or "none"] = zones.get(zone or "none", 0) + 1
+        rows[name] = VarEntityBacktest(
+            n_observations=out["n_observations"],
+            n_exceptions=out["n_exceptions"],
+            expected_exceptions=out["expected_exceptions"],
+            kupiec_p_value=out["kupiec"]["p_value"],
+            kupiec_p_value_bh=p_adjusted,
+            christoffersen_p_value=out["christoffersen"]["p_value"],
+            basel_zone=zone,
+        )
+    n_obs = sum(out["n_observations"] for out in outs.values())
+    n_exceptions = sum(out["n_exceptions"] for out in outs.values())
+    raw = sum(1 for out in outs.values() if out["kupiec"]["p_value"] < _ENTITY_FDR)
+    rejected = sum(1 for p in adjusted if p <= _ENTITY_FDR)
+    p = 1.0 - confidence
+    thin = [n for n in names if outs[n]["n_observations"] * p < 5]
+    warnings = [
+        f"{len(outs)} entities, each tested on its own series: the kupiec, "
+        "christoffersen, conditional-coverage, basel and z2 fields are per "
+        "entity, in entities, and null here. No test is run on the pooled "
+        "exceptions: entities breach their VaR together on a bad day, so the "
+        "pooled count is no binomial and a pooled Kupiec would reject a "
+        "correct model for the market moving together.",
+        f"Kupiec rejects at 5% for {raw} of {len(outs)} entities before "
+        f"adjustment and for {rejected} after Benjamini-Hochberg across them "
+        f"(about {len(outs) * _ENTITY_FDR:.1f} would reject at 5% by chance "
+        "before adjustment if every model were right).",
+        "exception_dates is empty: the dates are per entity; call with "
+        "entity set for one entity's.",
+    ]
+    if thin:
+        warnings.append(
+            f"{len(thin)} entities expect fewer than 5 exceptions, so their "
+            "p-values are rough and only a large error can reject."
+        )
+    if short:
+        warnings.append(
+            f"{len(short)} entities have fewer than two forecasts with an "
+            f"outcome after thinning and were not tested: {short[:5]}."
+        )
+    first = min(out["first_date"] for out in outs.values())
+    last = max(out["last_date"] for out in outs.values())
+    return VarBacktestResult(
+        confidence=confidence,
+        n_observations=n_obs,
+        first_date=_iso(first),
+        last_date=_iso(last),
+        n_exceptions=n_exceptions,
+        expected_exceptions=n_obs * p,
+        exception_rate=n_exceptions / n_obs,
+        entities=rows,
+        entities_rejected_bh=rejected,
+        zone_counts=dict(sorted(zones.items())),
+        warnings=warnings + notes,
+        **extra,
     )
 
 
@@ -552,7 +1085,10 @@ VAR_TOOL_DEFS = [
         "factor on the last 250 forecasts at 99%, and Z2 for ES with a p-value "
         "simulated under the forecasts. Reads forecast_var_series' reference "
         "or dated forecasts inline; a statistic that is undefined is null with "
-        "the reason.",
+        "the reason. Also a model's lower quantile as its VaR (q01 is 99%) "
+        "from a predictions reference with the outcome: each entity tested "
+        "alone, Kupiec BH-adjusted across entities, a multi-bar target "
+        "thinned to non-overlapping dates.",
         VarBacktestInput,
     ),
 ]

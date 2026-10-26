@@ -474,6 +474,33 @@ REFUSED: List[Tuple[str, str, str, Modifier]] = BAD_VALUES + [
     ),
     ("research", "backtest_var_forecasts", "random_seed=-1", _set(random_seed=-1)),
     (
+        "research",
+        "backtest_var_forecasts",
+        "a point model's predictions as VaR forecasts",
+        lambda args, fx: {
+            "predictions_ref": fx["refs"]["predictions_with_outcomes"],
+            "quantile_column": "q01",
+        },
+    ),
+    (
+        "research",
+        "screen_factor_candidates",
+        "a base factor that is not among the factors",
+        _set(base_factors=["NOT_A_FACTOR"]),
+    ),
+    (
+        "research",
+        "screen_factor_candidates",
+        "every factor a base factor, no candidate",
+        _set(base_factors=list(hermetic.SYMBOLS[:2])),
+    ),
+    (
+        "research",
+        "screen_factor_candidates",
+        "an estimation window longer than the history",
+        _set(estimation_window=5000),
+    ),
+    (
         "allocation",
         "combine_return_streams",
         "min_overlap above the shared dates",
