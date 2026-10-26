@@ -49,6 +49,9 @@ from standard_quant_tools.agent.runtimes.allocation import (
     get_strategy_capacity_curve,
     measure_book_returns,
 )
+from standard_quant_tools.agent.runtimes.allocation.selection_tools import (
+    select_allocation_rule,
+)
 from standard_quant_tools.agent.runtimes.allocation.sleeve_tools import (
     allocate_across_sleeves,
     combine_return_streams,

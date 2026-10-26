@@ -76,12 +76,20 @@ from standard_quant_tools.numeric_contract import (
     require_positive_int,
 )
 
-from .sleeves import METHODS, SleeveRule, _block_size, fit_sleeve_rule
+from .sleeves import (
+    METHODS,
+    SleeveRule,
+    _block_size,
+    fit_sleeve_rule,
+    sleeve_positions,
+)
 
 __all__ = [
     "MIN_OUT_OF_SAMPLE",
     "evaluate_allocation_rule",
+    "regime_summary",
     "walk_rule_forward",
+    "walk_sleeve_rule",
 ]
 
 #: The fewest out-of-sample periods taken: the deflated Sharpe ratio's own
@@ -117,7 +125,9 @@ def walk_rule_forward(
     out-of-sample `returns` (an array, one per row from W on) on `dates`,
     the `targets` the rule chose (a frame, one row per rebalance it fitted),
     the `turnover` and `cost` of each, the `unfitted` rebalances (date,
-    reason), and the book's final drifted `weights`.
+    reason), and the book's final drifted `weights`. `held` and
+    `held_cash` are what the book held after every rebalance, fitted or
+    not: the target, or the drifted weights it kept.
     """
     periods_per_year = require_periods_per_year(periods_per_year, what)
     window = require_positive_int(estimation_window, "estimation_window", what)
@@ -147,6 +157,9 @@ def walk_rule_forward(
     turnover: List[float] = []
     costs: List[float] = []
     unfitted: List[Tuple[str, str]] = []
+    held: List[np.ndarray] = []
+    held_cash: List[float] = []
+    held_dates: List[Any] = []
     for t in range(window, T):
         cost = 0.0
         if (t - window) % every == 0:
@@ -172,6 +185,9 @@ def walk_rule_forward(
                 chosen_dates.append(index[t])
                 turnover.append(traded)
                 costs.append(cost)
+            held.append(weights.copy())
+            held_cash.append(cash)
+            held_dates.append(index[t])
         r = values[t]
         # Correctly rounded: the same bits in any order and on any BLAS.
         gross = math.fsum(weights * r) + cash * rf
@@ -201,6 +217,101 @@ def walk_rule_forward(
         "unfitted": unfitted,
         "weights": weights,
         "cash": cash,
+        "held": pd.DataFrame(
+            np.vstack(held) if held else np.empty((0, n)),
+            index=pd.Index(held_dates, name=index.name),
+            columns=names,
+        ),
+        "held_cash": np.array(held_cash, dtype=float),
+    }
+
+
+def walk_sleeve_rule(
+    frame: pd.DataFrame,
+    rule: SleeveRule,
+    *,
+    estimation_window: int,
+    rebalance_every: int,
+    cost_bps: float = 0.0,
+    cash_rate: float = 0.0,
+    periods_per_year: int = 252,
+    what: str = "walk_rule_forward",
+    reports: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """
+    `walk_rule_forward` of a `SleeveRule`, refitted by `fit_sleeve_rule` on
+    each trailing window, at the rule's capital.
+
+    With a regime `state_column`, the window the rule is handed holds the
+    state with the sleeves, and the book holds none of it: the rule's
+    weights get a zero there, which adds nothing to any sum the walk takes,
+    so the returns are the bits of a walk on the sleeves alone. The targets
+    and holdings come back over the sleeves. `reports` collects the regime
+    report of every fit.
+    """
+    columns = [str(c) for c in frame.columns]
+    keep = sleeve_positions(frame, rule, what)
+    padded = len(keep) != len(columns)
+
+    def fit(window: pd.DataFrame, capital: Optional[float]) -> np.ndarray:
+        out = fit_sleeve_rule(
+            window,
+            rule,
+            cash_rate=cash_rate,
+            periods_per_year=periods_per_year,
+            capital=capital,
+            what=what,
+        )
+        if reports is not None and "regime" in out["details"]:
+            reports.append(out["details"]["regime"])
+        if not padded:
+            return out["weights"]
+        full = np.zeros(len(columns))
+        full[keep] = out["weights"]
+        return full
+
+    path = walk_rule_forward(
+        frame,
+        fit,
+        estimation_window=estimation_window,
+        rebalance_every=rebalance_every,
+        cost_bps=cost_bps,
+        cash_rate=cash_rate,
+        periods_per_year=periods_per_year,
+        capital=rule.capital,
+        what=what,
+    )
+    if padded:
+        path["targets"] = path["targets"].iloc[:, keep]
+        path["held"] = path["held"].iloc[:, keep]
+        path["weights"] = path["weights"][keep]
+    return path
+
+
+def regime_summary(reports: List[Dict[str, Any]], n_regimes: int) -> Dict[str, Any]:
+    """What the regime did across a walk's fits: how many were
+    conditioned, how many fell back to the unconditioned rule, how many
+    fits each regime was current at, the mean shrink weight and the mean
+    persistence of the window's labels."""
+    conditioned = [r for r in reports if r["conditioned"]]
+    labelled = [r for r in reports if r["current_regime"] is not None]
+    current = [0] * n_regimes
+    for r in labelled:
+        current[int(r["current_regime"])] += 1
+    nan = float("nan")
+    return {
+        "n_fits": len(reports),
+        "n_conditioned": len(conditioned),
+        "n_unconditioned": len(reports) - len(conditioned),
+        "fits_per_regime": current,
+        "mean_shrink_weight": (
+            float(np.mean([r["shrink_weight"] for r in conditioned]))
+            if conditioned
+            else nan
+        ),
+        "mean_persistence": (
+            float(np.mean([r["persistence"] for r in labelled])) if labelled else nan
+        ),
     }
 
 
@@ -335,6 +446,10 @@ def evaluate_allocation_rule(
     p-value), the `look_ahead_gap` (the full-sample fit's Sharpe minus the
     rule's), the full-sample weights, the `deflated` Sharpe ratio of the
     rule's stream at `n_trials`, the `unfitted` rebalances and warnings.
+    A regime rule adds its `regime` summary (`regime_summary`); its state
+    column, if it has one, is in the rule's windows and in no book. With
+    `benchmark_rule` the rule's own method, the benchmark is its
+    unconditioned twin (without its constraints).
     """
     n_trials = require_positive_int(n_trials, "n_trials", what)
     periods_per_year = require_periods_per_year(periods_per_year, what)
@@ -355,25 +470,15 @@ def evaluate_allocation_rule(
         cost_bps=cost_bps,
         cash_rate=cash_rate,
         periods_per_year=periods_per_year,
-        capital=rule.capital,
         what=what,
     )
-
-    def fitted(spec: SleeveRule) -> Rule:
-        def fit(window: pd.DataFrame, capital: Optional[float]) -> np.ndarray:
-            return fit_sleeve_rule(
-                window,
-                spec,
-                cash_rate=cash_rate,
-                periods_per_year=periods_per_year,
-                capital=capital,
-                what=what,
-            )["weights"]
-
-        return fit
-
-    path = walk_rule_forward(frame, fitted(rule), **settings)
-    bench = walk_rule_forward(frame, fitted(benchmark), **settings)
+    # A regime's state column rides in the rule's windows and is no sleeve:
+    # the benchmark and the held full-sample fit trade the sleeves alone.
+    keep = sleeve_positions(frame, rule, what)
+    sleeves = frame if len(keep) == frame.shape[1] else frame.iloc[:, keep]
+    reports: List[Dict[str, Any]] = []
+    path = walk_sleeve_rule(frame, rule, reports=reports, **settings)
+    bench = walk_sleeve_rule(sleeves, benchmark, **settings)
     warnings: List[str] = []
     rf = cash_rate / periods_per_year
     held_summary: Optional[Dict[str, Any]] = None
@@ -395,9 +500,22 @@ def evaluate_allocation_rule(
         warnings += whole["notes"]
         held_weights = whole["weights"]
         held = walk_rule_forward(
-            frame, lambda _window, _capital: held_weights, **settings
+            sleeves,
+            lambda _window, _capital: held_weights,
+            capital=rule.capital,
+            **settings,
         )
         held_summary = _summary(held, rf, periods_per_year)
+    regime = None
+    if rule.regime is not None:
+        regime = regime_summary(reports, rule.regime.n_regimes)
+        if regime["n_unconditioned"]:
+            warnings.append(
+                f"{what}: at {regime['n_unconditioned']} of {regime['n_fits']} "
+                "fits the regime could not be conditioned on (too few of the "
+                "window's returns in the current regime, or a state that could "
+                "not be labelled) and the rule was fitted unconditioned."
+            )
 
     rule_summary = _summary(path, rf, periods_per_year)
     bench_summary = _summary(bench, rf, periods_per_year)
@@ -465,7 +583,7 @@ def evaluate_allocation_rule(
         "full_sample_weights": (
             None
             if held_weights is None
-            else {str(c): float(w) for c, w in zip(frame.columns, held_weights)}
+            else {str(c): float(w) for c, w in zip(sleeves.columns, held_weights)}
         ),
         "look_ahead_gap": gap,
         "sharpe_difference": difference,
@@ -476,5 +594,6 @@ def evaluate_allocation_rule(
         "n_trials": n_trials,
         "unfitted": path["unfitted"],
         "n_out_of_sample": n_oos,
+        "regime": regime,
         "warnings": warnings,
     }

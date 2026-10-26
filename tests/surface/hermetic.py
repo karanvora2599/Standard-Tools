@@ -833,6 +833,16 @@ def _hand_written(
             return {"streams": _DELETE}
         if tool in ("allocate_across_sleeves", "evaluate_allocation_rule"):
             return {"returns": _DELETE}
+        if tool == "select_allocation_rule":
+            # Two rules on the panel's ~400 dates: a half-year window and a
+            # quarter of record before the first choice leave ~150 scored.
+            return {
+                "returns": _DELETE,
+                "candidates": [{"method": "equal"}, {"method": "risk_parity"}],
+                "estimation_window": 126,
+                "selection_window": 63,
+                "n_bootstrap": 50,
+            }
     if tool == "build_model_sleeves" and fx.get("model_id_2"):
         # The two ridge models the fixtures register, on one dataset, as
         # the sleeves; the synthesized model ids name nothing.

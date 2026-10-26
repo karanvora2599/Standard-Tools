@@ -76,7 +76,12 @@ from standard_quant_tools._blas import single_threaded_blas
 from standard_quant_tools.agent.runtimes import handoff
 from standard_quant_tools.allocation.capacity import capacity_curve
 from standard_quant_tools.allocation.kelly import kelly_report
-from standard_quant_tools.allocation.sleeves import SleeveRule, allocate_across_sleeves
+from standard_quant_tools.allocation.selection import select_allocation_rule
+from standard_quant_tools.allocation.sleeves import (
+    RegimeSpec,
+    SleeveRule,
+    allocate_across_sleeves,
+)
 from standard_quant_tools.allocation.walk_forward import evaluate_allocation_rule
 from standard_quant_tools.analysis.cointegration import (
     cointegration_test,
@@ -895,6 +900,30 @@ CALLS = {
             n_bootstrap=50,
         ).items()
         if key != "dates"
+    },
+    # A regime rule: the regime rows' covariance blended with the window's,
+    # the conditioned tangency, and the bootstrap's refits; and a selection
+    # among two rules, every candidate walked and the selector's scores.
+    "allocate_across_sleeves_regime": lambda: allocate_across_sleeves(
+        SLEEVES,
+        SleeveRule(method="max_sharpe", regime=RegimeSpec(labels="quantile")),
+        n_bootstrap=3,
+    ),
+    "select_allocation_rule": lambda: {
+        key: value
+        for key, value in select_allocation_rule(
+            SLEEVES,
+            [
+                ("min_variance", SleeveRule(method="min_variance")),
+                ("regime", SleeveRule(regime=RegimeSpec(labels="quantile"))),
+            ],
+            n_trials=2,
+            estimation_window=504,
+            rebalance_every=126,
+            selection_window=252,
+            n_bootstrap=50,
+        ).items()
+        if key not in ("dates", "first_scored_date", "choices")
     },
 }
 

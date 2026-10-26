@@ -47,6 +47,8 @@ from .sleeve_models import (
     CombineStreamsResult,
     EvaluateAllocationRuleInput,
     OutOfSampleStream,
+    RegimeReport,
+    RegimeWalkSummary,
     ShrinkageReport,
     SleeveAllocationResult,
     SleeveReturns,
@@ -112,11 +114,13 @@ def allocate_across_sleeves(input_data: AllocateSleevesInput) -> SleeveAllocatio
     )
     shrinkage = out.pop("shrinkage")
     binding = out.pop("binding_caps")
+    regime = out.pop("regime")
     out["warnings"] = notes + out["warnings"]
     return SleeveAllocationResult(
         **out,
         binding_caps=[BindingCap(**b) for b in binding],
         shrinkage=None if shrinkage is None else ShrinkageReport(**shrinkage),
+        regime=None if regime is None else RegimeReport(**regime),
         streams=alignment,
     )
 
@@ -220,6 +224,7 @@ def evaluate_allocation_rule(
         n_bootstrap=out["n_bootstrap"],
         block_size=out["block_size"],
         bootstrap_scale=difference["scale"],
+        regime=None if out["regime"] is None else RegimeWalkSummary(**out["regime"]),
         streams=alignment,
         warnings=warnings,
     )

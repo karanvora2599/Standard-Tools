@@ -536,6 +536,23 @@ REFUSED: List[Tuple[str, str, str, Modifier]] = BAD_VALUES + [
         "min_overlap above the shared dates",
         _set(min_overlap=100_000),
     ),
+    (
+        "allocation",
+        "select_allocation_rule",
+        "a selection window longer than the candidates' record",
+        _set(selection_window=5000),
+    ),
+    (
+        "allocation",
+        "select_allocation_rule",
+        "two candidates given one name",
+        _set(
+            candidates=[
+                {"method": "equal", "name": "a"},
+                {"method": "risk_parity", "name": "a"},
+            ]
+        ),
+    ),
 ]
 
 #: Inputs that must be HANDLED -- refused by name or answered -- where the

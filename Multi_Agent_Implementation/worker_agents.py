@@ -876,6 +876,15 @@ inverse volatility, risk parity with budgets, HRP, minimum variance, max
 Sharpe or a shrunk Sharpe, with caps, per-sleeve capacity and an optional
 target volatility, plus bootstrap weight bands and a stability number.
 The in-sample Sharpe it reports is in-sample; never quote it as expected.
+Any rule can take a regime: its mean and covariance are then those of the
+window's returns in the current regime (by the EWMA volatility of the
+sleeves' mix, or a state column the user names), shrunk toward the whole
+window's. It is opt-in for a reason: measured on planted sleeves it beat
+its unconditioned twin out of sample where the regimes differ in risk and
+the rule reads risk (risk parity, minimum variance, a volatility target),
+cost those rules little elsewhere, and did not help max Sharpe. Test it
+with evaluate_allocation_rule, benchmark_rule set to the same method,
+before recommending it.
 evaluate_allocation_rule: walk the rule forward -- fit on a trailing
 window, hold, rebalance, pay the reallocation cost -- and compare its
 out-of-sample stream with an equal-weight benchmark rule, with the paired
@@ -884,6 +893,15 @@ Sharpe at the trial count the user states. This is the test of a rule;
 the allocation tool alone is not. It takes no overlay: a volatility target
 or CPPI on the rule is apply_risk_overlay on the out-of-sample stream it
 publishes with run_id.
+select_allocation_rule: when the user wants the rule chosen for them,
+walk every candidate forward and let a selector choose at each rebalance
+from the candidates' own out-of-sample record before that date -- by
+default the equal blend of the better half, switching only past a Sharpe
+margin and paying for each switch. Report the selector against equal
+weight with its interval, and always beside it the HINDSIGHT best rule
+and its gap: that gap is what a backtest that picked the winner afterwards
+overstates. A PBO near 0.5 or above means choosing among these rules by
+their record is no better than chance; say so. Pass n_trials honestly.
 get_kelly_report: the Kelly leverage of a stream or a set of streams, its
 standard error, the chance the estimate is more than twice the truth, the
 growth at fractional Kelly and the drawdown odds. Lead with the

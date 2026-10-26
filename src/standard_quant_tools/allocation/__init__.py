@@ -13,16 +13,20 @@ from .book_returns import measure_book_returns
 from .capacity import capacity_curve
 from .kelly import drawdown_probability, empirical_kelly, kelly_report
 from .overlays import apply_overlay
+from .selection import select_allocation_rule
 from .sleeves import (
+    RegimeSpec,
     SleeveRule,
     allocate_across_sleeves,
     fit_sleeve_rule,
+    label_regimes,
     shrunk_sharpe_ratios,
     water_fill,
 )
 from .walk_forward import evaluate_allocation_rule, walk_rule_forward
 
 __all__: list = [
+    "RegimeSpec",
     "SleeveRule",
     "allocate_across_sleeves",
     "apply_overlay",
@@ -33,7 +37,9 @@ __all__: list = [
     "evaluate_allocation_rule",
     "fit_sleeve_rule",
     "kelly_report",
+    "label_regimes",
     "measure_book_returns",
+    "select_allocation_rule",
     "shrunk_sharpe_ratios",
     "walk_rule_forward",
     "water_fill",

@@ -1,5 +1,85 @@
 # Changelog
 
+## A rule chosen as you go keeps most of a real edge and loses little without one, and a rule can be conditioned on the current regime
+
+- **`select_allocation_rule`** (allocation, new). Picking the rule with the
+  best walk-forward record and quoting that record is a selection on the
+  test set. This tool walks 2 to 12 candidate rules forward exactly as
+  `evaluate_allocation_rule` does, and a selector rebalancing on the same
+  rows scores each candidate by the Sharpe ratio of its own realized
+  out-of-sample returns over the previous `selection_window` periods --
+  strictly before the rebalance -- holds the equal blend of the better
+  half (`combine="top_k"`; `"best"` holds the one), leaves a held rule
+  only when a challenger beats it by `switch_margin`, and trades its own
+  book to the chosen rules' books at `cost_bps`. Until a selection window
+  of record exists it holds the first candidate; those periods are
+  reported and not scored. An unnamed candidate is named by its method,
+  numbered when the method repeats; a candidate takes no capital or
+  capacity, which would cap it at its own walk's capital.
+- **What it reports**, on the scored periods: the selector's, equal
+  weight's and each candidate's Sharpe, return, drawdown, turnover and
+  cost; the paired Sharpe difference selector minus equal weight with its
+  block-bootstrap interval; how often each candidate was held and the
+  switches; the HINDSIGHT best candidate and its Sharpe minus the
+  selector's, the number a backtest that picked the winner afterwards
+  would have reported; the PBO over the candidates' streams; the deflated
+  Sharpe ratio of the selector at `n_trials` (required) and of the
+  hindsight winner at `n_trials` times the candidates. `run_id` publishes
+  every stream and the selector's weights.
+- **Measured before its defaults were set** (six rules, 40 ten-year
+  histories a case, 10 bps a unit of turnover). With no edge anywhere the
+  selector lost 0.023 of Sharpe ratio to equal weight, its interval never
+  cleared zero and the PBO averaged 0.48. With one sleeve at Sharpe 2 it
+  gained 0.283 (max Sharpe alone gained 0.370) and cleared zero in 45% of
+  histories; at Sharpe 1.5 it gained 0.092 where the best single rules
+  gained 0.056. On regime-switching sleeves, where minimum variance beat
+  equal weight by 0.10, it gained 0.010: it did not find the better rule,
+  and the hindsight gap of 0.18 says so. Paired against holding the single
+  best, the better-half blend gained 0.041 +- 0.011 with no edge and
+  0.022 +- 0.011 with a modest one and gave up 0.064 +- 0.014 of a large
+  one; a 0.5 margin beat none in every case, and a 252-period window beat
+  126 and 504 in three of four. Those are the defaults.
+- **`AllocationRule.regime`** (every tool that takes a rule). A rule can
+  condition its mean and covariance on the current regime, read from its
+  window alone: each period's state is the EWMA volatility of the sleeves'
+  equal-weight mix (or a returns column named `state_column`, which is
+  then not a sleeve), labelled into two or three regimes by the library's
+  Gaussian mixture or the window's quantiles; each return is paired with
+  the label of the period before it, so a large move never votes itself
+  into the volatile regime; the estimates are the current regime's shrunk
+  toward the window's by n / (n + n0). Too few returns in the regime, or a
+  state that does not vary, fits the rule unconditioned with a note. The
+  allocation reports the current regime, the returns per regime, the
+  shrink weight and the labels' persistence; the walk forward reports how
+  many fits were conditioned. Without a regime every output is the bits it
+  was.
+- **Measured, and left opt-in.** Each rule against itself unconditioned,
+  30 ten-year histories a case, monthly refits, 10 bps. On two-regime
+  Markov sleeves (calm and stressed, different means and correlations) the
+  default spec (mixture labels, a 10-period half-life, n0 = 126) gained
+  0.050 +- 0.007 of Sharpe ratio for risk parity at a volatility target
+  (ahead in 28 of 30), 0.013 +- 0.002 for risk parity and 0.015 +- 0.005
+  for minimum variance; max Sharpe's 0.043 +- 0.028 is not distinguishable
+  from none. Where there were no regimes it cost those rules at most
+  0.006 and max Sharpe 0.030 to 0.059. Quantile labels cost more than the
+  mixture without regimes (they always halve the window), a 10-period
+  half-life beat 21 and 42 with them, n0 = 126 cost 30 to 45% less than 63
+  without regimes and kept three quarters of its gain with them, and three
+  regimes did no better than two. A regime is a choice the caller makes
+  and tests with `evaluate_allocation_rule`, `benchmark_rule` set to the
+  same method.
+- **`walk_rule_forward`** also returns what the book held after every
+  rebalance (`held`, `held_cash`), which the selector follows; nothing it
+  returned before changed.
+- **Tests.** One candidate, or copies of one, is that rule's stream to the
+  bit; changing every row after a date changes no choice, weight or return
+  on or before it, for the selector and for a regime rule; a dominating
+  rule is held at every rebalance after the selection window; the book
+  against a recursion in currency; a constant state is the unconditioned
+  rule to the bit; a planted two-regime covariance is recovered within
+  four of its own standard errors; the shrinkage, the labels and the
+  pairing against independent computations; refusals by name.
+
 ## Registered models become allocation sleeves in one call, each measured from the capital its account opened with, beside the count of models tried
 
 - **`build_model_sleeves` (`allocation`).** Allocating across models took

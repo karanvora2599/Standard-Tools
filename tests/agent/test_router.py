@@ -370,6 +370,17 @@ class TestRoutingAccuracyEval:
             "by side as sleeves, so I can split capital across them.",
             "allocation",
         ),
+        (
+            "Pick among risk parity, minimum variance and max Sharpe for my "
+            "strategy sleeves as I go, by each rule's recent out-of-sample "
+            "record, and tell me whether that choosing beat equal weight.",
+            "allocation",
+        ),
+        (
+            "Condition my sleeve allocation on the current volatility regime "
+            "and test whether that beats the same rule without it.",
+            "allocation",
+        ),
         # data -- the newest category
         ("Fetch OHLCV for these fifty tickers and save it for later.", "data"),
         ("Does this provider guarantee point-in-time data?", "data"),

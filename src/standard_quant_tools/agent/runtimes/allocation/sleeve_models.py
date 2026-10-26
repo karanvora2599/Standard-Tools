@@ -16,7 +16,8 @@ one budget, and the rules behind each field are in the library modules
 
 `AllocationRule` is the one nested type: `allocate_across_sleeves` takes
 its fields flat, `evaluate_allocation_rule` takes one as `rule`, so a rule
-is spelled the same way in both.
+is spelled the same way in both. Its `regime` (`RegimeInput`) is inlined
+into every tool that takes a rule, which is why it has five short fields.
 """
 
 from __future__ import annotations
@@ -45,7 +46,7 @@ from standard_quant_tools.agent.runtimes.streams import (
     exactly_one_source,
     finite_dated_streams,
 )
-from standard_quant_tools.allocation.sleeves import SleeveRule
+from standard_quant_tools.allocation.sleeves import RegimeSpec, SleeveRule
 from standard_quant_tools.backtest.financing import _compact_schema
 
 Stat = Annotated[Optional[float], BeforeValidator(finite_or_none)]
@@ -125,6 +126,55 @@ class SleeveReturns(BaseModel):
         return self
 
 
+#: The regime spec's own defaults, the tool's too.
+_REGIME_DEFAULTS = RegimeSpec()
+
+
+def _compact_nested(schema: Dict) -> None:
+    """`_compact_schema`, and the model's own title too: a nested type is
+    inlined into every tool that takes it, and its name tells a caller
+    nothing the field name does not."""
+    _compact_schema(schema)
+    schema.pop("title", None)
+
+
+class RegimeInput(BaseModel):
+    """How a rule conditions on the current regime. See
+    `allocation.sleeves.RegimeSpec`; inlined into every tool taking a rule,
+    so it carries the fields a caller changes and nothing else: the fewest
+    returns a regime's estimate reads (`min_observations`) stays the
+    library's default."""
+
+    model_config = ConfigDict(extra="forbid", json_schema_extra=_compact_nested)
+
+    n_regimes: Literal[2, 3] = _REGIME_DEFAULTS.n_regimes
+    labels: Literal["mixture", "quantile"] = _REGIME_DEFAULTS.labels
+    state_column: Optional[str] = Field(
+        None, description="A column as the state; default EWMA vol."
+    )
+    halflife: float = Field(
+        _REGIME_DEFAULTS.halflife, gt=0, le=10_000, description="The EWMA's."
+    )
+    shrinkage: float = Field(
+        _REGIME_DEFAULTS.shrinkage, ge=0, le=10_000, description="n0: weight n/(n+n0)."
+    )
+
+    @model_validator(mode="after")
+    def _a_state(self) -> "RegimeInput":
+        if self.state_column is not None and self.halflife != _REGIME_DEFAULTS.halflife:
+            raise ValueError(
+                "regime.halflife is the EWMA volatility state's, and "
+                f"state_column={self.state_column!r} replaces that state. Drop "
+                "halflife, or state_column."
+            )
+        return self
+
+    def to_spec(self) -> RegimeSpec:
+        return RegimeSpec(
+            **{name: getattr(self, name) for name in RegimeInput.model_fields}
+        )
+
+
 class AllocationRule(BaseModel):
     """An allocation rule: its method, covariance and constraints."""
 
@@ -152,6 +202,9 @@ class AllocationRule(BaseModel):
         None, description="Sleeve -> most capital it takes."
     )
     capacity_excess: Literal["cash", "redistribute"] = "cash"
+    regime: Optional[RegimeInput] = Field(
+        None, description="Condition on the window's current regime."
+    )
 
     @field_validator("risk_budgets", "capacity")
     @classmethod
@@ -177,9 +230,10 @@ class AllocationRule(BaseModel):
         return self
 
     def to_rule(self) -> SleeveRule:
-        return SleeveRule(
-            **{name: getattr(self, name) for name in AllocationRule.model_fields}
-        )
+        fields = {name: getattr(self, name) for name in AllocationRule.model_fields}
+        if self.regime is not None:
+            fields["regime"] = self.regime.to_spec()
+        return SleeveRule(**fields)
 
 
 class CombineStreamsInput(BaseModel):
@@ -310,6 +364,69 @@ class ShrinkageReport(ExplainsNulls):
     shrunk_sharpe: Dict[str, Stat] = Field(default_factory=dict)
 
 
+#: Why a regime number can be null.
+_UNLABELLED = "the window's states could not be labelled (see the warnings)"
+
+
+class RegimeReport(ExplainsNulls):
+    """What the regime did at one fit, reported by its result."""
+
+    model_config = ConfigDict(extra="forbid")
+    null_reasons = {
+        "current_state": "the state is not a finite number",
+        "persistence": _UNLABELLED,
+        "shrink_weight": "the rule was fitted unconditioned (see the warnings)",
+    }
+
+    state: str = Field(
+        "", description="'ewma_volatility' (annual), or the state_column read."
+    )
+    labels: str = ""
+    n_regimes: int = 2
+    current_state: Stat = Field(None, description="The window's last state.")
+    current_regime: Optional[int] = Field(
+        None,
+        description="0 is the lowest state: the regime the next period starts "
+        "in; null when the states could not be labelled.",
+    )
+    periods_per_regime: Optional[List[int]] = Field(
+        None,
+        description="Per regime, the window's returns that followed a period "
+        "in it: what that regime's estimate reads.",
+    )
+    regime_periods: int = Field(0, description="The current regime's count.")
+    shrink_weight: Stat = Field(
+        None, description="n / (n + n0) on the regime's mean and covariance."
+    )
+    persistence: Stat = Field(
+        None, description="1 - label switches / (periods - 1) over the window."
+    )
+    conditioned: bool = Field(
+        False, description="False: fitted unconditioned (see the warnings)."
+    )
+
+
+class RegimeWalkSummary(ExplainsNulls):
+    """What the regime did across a walk's fits."""
+
+    model_config = ConfigDict(extra="forbid")
+    null_reasons = {
+        "mean_shrink_weight": "no fit was conditioned on a regime",
+        "mean_persistence": "no window's states could be labelled",
+    }
+
+    n_fits: int = 0
+    n_conditioned: int = 0
+    n_unconditioned: int = Field(
+        0, description="Fits that fell back to the unconditioned rule."
+    )
+    fits_per_regime: List[int] = Field(
+        default_factory=list, description="Fits at which each regime was current."
+    )
+    mean_shrink_weight: Stat = None
+    mean_persistence: Stat = None
+
+
 class SleeveAllocationResult(_Result):
     null_reasons = {
         "cash_amount": "no capital was given",
@@ -388,6 +505,7 @@ class SleeveAllocationResult(_Result):
     shrinkage: Optional[ShrinkageReport] = Field(
         None, description="shrunk_sharpe only."
     )
+    regime: Optional[RegimeReport] = Field(None, description="With a regime only.")
     streams: StreamAlignment = Field(default_factory=StreamAlignment)
 
 
@@ -491,6 +609,9 @@ class AllocationRuleEvaluation(_Result):
     n_bootstrap: int = 0
     block_size: int = 0
     bootstrap_scale: Stat = None
+    regime: Optional[RegimeWalkSummary] = Field(
+        None, description="With a regime rule only."
+    )
     streams: StreamAlignment = Field(default_factory=StreamAlignment)
 
 
@@ -503,6 +624,9 @@ __all__ = [
     "CombineStreamsResult",
     "EvaluateAllocationRuleInput",
     "OutOfSampleStream",
+    "RegimeInput",
+    "RegimeReport",
+    "RegimeWalkSummary",
     "ShrinkageReport",
     "SleeveAllocationResult",
     "SleeveReturns",

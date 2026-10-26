@@ -28,6 +28,7 @@ from . import (
     book_return_tools,
     leverage_tools,
     model_sleeve_tools,
+    selection_tools,
     sleeve_tools,
 )
 from .attribution_tools import attribute_returns_brinson
@@ -38,6 +39,7 @@ from .leverage_tools import (
     get_strategy_capacity_curve,
 )
 from .model_sleeve_tools import build_model_sleeves
+from .selection_tools import select_allocation_rule
 from .sleeve_tools import (
     allocate_across_sleeves,
     combine_return_streams,
@@ -53,6 +55,7 @@ _MODULES: tuple = (
     attribution_tools,
     book_return_tools,
     model_sleeve_tools,
+    selection_tools,
 )
 
 TOOL_DEFS = [d for module in _MODULES for d in module.TOOL_DEFS]
@@ -77,4 +80,5 @@ __all__ = [
     "get_kelly_report",
     "get_strategy_capacity_curve",
     "measure_book_returns",
+    "select_allocation_rule",
 ]
