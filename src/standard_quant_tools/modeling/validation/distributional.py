@@ -19,7 +19,7 @@ happened rather than discover a negative width.
 
 from __future__ import annotations
 
-from typing import Dict, Optional
+from typing import Dict, Iterable, Optional
 
 import numpy as np
 
@@ -31,6 +31,39 @@ def quantile_column(q: float) -> str:
     if abs(percent - round(percent)) < 1e-9:
         return f"q{int(round(percent)):02d}"
     return f"q{percent:04.1f}"
+
+
+#: The columns a model writes for an interval, beside its quantile columns.
+INTERVAL_COLUMNS = ("lower", "upper")
+
+
+def quantile_columns(columns: Iterable[object]) -> Dict[str, float]:
+    """
+    Which of `columns` are quantile columns, and at what level, by the round
+    trip that wrote them.
+
+    A column is a quantile column when parsing its name back to a level
+    and re-deriving the name yields the same string -- so `q05` is 0.05
+    and `q02.5` is 0.025, while `q5`, `quantile` and `q120` are not
+    quantile columns at all. Recognising them by the writer's own
+    function rather than a second regex is what keeps a rename on one
+    side from silently producing an empty result on the other.
+    """
+    found: Dict[str, float] = {}
+    for column in columns:
+        name = str(column)
+        if not name.startswith("q"):
+            continue
+        try:
+            percent = float(name[1:])
+        except ValueError:
+            continue
+        level = percent / 100.0
+        if not 0.0 < level < 1.0:
+            continue
+        if quantile_column(level) == name:
+            found[name] = level
+    return found
 
 
 def pinball_loss(y_true: np.ndarray, y_pred: np.ndarray, q: float) -> float:

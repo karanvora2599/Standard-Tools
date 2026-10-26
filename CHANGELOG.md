@@ -1,5 +1,36 @@
 # Changelog
 
+## A model's band and quantiles can be joined to the outcome they were predicting, so the interval scorer and the VaR backtest read a registered model
+
+- **`attach_model_outcomes(keep_intervals=True)`.**
+  `score_prediction_intervals` refuses a frame with no outcome and tells
+  the caller to attach outcomes first, and `backtest_var_forecasts` reads
+  a model's lower quantile as its VaR against the outcome beside it. But
+  `attach_model_outcomes` published exactly date, entity, prediction and
+  target, so the frame it made held no band or quantile for either tool
+  to read, and following the advice led to a second refusal. With
+  `keep_intervals` the model's `lower` and `upper` and its quantile
+  columns (`q05`, `q95` ...) ride along between `prediction` and
+  `target`, each value the model's own on that (date, entity), on the
+  model path and on a published reference alike. Asked of a model that
+  wrote neither, it is refused by name rather than answered with the
+  plain four. Off -- the default -- the frame is the four columns it was.
+- **`load_oos_predictions(keep_distribution=True)`** keeps the same columns
+  from a registered model's verified predictions, the quantiles in order
+  of level; by default it returns the three it did.
+- **One detector.** Which columns are quantiles is decided by the round
+  trip through the function that names them, now
+  `validation.distributional.quantile_columns`, which the interval scorer,
+  the VaR backtest and the join all call, so a column one of them carries
+  is a column the others read.
+- **Tests.** The carried values equal the model's out-of-sample frame on
+  the same rows and the shared columns equal the four-column frame's; the
+  interval scorer's 90% coverage on the attached frame is the share of
+  outcomes inside [q05, q95] counted directly; the VaR backtest's
+  exceptions on the attached q05 are the outcomes below it on every fifth
+  date of each entity, counted directly; a published reference carries
+  the same columns; a point model is refused.
+
 ## A rebalance is optimized from the weights held, with trading costs in the objective and a no-trade band that holds a weight to the bit
 
 - **`optimize_rebalance`** (portfolio runtime; the library function is

@@ -64,7 +64,7 @@ from ..validation.comparison import (
     newey_west_variance,
     paired_comparison,
 )
-from ..validation.distributional import distributional_metrics, quantile_column
+from ..validation.distributional import distributional_metrics, quantile_columns
 from .statistics_models import (
     AdjustedPValue,
     CompareSignalsInput,
@@ -126,31 +126,9 @@ _LEVEL_TOLERANCE = 1e-9
 
 
 def _detect_quantile_columns(frame: pd.DataFrame) -> Dict[str, float]:
-    """
-    Which columns are quantiles, by the round trip that wrote them.
-
-    A column is a quantile column when parsing its name back to a level
-    and re-deriving the name yields the same string -- so `q05` is 0.05
-    and `q02.5` is 0.025, while `q5`, `quantile` and `q120` are not
-    quantile columns at all. Recognising them by the writer's own
-    function rather than a second regex is what keeps a rename on one
-    side from silently producing an empty result on the other.
-    """
-    found: Dict[str, float] = {}
-    for column in frame.columns:
-        name = str(column)
-        if not name.startswith("q"):
-            continue
-        try:
-            percent = float(name[1:])
-        except ValueError:
-            continue
-        level = percent / 100.0
-        if not 0.0 < level < 1.0:
-            continue
-        if quantile_column(level) == name:
-            found[name] = level
-    return found
+    """Which columns are quantiles, by the round trip that wrote them
+    (`validation.distributional.quantile_columns`)."""
+    return quantile_columns(frame.columns)
 
 
 def _resolve_quantile_columns(

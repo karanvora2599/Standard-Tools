@@ -43,6 +43,7 @@ from .features.transforms import (
 )
 from .registry.model_registry import load_manifest, resolve_model_artifact
 from .specs import SCORE_TASKS
+from .validation.distributional import INTERVAL_COLUMNS, quantile_columns
 
 #: How the base predictions become one series.
 METHODS = ("mean", "median", "rank_mean", "weighted")
@@ -51,7 +52,9 @@ METHODS = ("mean", "median", "rank_mean", "weighted")
 PREDICTION_COLUMNS = ("date", "entity", "prediction")
 
 
-def load_oos_predictions(model_id: str, *, keep_path: bool = False) -> pd.DataFrame:
+def load_oos_predictions(
+    model_id: str, *, keep_path: bool = False, keep_distribution: bool = False
+) -> pd.DataFrame:
     """
     One model's out-of-sample predictions, verified against its manifest.
 
@@ -60,6 +63,11 @@ def load_oos_predictions(model_id: str, *, keep_path: bool = False) -> pd.DataFr
     was tested in, so the row is unique only with it. Dropped by default,
     because every consumer that wants ONE prediction per row refuses a cpcv
     model by name rather than silently averaging or picking.
+
+    `keep_distribution` keeps the interval (`lower`, `upper`) and quantile
+    columns (`q05` ...) a model trained with intervals or quantiles wrote,
+    the quantiles in order of level. Dropped by default, because a consumer
+    of the point prediction that finds them has to decide what they mean.
     """
     manifest = load_manifest(model_id)
     uri = manifest.oos_predictions_uri
@@ -92,6 +100,10 @@ def load_oos_predictions(model_id: str, *, keep_path: bool = False) -> pd.DataFr
     columns = list(PREDICTION_COLUMNS)
     if keep_path and "path" in frame.columns:
         columns.append("path")
+    if keep_distribution:
+        levels = quantile_columns(frame.columns)
+        columns += [c for c in INTERVAL_COLUMNS if c in frame.columns]
+        columns += sorted(levels, key=levels.__getitem__)
     out = frame[columns].copy()
     out["date"] = pd.to_datetime(out["date"])
     out["entity"] = out["entity"].astype(str)

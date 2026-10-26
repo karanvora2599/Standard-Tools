@@ -2415,6 +2415,15 @@ class AttachModelOutcomesInput(BaseModel):
         ),
     )
     name: str = Field(..., description="Artifact name for the joined frame.")
+    keep_intervals: bool = Field(
+        False,
+        description=(
+            "Also carry the predictions' interval (`lower`, `upper`) and "
+            "quantile columns (`q05`, `q95`) beside the outcome, for "
+            "score_prediction_intervals and backtest_var_forecasts. Off, "
+            "the frame is the four columns score_predictions reads."
+        ),
+    )
 
     @model_validator(mode="after")
     def _exactly_one_source(self) -> "AttachModelOutcomesInput":
@@ -2447,9 +2456,10 @@ class AttachModelOutcomesResult(BaseModel):
         ...,
         description=(
             "An `sqt://predictions/...` reference carrying exactly date, "
-            "entity, prediction and target. This is what score_predictions "
-            "reads: pass it as `predictions_ref` with the `task` and the "
-            "`horizon` reported below."
+            "entity, prediction and target (and, with keep_intervals, the "
+            "interval and quantile columns before target). This is what "
+            "score_predictions reads: pass it as `predictions_ref` with the "
+            "`task` and the `horizon` reported below."
         ),
     )
     task: Optional[str] = Field(

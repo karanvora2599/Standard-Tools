@@ -3228,7 +3228,12 @@ def attach_model_outcomes(
         # Verifies the artifact against the manifest's recorded digest
         # before reading it, so an edited predictions file fails here
         # rather than being scored.
-        predictions = load_oos_predictions(input_data.model_id)
+        predictions = load_oos_predictions(
+            input_data.model_id, keep_distribution=input_data.keep_intervals
+        )
+        carried = _carried_interval_columns(
+            predictions, input_data.keep_intervals, f"model {input_data.model_id!r}"
+        )
         dataset_id = str(manifest.dataset_id)
         requested = input_data.target or manifest.target_id
         task = manifest.task
@@ -3248,7 +3253,10 @@ def attach_model_outcomes(
                 "outcome needs the prediction and the (date, entity) it "
                 "belongs to."
             )
-        predictions = frame[["date", "entity", "prediction"]].copy()
+        carried = _carried_interval_columns(
+            frame, input_data.keep_intervals, repr(input_data.predictions_ref)
+        )
+        predictions = frame[["date", "entity", "prediction", *carried]].copy()
         # Coerced here rather than demanded of every publisher: a
         # `predictions` reference can come from anything. A date that
         # cannot be parsed still fails.
@@ -3327,7 +3335,9 @@ def attach_model_outcomes(
             "not resolved yet for the dates predicted."
         )
 
-    out = joined[["date", "entity", "prediction", "target"]].reset_index(drop=True)
+    out = joined[["date", "entity", "prediction", *carried, "target"]].reset_index(
+        drop=True
+    )
     unmatched = int(len(predictions) - len(out))
     if unmatched:
         warnings.append(
@@ -3358,6 +3368,35 @@ def attach_model_outcomes(
         last_date=str(pd.Timestamp(out["date"].max()).date()),
         warnings=warnings,
     )
+
+
+def _carried_interval_columns(frame, keep: bool, source: str) -> List[str]:
+    """
+    The interval and quantile columns `attach_model_outcomes` carries beside
+    the outcome: none unless asked for, because the four-column frame is
+    what score_predictions reads and a scorer that finds `lower` or a fold
+    id beside the outcome has to decide what it means. Asked for, `lower`
+    and `upper` and every quantile column, found by the detection
+    score_prediction_intervals and backtest_var_forecasts use, so a column
+    carried here is one they read. Asked for on predictions that carry
+    none, it is refused rather than published as the plain four.
+    """
+    if not keep:
+        return []
+    from ..validation.distributional import INTERVAL_COLUMNS, quantile_columns
+
+    levels = quantile_columns(frame.columns)
+    carried = [c for c in INTERVAL_COLUMNS if c in frame.columns]
+    carried += sorted(levels, key=levels.__getitem__)
+    if not carried:
+        raise ValidationError(
+            f"keep_intervals=True, but {source} carries no interval or "
+            f"quantile column; it holds {list(frame.columns)}. A model "
+            "writes them when trained with ModelSpec.quantiles (q05, q95) or "
+            "ModelSpec.intervals (lower, upper). Drop keep_intervals to "
+            "attach outcomes to the point prediction."
+        )
+    return carried
 
 
 def _paired_against_reference(input_data, reference: str):
