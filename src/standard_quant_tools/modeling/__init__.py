@@ -14,6 +14,7 @@ from .bridge import oos_predictions_to_signal_panel
 from .dataset.builder import build_dataset
 from .engine import run_experiment
 from .features.registry import list_features, register_feature
+from .model_sleeves import build_model_sleeves
 from .portfolio_eval import (
     evaluate_model_portfolio,
     transform_predictions_to_weights,
@@ -40,6 +41,7 @@ __all__ = [
     "TargetSpec",
     "ValidationSpec",
     "build_dataset",
+    "build_model_sleeves",
     "evaluate_model_portfolio",
     "list_features",
     "oos_predictions_to_signal_panel",

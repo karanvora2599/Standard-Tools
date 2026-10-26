@@ -833,6 +833,12 @@ def _hand_written(
             return {"streams": _DELETE}
         if tool in ("allocate_across_sleeves", "evaluate_allocation_rule"):
             return {"returns": _DELETE}
+    if tool == "build_model_sleeves" and fx.get("model_id_2"):
+        # The two ridge models the fixtures register, on one dataset, as
+        # the sleeves; the synthesized model ids name nothing.
+        return {
+            "models": [{"model_id": fx["model_id"]}, {"model_id": fx["model_id_2"]}]
+        }
     if tool == "backtest_var_forecasts" and refs.get("var_forecasts"):
         # The published forecasts carry their own level, and they are the
         # one source: the predictions reference named by field is not.

@@ -365,6 +365,11 @@ class TestRoutingAccuracyEval:
             "equal weight out of sample, after rebalancing costs?",
             "allocation",
         ),
+        (
+            "Put the out-of-sample returns of my three registered models side "
+            "by side as sleeves, so I can split capital across them.",
+            "allocation",
+        ),
         # data -- the newest category
         ("Fetch OHLCV for these fifty tickers and save it for later.", "data"),
         ("Does this provider guarantee point-in-time data?", "data"),

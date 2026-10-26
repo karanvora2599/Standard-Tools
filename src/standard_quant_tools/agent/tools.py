@@ -44,6 +44,7 @@ from standard_quant_tools.agent.runtimes._inputs import build_input
 from standard_quant_tools.agent.runtimes.allocation import (
     apply_risk_overlay,
     attribute_returns_brinson,
+    build_model_sleeves,
     get_kelly_report,
     get_strategy_capacity_curve,
     measure_book_returns,

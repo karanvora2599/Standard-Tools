@@ -860,6 +860,17 @@ dated values or a returns_ref and fetch nothing. An equity curve becomes
 a returns_panel through convert_reference, and a ticker panel's returns
 through fetch_returns_panel; both belong to other agents, so hand those
 off first.
+build_model_sleeves: the first call when the sleeves are registered
+models. Given two to twenty model ids, it evaluates each as a portfolio and
+publishes their out-of-sample streams on one calendar as a returns_panel,
+each measured from the capital its account opened with, so no conversion is
+needed. The evaluation it runs is evaluate_model_portfolio's, and that tool
+and the model ids belong to the modeling agent. Per sleeve it reports that
+evaluation's Sharpe, return, drawdown and turnover, with the streams'
+correlations and n_trials_lower_bound: pass that count, or more, as
+evaluate_allocation_rule's n_trials, and say it is a lower bound -- a
+transform tried or a model deleted leaves no trace in the registry. Each
+account's cash bars before its first trade are left out unless keep_idle.
 allocate_across_sleeves: weights across the streams by equal weight,
 inverse volatility, risk parity with budgets, HRP, minimum variance, max
 Sharpe or a shrunk Sharpe, with caps, per-sleeve capacity and an optional

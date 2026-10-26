@@ -1,5 +1,71 @@
 # Changelog
 
+## Registered models become allocation sleeves in one call, each measured from the capital its account opened with, beside the count of models tried
+
+- **`build_model_sleeves` (`allocation`).** Allocating across models took
+  three tools per model -- `evaluate_model_portfolio`, `convert_reference`
+  and `combine_return_streams` -- and nothing on the way said how many
+  models had been tried before these were kept. This takes two to twenty
+  model ids with a shared `transform` and `portfolio` (the modeling specs
+  themselves, with `evaluate_model_portfolio`'s defaults) or a model's own
+  `transform`, runs each through that evaluation, reads each stream from
+  the capital its account opened with as `_summarize_simulation` reads
+  growth, so it compounds to the evaluation's `cumulative_return`, and
+  publishes the streams on the dates they share as a `returns_panel` for
+  the sleeve tools' `returns_ref`. Per sleeve it reports the evaluation's
+  Sharpe, return, volatility, drawdown, turnover and rebalances, the
+  model's estimator and dataset and its `equity_curve_ref`; beside them
+  the alignment report, the streams' correlations and the
+  `periods_per_year` to pass on.
+- **The trial count.** `n_trials_lower_bound` is every model registered on
+  the datasets these models were trained on, read as `list_models` reads
+  the registry and never fewer than the models passed: the count
+  `evaluate_allocation_rule` needs as `n_trials`. It is a lower bound -- a
+  transform tried or a model deleted leaves no trace in the registry -- and
+  a model's own hyperparameter search, nested inside its walk-forward, is
+  not counted again. `trials_by_dataset` shows where it came from.
+- **The idle bars.** An evaluation prices its book over the dataset's whole
+  window, and the first prediction comes after the features' warm-up and
+  the first training window, so every curve opens with its account in cash
+  (275 of 1,499 bars in the measured case). Those returns are the cash
+  rate's, not the model's, and an allocation fitted over them reads the
+  sleeve as riskless, so each stream starts at its model's first live bar
+  by default; the bars left out are counted and compounded
+  (`n_idle_returns`, `idle_return`), so the live stream times the idle
+  growth is the evaluation's total, and at a zero cash rate the live stream
+  alone is. `keep_idle=True` keeps them: then eight of a 126-bar
+  walk-forward's first rebalances cannot be fitted on all-zero windows.
+- **Refused by name:** fewer than two or more than twenty models, a model
+  or a sleeve name given twice, a model validated by combinatorial purged
+  CV, models whose bars are not the same period, and streams sharing
+  fewer dates than `min_overlap`. Models with different tasks or labels
+  are not refused -- every column is an account's return per bar -- and
+  different target horizons are warned about, since one shared rebalance
+  schedule suits one horizon at most. The panel is named by its content
+  hash, so the same call under the same `run_id` republishes the same
+  reference instead of being refused.
+- **Measured.** Three ridge models kept of five trained on a planted
+  slow-drift market of eight names: each sleeve's seven numbers equal
+  `evaluate_model_portfolio`'s bit for bit, the count is 5, and an
+  inverse-volatility rule walked forward on the panel at 5 bps has a
+  deflated Sharpe probability of 0.919 at `n_trials=1` and 0.581 at 5,
+  lower by the expected maximum of five null Sharpe ratios in its standard
+  error (1.19). With no edge the same models give 0.041 and 0.0017.
+  Planted tests pin each column to the evaluation's own curve read back
+  from the capital, the compounded stream to its `cumulative_return` to
+  1e-12, the first live bar under next-open and close fills, the dates the
+  alignment drops, the count against models registered on the same and on
+  another dataset, every refusal, the republish, and the deflated Sharpe
+  at the count against the formula.
+- **Registered and budgeted.** It fetches through each model's dataset as
+  `evaluate_model_portfolio` does and names no ticker, so it carries that
+  tool's MCP hints; facade exports, a router case, the allocation worker's
+  prompt, a surface baseline on the fixtures' two models and two refusal
+  pins. Its full schema is 14.3 KB, almost all of it the two modeling
+  specs (a model's own transform points at the shared one rather than
+  restating it); under `auto` it is the one `allocation` tool thinned, and
+  the listing goes from 23,519 to 25,062 bytes.
+
 ## A model's quantiles are tested as the VaR forecasts they are, and a candidate factor has to make the risk model's minimum-variance book less volatile out of sample before it is selected
 
 - **`backtest_var_forecasts` takes a model's predictions.** A model fitted

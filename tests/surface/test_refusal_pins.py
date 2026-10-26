@@ -524,6 +524,18 @@ REFUSED: List[Tuple[str, str, str, Modifier]] = BAD_VALUES + [
         "an estimation window longer than the data",
         _set(estimation_window=5000),
     ),
+    (
+        "allocation",
+        "build_model_sleeves",
+        "one model passed twice",
+        _duplicate("models"),
+    ),
+    (
+        "allocation",
+        "build_model_sleeves",
+        "min_overlap above the shared dates",
+        _set(min_overlap=100_000),
+    ),
 ]
 
 #: Inputs that must be HANDLED -- refused by name or answered -- where the

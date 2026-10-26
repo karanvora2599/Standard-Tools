@@ -23,7 +23,13 @@ thins everything after it, so each tool module's first sentence stands on
 its own and names the deliverable.
 """
 
-from . import attribution_tools, book_return_tools, leverage_tools, sleeve_tools
+from . import (
+    attribution_tools,
+    book_return_tools,
+    leverage_tools,
+    model_sleeve_tools,
+    sleeve_tools,
+)
 from .attribution_tools import attribute_returns_brinson
 from .book_return_tools import measure_book_returns
 from .leverage_tools import (
@@ -31,6 +37,7 @@ from .leverage_tools import (
     get_kelly_report,
     get_strategy_capacity_curve,
 )
+from .model_sleeve_tools import build_model_sleeves
 from .sleeve_tools import (
     allocate_across_sleeves,
     combine_return_streams,
@@ -45,6 +52,7 @@ _MODULES: tuple = (
     leverage_tools,
     attribution_tools,
     book_return_tools,
+    model_sleeve_tools,
 )
 
 TOOL_DEFS = [d for module in _MODULES for d in module.TOOL_DEFS]
@@ -63,6 +71,7 @@ __all__ = [
     "allocate_across_sleeves",
     "apply_risk_overlay",
     "attribute_returns_brinson",
+    "build_model_sleeves",
     "combine_return_streams",
     "evaluate_allocation_rule",
     "get_kelly_report",
