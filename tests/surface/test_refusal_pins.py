@@ -157,6 +157,18 @@ BAD_VALUES: List[Tuple[str, str, str, Modifier]] = [
         _first_value("target_weights", float("nan")),
     ),
     ("portfolio", "estimate_trade_cost", "spread_bps=1e308", _set(spread_bps=1e308)),
+    (
+        "portfolio",
+        "optimize_rebalance",
+        "a NaN current weight",
+        _first_value("current_weights", float("nan")),
+    ),
+    (
+        "portfolio",
+        "optimize_rebalance",
+        "a linear cost of 1e308",
+        _set(linear_cost=1e308),
+    ),
     ("finance", "price_fx_forward_hedge", "a spot of 1e308", _set(spot=1e308)),
     (
         "finance",
@@ -331,6 +343,18 @@ REFUSED: List[Tuple[str, str, str, Modifier]] = BAD_VALUES + [
         _first_value("weights", float("inf")),
     ),
     ("portfolio", "get_capacity_report", "adv_lookback=0", _set(adv_lookback=0)),
+    (
+        "portfolio",
+        "optimize_rebalance",
+        "a negative linear cost",
+        _set(linear_cost=-0.001),
+    ),
+    (
+        "portfolio",
+        "optimize_rebalance",
+        "a current weight for an asset not in the covariance",
+        _first_key("current_weights", "NOT_AN_ASSET"),
+    ),
     ("portfolio", "get_liquidity_metrics", "tickers=[]", _set(tickers=[])),
     (
         "portfolio",

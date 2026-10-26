@@ -764,6 +764,25 @@ def _hand_written(
             "covariance": synth._covariance(len(SYMBOLS)),
             **limits,
         }
+    if tool == "optimize_rebalance":
+        # A held book, a forecast per asset, a cost and a turnover cap, so the
+        # probes reach the pieces, the cap's row and the frictionless target,
+        # not only the covariance.
+        trade = {
+            "expected_returns": {s: 0.04 + 0.01 * i for i, s in enumerate(SYMBOLS)},
+            "current_weights": {s: 1.0 / len(SYMBOLS) for s in SYMBOLS},
+            "risk_aversion": 2.0,
+            "linear_cost": 0.002,
+            "max_weight": 0.5,
+            "max_turnover": 0.3,
+        }
+        if refs.get("covariance"):
+            return {"covariance": _DELETE, "assets": _DELETE, **trade}
+        return {
+            "assets": list(SYMBOLS),
+            "covariance": synth._covariance(len(SYMBOLS)),
+            **trade,
+        }
     # The returns panel's columns are the six symbols. Each tool given it in
     # place of its inline returns reads them in its own roles: the assets,
     # the strategy, the configurations, the candidates beside a benchmark.

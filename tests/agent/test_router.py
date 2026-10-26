@@ -56,6 +56,7 @@ class TestToolCategories:
         "optimize_hierarchical_risk_parity": "hierarchical risk parity",
         "optimize_max_diversification": "maximum diversification",
         "optimize_portfolio": "constrained optimizer",
+        "optimize_rebalance": "cost-aware trade",
         "optimize_risk_parity": "risk parity",
         "plan_rebalance": "rebalance",
         "run_portfolio_optimization": "black-litterman",
@@ -276,6 +277,12 @@ class TestRoutingAccuracyEval:
         (
             "Here are my expected returns and covariance: minimize tracking "
             "error to the benchmark with sector caps and zero value exposure.",
+            "portfolio_risk",
+        ),
+        (
+            "Given the weights I hold, new expected returns and 15 bps per "
+            "trade, what should I trade this week without churning names "
+            "that barely moved?",
             "portfolio_risk",
         ),
         # allocation -- capital across strategy return streams

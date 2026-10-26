@@ -1,5 +1,79 @@
 # Changelog
 
+## A rebalance is optimized from the weights held, with trading costs in the objective and a no-trade band that holds a weight to the bit
+
+- **`optimize_rebalance`** (portfolio runtime; the library function is
+  `portfolio.rebalance_optimizer.optimize_rebalance`) answers the question
+  `optimize_portfolio` cannot: what to trade from the current weights.
+  Asked again after forecasts move a little, `optimize_portfolio`
+  returns a portfolio that moved a little in every name, so a book that
+  follows it trades everything every time. This maximizes
+  mu'w - (gamma/2) w'Sw - sum kappa |w - w0| - sum eta (w - w0)^2 under
+  `optimize_portfolio`'s bounds, budget, group and exposure limits, read
+  by the same code, plus caps on turnover (sum |w - w0|), gross weight
+  and volatility. kappa is the caller's cost per unit traded (0.0015 is
+  15 bps), eta the cost on the square of the trade.
+- **A weight inside its no-trade band comes back as its current weight,
+  bit for bit,** and is listed in `no_trade`; `trades`, `turnover`, the
+  two costs and `utility` (net of them) are reported beside the weights.
+  Every binding constraint carries its `shadow_price` in utility net of
+  costs -- the turnover cap's is what one more unit of turnover is worth
+  -- and the KKT certificate is computed from the weights, with a held
+  weight's two-sided subgradient check. A book that breaks the limits
+  reports `required_turnover`, the least any answer must trade.
+- **Exact, and why the trades are not split.** Writing w - w0 = u - v
+  makes a smooth programme whose Hessian is singular wherever u and v move
+  together; an active-set method then meets singular systems as soon as a
+  wrongly signed turnover multiplier frees both halves of a pair. The
+  method works on each weight's pieces between its breakpoints (its
+  bounds, its current weight, zero under a gross cap), on which the costs
+  and caps are linear: a primal-dual active-set pass on the problem
+  without the turnover and gross caps (with one binding it was measured
+  to oscillate and stop on a singular system), then the primal active-set
+  method, with the caps as rows. The volatility cap is
+  `optimize_portfolio`'s own Brent search on the risk aversion.
+- **Measured.** 200 assets with a 10 bps cost, long-only caps, a budget
+  and a binding turnover cap: 25 ms median over eight books (32 ms the
+  slowest; 44 ms with the machine under load); 500 assets: 0.10 s.
+  Two passes go to each name that trades from its current weight to a
+  bound, so a cold solve costs what the trade is. Passing the previous
+  answer as `start=` makes its states and binding caps the first guess:
+  a walk-forward of drifting books at 200 names takes 1 to 10 passes and
+  about 12 ms a date, every answer equal to the cold one.
+- **A book that starts on its binding gross cap** -- every date of a
+  sequence on which the cap bound, since each answer is the next book --
+  is solved exactly. A row or cap binds only on a move above rounding of
+  its own value and only when it adds to the working rows' rank on the
+  free weights; a step the budget fixes to the last bit had bound the cap
+  parallel to the budget, and the next system was singular.
+- **A held book on its limits to rounding is that book.** Prices make a
+  fully invested book sum to one within 1e-13 and leave a capped name an
+  ulp past its cap. Such a book starts the solve as it is; the weight
+  freed to carry the budget is one with room on the side the residual
+  points to (one at its lower bound cannot give up 1e-13, and freed there
+  it had left the budget no free weight and the next system singular on
+  about half the dates of a long-only sequence). When nothing trades,
+  every weight returns as held, to the bit, and the budget keeps the
+  book's own residual, reported in `warnings`; when something trades, the
+  traded names absorb it. A miss beyond rounding is a broken limit,
+  solved from the nearest feasible point with `required_turnover`.
+- **The tool shows what the costs held back:** the frictionless target
+  (the same problem with no costs and no turnover cap, which is
+  `optimize_portfolio`'s answer), the turnover and cost of trading to it,
+  its utility after that cost, and the distance and tracking from it.
+- **`optimize_portfolio` is unchanged to the bit** (44 problems across
+  every objective, compared before and after): its input helpers now take
+  the name they refuse for, the feasibility programme takes turnover and
+  gross caps as rows, and its certificate takes held kinks.
+- **Tests.** Without costs it is `optimize_portfolio` to 1e-12, weights
+  and prices; on a diagonal covariance each weight is its soft-threshold
+  closed form; a planted no-trade book comes back as w0 with `==`; small
+  problems match a brute force over every combination of states to 1e-9;
+  turnover, gross and volatility caps hold with equality to 1e-12 and
+  their prices match central differences; a dollar-neutral book held on
+  its gross cap certifies date after date, cold and warm, and matches the
+  brute force on small books.
+
 ## A rule chosen as you go keeps most of a real edge and loses little without one, and a rule can be conditioned on the current regime
 
 - **`select_allocation_rule`** (allocation, new). Picking the rule with the

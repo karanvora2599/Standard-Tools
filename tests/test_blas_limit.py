@@ -56,8 +56,11 @@ KKT solves, its certificate's least squares and its covariance's
 eigenvalues under the limit from the start; it is held here at 235 assets.
 So do the Kelly report's covariance, solve and Newton steps (235 streams)
 and the capacity curve's cost products (5,000 weight rows of 500
-instruments), and the factor screen's walk-forward fits, null and
-minimum-variance solves (a 10,000-row window, and 300 names).
+instruments), the factor screen's walk-forward fits, null and
+minimum-variance solves (a 10,000-row window, and 300 names), and
+`optimize_rebalance`'s KKT solves on the free weights, its certificate and
+its volatility cap's search, held at 235 assets from a book that breaks the
+limits.
 """
 
 from __future__ import annotations
@@ -134,6 +137,7 @@ from standard_quant_tools.portfolio.optimize import (
     mean_variance_optimize,
 )
 from standard_quant_tools.portfolio.portfolio import portfolio_metrics
+from standard_quant_tools.portfolio.rebalance_optimizer import optimize_rebalance
 from standard_quant_tools.portfolio.tail_risk import decompose_tail_risk
 
 threadpoolctl = pytest.importorskip("threadpoolctl")
@@ -420,6 +424,15 @@ OPTIMIZER_ARGS = {
         {"size": np.linspace(-1.0, 1.0, N)}, index=COVARIANCE.columns
     ),
     "exposure_min": {"size": 0.1},
+}
+#: The same limits from an equal-weight book, which breaks the group cap and
+#: the exposure floor, with costs on both terms and a turnover cap.
+REBALANCE_ARGS = {
+    **OPTIMIZER_ARGS,
+    "current_weights": WEIGHTS,
+    "linear_cost": 0.001,
+    "quadratic_cost": 0.002,
+    "max_turnover": 0.6,
 }
 
 
@@ -864,6 +877,12 @@ CALLS = {
     ),
     "optimize_portfolio_max_sharpe": lambda: optimize_portfolio(
         COVARIANCE, **OPTIMIZER_ARGS, objective="max_sharpe"
+    ),
+    "optimize_rebalance_turnover_cap": lambda: optimize_rebalance(
+        COVARIANCE, **REBALANCE_ARGS
+    ),
+    "optimize_rebalance_volatility_cap": lambda: optimize_rebalance(
+        COVARIANCE, **REBALANCE_ARGS, max_volatility=0.06
     ),
     # The Kelly report over 235 streams: the covariance, Sigma^-1 mu and its
     # inverse, and the empirical Kelly's Newton steps. The capacity curve's

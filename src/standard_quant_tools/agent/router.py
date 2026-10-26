@@ -188,7 +188,9 @@ TOOL_CATEGORIES: Dict[str, Dict[str, str]] = {
             "crash windows and hypothetical scenarios, and measure "
             "liquidity-adjusted VaR. Implement it: size a position "
             "(ATR/Kelly), check capacity against each name's traded volume "
-            "and the liquidity of each holding, schedule a rebalance, and "
+            "and the liquidity of each holding, find the cost-aware trade "
+            "from the weights held (trading costs and a turnover cap in the "
+            "objective, a no-trade band per name), schedule a rebalance, and "
             "itemize one trade's cost."
         ),
     },

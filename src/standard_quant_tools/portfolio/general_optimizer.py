@@ -430,6 +430,27 @@ class _Duals:
     row_upper: np.ndarray
 
 
+@dataclass(frozen=True)
+class _Kinks:
+    """
+    Coordinates held at a kink of a convex piecewise-linear term: a trading
+    cost kappa_i |x_i - x0_i| at the current weight, or an absolute cap's
+    term at its centre.
+
+    A coordinate held at a kink is fixed there, but its multiplier z_i is
+    not one-signed as at a bound: the subgradient of |.| at its kink is the
+    whole interval [-1, 1], so the condition is |z_i| <= `width`_i plus,
+    for every absolute row whose kink this is, that row's multiplier (its
+    entry of `row_width`, an n x rows matrix of 0s and 1s). `point` is the
+    kink, which the coordinate must equal.
+    """
+
+    held: np.ndarray
+    point: np.ndarray
+    width: np.ndarray
+    row_width: np.ndarray
+
+
 def _certify(
     prog: _Programme,
     x: np.ndarray,
@@ -437,6 +458,7 @@ def _certify(
     gradient_scale: np.ndarray,
     active: Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = None,
     caps: Sequence[_Cap] = (),
+    kinks: Optional[_Kinks] = None,
 ) -> Tuple[Certificate, _Duals]:
     """
     The KKT residuals of `x` for `prog` with the caps' multipliers given.
@@ -450,6 +472,10 @@ def _certify(
     residual is computed from `x` and the problem's own data. A wrong
     classification shows as a residual: a variable called fixed that is
     not at its bound has a multiplier times a nonzero slack.
+
+    `kinks` names coordinates held at a kink of a piecewise-linear term
+    (see `_Kinks`); the gradient there excludes that term, whose subgradient
+    the interval check accounts for. Without it nothing below changes.
     """
     n = x.size
     rows = prog.rows
@@ -479,7 +505,12 @@ def _certify(
         at_lo, at_hi, row_lo, row_hi = (np.asarray(a, dtype=bool) for a in active)
         at_lo = at_lo & ~pinned
         at_hi = at_hi & ~pinned & ~at_lo
-    fixed = at_lo | at_hi | pinned
+    held = np.zeros(n, dtype=bool)
+    if kinks is not None:
+        held = np.asarray(kinks.held, dtype=bool) & ~pinned
+        at_lo = at_lo & ~held
+        at_hi = at_hi & ~held
+    fixed = at_lo | at_hi | pinned | held
     free = ~fixed
     equal = np.array([r.equality for r in rows], dtype=bool)
     engaged = equal | row_lo | row_hi
@@ -509,6 +540,11 @@ def _certify(
     scale = g_scale.copy()
     for j in idx:
         scale += abs(multipliers[j]) * np.abs(rows[j].coef)
+    if held.any():
+        assert kinks is not None
+        scale = scale + np.where(
+            held, kinks.width + kinks.row_width @ np.abs(multipliers), 0.0
+        )
     scale_g = max(float(np.max(scale)) if n else 0.0, np.finfo(float).tiny)
 
     z = np.where(fixed, total, 0.0)
@@ -528,6 +564,10 @@ def _certify(
             dual = max(dual, multipliers[j] * width)
     for cap in caps:
         dual = max(dual, -cap.nu * float(np.max(cap.gradient_scale(x)) or 0.0))
+    if held.any():
+        assert kinks is not None
+        half = kinks.width + kinks.row_width @ np.maximum(multipliers, 0.0)
+        dual = max(dual, float(np.max(np.where(held, np.abs(z) - half, 0.0))))
     dual_feasibility = dual / scale_g
 
     primal = (
@@ -561,6 +601,10 @@ def _certify(
     for cap in caps:
         if cap.nu != 0.0:
             comp = max(comp, cap.nu * abs(cap.limit**2 - cap.value(x)))
+    if held.any():
+        assert kinks is not None
+        off = np.where(held, np.abs(z) * np.abs(x - kinks.point), 0.0)
+        comp = max(comp, float(np.max(off)))
     complementarity = comp / (scale_g * scale_x)
 
     certificate = Certificate(
@@ -739,6 +783,54 @@ def _describe_row(row: _Row, side: str) -> str:
     return f"{what} at most {row.upper:g}"
 
 
+@dataclass(frozen=True)
+class _AbsoluteRow:
+    """
+    A cap on a sum of absolute values, sum_i |x_i - centre_i| <= limit: the
+    turnover from the current weights (centre = those weights) or the gross
+    weight (centre = 0). It is not a linear row, so the feasibility
+    programme gives it n auxiliary variables t_i with t_i >= x_i - centre_i
+    and t_i >= centre_i - x_i -- rows that always hold for a large enough t
+    and so carry no elastic -- and the cap itself is the linear row
+    sum t <= limit, which does.
+    """
+
+    kind: str  # "max_turnover" | "max_gross"
+    centre: np.ndarray
+    limit: float
+
+    def value(self, x: np.ndarray) -> float:
+        return float(np.sum(np.abs(x - self.centre)))
+
+    def describe(self) -> str:
+        if self.kind == "max_turnover":
+            return (
+                f"the turnover cap (the traded weights sum to at most {self.limit:g})"
+            )
+        return f"the gross cap (the absolute weights sum to at most {self.limit:g})"
+
+
+def _absolute_rows(
+    absolute: Sequence[_AbsoluteRow], n: int, width: int
+) -> Tuple[np.ndarray, np.ndarray]:
+    """The rows t_i >= +-(x_i - centre_i) of every absolute cap, as
+    A_ub z <= b_ub over z = (x, t_1, ..., t_k, ...) of `width` columns,
+    each cap's t a block of n after x."""
+    A = np.zeros((2 * n * len(absolute), width))
+    b = np.zeros(2 * n * len(absolute))
+    eye = np.eye(n)
+    for k, cap in enumerate(absolute):
+        top = 2 * n * k
+        block = slice(n + n * k, n + n * (k + 1))
+        A[top : top + n, :n] = eye
+        A[top : top + n, block] = -eye
+        b[top : top + n] = cap.centre
+        A[top + n : top + 2 * n, :n] = -eye
+        A[top + n : top + 2 * n, block] = -eye
+        b[top + n : top + 2 * n] = -cap.centre
+    return A, b
+
+
 def _feasible_point(
     names: Sequence[str],
     rows: Sequence[_Row],
@@ -746,6 +838,9 @@ def _feasible_point(
     upper: np.ndarray,
     objective: Optional[np.ndarray] = None,
     objective_cap: Optional[float] = None,
+    *,
+    absolute: Sequence[_AbsoluteRow] = (),
+    who: str = _WHO,
 ) -> Tuple[np.ndarray, Optional[float]]:
     """
     A point satisfying every row and bound, from the least total violation
@@ -756,11 +851,16 @@ def _feasible_point(
     the feasible set with objective'x <= `objective_cap` (so it cannot be
     unbounded) and returns its value too: max_sharpe's check that some
     portfolio has a positive excess return.
+
+    `absolute` adds turnover and gross caps (see `_AbsoluteRow`), each an
+    elastic row of the same programme; with none, the programme is the one
+    above to the last coefficient.
     """
     from scipy.optimize import linprog
 
+    if objective is not None and absolute:
+        raise AssertionError("the excess-return programme takes no absolute caps")
     n = len(names)
-    m = len(rows)
     eq = [j for j, r in enumerate(rows) if r.equality]
     upper_rows = [
         j for j, r in enumerate(rows) if not r.equality and math.isfinite(r.upper)
@@ -768,21 +868,25 @@ def _feasible_point(
     lower_rows = [
         j for j, r in enumerate(rows) if not r.equality and math.isfinite(r.lower)
     ]
-    # variables: x (n), then per equality row two elastics (+, -), then one
-    # per inequality side
-    n_el = 2 * len(eq) + len(upper_rows) + len(lower_rows)
-    cost = np.concatenate([np.zeros(n), np.ones(n_el)])
-    A_eq = np.zeros((len(eq), n + n_el))
+    # variables: x (n), then each absolute cap's t (n each), then per
+    # equality row two elastics (+, -), then one per inequality side and
+    # one per absolute cap
+    n_aux = n * len(absolute)
+    n_el = 2 * len(eq) + len(upper_rows) + len(lower_rows) + len(absolute)
+    width = n + n_aux + n_el
+    cost = np.concatenate([np.zeros(n + n_aux), np.ones(n_el)])
+    A_eq = np.zeros((len(eq), width))
     b_eq = np.zeros(len(eq))
-    col = n
+    col = n + n_aux
     for i, j in enumerate(eq):
         A_eq[i, :n] = rows[j].coef
         A_eq[i, col] = 1.0
         A_eq[i, col + 1] = -1.0
         b_eq[i] = rows[j].lower
         col += 2
-    A_ub = np.zeros((len(upper_rows) + len(lower_rows), n + n_el))
-    b_ub = np.zeros(len(upper_rows) + len(lower_rows))
+    n_sides = len(upper_rows) + len(lower_rows)
+    A_ub = np.zeros((n_sides + len(absolute), width))
+    b_ub = np.zeros(n_sides + len(absolute))
     for i, j in enumerate(upper_rows):
         A_ub[i, :n] = rows[j].coef
         A_ub[i, col] = -1.0
@@ -794,13 +898,26 @@ def _feasible_point(
         A_ub[k, col] = -1.0
         b_ub[k] = -rows[j].lower
         col += 1
-    bounds = [
-        (
-            None if not math.isfinite(lo) else float(lo),
-            None if not math.isfinite(hi) else float(hi),
-        )
-        for lo, hi in zip(lower, upper)
-    ] + [(0.0, None)] * n_el
+    for k, cap in enumerate(absolute):
+        A_ub[n_sides + k, n + n * k : n + n * (k + 1)] = 1.0
+        A_ub[n_sides + k, col] = -1.0
+        b_ub[n_sides + k] = cap.limit
+        col += 1
+    if absolute:
+        A_abs, b_abs = _absolute_rows(absolute, n, width)
+        A_ub = np.vstack([A_ub, A_abs])
+        b_ub = np.concatenate([b_ub, b_abs])
+    bounds = (
+        [
+            (
+                None if not math.isfinite(lo) else float(lo),
+                None if not math.isfinite(hi) else float(hi),
+            )
+            for lo, hi in zip(lower, upper)
+        ]
+        + [(None, None)] * n_aux
+        + [(0.0, None)] * n_el
+    )
     result = linprog(
         cost,
         A_ub=A_ub if A_ub.shape[0] else None,
@@ -812,19 +929,29 @@ def _feasible_point(
     )
     if result.status != 0:
         raise ValidationError(
-            f"{_WHO}: the feasibility programme did not finish ({result.message}). "
+            f"{who}: the feasibility programme did not finish ({result.message}). "
             "Check the bounds and limits for values far outside the scale of "
             "portfolio weights."
         )
     scale = 1.0 + max(
         [abs(r.lower) for r in rows if math.isfinite(r.lower)]
         + [abs(r.upper) for r in rows if math.isfinite(r.upper)]
+        + [abs(cap.limit) for cap in absolute]
         + [0.0]
     )
     if result.fun > _LP_FEASIBLE * scale:
         raise ValidationError(
             _infeasible_message(
-                names, rows, lower, upper, result, eq, upper_rows, lower_rows
+                names,
+                rows,
+                lower,
+                upper,
+                result,
+                eq,
+                upper_rows,
+                lower_rows,
+                absolute=absolute,
+                who=who,
             )
         )
     x = np.clip(np.asarray(result.x[:n], dtype=float), lower, upper)
@@ -850,10 +977,107 @@ def _feasible_point(
     )
     if best.status != 0:
         raise ValidationError(
-            f"{_WHO}: the programme for the highest excess return did not "
+            f"{who}: the programme for the highest excess return did not "
             f"finish ({best.message})."
         )
     return np.clip(np.asarray(best.x, dtype=float), lower, upper), float(-best.fun)
+
+
+def _least_absolute_point(
+    rows: Sequence[_Row],
+    lower: np.ndarray,
+    upper: np.ndarray,
+    absolute: Sequence[_AbsoluteRow],
+    centre: np.ndarray,
+    who: str = _WHO,
+) -> Optional[Tuple[np.ndarray, float]]:
+    """
+    The point of the constraint set -- rows, bounds and absolute caps --
+    nearest `centre` in the sum of absolute differences, and that least
+    sum: from the current weights, the smallest trade that satisfies every
+    constraint. None when the set is empty; `_feasible_point` then says
+    which constraints conflict. The matrices are built sparse: each
+    absolute block is two diagonals, and handed over dense they cost more
+    to convert than HiGHS takes to solve.
+    """
+    from scipy import sparse
+    from scipy.optimize import linprog
+
+    n = lower.size
+    blocks = list(absolute) + [_AbsoluteRow("least", centre, math.inf)]
+    width = n + n * len(blocks)
+    r_idx: List[np.ndarray] = []
+    c_idx: List[np.ndarray] = []
+    vals: List[np.ndarray] = []
+    b_ub: List[np.ndarray] = []
+    row = 0
+    for r in rows:
+        if r.equality:
+            continue
+        nz = np.flatnonzero(r.coef)
+        for sign, limit in ((1.0, r.upper), (-1.0, r.lower)):
+            if math.isfinite(limit):
+                r_idx.append(np.full(nz.size, row))
+                c_idx.append(nz)
+                vals.append(sign * r.coef[nz])
+                b_ub.append(np.array([sign * limit]))
+                row += 1
+    for k, cap in enumerate(absolute):
+        r_idx.append(np.full(n, row))
+        c_idx.append(n + n * k + np.arange(n))
+        vals.append(np.ones(n))
+        b_ub.append(np.array([cap.limit]))
+        row += 1
+    ar = np.arange(n)
+    for k, block in enumerate(blocks):
+        t = n + n * k + ar
+        # x - t <= centre, then -x - t <= -centre
+        r_idx += [row + ar, row + ar, row + n + ar, row + n + ar]
+        c_idx += [ar, t, ar, t]
+        vals += [np.ones(n), -np.ones(n), -np.ones(n), -np.ones(n)]
+        b_ub += [block.centre, -block.centre]
+        row += 2 * n
+    A_ub = sparse.csr_matrix(
+        (np.concatenate(vals), (np.concatenate(r_idx), np.concatenate(c_idx))),
+        shape=(row, width),
+    )
+    equalities = [r for r in rows if r.equality]
+    A_eq = None
+    b_eq = None
+    if equalities:
+        dense = np.zeros((len(equalities), width))
+        for i, r in enumerate(equalities):
+            dense[i, :n] = r.coef
+        A_eq = sparse.csr_matrix(dense)
+        b_eq = np.array([r.lower for r in equalities], dtype=float)
+    cost = np.zeros(width)
+    cost[width - n :] = 1.0
+    bounds = [
+        (
+            None if not math.isfinite(lo) else float(lo),
+            None if not math.isfinite(hi) else float(hi),
+        )
+        for lo, hi in zip(lower, upper)
+    ] + [(None, None)] * (n * len(blocks))
+    result = linprog(
+        cost,
+        A_ub=A_ub,
+        b_ub=np.concatenate(b_ub),
+        A_eq=A_eq,
+        b_eq=b_eq,
+        bounds=bounds,
+        method="highs",
+    )
+    if result.status == 2:
+        return None
+    if result.status != 0:
+        raise ValidationError(
+            f"{who}: the programme for the least trade into the constraints "
+            f"did not finish ({result.message}). Check the bounds and limits "
+            "for values far outside the scale of portfolio weights."
+        )
+    x = np.clip(np.asarray(result.x[:n], dtype=float), lower, upper)
+    return x, float(result.fun)
 
 
 def _infeasible_message(
@@ -865,6 +1089,9 @@ def _infeasible_message(
     eq: Sequence[int],
     upper_rows: Sequence[int],
     lower_rows: Sequence[int],
+    *,
+    absolute: Sequence[_AbsoluteRow] = (),
+    who: str = _WHO,
 ) -> str:
     """The refusal: the constraints with a nonzero price in the least-
     violation programme, which together are a proof that no portfolio
@@ -886,6 +1113,10 @@ def _infeasible_message(
         for i, j in enumerate(lower_rows):
             if abs(ub_marg[len(upper_rows) + i]) > small:
                 involved.append(_describe_row(rows[j], "lower"))
+        n_sides = len(upper_rows) + len(lower_rows)
+        for k, cap in enumerate(absolute):
+            if abs(ub_marg[n_sides + k]) > small:
+                involved.append(cap.describe())
     n = len(names)
     bound_lo = [
         f"{names[i]} >= {lower[i]:g}"
@@ -909,7 +1140,7 @@ def _infeasible_message(
         )
     conflict = "; ".join(involved) if involved else "the constraints as a whole"
     return (
-        f"{_WHO}: no portfolio satisfies these constraints together. They "
+        f"{who}: no portfolio satisfies these constraints together. They "
         f"cannot all hold: {conflict}. The closest any portfolio inside the "
         f"bounds comes is a total violation of {float(result.fun):.6g} (the "
         "least-violation programme's optimum; those are the constraints its "
@@ -921,15 +1152,20 @@ def _infeasible_message(
 # ── inputs ───────────────────────────────────────────────────────────────
 
 
+#: Each input helper below names the function it refuses for (`who`), so
+#: another entry point that shares these inputs -- the rebalance optimizer
+#: -- refuses in its own name with the same words.
+
+
 def _named_covariance(
-    covariance: Any, assets: Optional[Sequence[str]]
+    covariance: Any, assets: Optional[Sequence[str]], who: str = _WHO
 ) -> Tuple[List[str], np.ndarray]:
     if isinstance(covariance, pd.DataFrame):
         names = [str(c) for c in covariance.columns]
         index = [str(i) for i in covariance.index]
         if index != names:
             raise ValidationError(
-                f"{_WHO}: the covariance's rows and columns name different "
+                f"{who}: the covariance's rows and columns name different "
                 f"assets or orders ({index[:_SHOWN]} against {names[:_SHOWN]}). "
                 "A covariance is square over one list of assets."
             )
@@ -937,7 +1173,7 @@ def _named_covariance(
             order = [str(a) for a in assets]
             if sorted(order) != sorted(names):
                 raise ValidationError(
-                    f"{_WHO}: assets {order[:_SHOWN]} must name exactly the "
+                    f"{who}: assets {order[:_SHOWN]} must name exactly the "
                     f"covariance's assets {names[:_SHOWN]}."
                 )
             covariance = covariance.loc[order, order]
@@ -946,7 +1182,7 @@ def _named_covariance(
     else:
         if assets is None:
             raise ValidationError(
-                f"{_WHO}: an unnamed covariance needs `assets` to name its "
+                f"{who}: an unnamed covariance needs `assets` to name its "
                 "rows; every weight in the answer is keyed by name."
             )
         names = [str(a) for a in assets]
@@ -954,12 +1190,12 @@ def _named_covariance(
     if len(set(names)) != len(names):
         repeated = sorted({a for a in names if names.count(a) > 1})
         raise ValidationError(
-            f"{_WHO}: the assets repeat {repeated[:_SHOWN]}; each is one row "
+            f"{who}: the assets repeat {repeated[:_SHOWN]}; each is one row "
             "and column of the covariance."
         )
     if matrix.ndim != 2 or matrix.shape != (len(names), len(names)):
         raise ValidationError(
-            f"{_WHO}: the covariance has shape {matrix.shape} for "
+            f"{who}: the covariance has shape {matrix.shape} for "
             f"{len(names)} assets; it must be square over them."
         )
     return names, matrix
@@ -970,10 +1206,13 @@ def _vector(
     names: Sequence[str],
     field_name: str,
     missing: Optional[float],
+    who: str = _WHO,
+    absent_hint: str = "a missing forecast is not zero",
 ) -> np.ndarray:
     """A per-asset vector from a scalar, a name-keyed map or a sequence in
     asset order. In a map, an unknown name is refused and a missing one
-    takes `missing` -- or is refused when `missing` is None."""
+    takes `missing` -- or is refused when `missing` is None, with
+    `absent_hint` saying why a gap is not filled."""
     n = len(names)
     if isinstance(values, (int, float, np.floating, np.integer)) and not isinstance(
         values, bool
@@ -984,7 +1223,7 @@ def _vector(
         unknown = [str(k) for k in mapping if str(k) not in set(names)]
         if unknown:
             raise ValidationError(
-                f"{_WHO}: {field_name} names {unknown[:_SHOWN]}, which are not "
+                f"{who}: {field_name} names {unknown[:_SHOWN]}, which are not "
                 "assets of the covariance. A value for an asset that is not "
                 "in the problem is a typo or a different universe."
             )
@@ -992,22 +1231,26 @@ def _vector(
         absent = [a for a in names if a not in lookup]
         if absent and missing is None:
             raise ValidationError(
-                f"{_WHO}: {field_name} has no value for {absent[:_SHOWN]}"
+                f"{who}: {field_name} has no value for {absent[:_SHOWN]}"
                 + (f" and {len(absent) - _SHOWN} more" if len(absent) > _SHOWN else "")
-                + ". Give every asset one; a missing forecast is not zero."
+                + f". Give every asset one; {absent_hint}."
             )
         out = np.array([float(lookup.get(a, missing)) for a in names])
     else:
         out = np.asarray(values, dtype=float).reshape(-1)
         if out.size != n:
             raise ValidationError(
-                f"{_WHO}: {field_name} has {out.size} values for {n} assets."
+                f"{who}: {field_name} has {out.size} values for {n} assets."
             )
     return out
 
 
 def _finite(
-    values: np.ndarray, names: Sequence[str], field_name: str, allow_inf: bool = False
+    values: np.ndarray,
+    names: Sequence[str],
+    field_name: str,
+    allow_inf: bool = False,
+    who: str = _WHO,
 ) -> None:
     bad = [
         names[i]
@@ -1016,31 +1259,36 @@ def _finite(
     ]
     if bad:
         raise ValidationError(
-            f"{_WHO}: {field_name} is not finite at {bad[:_SHOWN]}; every "
+            f"{who}: {field_name} is not finite at {bad[:_SHOWN]}; every "
             "entry must be a finite number."
         )
 
 
 def _scalar(
-    value: Any, field_name: str, *, positive: bool = False, allow_zero: bool = True
+    value: Any,
+    field_name: str,
+    *,
+    positive: bool = False,
+    allow_zero: bool = True,
+    who: str = _WHO,
 ) -> float:
     if isinstance(value, bool) or not isinstance(
         value, (int, float, np.floating, np.integer)
     ):
-        raise ValidationError(f"{_WHO}: {field_name} must be a number, got {value!r}.")
+        raise ValidationError(f"{who}: {field_name} must be a number, got {value!r}.")
     number = float(value)
     if not math.isfinite(number):
-        raise ValidationError(f"{_WHO}: {field_name} must be finite, got {value!r}.")
+        raise ValidationError(f"{who}: {field_name} must be finite, got {value!r}.")
     if positive and (number < 0 or (number == 0 and not allow_zero)):
         raise ValidationError(
-            f"{_WHO}: {field_name}={number:g} must be "
+            f"{who}: {field_name}={number:g} must be "
             f"{'positive' if not allow_zero else 'non-negative'}."
         )
     return number
 
 
 def _loadings_matrix(
-    factor_loadings: Any, names: Sequence[str]
+    factor_loadings: Any, names: Sequence[str], who: str = _WHO
 ) -> Tuple[List[str], np.ndarray]:
     """Assets x factors, every asset with a loading on every factor."""
     if isinstance(factor_loadings, pd.DataFrame):
@@ -1057,13 +1305,13 @@ def _loadings_matrix(
     unknown = [a for a in frame.index if a not in set(names)]
     if unknown:
         raise ValidationError(
-            f"{_WHO}: factor_loadings names {unknown[:_SHOWN]}, which are not "
+            f"{who}: factor_loadings names {unknown[:_SHOWN]}, which are not "
             "assets of the covariance."
         )
     missing_assets = [a for a in names if a not in set(frame.index)]
     if missing_assets:
         raise ValidationError(
-            f"{_WHO}: factor_loadings has no row for {missing_assets[:_SHOWN]}"
+            f"{who}: factor_loadings has no row for {missing_assets[:_SHOWN]}"
             + (
                 f" and {len(missing_assets) - _SHOWN} more"
                 if len(missing_assets) > _SHOWN
@@ -1078,13 +1326,13 @@ def _loadings_matrix(
     if gaps.to_numpy().any():
         pairs = [f"{a}/{f}" for a in gaps.index for f in gaps.columns if gaps.at[a, f]]
         raise ValidationError(
-            f"{_WHO}: {len(pairs)} asset/factor loading(s) are missing: "
+            f"{who}: {len(pairs)} asset/factor loading(s) are missing: "
             f"{pairs[:_SHOWN]}. Give every asset a loading on every factor "
             "(0.0 where it genuinely has none) -- absent is not zero."
         )
     values = frame.to_numpy(dtype=float)
     if not np.all(np.isfinite(values)):
-        raise ValidationError(f"{_WHO}: factor_loadings contains a non-finite loading.")
+        raise ValidationError(f"{who}: factor_loadings contains a non-finite loading.")
     return [str(c) for c in frame.columns], values
 
 
@@ -1093,23 +1341,24 @@ def _limit_map(
     known: Sequence[str],
     field_name: str,
     what: str,
+    who: str = _WHO,
 ) -> Dict[str, float]:
     if not values:
         return {}
     unknown = [str(k) for k in values if str(k) not in set(known)]
     if unknown:
         raise ValidationError(
-            f"{_WHO}: {field_name} names {unknown[:_SHOWN]}, which are not "
+            f"{who}: {field_name} names {unknown[:_SHOWN]}, which are not "
             f"{what}. Known: {list(known)[:_SHOWN]}."
         )
     out = {}
     for k, v in values.items():
-        out[str(k)] = _scalar(v, f"{field_name}[{k!r}]")
+        out[str(k)] = _scalar(v, f"{field_name}[{k!r}]", who=who)
     return out
 
 
 def _require_positive_definite(
-    cov: np.ndarray, names: Sequence[str], free: np.ndarray
+    cov: np.ndarray, names: Sequence[str], free: np.ndarray, who: str = _WHO
 ) -> Tuple[float, List[str]]:
     """The covariance over the assets that can move must be positive
     definite; its condition number, and a warning above 1e10."""
@@ -1121,7 +1370,7 @@ def _require_positive_definite(
     floor = largest * max(sub.shape[0], 1) * float(np.finfo(float).eps)
     if not largest > 0.0 or smallest <= floor:
         raise ValidationError(
-            f"{_WHO}: the covariance of the {sub.shape[0]} assets free to move "
+            f"{who}: the covariance of the {sub.shape[0]} assets free to move "
             f"is not positive definite (smallest eigenvalue {smallest:.3e}, "
             f"largest {largest:.3e}). Some combination of them has no "
             "variance, so the optimizer would find a riskless-looking "
@@ -1142,7 +1391,9 @@ def _require_positive_definite(
     return condition, warnings
 
 
-def _require_independent_equalities(rows: Sequence[_Row], free: np.ndarray) -> None:
+def _require_independent_equalities(
+    rows: Sequence[_Row], free: np.ndarray, who: str = _WHO
+) -> None:
     """
     Refuse an equality limit the others already imply.
 
@@ -1164,13 +1415,136 @@ def _require_independent_equalities(rows: Sequence[_Row], free: np.ndarray) -> N
                     _describe_row(r, "equal") for r in equalities[: len(kept)]
                 ] or ["the assets' fixed weights"]
                 raise ValidationError(
-                    f"{_WHO}: {_describe_row(row, 'equal')} is implied by "
+                    f"{who}: {_describe_row(row, 'equal')} is implied by "
                     f"{'; '.join(earlier)} on the assets free to move: the "
                     "rows are linearly dependent, so it adds no constraint "
                     "and its shadow price is not determined. Drop it, or "
                     "state it as a range (min below max)."
                 )
             kept.append(row.coef[free])
+
+
+def _parse_bounds(
+    names: Sequence[str], lower_bounds: Any, upper_bounds: Any, who: str = _WHO
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Each asset's lower and upper bound (0 and no cap when left out),
+    refused when infinite the wrong way or crossed."""
+    n = len(names)
+    lower = _vector(
+        0.0 if lower_bounds is None else lower_bounds,
+        names,
+        "lower_bounds",
+        0.0,
+        who,
+    )
+    upper = _vector(
+        math.inf if upper_bounds is None else upper_bounds,
+        names,
+        "upper_bounds",
+        math.inf,
+        who,
+    )
+    _finite(lower, names, "lower_bounds", allow_inf=True, who=who)
+    _finite(upper, names, "upper_bounds", allow_inf=True, who=who)
+    if np.any(lower == math.inf) or np.any(upper == -math.inf):
+        raise ValidationError(
+            f"{who}: a lower bound of +inf or an upper bound of -inf admits no weight."
+        )
+    crossed = [names[i] for i in range(n) if lower[i] > upper[i]]
+    if crossed:
+        raise ValidationError(
+            f"{who}: the lower bound is above the upper bound for "
+            f"{crossed[:_SHOWN]}; no weight lies between them."
+        )
+    return lower, upper
+
+
+def _constraint_rows(
+    names: Sequence[str],
+    *,
+    budget: float,
+    budget_type: str,
+    groups: Optional[Mapping[str, Sequence[str]]],
+    group_min: Optional[Mapping[str, float]],
+    group_max: Optional[Mapping[str, float]],
+    factor_loadings: Any,
+    exposure_min: Optional[Mapping[str, float]],
+    exposure_max: Optional[Mapping[str, float]],
+    who: str = _WHO,
+) -> Tuple[List[_Row], Dict[str, np.ndarray], List[str], np.ndarray]:
+    """The linear rows -- the budget, the groups, the exposures -- with
+    each group's membership vector and the factor loadings, for reporting
+    group totals and exposures at the answer."""
+    n = len(names)
+    rows: List[_Row] = []
+    ones = np.ones(n)
+    if budget_type == "equal":
+        rows.append(_Row("budget", None, ones, budget, budget))
+    else:
+        rows.append(_Row("budget", None, ones, -math.inf, budget))
+    group_names: List[str] = []
+    group_rows: Dict[str, np.ndarray] = {}
+    if groups:
+        position = {a: i for i, a in enumerate(names)}
+        for gname, members in groups.items():
+            gname = str(gname)
+            members = [str(a) for a in members]
+            if not members:
+                raise ValidationError(f"{who}: group {gname!r} has no members.")
+            unknown = [a for a in members if a not in position]
+            if unknown:
+                raise ValidationError(
+                    f"{who}: group {gname!r} names {unknown[:_SHOWN]}, which "
+                    "are not assets of the covariance."
+                )
+            repeated = sorted({a for a in members if members.count(a) > 1})
+            if repeated:
+                raise ValidationError(
+                    f"{who}: group {gname!r} lists {repeated[:_SHOWN]} more "
+                    "than once; a member counts once in the group's sum."
+                )
+            coef = np.zeros(n)
+            coef[[position[a] for a in members]] = 1.0
+            group_names.append(gname)
+            group_rows[gname] = coef
+    gmin = _limit_map(group_min, group_names, "group_min", "groups", who)
+    gmax = _limit_map(group_max, group_names, "group_max", "groups", who)
+    for gname in group_names:
+        lo_g = gmin.get(gname, -math.inf)
+        hi_g = gmax.get(gname, math.inf)
+        if lo_g > hi_g:
+            raise ValidationError(
+                f"{who}: group {gname!r} has group_min {lo_g:g} above group_max {hi_g:g}."
+            )
+        if math.isfinite(lo_g) or math.isfinite(hi_g):
+            rows.append(_Row("group", gname, group_rows[gname], lo_g, hi_g))
+    factor_names: List[str] = []
+    loadings = np.zeros((n, 0))
+    if factor_loadings is not None:
+        factor_names, loadings = _loadings_matrix(factor_loadings, names, who)
+    emin = _limit_map(
+        exposure_min, factor_names, "exposure_min", "factors of factor_loadings", who
+    )
+    emax = _limit_map(
+        exposure_max, factor_names, "exposure_max", "factors of factor_loadings", who
+    )
+    if (emin or emax) and factor_loadings is None:
+        raise ValidationError(f"{who}: exposure limits need factor_loadings.")
+    for k, fname in enumerate(factor_names):
+        lo_f = emin.get(fname, -math.inf)
+        hi_f = emax.get(fname, math.inf)
+        if lo_f > hi_f:
+            raise ValidationError(
+                f"{who}: factor {fname!r} has exposure_min {lo_f:g} above exposure_max {hi_f:g}."
+            )
+        if math.isfinite(lo_f) or math.isfinite(hi_f):
+            rows.append(_Row("exposure", fname, loadings[:, k].copy(), lo_f, hi_f))
+    if len(rows) - 1 > MAX_CONSTRAINT_ROWS:
+        raise ValidationError(
+            f"{who}: {len(rows) - 1} group and exposure limits; at most "
+            f"{MAX_CONSTRAINT_ROWS} are taken."
+        )
+    return rows, group_rows, factor_names, loadings
 
 
 # ── the objectives ───────────────────────────────────────────────────────
@@ -1311,6 +1685,21 @@ def _value(spec: _CapSpec, w: np.ndarray) -> float:
     return float(d @ spec.S @ d)
 
 
+def _cap_floor_refusal(
+    spec: _CapSpec, lowest: float, who: str = _WHO
+) -> ValidationError:
+    """The refusal of a cap below `lowest`, the least value of its squared
+    quantity inside the other constraints."""
+    what = "volatility" if spec.kind == "max_volatility" else "tracking error"
+    return ValidationError(
+        f"{who}: {spec.kind}={spec.limit:g} cannot be met: the lowest "
+        f"{what} any portfolio inside the other constraints reaches is "
+        f"{math.sqrt(lowest):.6g}. Raise the cap to at least that, or "
+        "loosen the constraints that hold the "
+        f"{what} up."
+    )
+
+
 # ── the entry point ──────────────────────────────────────────────────────
 
 
@@ -1438,27 +1827,7 @@ def _optimize(
     if benchmark_weights is not None:
         bench = _vector(benchmark_weights, names, "benchmark_weights", 0.0)
         _finite(bench, names, "benchmark_weights")
-    lower = _vector(
-        0.0 if lower_bounds is None else lower_bounds, names, "lower_bounds", 0.0
-    )
-    upper = _vector(
-        math.inf if upper_bounds is None else upper_bounds,
-        names,
-        "upper_bounds",
-        math.inf,
-    )
-    _finite(lower, names, "lower_bounds", allow_inf=True)
-    _finite(upper, names, "upper_bounds", allow_inf=True)
-    if np.any(lower == math.inf) or np.any(upper == -math.inf):
-        raise ValidationError(
-            f"{_WHO}: a lower bound of +inf or an upper bound of -inf admits no weight."
-        )
-    crossed = [names[i] for i in range(n) if lower[i] > upper[i]]
-    if crossed:
-        raise ValidationError(
-            f"{_WHO}: the lower bound is above the upper bound for "
-            f"{crossed[:_SHOWN]}; no weight lies between them."
-        )
+    lower, upper = _parse_bounds(names, lower_bounds, upper_bounds)
     risk_aversion = _scalar(risk_aversion, "risk_aversion")
     if objective in ("max_utility", "max_active_utility") and not risk_aversion > 0:
         raise ValidationError(
@@ -1525,75 +1894,17 @@ def _optimize(
                 "sets it, or a volatility cap."
             )
 
-    # Rows: the budget, the groups, the exposures.
-    rows: List[_Row] = []
-    ones = np.ones(n)
-    if budget_type == "equal":
-        rows.append(_Row("budget", None, ones, budget, budget))
-    else:
-        rows.append(_Row("budget", None, ones, -math.inf, budget))
-    group_names: List[str] = []
-    group_rows: Dict[str, np.ndarray] = {}
-    if groups:
-        position = {a: i for i, a in enumerate(names)}
-        for gname, members in groups.items():
-            gname = str(gname)
-            members = [str(a) for a in members]
-            if not members:
-                raise ValidationError(f"{_WHO}: group {gname!r} has no members.")
-            unknown = [a for a in members if a not in position]
-            if unknown:
-                raise ValidationError(
-                    f"{_WHO}: group {gname!r} names {unknown[:_SHOWN]}, which "
-                    "are not assets of the covariance."
-                )
-            repeated = sorted({a for a in members if members.count(a) > 1})
-            if repeated:
-                raise ValidationError(
-                    f"{_WHO}: group {gname!r} lists {repeated[:_SHOWN]} more "
-                    "than once; a member counts once in the group's sum."
-                )
-            coef = np.zeros(n)
-            coef[[position[a] for a in members]] = 1.0
-            group_names.append(gname)
-            group_rows[gname] = coef
-    gmin = _limit_map(group_min, group_names, "group_min", "groups")
-    gmax = _limit_map(group_max, group_names, "group_max", "groups")
-    for gname in group_names:
-        lo_g = gmin.get(gname, -math.inf)
-        hi_g = gmax.get(gname, math.inf)
-        if lo_g > hi_g:
-            raise ValidationError(
-                f"{_WHO}: group {gname!r} has group_min {lo_g:g} above group_max {hi_g:g}."
-            )
-        if math.isfinite(lo_g) or math.isfinite(hi_g):
-            rows.append(_Row("group", gname, group_rows[gname], lo_g, hi_g))
-    factor_names: List[str] = []
-    loadings = np.zeros((n, 0))
-    if factor_loadings is not None:
-        factor_names, loadings = _loadings_matrix(factor_loadings, names)
-    emin = _limit_map(
-        exposure_min, factor_names, "exposure_min", "factors of factor_loadings"
+    rows, group_rows, factor_names, loadings = _constraint_rows(
+        names,
+        budget=budget,
+        budget_type=budget_type,
+        groups=groups,
+        group_min=group_min,
+        group_max=group_max,
+        factor_loadings=factor_loadings,
+        exposure_min=exposure_min,
+        exposure_max=exposure_max,
     )
-    emax = _limit_map(
-        exposure_max, factor_names, "exposure_max", "factors of factor_loadings"
-    )
-    if (emin or emax) and factor_loadings is None:
-        raise ValidationError(f"{_WHO}: exposure limits need factor_loadings.")
-    for k, fname in enumerate(factor_names):
-        lo_f = emin.get(fname, -math.inf)
-        hi_f = emax.get(fname, math.inf)
-        if lo_f > hi_f:
-            raise ValidationError(
-                f"{_WHO}: factor {fname!r} has exposure_min {lo_f:g} above exposure_max {hi_f:g}."
-            )
-        if math.isfinite(lo_f) or math.isfinite(hi_f):
-            rows.append(_Row("exposure", fname, loadings[:, k].copy(), lo_f, hi_f))
-    if len(rows) - 1 > MAX_CONSTRAINT_ROWS:
-        raise ValidationError(
-            f"{_WHO}: {len(rows) - 1} group and exposure limits; at most "
-            f"{MAX_CONSTRAINT_ROWS} are taken."
-        )
 
     upper_used = _drop_redundant_bounds(lower, upper, budget, budget_type)
     free_assets = np.flatnonzero(lower != upper)
@@ -1734,14 +2045,7 @@ def _with_caps(
             return unsolved(failure)
         lowest = _value(spec, floor.x)
         if lowest > spec.limit**2 * (1.0 + TOLERANCE):
-            what = "volatility" if spec.kind == "max_volatility" else "tracking error"
-            raise ValidationError(
-                f"{_WHO}: {spec.kind}={spec.limit:g} cannot be met: the lowest "
-                f"{what} any portfolio inside the other constraints reaches is "
-                f"{math.sqrt(lowest):.6g}. Raise the cap to at least that, or "
-                "loosen the constraints that hold the "
-                f"{what} up."
-            )
+            raise _cap_floor_refusal(spec, lowest)
         floors[spec.kind] = floor
 
     try:

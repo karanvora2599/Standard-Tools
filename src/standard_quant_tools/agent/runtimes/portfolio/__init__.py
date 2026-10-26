@@ -36,6 +36,11 @@ from .optimizer_tools import (  # noqa: F401
     OPTIMIZER_TOOL_DISPATCH,
     optimize_portfolio,
 )
+from .rebalance_optimizer_tools import (  # noqa: F401
+    REBALANCE_TOOL_DEFS,
+    REBALANCE_TOOL_DISPATCH,
+    optimize_rebalance,
+)
 from .risk_decomposition_tools import (  # noqa: F401
     RISK_DECOMPOSITION_TOOL_DEFS,
     RISK_DECOMPOSITION_TOOL_DISPATCH,
@@ -179,8 +184,15 @@ TOOL_CATEGORY.update(
     {name: "portfolio_risk" for name in RISK_DECOMPOSITION_TOOL_DISPATCH}
 )
 
+# The cost-aware rebalance, declared in rebalance_optimizer_tools.py and
+# registered the same way.
+TOOL_DEFS = TOOL_DEFS + REBALANCE_TOOL_DEFS
+TOOL_DISPATCH.update(REBALANCE_TOOL_DISPATCH)
+TOOL_CATEGORY.update({name: "portfolio_risk" for name in REBALANCE_TOOL_DISPATCH})
+
 __all__ = [
     "optimize_portfolio",
+    "optimize_rebalance",
     "optimize_max_diversification",
     "get_marginal_risk_contribution",
     "run_portfolio_scenarios",

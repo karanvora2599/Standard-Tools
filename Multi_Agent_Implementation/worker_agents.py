@@ -790,6 +790,15 @@ utility, under per-asset bounds, a budget, sector groups, factor-exposure
 limits and volatility or tracking-error caps. Read `certified` before
 quoting the weights, and quote a binding constraint's shadow_price when
 asked what a limit costs.
+optimize_rebalance: the trade to make from the weights the user holds, with
+trading costs in the objective -- linear_cost per unit of weight traded
+(0.0015 is 15 bps) and quadratic_cost on the trade's square -- and caps on
+turnover, gross weight and volatility, under optimize_portfolio's limits.
+Use it, not optimize_portfolio, whenever there is a current book: a name
+inside its no-trade band keeps its weight exactly (no_trade lists them).
+Quote the trades and the turnover, and target_turnover and
+distance_to_target for what the costs held back; the turnover cap's
+shadow_price is what one more unit of turnover is worth.
 get_efficient_frontier: the whole frontier in one call, through its
 certified corner portfolios when weights are long-only or capped, with the
 minimum-variance and tangency portfolios.

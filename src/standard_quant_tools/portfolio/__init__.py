@@ -13,3 +13,4 @@ from .portfolio import (
     fetch_returns_sync,
     portfolio_metrics,
 )
+from .rebalance_optimizer import optimize_rebalance

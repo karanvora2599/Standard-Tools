@@ -229,6 +229,7 @@ from standard_quant_tools.agent.runtimes.portfolio import (
     optimize_hierarchical_risk_parity,
     optimize_max_diversification,
     optimize_portfolio,
+    optimize_rebalance,
     optimize_risk_parity,
     plan_rebalance,
     run_portfolio_optimization,
