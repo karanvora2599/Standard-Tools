@@ -1,5 +1,17 @@
 # Changelog
 
+## The README's Wilder's ATR figure is the measured tie, not 28×, which no ATR measurement ever gave
+
+- **The README credited Wilder's ATR with a 28× speedup.** No row of
+  `16_performance.md` says so: `wilder_atr` measures **0.92–1.00×** against
+  warm numba, a tie. The 28× arrived when the README was condensed on
+  2026-08-23 and matches only the binomial option lattice, at 200 steps.
+  The headline figures now give the lattice its 28×, and the sentence on
+  ports that are worth less names all four the table measures at or below
+  1×: RSI, ADX and Wilder's ATR tie (0.92–1.05×) and the GARCH recursion is
+  slightly slower (0.8×), each kept for the ~200 ms–1.1 s cold start it
+  removes. The briefing already followed the table.
+
 ## A 40-page briefing describes the whole library in the documentation's theme, light and dark, with every figure measured from the code and the runtime table and tool catalog generated from the registry
 
 - **`Documentation/Standard-Quant-Tools-Briefing.pdf`**, and its dark
