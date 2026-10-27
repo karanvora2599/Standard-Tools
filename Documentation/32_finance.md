@@ -1,4 +1,11 @@
-# Finance
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/header-dark.svg">
+  <img src="assets/header-light.svg" alt="Standard Quant Tools documentation" width="100%">
+</picture>
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md)</sub>
+
+# <img src="assets/chip-32.svg" height="28" alt=""> Finance
 
 Nine tools for what holding a set of positions costs and what a stream of
 cash is worth: the financing, borrow and cash drag on the positions, the
@@ -300,3 +307,7 @@ replays: the same positions and terms give the same bits on any machine.
   carry component it implies.
 - [04_backtesting.md](04_backtesting.md) -- the same `FinancingSpec` inside
   the engines.
+
+---
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md) · by Karan Vora · Apache 2.0</sub>

@@ -1,4 +1,11 @@
-# MCP server
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/header-dark.svg">
+  <img src="assets/header-light.svg" alt="Standard Quant Tools documentation" width="100%">
+</picture>
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md)</sub>
+
+# <img src="assets/chip-18.svg" height="28" alt=""> MCP server
 
 Standard Tools over the Model Context Protocol, so any MCP client — Claude
 Desktop, Claude Code, an IDE, another agent framework — can use the library
@@ -699,3 +706,7 @@ reach a user: a library module writing to stdout, which corrupts JSON-RPC
 and surfaces as an unintelligible protocol error rather than a Python one.
 It is also what caught a handler constructing an object the SDK rejects,
 which every in-process test had missed.
+
+---
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md) · by Karan Vora · Apache 2.0</sub>

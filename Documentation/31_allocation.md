@@ -1,4 +1,11 @@
-# Capital Allocation
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/header-dark.svg">
+  <img src="assets/header-light.svg" alt="Standard Quant Tools documentation" width="100%">
+</picture>
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md)</sub>
+
+# <img src="assets/chip-31.svg" height="28" alt=""> Capital Allocation
 
 Ten tools for splitting capital ACROSS return streams -- strategies,
 sleeves, models -- rather than across tickers: putting the streams on one
@@ -370,3 +377,7 @@ it (10% by default) is listed with whether it has its own valuation.
   return uses.
 - [09_advanced_agent_tools.md](09_advanced_agent_tools.md) -- position
   sizing for one trade and the capacity report for a set of target weights.
+
+---
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md) · by Karan Vora · Apache 2.0</sub>

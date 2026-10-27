@@ -1,4 +1,11 @@
-# Technical Indicators
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/header-dark.svg">
+  <img src="assets/header-light.svg" alt="Standard Quant Tools documentation" width="100%">
+</picture>
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md)</sub>
+
+# <img src="assets/chip-02.svg" height="28" alt=""> Technical Indicators
 
 All indicators accept `pd.Series` (or `pd.DataFrame` for OHLCV-based indicators) and return `pd.Series` or `pd.DataFrame` with the same DatetimeIndex as the input — safe to assign back to any DataFrame.
 
@@ -530,3 +537,7 @@ fetches for itself.
 `get_technical_panel` lists tickers with too little history in
 `incomplete_tickers` rather than dropping them, because a ticker that could
 not be computed and one a screen legitimately excluded are different facts.
+
+---
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md) · by Karan Vora · Apache 2.0</sub>

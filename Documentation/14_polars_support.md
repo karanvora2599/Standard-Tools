@@ -1,4 +1,11 @@
-# Polars Support (optional)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/header-dark.svg">
+  <img src="assets/header-light.svg" alt="Standard Quant Tools documentation" width="100%">
+</picture>
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md)</sub>
+
+# <img src="assets/chip-14.svg" height="28" alt=""> Polars Support (optional)
 
 Standard Quant Tools is pandas-first — pandas stays the default and required
 backend everywhere. [Polars](https://pola.rs) support is additive and
@@ -117,3 +124,7 @@ no attribute 'values'`, which is precisely the confusing crash this
 section exists to warn about rather than a guarantee against it. Convert
 explicitly with `.to_pandas()` outside the functions listed above — and if
 you hit one that should be adapted, open an issue naming it.
+
+---
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md) · by Karan Vora · Apache 2.0</sub>

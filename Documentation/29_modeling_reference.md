@@ -1,4 +1,11 @@
-# Modeling reference
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/header-dark.svg">
+  <img src="assets/header-light.svg" alt="Standard Quant Tools documentation" width="100%">
+</picture>
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md)</sub>
+
+# <img src="assets/chip-29.svg" height="28" alt=""> Modeling reference
 
 Every feature, estimator, target and spec option the modeling runtime
 knows, read from its registries. **Generated** by
@@ -151,3 +158,7 @@ Composed in order by `PreprocessingSpec.steps`; each is fitted on the fold's tra
 | `MAX_EXPANDED_COLUMNS` | 400 | ceiling on the expanded panel |
 | `DEFAULT_MAX_FITS` | 500 | estimator fits one experiment may cost unless `budget.max_fits` says otherwise; refused, never truncated |
 | `MAX_FITS_CEILING` | 100000 | the most `budget.max_fits` may be raised to |
+
+---
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md) · by Karan Vora · Apache 2.0</sub>

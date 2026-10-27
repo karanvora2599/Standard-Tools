@@ -30,6 +30,7 @@ a standard.
 
 from __future__ import annotations
 
+import html
 import re
 from pathlib import Path
 
@@ -487,6 +488,88 @@ class TestLinksResolve:
             if f"Documentation/{p.name}" not in text
         ]
         assert not missing, f"guides absent from the README's table: {missing}"
+
+
+ASSETS = DOCS / "assets"
+PICTURE = re.compile(
+    r'<picture>\s*<source media="\(prefers-color-scheme: dark\)" '
+    r'srcset="([^"]+)">\s*<img src="([^"]+)" alt="([^"]*)"'
+)
+
+
+def _title(svg: Path) -> str:
+    match = re.search(r"<title>(.*?)</title>", svg.read_text(encoding="utf-8"))
+    assert match, f"{svg.name} has no <title>"
+    return html.unescape(match.group(1))
+
+
+class TestTheImagesSayWhatThePagesSay:
+    """
+    The README and the guides are illustrated with generated SVGs
+    (`Documentation/design/gen_assets.py`). A number drawn on an image is
+    a claim no test can read, so each image's alt text on the page is its
+    own `<title>`: the words a screen reader hears are the words drawn,
+    and a count drawn is a count in the page, where the guards above see
+    it.
+    """
+
+    def test_every_image_a_page_names_exists(self):
+        missing = []
+        for page in [README, *sorted(DOCS.glob("*.md"))]:
+            text = page.read_text(encoding="utf-8")
+            for target in re.findall(r'(?:src|srcset)="([^":]+\.svg)"', text):
+                if not (page.parent / target).exists():
+                    missing.append(f"{page.name} -> {target}")
+        assert not missing, f"images that do not exist: {missing}"
+
+    def test_alt_text_is_the_title_of_both_editions(self):
+        wrong = []
+        pictures = 0
+        for page in [README, *sorted(DOCS.glob("*.md"))]:
+            text = page.read_text(encoding="utf-8")
+            for dark, light, alt in PICTURE.findall(text):
+                pictures += 1
+                for edition in (dark, light):
+                    title = _title(page.parent / edition)
+                    if title != alt:
+                        wrong.append(f"{page.name}: {edition} says {title!r}")
+        assert pictures > len(list(DOCS.glob("[0-9][0-9]_*.md"))), pictures
+        assert not wrong, (
+            "an image and its alt text disagree; change the label in "
+            "Documentation/design/gen_assets.py, regenerate, and copy it "
+            f"into the page: {wrong}"
+        )
+
+    def test_every_guide_opens_with_the_strip_and_its_own_chip(self):
+        wrong = []
+        for path in sorted(DOCS.glob("[0-9][0-9]_*.md")):
+            text = path.read_text(encoding="utf-8")
+            match = PICTURE.match(text)
+            if match is None or match.group(2) != "assets/header-light.svg":
+                wrong.append(f"{path.name}: does not open with the header strip")
+                continue
+            title = re.search(r"^# (.*)$", text, re.M)
+            if title is None or f"assets/chip-{path.name[:2]}.svg" not in title.group(
+                1
+            ):
+                wrong.append(f"{path.name}: its title has no chip-{path.name[:2]}")
+        assert not wrong, wrong
+
+    def test_the_counts_drawn_and_badged_are_current(self, runtimes, all_tools):
+        drawn = re.search(r"(\d+) runtimes", _title(ASSETS / "glance-light.svg"))
+        assert drawn and int(drawn.group(1)) == len(runtimes), (
+            f"the glance tiles say {drawn and drawn.group(1)} runtimes, the "
+            f"registry has {len(runtimes)}: change GLANCE in "
+            "Documentation/design/gen_assets.py and regenerate"
+        )
+        text = README.read_text(encoding="utf-8")
+        for badge, actual in (("tools", len(all_tools)), ("runtimes", len(runtimes))):
+            stated = re.search(rf"badge/{badge}-(\d+)-", text)
+            assert stated, f"the README has no {badge} badge"
+            assert int(stated.group(1)) == actual, (
+                f"the README's {badge} badge says {stated.group(1)}, "
+                f"the registry has {actual}"
+            )
 
 
 class TestTheDescriptionsAreUsable:

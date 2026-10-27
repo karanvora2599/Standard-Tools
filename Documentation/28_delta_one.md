@@ -1,4 +1,11 @@
-# Delta One
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/header-dark.svg">
+  <img src="assets/header-light.svg" alt="Standard Quant Tools documentation" width="100%">
+</picture>
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md)</sub>
+
+# <img src="assets/chip-28.svg" height="28" alt=""> Delta One
 
 Eighteen tools for the instruments that move one-for-one with an underlying —
 cash, ETFs, baskets, futures, forwards and total return swaps. The runtime
@@ -445,3 +452,7 @@ accumulator must be finite and in range, the baseline must exist exactly
 when the warm-up is complete, and the degenerate flag is recomputed from it
 rather than trusted. A state that fails was edited or corrupted after it
 was written, and is refused rather than resumed.
+
+---
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md) · by Karan Vora · Apache 2.0</sub>

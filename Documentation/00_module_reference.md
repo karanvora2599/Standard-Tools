@@ -1,4 +1,11 @@
-# Module reference
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/header-dark.svg">
+  <img src="assets/header-light.svg" alt="Standard Quant Tools documentation" width="100%">
+</picture>
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md)</sub>
+
+# <img src="assets/chip-00.svg" height="28" alt=""> Module reference
 
 Every public module in one place: what it holds, and where the deep
 documentation for it lives. This exists because the per-module guides
@@ -859,3 +866,7 @@ under a year; flows above `large_flow_share` of the value are listed.
 
 The agent tools over these are the `allocation` runtime's; see
 [31_allocation.md](31_allocation.md).
+
+---
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md) · by Karan Vora · Apache 2.0</sub>

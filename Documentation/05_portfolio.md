@@ -1,4 +1,11 @@
-# Portfolio Analysis
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/header-dark.svg">
+  <img src="assets/header-light.svg" alt="Standard Quant Tools documentation" width="100%">
+</picture>
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md)</sub>
+
+# <img src="assets/chip-05.svg" height="28" alt=""> Portfolio Analysis
 
 The portfolio module handles multi-asset analysis using NumPy matrix operations (covariance via BLAS, portfolio returns via `@` matrix multiply). Data fetching is async-first.
 
@@ -1380,3 +1387,7 @@ default and the arithmetic it always used, or `"ACT/360"`) is the basis the
 borrow and the account margin accrue on over `holding_days`: the same
 90-day, 300 bps short holds 75.00 bps of borrow on ACT/360 against 73.97 on
 ACT/365F. 30/360 is refused with the reason.
+
+---
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md) · by Karan Vora · Apache 2.0</sub>

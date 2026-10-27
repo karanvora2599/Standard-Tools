@@ -1,4 +1,11 @@
-# Agent Tools
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/header-dark.svg">
+  <img src="assets/header-light.svg" alt="Standard Quant Tools documentation" width="100%">
+</picture>
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md)</sub>
+
+# <img src="assets/chip-07.svg" height="28" alt=""> Agent Tools
 
 The agent module exposes every major library capability as **Pydantic-typed, LLM-callable functions**. Each tool takes one input model, does real computation, and returns one output model — both are directly JSON-serializable for function calling.
 
@@ -2166,3 +2173,7 @@ surface.
 ## Advanced Tools
 
 Thirty-five further advanced, supplementary, custom-signal, analytics, options, diagnostic, constrained-optimization and risk-decomposition tools compose these primitives into single, LLM-callable operations covering complete research workflows — output reference tables and multi-step chaining examples in [09_advanced_agent_tools.md](09_advanced_agent_tools.md). The remainder of the 213 — the data, microstructure, delta-one, derivatives, allocation, finance, discovery and provenance surfaces — are catalogued in [20_tool_index.md](20_tool_index.md) and documented by their own runtime guides, listed in [19_runtimes.md](19_runtimes.md).
+
+---
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md) · by Karan Vora · Apache 2.0</sub>

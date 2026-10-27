@@ -33,6 +33,7 @@
 *.txt    text eol=lf
 *.json   text eol=lf
 *.example text eol=lf
+*.svg     text eol=lf
 .gitignore text eol=lf
 
 # Binary, should any arrive: never normalized, never diffed as text.
@@ -53,3 +54,4 @@
 *.gif     binary
 *.ico     binary
 *.pdf     binary
+*.woff2   binary

@@ -1,4 +1,11 @@
-# Modeling Runtime (`standard_quant_tools.modeling`)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/header-dark.svg">
+  <img src="assets/header-light.svg" alt="Standard Quant Tools documentation" width="100%">
+</picture>
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md)</sub>
+
+# <img src="assets/chip-15.svg" height="28" alt=""> Modeling Runtime (`standard_quant_tools.modeling`)
 
 A second, independent runtime alongside the 217-tool
 `standard_quant_tools.agent` analysis/backtest surface — not tool #190.
@@ -5095,3 +5102,7 @@ Adjustment is a separate question: a split-adjusted history is revised every
 time a split happens, and the adjusted close for 2019 is not the number
 anybody saw in 2019. That is `DataSetMetadata.split_adjusted` and
 `dividend_adjusted`, not this contract.
+
+---
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md) · by Karan Vora · Apache 2.0</sub>

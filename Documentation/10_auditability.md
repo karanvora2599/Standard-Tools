@@ -1,4 +1,11 @@
-# Auditability
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/header-dark.svg">
+  <img src="assets/header-light.svg" alt="Standard Quant Tools documentation" width="100%">
+</picture>
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md)</sub>
+
+# <img src="assets/chip-10.svg" height="28" alt=""> Auditability
 
 Every call routed through `dispatch()` can produce an immutable **decision
 record**: the tool name and inputs, the market data it pulled (with content
@@ -1600,3 +1607,7 @@ correct but costs time and memory in proportion to the day.
 worked example: it proves the interface is a real seam `AuditWriter`
 delegates through — including cross-day chain bootstrapping — not just a
 passthrough wrapper that still assumes local disk somewhere.
+
+---
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md) · by Karan Vora · Apache 2.0</sub>

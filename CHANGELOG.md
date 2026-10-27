@@ -1,5 +1,40 @@
 # Changelog
 
+## The README and every guide share one theme in light and dark, a documentation page groups the guides by subject, and each image's words are its alt text, so a figure drawn on one is checked like a figure in the prose
+
+- **The README** opens with a banner, a row of badges (CI, Python, tools,
+  runtimes, the optional C++17 extension, MCP, the licence) and a short
+  lede, then two new sections. "At a glance" puts six measured figures on
+  tiles and names the guide each comes from. "How it works" draws the five
+  things that happen to a call (serve, dispatch, compute, hand off,
+  record) and says each in a bullet. Every section carries a numbered
+  chip, and the rules between sections are gone. The guide table links
+  every guide, in number order. The two in-page links follow GitHub's ids
+  for a heading that opens with an image, which gain a leading hyphen.
+- **`Documentation/README.md` is new**: the documentation page. It groups
+  every guide under ten subjects, from "Start here" to "Speed and the
+  build", with the README's own description of each, so the two tables
+  cannot disagree.
+- **Every guide** opens with the theme's strip and links to the README
+  and the documentation page, carries the chip of its own number in its
+  title, and closes with the same links. The tool index and the modeling
+  reference get theirs from their generators.
+- **The images are generated** by `Documentation/design/gen_assets.py`,
+  light and dark, in IBM Plex (the fonts unmodified under the SIL Open
+  Font License, in `Documentation/design/fonts/`). An SVG shown as an
+  `<img>` cannot load fonts, so each image carries the faces it uses,
+  subset to its characters. Every label is measured against the font's
+  metrics, and the script stops on one that overruns its box. The hexagon
+  lattice is one path drawn three times by reference, so a banner is 67
+  KB. `Documentation/design/README.md` says how to rebuild them.
+- **Tests.** `TestTheImagesSayWhatThePagesSay`: every image a page names
+  exists; each picture's alt text is the `<title>` of both editions, so a
+  number drawn is a number in the page, where the count guards read it;
+  every guide opens with the strip and its own chip; and the runtime
+  count on the tiles and the tool and runtime badges are the live
+  registry's. The README and `25_testing` count 19,256 tests.
+  `.gitattributes` stores `.woff2` as binary and `.svg` as LF text.
+
 ## The documentation describes the cost-aware rebalance, the optimizer-sized transform, model sleeves, rule selection and regimes, the factor screen and a model's quantiles as VaR, with what each was measured to do, and counts 266 tools
 
 - **The guides say what each new piece does and what it was measured to do,

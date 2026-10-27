@@ -1,4 +1,11 @@
-# Tool index
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/header-dark.svg">
+  <img src="assets/header-light.svg" alt="Standard Quant Tools documentation" width="100%">
+</picture>
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md)</sub>
+
+# <img src="assets/chip-20.svg" height="28" alt=""> Tool index
 
 Every tool in the library, by runtime, with the description the model
 actually sees. **Generated from the live registry** by
@@ -1977,3 +1984,7 @@ DCF value of forecast free cash flows with a Gordon or exit-multiple terminal va
 
 **Required:** `cash_flows`  
 **Optional:** `discount_rate`, `terminal_method`, `terminal_growth`, `exit_multiple`, `terminal_metric`, `target_value`, `solve_for`, `sensitivity_rates`, `sensitivity_terminal`
+
+---
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md) · by Karan Vora · Apache 2.0</sub>

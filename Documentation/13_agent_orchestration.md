@@ -1,4 +1,11 @@
-# Agent Orchestration
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/header-dark.svg">
+  <img src="assets/header-light.svg" alt="Standard Quant Tools documentation" width="100%">
+</picture>
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md)</sub>
+
+# <img src="assets/chip-13.svg" height="28" alt=""> Agent Orchestration
 
 `get_agent_tools()` returns 217 LLM-callable tools (see
 [07_agent_tools.md](07_agent_tools.md) /
@@ -406,3 +413,7 @@ still a real failure mode worth watching for via the routing-accuracy eval
 above. Neither mechanism validates that the *arguments* passed to a
 correctly-selected tool are sensible — that's Pydantic's job at the
 `dispatch()` boundary, not this page's.
+
+---
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md) · by Karan Vora · Apache 2.0</sub>

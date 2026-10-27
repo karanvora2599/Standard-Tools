@@ -1,4 +1,11 @@
-# Correctness & Backend Parity
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/header-dark.svg">
+  <img src="assets/header-light.svg" alt="Standard Quant Tools documentation" width="100%">
+</picture>
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md)</sub>
+
+# <img src="assets/chip-17.svg" height="28" alt=""> Correctness & Backend Parity
 
 Both tiers of this package — the pure-Python/NumPy implementations and the
 optional C++ extension — have been through line-by-line correctness audits.
@@ -194,3 +201,5 @@ note in [10_auditability.md](10_auditability.md). The
 tamper-evident record chain is unaffected and still verifies.
 
 ---
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md) · by Karan Vora · Apache 2.0</sub>

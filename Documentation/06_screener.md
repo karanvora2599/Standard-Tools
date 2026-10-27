@@ -1,4 +1,11 @@
-# Stock Screener
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/header-dark.svg">
+  <img src="assets/header-light.svg" alt="Standard Quant Tools documentation" width="100%">
+</picture>
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md)</sub>
+
+# <img src="assets/chip-06.svg" height="28" alt=""> Stock Screener
 
 The screener evaluates a list of tickers concurrently against fundamental and technical filters, returning a `pd.DataFrame` of passing stocks, optionally sorted by a chosen column.
 
@@ -294,3 +301,7 @@ The returned DataFrame always includes `ticker` as the index. Available columns 
 | `rsi_14` | `rsi_max` or `rsi_min` |
 | `sma_{N}` | `price_above_sma` or `price_below_sma` |
 | `beta` | `beta_max` or `beta_min` |
+
+---
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md) · by Karan Vora · Apache 2.0</sub>

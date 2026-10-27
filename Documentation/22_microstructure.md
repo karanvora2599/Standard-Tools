@@ -1,4 +1,11 @@
-# Microstructure
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/header-dark.svg">
+  <img src="assets/header-light.svg" alt="Standard Quant Tools documentation" width="100%">
+</picture>
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md)</sub>
+
+# <img src="assets/chip-22.svg" height="28" alt=""> Microstructure
 
 Seventeen tools for what the market will charge you to trade, at four data
 fidelities.
@@ -582,3 +589,7 @@ microsecond of its add lived 0.0 seconds.
 
 - [05_portfolio.md](05_portfolio.md) — sizing and the cost models that predict
 - [19_runtimes.md](19_runtimes.md) — why this left the portfolio runtime
+
+---
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md) · by Karan Vora · Apache 2.0</sub>

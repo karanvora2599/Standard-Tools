@@ -1,4 +1,11 @@
-# The testing regime
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/header-dark.svg">
+  <img src="assets/header-light.svg" alt="Standard Quant Tools documentation" width="100%">
+</picture>
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md)</sub>
+
+# <img src="assets/chip-25.svg" height="28" alt=""> The testing regime
 
 Nine layers, each catching a class of defect the others cannot. The
 arrangement is deliberate: every layer exists because something got through
@@ -142,7 +149,7 @@ the run that introduced it, 6,514 passed and 519 skipped — the extra skips
 are the parity and benchmark tests that `importorskip` the extension,
 correctly — and it took 11:22 against 6:54, which is the compiled path's
 contribution measured at suite scale rather than per kernel. The suite is
-19,252 tests now (19,080 passed, 94 skipped with the extension and `SQT_EXPECT_NATIVE=1`, in 10:39 to 26:52 on the same machine depending on its load), so
+19,256 tests now (19,084 passed, 94 skipped with the extension and `SQT_EXPECT_NATIVE=1`, in 10:39 to 26:52 on the same machine depending on its load), so
 that pair of clocks is a ratio to re-measure, not a figure to quote.
 
 ### Why this is a testing concern and not a packaging one
@@ -555,3 +562,7 @@ a backtest establishes on its own.
 - [17_correctness.md](17_correctness.md) — the C++/Python backend-parity contract
 - [10_auditability.md](10_auditability.md) — replay verification against recorded data
 - [24_overfitting.md](24_overfitting.md) — the same scepticism applied to results
+
+---
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md) · by Karan Vora · Apache 2.0</sub>

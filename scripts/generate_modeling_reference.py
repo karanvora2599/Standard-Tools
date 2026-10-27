@@ -31,7 +31,14 @@ sys.path.insert(0, str(ROOT / "src"))
 
 OUTPUT = ROOT / "Documentation" / "29_modeling_reference.md"
 
-HEADER = """# Modeling reference
+HEADER = """<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/header-dark.svg">
+  <img src="assets/header-light.svg" alt="Standard Quant Tools documentation" width="100%">
+</picture>
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md)</sub>
+
+# <img src="assets/chip-29.svg" height="28" alt=""> Modeling reference
 
 Every feature, estimator, target and spec option the modeling runtime
 knows, read from its registries. **Generated** by
@@ -44,6 +51,11 @@ The estimators marked *optional* register only when their library is
 installed. They are listed from a static declaration so this document is
 the same on every machine; `list_modeling_capabilities` reports which of
 them the running install actually has.
+"""
+
+FOOTER = """---
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md) · by Karan Vora · Apache 2.0</sub>
 """
 
 
@@ -286,6 +298,7 @@ def render() -> str:
         _targets(),
         _spec_options(),
         _limits(),
+        FOOTER,
     ]
     return "\n\n".join(section.rstrip() for section in sections) + "\n"
 

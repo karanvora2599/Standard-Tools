@@ -1,4 +1,11 @@
-# Analysis
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/header-dark.svg">
+  <img src="assets/header-light.svg" alt="Standard Quant Tools documentation" width="100%">
+</picture>
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md)</sub>
+
+# <img src="assets/chip-08.svg" height="28" alt=""> Analysis
 
 The analysis module provides statistical tools for understanding return series, factor exposures, and market structure. Most functions are pure NumPy / Pandas with no external dependencies. The error bars, multiple-testing corrections and structure tests built around this surface — bootstrap intervals, normality, stationarity, regimes, seasonality, lead-lag — are a separate family and live in [23_inference.md](23_inference.md); nothing here duplicates them. Several functions have optional **C++ fast paths** via the `_sqt_core` extension:
 
@@ -1330,3 +1337,7 @@ detect_rally(
 ```
 
 `rally_score` is the fraction of 5 boolean signals that agree; `is_rally = rally_score >= 0.6` (at least 3 of 5). `auto_tune_adx_threshold=True` replaces the fixed `adx_threshold` with the `auto_tune_percentile`-th percentile of the symbol's *own* trailing ADX history — calibrating "strong trend" per-asset instead of applying one number to every symbol, without needing a human to pick a threshold per name. Disabled by default; enabling it changes nothing else and a caller who never sets it gets identical output to before this option existed. Raises `ValidationError` for missing OHLC columns, fewer than `zscore_window + lookback` observations, or an out-of-range `auto_tune_percentile` when auto-tuning is on.
+
+---
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md) · by Karan Vora · Apache 2.0</sub>

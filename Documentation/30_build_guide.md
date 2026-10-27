@@ -1,4 +1,11 @@
-# C++ Extension Build Guide
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/header-dark.svg">
+  <img src="assets/header-light.svg" alt="Standard Quant Tools documentation" width="100%">
+</picture>
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md)</sub>
+
+# <img src="assets/chip-30.svg" height="28" alt=""> C++ Extension Build Guide
 
 ## `pip install .` builds the extension
 
@@ -1259,3 +1266,7 @@ compiler reorder rounds differently from one it does not, which is one of
 the reasons the audit trail promises twelve significant digits, not bits,
 across builds — see
 [the reproducibility contract](10_auditability.md#the-reproducibility-contract).
+
+---
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md) · by Karan Vora · Apache 2.0</sub>

@@ -1,4 +1,11 @@
-# Metrics
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/header-dark.svg">
+  <img src="assets/header-light.svg" alt="Standard Quant Tools documentation" width="100%">
+</picture>
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md)</sub>
+
+# <img src="assets/chip-03.svg" height="28" alt=""> Metrics
 
 All metric functions accept `pd.Series`. Most return a single `float`; two do not — `drawdown_series` returns a full `pd.Series` (one drawdown value per bar) and `evt_tail_risk` returns a dict describing one fitted tail. The `risk_metrics` functions (`sharpe_ratio`, `sortino_ratio`, `max_drawdown`, `calmar_ratio`, `var_historical`, `var_parametric`, `cvar`, `cvar_tail_observations`, `information_ratio`, `treynor_ratio`, `evt_tail_risk`) are decorated with `@validate_series`, which raises `ValidationError` on empty input. The `return_metrics` functions (`cumulative_return`, `cagr`, `annualized_volatility`, `equity_from_returns`) and `drawdown_series` are **not** decorated: `cumulative_return`/`cagr` return `0.0` on an empty series, while `annualized_volatility` and `drawdown_series` now RAISE `ValidationError` on an empty series rather than returning `nan` or an empty `Series`; `drawdown_series` also refuses a non-positive opening level.
 
@@ -340,3 +347,7 @@ rather than a second time here:
   spacing, bucketed to 252 / 52 / 12 / 4) and `resolve_periods_per_year`,
   which the backtest engine calls:
   [04_backtesting.md](04_backtesting.md#bars-per-year).
+
+---
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md) · by Karan Vora · Apache 2.0</sub>

@@ -1,4 +1,11 @@
-# Data Fetching
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/header-dark.svg">
+  <img src="assets/header-light.svg" alt="Standard Quant Tools documentation" width="100%">
+</picture>
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md)</sub>
+
+# <img src="assets/chip-01.svg" height="28" alt=""> Data Fetching
 
 > **Fetching is also a RUNTIME.** This page is about the providers
 > themselves — how they are configured, what they guarantee, how retries
@@ -1030,3 +1037,7 @@ cannot say. Four standalone checks run over data you've already fetched.
 [11_data_quality.md](11_data_quality.md) owns both — it is the
 credibility-of-the-data-itself counterpart to the backtesting engine's own
 trustworthiness work in [04_backtesting.md](04_backtesting.md).
+
+---
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md) · by Karan Vora · Apache 2.0</sub>

@@ -1,4 +1,11 @@
-# Runtimes and the Handoff Interconnect
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/header-dark.svg">
+  <img src="assets/header-light.svg" alt="Standard Quant Tools documentation" width="100%">
+</picture>
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md)</sub>
+
+# <img src="assets/chip-19.svg" height="28" alt=""> Runtimes and the Handoff Interconnect
 
 Two mechanisms, and they answer opposite questions.
 
@@ -421,3 +428,7 @@ forwards the text as it is. An accepted call costs 0.07 µs more.
 - [18_mcp.md](18_mcp.md) — how runtimes reach an MCP client
 - [15_modeling.md](15_modeling.md) — the modeling runtime
 - [10_auditability.md](10_auditability.md) — what every dispatch records
+
+---
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md) · by Karan Vora · Apache 2.0</sub>

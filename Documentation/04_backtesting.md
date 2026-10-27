@@ -1,4 +1,11 @@
-# Backtesting
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/header-dark.svg">
+  <img src="assets/header-light.svg" alt="Standard Quant Tools documentation" width="100%">
+</picture>
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md)</sub>
+
+# <img src="assets/chip-04.svg" height="28" alt=""> Backtesting
 
 The backtesting engine is **fully vectorized** — it computes the entire equity curve in one NumPy operation instead of looping bar-by-bar. This makes it orders of magnitude faster than event-driven backtesting for signal-based strategies.
 
@@ -1842,3 +1849,7 @@ simulation count rather than the statistics.
 Same block bootstrap either way. The terminal variant says nothing about
 the path, and says so — a distribution of endpoints can look benign while
 every path reaching it was unholdable.
+
+---
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md) · by Karan Vora · Apache 2.0</sub>

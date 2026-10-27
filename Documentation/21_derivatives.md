@@ -1,4 +1,11 @@
-# Derivatives
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/header-dark.svg">
+  <img src="assets/header-light.svg" alt="Standard Quant Tools documentation" width="100%">
+</picture>
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md)</sub>
+
+# <img src="assets/chip-21.svg" height="28" alt=""> Derivatives
 
 Thirteen tools for what an option is worth and what holding it does to you.
 Pricing under four models, the second-order greeks that explain why a
@@ -399,3 +406,7 @@ risk a calendar carries.
 - [12_options.md](12_options.md) — the pricing models themselves
 - [22_microstructure.md](22_microstructure.md) — what it costs to trade the hedge
 - [19_runtimes.md](19_runtimes.md) — why derivatives is its own execution boundary
+
+---
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md) · by Karan Vora · Apache 2.0</sub>

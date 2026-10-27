@@ -1,4 +1,11 @@
-# Overfitting and trade analysis
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/header-dark.svg">
+  <img src="assets/header-light.svg" alt="Standard Quant Tools documentation" width="100%">
+</picture>
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md)</sub>
+
+# <img src="assets/chip-24.svg" height="28" alt=""> Overfitting and trade analysis
 
 Eleven tools in the `backtest` runtime that answer a question the backtest
 itself cannot: given that you tried N things and kept the best, how much of
@@ -375,3 +382,7 @@ Full argument lists: [20_tool_index.md](20_tool_index.md#backtest--backtest).
 - [04_backtesting.md](04_backtesting.md) — running the strategy in the first place
 - [23_inference.md](23_inference.md) — the same discipline on a return series
 - [15_modeling.md](15_modeling.md) — leakage-purged validation for models
+
+---
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md) · by Karan Vora · Apache 2.0</sub>

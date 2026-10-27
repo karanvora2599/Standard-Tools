@@ -1,4 +1,11 @@
-# Data Quality
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/header-dark.svg">
+  <img src="assets/header-light.svg" alt="Standard Quant Tools documentation" width="100%">
+</picture>
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md)</sub>
+
+# <img src="assets/chip-11.svg" height="28" alt=""> Data Quality
 
 A backtester's credibility depends as much on data quality as on strategy
 logic — a strategy validated against stale or silently-adjusted prices
@@ -278,3 +285,7 @@ print(result.ohlc_inconsistencies)     # [{"date": ..., "position": ..., "kind":
 
 See [09_advanced_agent_tools.md](09_advanced_agent_tools.md) for the tool's
 full input/output reference alongside the rest of the agent tools.
+
+---
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md) · by Karan Vora · Apache 2.0</sub>

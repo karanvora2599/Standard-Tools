@@ -1,4 +1,11 @@
-# The Meta Runtime
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/header-dark.svg">
+  <img src="assets/header-light.svg" alt="Standard Quant Tools documentation" width="100%">
+</picture>
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md)</sub>
+
+# <img src="assets/chip-27.svg" height="28" alt=""> The Meta Runtime
 
 Twenty-five tools that answer questions about **this library and this
 session**, never about a market.
@@ -230,3 +237,7 @@ Full argument lists: [20_tool_index.md](20_tool_index.md#meta--discovery--proven
 - [19_runtimes.md](19_runtimes.md) — runtimes, references and pre-flight
 - [26_data.md](26_data.md) — the runtime that fetches, where `meta` only describes
 - [18_mcp.md](18_mcp.md) — `describe_tool` is what makes thinned listings work
+
+---
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md) · by Karan Vora · Apache 2.0</sub>

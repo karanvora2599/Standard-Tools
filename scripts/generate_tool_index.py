@@ -83,7 +83,14 @@ DEEP_DOCS = {
     "feature_lab": "[15_modeling.md](15_modeling.md)",
 }
 
-HEADER = """# Tool index
+HEADER = """<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/header-dark.svg">
+  <img src="assets/header-light.svg" alt="Standard Quant Tools documentation" width="100%">
+</picture>
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md)</sub>
+
+# <img src="assets/chip-20.svg" height="28" alt=""> Tool index
 
 Every tool in the library, by runtime, with the description the model
 actually sees. **Generated from the live registry** by
@@ -114,6 +121,13 @@ are served only with `--enable-long-running`. A default MCP session is also
 scoped to four categories rather than all of them, so it advertises 61 of the
 {total} below; `--runtime all --enable-long-running` serves every one.
 
+"""
+
+FOOTER = """
+
+---
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md) · by Karan Vora · Apache 2.0</sub>
 """
 
 
@@ -186,7 +200,7 @@ def render() -> str:
                 lines.append(f"{description}{flag}\n")
                 lines.append(f"{signature}\n")
 
-    return "\n".join(lines).rstrip() + "\n"
+    return "\n".join(lines).rstrip() + FOOTER
 
 
 def _costs(text: str) -> Dict[str, int]:

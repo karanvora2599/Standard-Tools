@@ -1,4 +1,11 @@
-# The Data Runtime
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/header-dark.svg">
+  <img src="assets/header-light.svg" alt="Standard Quant Tools documentation" width="100%">
+</picture>
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md)</sub>
+
+# <img src="assets/chip-26.svg" height="28" alt=""> The Data Runtime
 
 Twenty-one tools for getting the bytes and saying what they can support.
 
@@ -489,3 +496,7 @@ Full argument lists: [20_tool_index.md](20_tool_index.md#data--data).
 - [11_data_quality.md](11_data_quality.md) — the quality checks, which live in `research`
 - [15_modeling.md](15_modeling.md#the-temporal-contract) — where bundles are consumed
 - [19_runtimes.md](19_runtimes.md) — why this is its own execution boundary
+
+---
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md) · by Karan Vora · Apache 2.0</sub>

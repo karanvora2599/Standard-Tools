@@ -1,13 +1,49 @@
-# Standard Quant Tools for AI Agents
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="Documentation/assets/banner-dark.svg">
+  <img src="Documentation/assets/banner-light.svg" alt="Standard Quant Tools: quantitative finance for AI agents, in Python with a C++ core. Measured, not projected." width="100%">
+</picture>
 
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](pyproject.toml)
+<p>
+  <a href="https://github.com/karanvora2599/Standard-Tools/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/karanvora2599/Standard-Tools/ci.yml?branch=main&style=flat-square&labelColor=1a1a1a&label=CI"></a>
+  <img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-5bbff4?style=flat-square&labelColor=1a1a1a">
+  <img alt="266 tools" src="https://img.shields.io/badge/tools-266-74f2d6?style=flat-square&labelColor=1a1a1a">
+  <img alt="12 runtimes" src="https://img.shields.io/badge/runtimes-12-79ee5f?style=flat-square&labelColor=1a1a1a">
+  <img alt="C++17, optional" src="https://img.shields.io/badge/C%2B%2B17-optional-f2b43c?style=flat-square&labelColor=1a1a1a">
+  <img alt="MCP: sqt-mcp" src="https://img.shields.io/badge/MCP-sqt--mcp-d6352a?style=flat-square&labelColor=1a1a1a">
+  <a href="LICENSE"><img alt="license: Apache 2.0" src="https://img.shields.io/badge/license-Apache%202.0-5bbff4?style=flat-square&labelColor=1a1a1a"></a>
+</p>
 
-A high-performance, modular Python library for quantitative financial analysis. Designed to give AI agents and automated workflows **clean structured data**, **mathematical accuracy**, and **robust error handling**.
+**Standard Quant Tools is a Python library for quantitative finance, built to be called by AI agents.** Every tool takes one Pydantic model and returns one, so an agent gets structured data back, and errors that say what to fix. The CPU-bound paths run in an optional C++ extension behind the same API, with a pure-Python fallback when it is not built.
+
+Every number in these pages is measured rather than projected: the speedups by timing both paths of the same call, and the tool and runtime counts against the live registry, by tests that fail when the prose goes stale.
 
 Maintained by [Karan Vora](mailto:kv2154@nyu.edu). Source: [github.com/karanvora2599/Standard-Tools](https://github.com/karanvora2599/Standard-Tools).
 
-## Key Features
+## <img src="Documentation/assets/chip-01.svg" height="22" alt=""> At a glance
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="Documentation/assets/glance-dark.svg">
+  <img src="Documentation/assets/glance-light.svg" alt="At a glance: 274× for rolling Hurst with the C++ extension; 1.7 min to test all 1,999,000 pairs of 2,000 names for cointegration at 500 bars; ~58× for the backtest kernel; 12 runtimes; 9 test layers; 21 of 21 planted mutations killed" width="100%">
+</picture>
+
+The speedups are from [Documentation/16_performance.md](Documentation/16_performance.md), each measured by toggling the same module's `HAS_CPP` flag and timing both paths back to back. The test layers and the mutations are in [Documentation/25_testing.md](Documentation/25_testing.md).
+
+## <img src="Documentation/assets/chip-02.svg" height="22" alt=""> How it works
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="Documentation/assets/pipeline-dark.svg">
+  <img src="Documentation/assets/pipeline-light.svg" alt="How a call runs: serve, dispatch, compute, hand off, record. From Python one tool at a time; over MCP one runtime per session." width="100%">
+</picture>
+
+- **Serve:** a client is given one runtime, not the whole surface, as MCP tools or function-calling schemas. Under `--tool-detail auto` the heaviest schemas are thinned, and `describe_tool` returns any of them in full.
+- **Dispatch:** the input is validated against the tool's Pydantic model and unknown arguments are refused. A tool from another runtime is unroutable, and the refusal names the runtime that owns it.
+- **Compute:** C++ kernels when the extension is built, the Python path when it is not, behind one API. A source declares when its facts became knowable, and every Sharpe-reporting tool takes the risk-free rate it is measured against.
+- **Hand off:** bulk values (equity curves, trade logs, a model's predictions) are published as `sqt://` references, and their kind is checked when another runtime resolves them. Nothing large passes through the conversation.
+- **Record:** a call through `dispatch()` can write a decision record with content hashes of the data it read, hash-chained across days. `sqt replay` re-runs it and `sqt verify` checks the chain.
+
+The runtimes and the references between them are in [Documentation/19_runtimes.md](Documentation/19_runtimes.md); the audit trail in [Documentation/10_auditability.md](Documentation/10_auditability.md).
+
+## <img src="Documentation/assets/chip-03.svg" height="22" alt=""> Key Features
 - **High performance** — an optional C++ extension (`_sqt_core`) accelerates the CPU-bound paths, behind an identical API with an automatic pure-Python fallback. Headline measured figures: rolling Hurst **274×**, Engle-Granger cointegration **25–41×**, a 2 000-name pair scan, both orders of all 1,999,000 pairs, in **1.7 min** at 500 bars (a per-pair statsmodels loop of one order took 61.7 min), whole-universe indicator panels **11.9×**, Wilder's ATR **28×**, the backtest kernel **~58×**, the modeling layer's preprocessing kernels **5.5–53.6×**. Several ports are worth less than that and are reported as such — ADX and GARCH measure at or below 1× against *warm* numba, and exist for the ~200 ms–1.1 s JIT cold start they remove, not for steady-state speed. Every number is measured by toggling the same module's own `HAS_CPP` flag and timing both paths back-to-back. Full tables, methodology, and the ports that did not pay off: **[Documentation/16_performance.md](Documentation/16_performance.md)**.
 - **Agent-first design** — every tool returns a Pydantic model. **266 LLM-callable tools** with OpenAI/Anthropic function-calling schemas, split across **twelve parallel runtimes** whose dispatch tables refuse what they do not own, so a tool an agent was never given is unroutable rather than merely unlikely. Bulk values cross between runtimes as typed references, never through the conversation. Unknown arguments are rejected rather than silently ignored, every Sharpe-reporting tool takes the risk-free rate it is measured against, and errors are written to be self-correcting rather than merely accurate.
 - **A client is served one runtime, not the whole surface** — `sqt-mcp --runtime research` costs 75 KB, and there is no session ceiling -- `CONTEXT_CEILING_BYTES` is `None`, because a cap was the wrong control, and the heaviest runtime, `modeling`, is 213 KB at full detail — there is no fixed per-runtime cap, because what a client can afford is a property of the client. `--tool-detail auto` is the DEFAULT: it thins the most expensive schemas until a runtime fits its budget and injects `describe_tool` so the full schema is one call away rather than gone — which brings `modeling` from 227 KB served to 43 KB, `backtest` from 111 to 43 and `research` from 86 to 46. Those are SERVED bytes — the envelope the server actually sends — while the per-runtime table above and `--print-budget` report bare schema bytes, so the two are not the same instrument and are not comparable line for line. The whole surface at full detail is 727 KB of schema (~186k tokens), which does not fit and is not meant to — that constraint is what the scoping exists to answer, not a regression. The schema figures are what `sqt-mcp --print-budget` reports; the served figures come from the server's own `context_bytes()`.
@@ -27,15 +63,13 @@ Maintained by [Karan Vora](mailto:kv2154@nyu.edu). Source: [github.com/karanvora
 | `meta` | 25 | 25 KB | what does this library hold, and what did this session do |
 | `feature_lab` | 11 | 50 KB | what each feature measures and predicts, before fitting |
 
-- **Tested in nine layers, and the layers earn their place** — correctness against PLANTED answers rather than recorded outputs (second-order greeks against central finite differences, put-call parity against the model's own prices, risk parity against its closed form); whole-surface invariants that catch a tool registered halfway; schema-synthesized adversarial fuzzing that found six real bugs on its first run; metamorphic relations that catch a function which is *consistently* wrong; determinism checks that catch a `seed` being silently ignored; a second oracle for every C++ kernel, because a parity test cannot catch two backends agreeing on the wrong answer and one of them did not; generated documentation that cannot go stale; a whole-suite run with the compiled extension switched off, because a fallback that only exists behind a monkeypatch is not covered and is easily mistaken for dead code; and mutation testing, because a passing suite proves the tests RUN and not that they would notice. 19,252 tests; 21 of 21 mutations killed. See [Documentation/25_testing.md](Documentation/25_testing.md).
+- **Tested in nine layers, and the layers earn their place** — correctness against PLANTED answers rather than recorded outputs (second-order greeks against central finite differences, put-call parity against the model's own prices, risk parity against its closed form); whole-surface invariants that catch a tool registered halfway; schema-synthesized adversarial fuzzing that found six real bugs on its first run; metamorphic relations that catch a function which is *consistently* wrong; determinism checks that catch a `seed` being silently ignored; a second oracle for every C++ kernel, because a parity test cannot catch two backends agreeing on the wrong answer and one of them did not; generated documentation that cannot go stale; a whole-suite run with the compiled extension switched off, because a fallback that only exists behind a monkeypatch is not covered and is easily mistaken for dead code; and mutation testing, because a passing suite proves the tests RUN and not that they would notice. 19,256 tests; 21 of 21 mutations killed. See [Documentation/25_testing.md](Documentation/25_testing.md).
 - **Point-in-time by declaration, not by hope** — a source says what it can tell you about *when* its facts became knowable, and `describe_temporal_contract` answers that before anything is fetched. A quarterly filing describes 30 September and is published on 25 October; joining it on the quarter end is three weeks of hindsight per row, and the contract refuses rather than degrading silently.
-- **Comprehensive coverage** — 14 indicators, 14 risk/return metrics + 5 backtest diagnostics, 16 analysis functions plus Black-Scholes-Merton pricing/Greeks/implied volatility, portfolio analysis and optimization (Markowitz mean-variance, risk parity, Black-Litterman), a stock screener, 8 backtest strategies with parameter grid search, a shared-cash portfolio simulation engine with pluggable cost and constraint models, a pairs backtest, and walk-forward/robustness diagnostics. Grid search and the signal-panel backtester also accept your own signal-generating callable or matrix, not just the built-in strategies. See the [module map](#module-map).
+- **Comprehensive coverage** — 14 indicators, 14 risk/return metrics + 5 backtest diagnostics, 16 analysis functions plus Black-Scholes-Merton pricing/Greeks/implied volatility, portfolio analysis and optimization (Markowitz mean-variance, risk parity, Black-Litterman), a stock screener, 8 backtest strategies with parameter grid search, a shared-cash portfolio simulation engine with pluggable cost and constraint models, a pairs backtest, and walk-forward/robustness diagnostics. Grid search and the signal-panel backtester also accept your own signal-generating callable or matrix, not just the built-in strategies. See the [module map](#-module-map).
 - **Robust infrastructure** — retry with exponential backoff, TTL + Parquet caching, a custom exception hierarchy, the `@validate_series` decorator, a hash-chained decision-record audit trail with the `sqt` CLI, and graceful degradation when C++/scipy/numba are absent.
 - **Audited for correctness** — both tiers have been through line-by-line audits. 41 findings in the core, then two reviews of the modeling runtime: the first found 7 critical issues (two leakage channels, a PCA start-vector degeneracy), the second found 20 more across modeling, the data layer and the numerics — a full-refit model that had seen prices past its own recorded cutoff, an `end_date` that meant different things per provider, a "cross-section" that could mix dates, and aliases that could forge feature provenance. Since then a portfolio/screener/agent-tools audit, a full-codebase pass, and the live-data pass of 2026-09-20 — the first run against a real vendor tape, which found twenty defects no synthetic fixture could show — take the record to ten sections. None of it was catchable by the suite as it stood. Every finding was reproduced against a live interpreter before being fixed, and each is pinned by a regression test. The full record, including what each defect broke: **[Documentation/17_correctness.md](Documentation/17_correctness.md)**.
 
----
-
-## Installation
+## <img src="Documentation/assets/chip-04.svg" height="22" alt=""> Installation
 
 ```bash
 pip install .
@@ -45,15 +79,13 @@ poetry install
 
 **Requirements:** Python 3.10+, `pandas`, `numpy`, `yfinance`, `numba`, `aiohttp`, `cachetools`, `pydantic`, `statsmodels`, `scikit-learn`, `plotly`, `pyarrow`, `python-dotenv`, `joblib`, `scipy`
 
-**Optional:** `pip install standard_quant_tools[bloomberg]` adds `blpapi` (Bloomberg's own SDK) for `BloombergProvider` — requires a running, logged-in Bloomberg Terminal; see [Documentation/01_data_fetching.md](Documentation/01_data_fetching.md#bloomberg-provider). `pip install standard_quant_tools[signing]` adds `cryptography` for Ed25519 audit-checkpoint signing — see [Audit Trail & CLI](#audit-trail--cli-standard_quant_toolsaudit-sqt) below. `PolygonProvider` needs no extra install — it's a plain REST API — just an API key (`SQT_POLYGON_API_KEY`); see [Documentation/01_data_fetching.md](Documentation/01_data_fetching.md#polygonio-provider). `DatabentoProvider` — the only provider here that serves L2 depth and order-by-order events — needs `pip install databento` and `DATABENTO_API_KEY` (the vendor's own variable, never passed through a spec, so it cannot be persisted into a model's lineage or a decision record). `pip install standard_quant_tools[mcp]` adds the Model Context Protocol SDK and the `sqt-mcp` server, which exposes the whole library to any MCP client — see [Documentation/18_mcp.md](Documentation/18_mcp.md). `pip install standard_quant_tools[polars]` adds optional `polars` interop for a growing subset of functions — pandas remains the default and required backend either way; see [Documentation/14_polars_support.md](Documentation/14_polars_support.md).
+**Optional:** `pip install standard_quant_tools[bloomberg]` adds `blpapi` (Bloomberg's own SDK) for `BloombergProvider` — requires a running, logged-in Bloomberg Terminal; see [Documentation/01_data_fetching.md](Documentation/01_data_fetching.md#bloomberg-provider). `pip install standard_quant_tools[signing]` adds `cryptography` for Ed25519 audit-checkpoint signing — see [Audit Trail & CLI](#-audit-trail--cli-standard_quant_toolsaudit-sqt) below. `PolygonProvider` needs no extra install — it's a plain REST API — just an API key (`SQT_POLYGON_API_KEY`); see [Documentation/01_data_fetching.md](Documentation/01_data_fetching.md#polygonio-provider). `DatabentoProvider` — the only provider here that serves L2 depth and order-by-order events — needs `pip install databento` and `DATABENTO_API_KEY` (the vendor's own variable, never passed through a spec, so it cannot be persisted into a model's lineage or a decision record). `pip install standard_quant_tools[mcp]` adds the Model Context Protocol SDK and the `sqt-mcp` server, which exposes the whole library to any MCP client — see [Documentation/18_mcp.md](Documentation/18_mcp.md). `pip install standard_quant_tools[polars]` adds optional `polars` interop for a growing subset of functions — pandas remains the default and required backend either way; see [Documentation/14_polars_support.md](Documentation/14_polars_support.md).
 
 > **Note on the C++ extension:** `pip install .` now **builds `_sqt_core` when a C++ toolchain is available** (the backend is scikit-build-core, which drives the project's CMake build). Without a compiler the install still succeeds and you get the pure-Python package — every indicator, backtest and analysis function works through its Numba/pure-Python fallback, and `HAS_CPP` is `False`. That degradation is deliberate: the extension is an optional accelerator, so requiring a compiler to install would turn it into a hard dependency. Pass `-C cmake.define.SQT_REQUIRE_NATIVE=ON` to make a missing toolchain a hard error instead (what CI uses). For the in-place developer build, see [Documentation/30_build_guide.md](Documentation/30_build_guide.md).
 
 > **Config & secrets:** copy [`.env.example`](.env.example) to `.env` (already `.gitignore`d) for any local provider configuration — currently `SQT_BLOOMBERG_HOST`/`SQT_BLOOMBERG_PORT` and `SQT_POLYGON_API_KEY`. `standard_quant_tools.config.load_env()` loads it automatically and is a harmless no-op when `.env` doesn't exist (the normal state in CI). In GitHub Actions / GitLab CI, set the same variable names as encrypted secrets and inject them as job-level environment variables instead — no `.env` file involved, no code changes needed either way.
 
----
-
-## Quick Start
+## <img src="Documentation/assets/chip-05.svg" height="22" alt=""> Quick Start
 
 ```python
 from standard_quant_tools.data.factory import DataFactory
@@ -78,9 +110,7 @@ print(f"Max Drawdown: {max_drawdown(equity):.2%}")
 print(f"VaR(95%): {var_historical(returns, 0.95):.4f}")
 ```
 
----
-
-## Module map
+## <img src="Documentation/assets/chip-06.svg" height="22" alt=""> Module map
 
 | Module | What it does | Guide |
 |---|---|---|
@@ -108,7 +138,8 @@ print(f"VaR(95%): {var_historical(returns, 0.95):.4f}")
 
 Full API surface per module: [Documentation/00_module_reference.md](Documentation/00_module_reference.md).
 Polars interop: [14](Documentation/14_polars_support.md).
-## Performance
+
+## <img src="Documentation/assets/chip-07.svg" height="22" alt=""> Performance
 The C++ extension is **optional**. `pip install .` builds it when a toolchain
 is available and silently skips it when there isn't one; `HAS_CPP` tells you
 which path you are on, and the API is identical either way. An extension
@@ -128,7 +159,7 @@ that were not worth doing:
 | [Documentation/17_correctness.md](Documentation/17_correctness.md) | The backend-parity contract that makes the two tiers substitutable, and the audit findings behind it |
 | [Documentation/30_build_guide.md](Documentation/30_build_guide.md) | Building the extension on Windows / Linux / macOS |
 
-## Error Handling
+## <img src="Documentation/assets/chip-08.svg" height="22" alt=""> Error Handling
 
 ```python
 from standard_quant_tools.error import DataNotFoundError, InvalidSymbolError, ValidationError
@@ -149,9 +180,7 @@ series lengths — and is **never retried or re-typed** by the `retry`
 decorator. See [01_data_fetching.md](Documentation/01_data_fetching.md) for
 the full retry classification table.
 
----
-
-## Audit Trail & CLI (`standard_quant_tools.audit`, `sqt`)
+## <img src="Documentation/assets/chip-09.svg" height="22" alt=""> Audit Trail & CLI (`standard_quant_tools.audit`, `sqt`)
 
 Every call routed through `agent.tools.dispatch()` can produce an immutable JSONL decision record: its inputs, the market data it pulled (with content hashes), which execution path ran, and a hash of its output — enough to tell a stale or tampered cache apart from a genuine code change. Records are hash-chained **across calendar days**, not just within one day's file, so deleting a whole day is detectable and not only editing one record. Nothing runs automatically: `SQT_AUDIT_ENABLED=0` disables record writes and `SQT_AUDIT_DIR` overrides the storage directory.
 
@@ -180,9 +209,7 @@ sqt runs gc [--confirm] [--older-than HOURS]   # list (or delete) temp files and
 
 **Checkpoint signing** (Ed25519, optional `pip install standard_quant_tools[signing]`) closes the one gap the hash chain cannot close on its own: a wholesale, internally-consistent rewrite of an entire day file. `sqt anchor` signs a day's chain endpoint and `sqt verify --checkpoint` verifies it with only the public key. `sqt keygen` is for local development only — a real deployment routes signing through an HSM/KMS via a `signer` callback rather than a bare key file.
 
----
-
-## Running Tests
+## <img src="Documentation/assets/chip-10.svg" height="22" alt=""> Running Tests
 
 ```bash
 # Unit tests (no network required)
@@ -214,7 +241,7 @@ python tests/bench/bench_universe.py                    # 2,000-ticker shapes
 pytest tests/ -m "not integration" --cov=src/standard_quant_tools
 ```
 
-**19,252 Python tests total.** With `_sqt_core` built and `SQT_EXPECT_NATIVE=1`, `-m "not integration"` gives **19,080 passing, 94 skipped** in 12 to 27 minutes depending on the machine's load; without `SQT_EXPECT_NATIVE`, the three tests that hold the extension to being required skip as well. The 78 deselected are the integration tests, which need network; the skips are environmental — failure paths the input under test does not trigger, and optional dependencies that are not installed. Without the C++ extension the `tests/cpp_bindings/` files skip instead (they are gated on the extension being importable), and the rest still pass: every C++ path has a Python fallback, and both are held to the same contract (see [Documentation/17_correctness.md](Documentation/17_correctness.md)).
+**19,256 Python tests total.** With `_sqt_core` built and `SQT_EXPECT_NATIVE=1`, `-m "not integration"` gives **19,084 passing, 94 skipped** in 12 to 27 minutes depending on the machine's load; without `SQT_EXPECT_NATIVE`, the three tests that hold the extension to being required skip as well. The 78 deselected are the integration tests, which need network; the skips are environmental — failure paths the input under test does not trigger, and optional dependencies that are not installed. Without the C++ extension the `tests/cpp_bindings/` files skip instead (they are gated on the extension being importable), and the rest still pass: every C++ path has a Python fallback, and both are held to the same contract (see [Documentation/17_correctness.md](Documentation/17_correctness.md)).
 
 `tests/` mirrors `src/standard_quant_tools/` — one directory per package (`agent/`, `analysis/`, `audit/`, `backtest/`, `backtesting/`, `data/`, `delta_one/`, `indicators/`, `mcp/`, `metrics/`, `modeling/`, `portfolio/`, `screener/`), plus `core/` for cross-cutting suites, `surface/` for the whole-surface layers (invariants, adversarial fuzzing, metamorphic relations, determinism), `docs/` for the generated-documentation checks, `bench/` for the performance harnesses, `cpp/` for the C++ gtest sources CMake compiles, and `cpp_bindings/` for the Python-side backend-parity tests. Run one group with `pytest tests/backtest`.
 
@@ -236,63 +263,61 @@ NaN/Inf data contract is covered separately, in
 > `cmake -B build` invocation in
 > [Documentation/30_build_guide.md](Documentation/30_build_guide.md).
 
----
+## <img src="Documentation/assets/chip-11.svg" height="22" alt=""> Documentation
 
-## Documentation
+The guides are grouped by subject on the [documentation page](Documentation/README.md). Every one, in order:
 
-| File | Module |
+| Guide | What it covers |
 |---|---|
-| `Documentation/00_module_reference.md` | Every public module's API surface in one place |
-| `Documentation/01_data_fetching.md` | Data providers, Parquet cache, error handling |
-| `Documentation/02_indicators.md` | All 14 technical indicators with examples |
-| `Documentation/03_metrics.md` | Risk/return metrics (VaR, Sharpe, Calmar, …) |
-| `Documentation/04_backtesting.md` | Vectorized engine, trade log, custom signals, grid search |
-| `Documentation/05_portfolio.md` | Multi-asset metrics, correlation, optimization |
-| `Documentation/06_screener.md` | Filter reference, large-universe screening, example screens |
-| `Documentation/07_agent_tools.md` | Core 14 LLM tools, the full 217-tool analysis registry, Pydantic models, end-to-end agent loop |
-| `Documentation/08_analysis.md` | Multi-factor regression, cointegration, PCA, Hurst exponent (incl. C++ acceleration) |
-| `Documentation/09_advanced_agent_tools.md` | 35 advanced/supplementary/custom-signal/analytics/options/diagnostic tools: regime-adaptive (full-sample and leakage-free walk-forward), pair scanner, walk-forward, risk attribution, portfolio optimization, constrained optimization with shadow prices, factor and tail risk decomposition, position sizer, fundamentals, optimization, advanced indicators, rolling beta, extended risk, backtest diagnostics, true portfolio simulation, pair trade backtest, robustness diagnostics, capacity report, data quality report, compact backtest result, volatility estimators, correlation analysis, Monte Carlo simulation, stress test, liquidity metrics, GARCH volatility forecast, Kalman hedge ratio, EVT tail risk, option pricing/Greeks, implied volatility |
-| `Documentation/10_auditability.md` | Decision-record audit trail, replay verification (both tool registries), correlated logging, `sqt` CLI |
-| `Documentation/11_data_quality.md` | Dataset provenance metadata, missing-bar/stale-price/price-jump detection |
-| `Documentation/12_options.md` | Black-Scholes-Merton option pricing, Greeks, implied volatility (European options only) |
-| `Documentation/13_agent_orchestration.md` | Tool-category taxonomy, the lightweight router, and the multi-agent orchestrator-workers architecture |
-| `Documentation/14_polars_support.md` | Optional Polars interop (`pip install standard_quant_tools[polars]`): what's supported today, the conversion-boundary design, and what is not adapted yet |
-| `Documentation/15_modeling.md` | The separate 38-tool modeling runtime: feature catalog and feature report, regression/classification/ranking/survival targets, leakage-purged walk-forward validation, sample weighting, the model adapters, point-in-time joins, the content-addressed model registry with signed manifests, lifecycle stages and drift monitoring, the model→backtest bridge, portfolio evaluation of OOS predictions, and what's explicitly deferred |
-| `Documentation/16_performance.md` | Every measured C++ and Python-level performance figure, with methodology and the ports that did not pay off |
-| `Documentation/17_correctness.md` | The correctness audits and the backend-parity contract between the Python and C++ tiers |
-| `Documentation/18_mcp.md` | The MCP server: install, runtime and category scoping, the context budget, resources, prompts, and the audit trail over the protocol |
-| `Documentation/19_runtimes.md` | The twelve parallel runtimes and why scoping is enforced at dispatch rather than advertised; the typed handoff references that carry bulk values between them; pre-flight tool validation |
-| `Documentation/20_tool_index.md` | **Generated** index of all 266 tools by runtime, with the description the model sees and every argument name |
-| `Documentation/21_derivatives.md` | The derivatives runtime: second-order greeks, multi-leg payoffs, smile and term-structure fitting with arbitrage checks, put-call parity, delta-hedge simulation, revaluation grids |
-| `Documentation/28_delta_one.md` | Carry and basis against a quoted future, futures curves and roll economics, beta translated into contracts, and why the holding horizon reverses which instrument is cheapest |
-| `Documentation/29_modeling_reference.md` | **Generated** from the modeling registries: every feature, estimator (with bounded parameters and capabilities), target and spec option; a test fails when it drifts |
-| `Documentation/22_microstructure.md` | The microstructure runtime: spreads measured from ticks, and the eight bar-based estimators (Roll, Corwin-Schultz, Amihud, Kyle, order flow, VPIN, volume profile, implementation shortfall) for when there is no tick feed |
-| `Documentation/23_inference.md` | Error bars and diagnostics: block bootstrap intervals, distribution comparison, normality and tail index, Sharpe stability, drawdown profile, seasonality, lead-lag, structural breaks |
-| `Documentation/24_overfitting.md` | How much of a backtest is real: deflated Sharpe, PBO, purged combinatorial CV, reality check, Monte Carlo trade paths, trade clustering, break-even cost |
-| `Documentation/27_meta.md` | The meta runtime: pre-flight (`describe_tool`, `validate_tool_call`), registry discovery, what a provider can promise, reading published artifacts, and the read-only half of the audit trail |
-| `Documentation/26_data.md` | The data runtime: fetching as a reference other runtimes read, what a provider guarantees, temporal contracts for frames this library did not fetch, bundles, and the unit-versus-definition distinction in ratio comparison |
-| `Documentation/25_testing.md` | The nine-layer testing regime: planted-answer correctness, a second oracle per C++ kernel, the whole-suite run with the extension switched off, whole-surface invariants, schema-synthesized adversarial fuzzing, metamorphic relations, determinism and purity, generated documentation, and mutation testing — with what each layer has actually caught |
-| `Documentation/31_allocation.md` | The allocation runtime: return streams on one calendar, allocating across sleeves with how much of the split the sample chose, the walk-forward test of an allocation rule, Kelly leverage, volatility-target and CPPI overlays, the capacity curve, Brinson attribution and time- against money-weighted returns |
-| `Documentation/32_finance.md` | The finance runtime: financing and borrow on positions, Reg T and FINRA 4210 margin and the margin runway under a stress path, currency exposure after hedges, carry, the FX forward by covered interest parity, and NPV, IRR, duration, cost of capital and DCF |
-| `Documentation/30_build_guide.md` | C++ extension build instructions (Windows / Linux / macOS) |
+| [00_module_reference.md](Documentation/00_module_reference.md) | Every public module's API surface in one place |
+| [01_data_fetching.md](Documentation/01_data_fetching.md) | Data providers, Parquet cache, error handling |
+| [02_indicators.md](Documentation/02_indicators.md) | All 14 technical indicators with examples |
+| [03_metrics.md](Documentation/03_metrics.md) | Risk/return metrics (VaR, Sharpe, Calmar, …) |
+| [04_backtesting.md](Documentation/04_backtesting.md) | Vectorized engine, trade log, custom signals, grid search |
+| [05_portfolio.md](Documentation/05_portfolio.md) | Multi-asset metrics, correlation, optimization |
+| [06_screener.md](Documentation/06_screener.md) | Filter reference, large-universe screening, example screens |
+| [07_agent_tools.md](Documentation/07_agent_tools.md) | Core 14 LLM tools, the full 217-tool analysis registry, Pydantic models, end-to-end agent loop |
+| [08_analysis.md](Documentation/08_analysis.md) | Multi-factor regression, cointegration, PCA, Hurst exponent (incl. C++ acceleration) |
+| [09_advanced_agent_tools.md](Documentation/09_advanced_agent_tools.md) | 35 advanced/supplementary/custom-signal/analytics/options/diagnostic tools: regime-adaptive (full-sample and leakage-free walk-forward), pair scanner, walk-forward, risk attribution, portfolio optimization, constrained optimization with shadow prices, factor and tail risk decomposition, position sizer, fundamentals, optimization, advanced indicators, rolling beta, extended risk, backtest diagnostics, true portfolio simulation, pair trade backtest, robustness diagnostics, capacity report, data quality report, compact backtest result, volatility estimators, correlation analysis, Monte Carlo simulation, stress test, liquidity metrics, GARCH volatility forecast, Kalman hedge ratio, EVT tail risk, option pricing/Greeks, implied volatility |
+| [10_auditability.md](Documentation/10_auditability.md) | Decision-record audit trail, replay verification (both tool registries), correlated logging, `sqt` CLI |
+| [11_data_quality.md](Documentation/11_data_quality.md) | Dataset provenance metadata, missing-bar/stale-price/price-jump detection |
+| [12_options.md](Documentation/12_options.md) | Black-Scholes-Merton option pricing, Greeks, implied volatility (European options only) |
+| [13_agent_orchestration.md](Documentation/13_agent_orchestration.md) | Tool-category taxonomy, the lightweight router, and the multi-agent orchestrator-workers architecture |
+| [14_polars_support.md](Documentation/14_polars_support.md) | Optional Polars interop (`pip install standard_quant_tools[polars]`): what's supported today, the conversion-boundary design, and what is not adapted yet |
+| [15_modeling.md](Documentation/15_modeling.md) | The separate 38-tool modeling runtime: feature catalog and feature report, regression/classification/ranking/survival targets, leakage-purged walk-forward validation, sample weighting, the model adapters, point-in-time joins, the content-addressed model registry with signed manifests, lifecycle stages and drift monitoring, the model→backtest bridge, portfolio evaluation of OOS predictions, and what's explicitly deferred |
+| [16_performance.md](Documentation/16_performance.md) | Every measured C++ and Python-level performance figure, with methodology and the ports that did not pay off |
+| [17_correctness.md](Documentation/17_correctness.md) | The correctness audits and the backend-parity contract between the Python and C++ tiers |
+| [18_mcp.md](Documentation/18_mcp.md) | The MCP server: install, runtime and category scoping, the context budget, resources, prompts, and the audit trail over the protocol |
+| [19_runtimes.md](Documentation/19_runtimes.md) | The twelve parallel runtimes and why scoping is enforced at dispatch rather than advertised; the typed handoff references that carry bulk values between them; pre-flight tool validation |
+| [20_tool_index.md](Documentation/20_tool_index.md) | **Generated** index of all 266 tools by runtime, with the description the model sees and every argument name |
+| [21_derivatives.md](Documentation/21_derivatives.md) | The derivatives runtime: second-order greeks, multi-leg payoffs, smile and term-structure fitting with arbitrage checks, put-call parity, delta-hedge simulation, revaluation grids |
+| [22_microstructure.md](Documentation/22_microstructure.md) | The microstructure runtime: spreads measured from ticks, and the eight bar-based estimators (Roll, Corwin-Schultz, Amihud, Kyle, order flow, VPIN, volume profile, implementation shortfall) for when there is no tick feed |
+| [23_inference.md](Documentation/23_inference.md) | Error bars and diagnostics: block bootstrap intervals, distribution comparison, normality and tail index, Sharpe stability, drawdown profile, seasonality, lead-lag, structural breaks |
+| [24_overfitting.md](Documentation/24_overfitting.md) | How much of a backtest is real: deflated Sharpe, PBO, purged combinatorial CV, reality check, Monte Carlo trade paths, trade clustering, break-even cost |
+| [25_testing.md](Documentation/25_testing.md) | The nine-layer testing regime: planted-answer correctness, a second oracle per C++ kernel, the whole-suite run with the extension switched off, whole-surface invariants, schema-synthesized adversarial fuzzing, metamorphic relations, determinism and purity, generated documentation, and mutation testing — with what each layer has actually caught |
+| [26_data.md](Documentation/26_data.md) | The data runtime: fetching as a reference other runtimes read, what a provider guarantees, temporal contracts for frames this library did not fetch, bundles, and the unit-versus-definition distinction in ratio comparison |
+| [27_meta.md](Documentation/27_meta.md) | The meta runtime: pre-flight (`describe_tool`, `validate_tool_call`), registry discovery, what a provider can promise, reading published artifacts, and the read-only half of the audit trail |
+| [28_delta_one.md](Documentation/28_delta_one.md) | Carry and basis against a quoted future, futures curves and roll economics, beta translated into contracts, and why the holding horizon reverses which instrument is cheapest |
+| [29_modeling_reference.md](Documentation/29_modeling_reference.md) | **Generated** from the modeling registries: every feature, estimator (with bounded parameters and capabilities), target and spec option; a test fails when it drifts |
+| [30_build_guide.md](Documentation/30_build_guide.md) | C++ extension build instructions (Windows / Linux / macOS) |
+| [31_allocation.md](Documentation/31_allocation.md) | The allocation runtime: return streams on one calendar, allocating across sleeves with how much of the split the sample chose, the walk-forward test of an allocation rule, Kelly leverage, volatility-target and CPPI overlays, the capacity curve, Brinson attribution and time- against money-weighted returns |
+| [32_finance.md](Documentation/32_finance.md) | The finance runtime: financing and borrow on positions, Reg T and FINRA 4210 margin and the margin runway under a stress path, currency exposure after hedges, carry, the FX forward by covered interest parity, and NPV, IRR, duration, cost of capital and DCF |
 
----
-
-## Contributing
+## <img src="Documentation/assets/chip-12.svg" height="22" alt=""> Contributing
 
 Bug reports, doc fixes, and PRs are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md)
 for the development workflow, code conventions, and PR expectations.
 
-## Security
+## <img src="Documentation/assets/chip-13.svg" height="22" alt=""> Security
 
 Found a security issue? Please don't open a public issue — see
 [SECURITY.md](SECURITY.md) for how to report it privately.
 
-## Changelog
+## <img src="Documentation/assets/chip-14.svg" height="22" alt=""> Changelog
 
 Notable changes are tracked in [CHANGELOG.md](CHANGELOG.md).
 
-## License
+## <img src="Documentation/assets/chip-15.svg" height="22" alt=""> License
 
 Apache License 2.0 — see [LICENSE](LICENSE) for the full text.
 
@@ -311,3 +336,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ```
+
+---
+
+<sub>Standard Quant Tools · by Karan Vora · Apache 2.0 · <a href="https://github.com/karanvora2599/Standard-Tools">github.com/karanvora2599/Standard-Tools</a></sub>

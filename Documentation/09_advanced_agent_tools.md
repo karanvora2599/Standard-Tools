@@ -1,4 +1,11 @@
-# Advanced Agent Tools
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/header-dark.svg">
+  <img src="assets/header-light.svg" alt="Standard Quant Tools documentation" width="100%">
+</picture>
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md)</sub>
+
+# <img src="assets/chip-09.svg" height="28" alt=""> Advanced Agent Tools
 
 Thirty-five high-level agentic tools that compose the library's existing primitives into single, LLM-callable operations. Each collapses a multi-step reasoning workflow into one structured function call with a Pydantic output model.
 
@@ -3078,3 +3085,7 @@ print(f"threshold used: {auto_result.adx_threshold_used}  "
 **Interpreting the results:**
 
 Don't just read `is_rally` — check `rally_score` and the individual fields to see *which* signals actually fired, since 3/5 agreeing (the minimum) looks very different from 5/5 agreeing. A common false-negative pattern: a genuinely rallying but historically low-ADX name (a "sleepy" stock breaking out) never clears the fixed `adx_threshold=25`, so `strong_trend` never fires even though the other 4 signals do — this is exactly what `auto_tune_adx_threshold=True` fixes, by comparing the symbol against its own history instead of a one-size-fits-all bar. Conversely, a chronically high-ADX name (already always "trending") clearing 25 tells you little on its own — `bullish_direction`, `unusual_positive_return`, and `new_high_breakout` are the signals that actually distinguish "trending as usual" from "rallying right now" for that kind of name.
+
+---
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md) · by Karan Vora · Apache 2.0</sub>

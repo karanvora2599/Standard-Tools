@@ -1,4 +1,11 @@
-# Statistical inference and diagnostics
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/header-dark.svg">
+  <img src="assets/header-light.svg" alt="Standard Quant Tools documentation" width="100%">
+</picture>
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md)</sub>
+
+# <img src="assets/chip-23.svg" height="28" alt=""> Statistical inference and diagnostics
 
 Twenty-two tools in the `research` runtime that answer questions a summary
 statistic hides. Most fall into three groups: **error bars** on estimates
@@ -352,3 +359,7 @@ Full argument lists: [20_tool_index.md](20_tool_index.md#research--research).
 - [08_analysis.md](08_analysis.md) — factor regression, cointegration, PCA, Hurst
 - [24_overfitting.md](24_overfitting.md) — the same discipline applied to backtests
 - [17_correctness.md](17_correctness.md) — how these are validated
+
+---
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md) · by Karan Vora · Apache 2.0</sub>

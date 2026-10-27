@@ -1,4 +1,11 @@
-# Options Pricing, Greeks & Implied Volatility
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/header-dark.svg">
+  <img src="assets/header-light.svg" alt="Standard Quant Tools documentation" width="100%">
+</picture>
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md)</sub>
+
+# <img src="assets/chip-12.svg" height="28" alt=""> Options Pricing, Greeks & Implied Volatility
 
 `standard_quant_tools.analysis.options` — Black-Scholes-Merton pricing, Greeks, and implied volatility for **European options only** (no early exercise). Dependency-free: the standard normal CDF/PDF are computed via `math.erf` (stdlib), not scipy — pricing and Greeks never require scipy. `implied_volatility` also has no hard scipy dependency: Newton-Raphson (vega as the derivative) with a bisection fallback over a practical volatility bracket.
 
@@ -272,3 +279,7 @@ from standard_quant_tools.error import ValidationError
 ```
 
 `black_scholes_price`/`black_scholes_greeks`/`implied_volatility` never raise anything other than `ValidationError` — there is no network call, external API, or optional dependency in this module to fail in a different way.
+
+---
+
+<sub>[Standard Quant Tools](../README.md) · [Documentation](README.md) · by Karan Vora · Apache 2.0</sub>
