@@ -1,0 +1,137 @@
+<section class="part" id="part-evidence" data-toc="Part IV · Evidence" data-n="IV">
+  <div class="bars"><span></span><span></span><span></span><span></span><span></span><span></span></div>
+  <div class="num">PART IV</div>
+  <h1>Evidence</h1>
+  <p>What a decision record proves, what the audits found, how the tests are built to notice a defect, how fast the
+  extension measured, and the results that were measured and did not help.</p>
+  <ol><li>13 &nbsp; The audit trail</li><li>14 &nbsp; The correctness audits</li><li>15 &nbsp; The testing regime</li><li>16 &nbsp; Performance, measured</li><li>17 &nbsp; Where it did not help</li></ol>
+</section>
+
+<h2 class="sec" id="s-13-audit" data-toc="The audit trail" data-n="13"><span class="chip c-green">13</span>The audit trail</h2>
+<div class="sec-rule"></div>
+<p class="lede">A call routed through <span class="mono">dispatch()</span> can write an immutable decision record:
+its inputs, the market data it pulled with content hashes, which execution path ran, and a hash of its output.
+That is enough to tell a stale or tampered cache from a genuine code change.</p>
+
+<div class="trace">
+  <div class="step" style="border-top-color: var(--blue)"><div class="h">1 · CALL</div><div class="b">A tool runs through <span class="mono">dispatch()</span> with validated inputs.</div></div>
+  <div class="step" style="border-top-color: var(--mint)"><div class="h">2 · RECORD</div><div class="b">Inputs, data hashes, the path taken and the output hash go to the day's JSONL file.</div></div>
+  <div class="step" style="border-top-color: var(--green)"><div class="h">3 · CHAIN</div><div class="b">Each record hashes the one before it, across calendar days, so a deleted day is detected.</div></div>
+  <div class="step" style="border-top-color: var(--red)"><div class="h">4 · ANCHOR</div><div class="b">Optionally, an Ed25519 checkpoint signs a day's chain endpoint.</div></div>
+  <div class="step" style="border-top-color: var(--amber)"><div class="h">5 · REPLAY</div><div class="b"><span class="mono">sqt replay</span> re-runs the call and says whether it still reproduces.</div></div>
+</div>
+
+<h4>The <span class="mono">sqt</span> command</h4>
+<pre><code>sqt replay &lt;request_id&gt;                # re-run it: do the data and the output still match?
+sqt compare &lt;id_a&gt; &lt;id_b&gt;              # diff two records, field by field
+sqt verify [--file PATH]               # check the hash chain, whole trail or one file
+sqt anchor &lt;date&gt; --key PATH           # sign a checkpoint on a day's chain endpoint
+sqt export --start D --end D --out F   # a date range, its manifest and a standalone verifier</code></pre>
+
+<div class="grid2">
+  <div>
+    <h4>Exit codes that mean something</h4>
+    <p><span class="mono">sqt replay</span> exits 0 when the output reproduced exactly, 1 on a confirmed mismatch, 2
+    when the record has no output hash to compare against, and 3 when it reproduced to twelve significant digits on a
+    different native build or instruction-set path. <span class="mono">sqt verify</span> exits 0 when the chain is
+    clean.</p>
+  </div>
+  <div>
+    <h4>What it does and does not certify</h4>
+    <p>It is an engineering control: tamper <em>detection</em>, not tamper prevention or regulatory certification.
+    Checkpoint signing closes the one gap the chain cannot close alone, an internally consistent rewrite of a whole
+    day. An exported bundle carries a dependency-free verifier for an auditor who does not install the package, and
+    named input fields can be redacted to a salted, non-reversible hash before a record is written.</p>
+  </div>
+</div>
+
+<h2 class="sec" id="s-14-audits" data-toc="The correctness audits" data-n="14"><span class="chip c-amber">14</span>The correctness audits</h2>
+<div class="sec-rule"></div>
+<p class="lede">Both tiers have been through line-by-line audits. Most findings were not exotic: they were ordinary
+code that looked right, and the reason each survived review is usually more instructive than the fix.</p>
+
+<table>
+  <thead><tr><th>Audit</th><th class="num">Findings</th><th>The shape of what it found</th></tr></thead>
+  <tbody>
+    <tr><td class="strong">The core, line by line</td><td class="num">41</td><td>31 in the Python tier, 10 in C++. Five backend divergences, where the same call answered differently with the extension built; checks that lived only in the C++ branch; two JIT kernels that could read past their arrays on short input.</td></tr>
+    <tr><td class="strong">The modeling runtime, first review</td><td class="num">7</td><td>Critical, two of them look-ahead channels: walk-forward was given an embargo but never the target horizon, and a negative lookback let a feature read future prices while its point-in-time label stayed satisfied.</td></tr>
+    <tr><td class="strong">The modeling runtime, second review</td><td class="num">20</td><td>Results that were plausible, consistent and wrong: a full-refit model that had seen prices past its own cutoff, an end date that meant different things per provider, a cross-section that could mix dates.</td></tr>
+    <tr><td class="strong">The live-data pass, 20 September 2026</td><td class="num">20</td><td>The first run against a real vendor tape, which found defects no synthetic fixture could show.</td></tr>
+  </tbody>
+</table>
+<p>Further passes over the portfolio, screener and agent tools, and a full-codebase review, take the record to ten
+sections. None of it was catchable by the suite as it stood. Every finding was reproduced against a live interpreter
+before it was fixed, and each is pinned by a regression test.</p>
+
+<div class="callout red"><span class="label">Why parity tests were not enough</span>
+<p>A test that pins only one backend cannot see the two disagree, which is how several divergences survived. The
+fixes are pinned by tests that hold the two backends against <em>each other</em>, and against a second oracle that
+neither of them shares.</p></div>
+
+<h2 class="sec" id="s-15-testing" data-toc="The testing regime" data-n="15"><span class="chip c-red">15</span>The testing regime</h2>
+<div class="sec-rule"></div>
+<p class="lede">Nine layers, each catching a class of defect the others cannot. The rule underneath all of them: test
+against an answer known by construction, never against a recorded output.</p>
+
+<table class="tight">
+  <thead><tr><th>Layer</th><th>What it holds</th><th>What it has caught</th></tr></thead>
+  <tbody>
+    <tr><td class="strong">1 · Planted answers</td><td>Greeks against finite differences, parity against the model's own prices, risk parity against its closed form</td><td>A test asserting a recorded number passes forever and catches nothing; this one catches the formula</td></tr>
+    <tr><td class="strong">1b · A second oracle</td><td>Every C++ kernel checked against an independent reference, not only against its Python twin</td><td>Two backends agreeing on the wrong answer, which a parity test cannot see</td></tr>
+    <tr><td class="strong">1c · Extension off</td><td>The whole suite run with the compiled extension switched off</td><td>Fallbacks reachable only behind a monkeypatch, easily mistaken for dead code</td></tr>
+    <tr><td class="strong">2 · Whole surface</td><td>Invariants across every tool: registered in all six places, schema and dispatch agree</td><td>A tool registered halfway, which no per-tool test can catch</td></tr>
+    <tr><td class="strong">3 · Fuzzing</td><td>Schema-synthesized adversarial inputs: a named refusal or a valid result, never a crash</td><td>Six real bugs on its first run, three of them index errors on short data</td></tr>
+    <tr><td class="strong">3b · Metamorphic</td><td>Relations that say two inputs must give the same answer</td><td>A function that is consistently wrong for every input</td></tr>
+    <tr><td class="strong">4 · Determinism</td><td>The same arguments give identical output; a different seed gives a different answer</td><td>A <span class="mono">seed</span> silently ignored</td></tr>
+    <tr><td class="strong">5 · Documentation</td><td>Generated indexes compared with the registry; every count in prose checked</td><td>85 of 157 tools in no document, and a README advertising 95 tools in six runtimes</td></tr>
+    <tr><td class="strong">6 · Mutation</td><td>A catalogue of deliberate defects, each of which the suite must notice</td><td>A false-positive test whose bar the uncorrected rate already slipped under</td></tr>
+  </tbody>
+</table>
+
+<div class="stats">
+  <div class="stat blue"><div class="n">19,256</div><div class="d">Python tests; 19,084 pass and 94 skip with the extension built, the rest need network</div></div>
+  <div class="stat green"><div class="n">95,816</div><div class="d">assertion-level checks in 16 C++ test executables, 50,663 of them from the fuzz harness</div></div>
+  <div class="stat red"><div class="n">21 / 21</div><div class="d">mutations killed in the current catalogue</div></div>
+</div>
+<p class="small">What none of this establishes is that the numbers are useful. The regime checks that a statistic is
+computed correctly, refuses cleanly, reproduces exactly and is documented honestly. Whether a strategy makes money is
+not a property a test can assert.</p>
+
+<h2 class="sec" id="s-16-performance" data-toc="Performance, measured" data-n="16"><span class="chip c-blue">16</span>Performance, measured</h2>
+<div class="sec-rule"></div>
+<p class="lede">The C++ extension is optional, and the API is identical either way. Every figure is measured by
+toggling the same module's <span class="mono">HAS_CPP</span> flag and timing both paths back to back, and the ports
+that did not pay off are reported with the ones that did.</p>
+<p>An extension built from other C++ sources than the ones beside the package is refused at import, with a warning
+naming the file and the command that rebuilds it, so it cannot answer with old kernels.</p>
+
+<figure><!--INCLUDE:speedups.svg--><figcaption>Figure 2. The C++ path against the Python path it replaces, the same call on the same machine, log scale. A range is the spread over the sizes measured. Grey bars are ties.</figcaption></figure>
+
+<div class="grid2">
+  <div class="card t-blue"><span class="label">Where it pays</span><p>Rolling Hurst at 274×. A 2,000-name
+  cointegration scan, both orders of all 1,999,000 pairs, in 1.7 minutes at 500 bars. The backtest kernel at about
+  58×, once a wrapper-redundancy bug that had held it at 1.0× end to end was found and fixed.</p></div>
+  <div class="card t-amber"><span class="label">Where it ties</span><p>RSI, ADX and Wilder's ATR tie with the warm
+  JIT-compiled Python path, and the GARCH recursion is slightly slower, at 0.8×. Those ports exist for the 200 ms to
+  1.1 s compile on the first call in a fresh process, which they remove, not for steady-state speed.</p></div>
+</div>
+
+<h2 class="sec" id="s-17-negatives" data-toc="Where it did not help" data-n="17"><span class="chip c-mint">17</span>Where it did not help</h2>
+<div class="sec-rule"></div>
+<p class="lede">An option that is measured and does not help stays off by default, and the measurement is published
+beside the ones that worked. These are the results that decided defaults.</p>
+
+<table>
+  <thead><tr><th>What was tried</th><th>What it measured</th><th>What it decided</th></tr></thead>
+  <tbody>
+    <tr><td class="strong">Kelly sizing of model predictions</td><td>The gross limit sized every Kelly book, so a quarter, a half and full Kelly gave the same Sharpe at about twice the drawdown; its +0.07 lead is within 1.5 standard errors</td><td>Opt-in, quarter Kelly when chosen</td></tr>
+    <tr><td class="strong">Shrinking the information coefficient</td><td>Cost 0.14 ± 0.05 Sharpe with an edge, and 0.24 ± 0.07 where correlated names score alike</td><td>Off by default</td></tr>
+    <tr><td class="strong">Optimizer sizing against damped rank</td><td>A tie with a real edge, +0.01 ± 0.05</td><td>Reported as a tie, not a win</td></tr>
+    <tr><td class="strong">Choosing the rule as you go, without an edge</td><td>−0.023 ± 0.013 Sharpe against equal weight; on regime data it did not find the better rule, a hindsight gap of 0.18</td><td>Ships with the hindsight pick reported beside it</td></tr>
+    <tr><td class="strong">Regime conditioning on max Sharpe</td><td>Not distinguishable from zero, where risk parity gained 0.050</td><td>Opt-in, per rule</td></tr>
+    <tr><td class="strong">Screening factors against keeping all</td><td>The selected model's book was only 0 to 2.3 bp a year better than the model with every candidate</td><td>Said in the result, not hidden</td></tr>
+    <tr><td class="strong">Porting RSI, ADX, ATR and GARCH to C++</td><td>Tied with the warm JIT path, GARCH slightly slower at 0.8×</td><td>Kept for the cold start, and labelled as such</td></tr>
+  </tbody>
+</table>
+<p class="small">The planted-data figures are paired comparisons over many simulated histories, net of costs, with
+the standard error of the difference. They show what a rule does when the truth is known, not what it will earn.</p>

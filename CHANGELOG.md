@@ -1,5 +1,38 @@
 # Changelog
 
+## A 40-page briefing describes the whole library in the documentation's theme, light and dark, with every figure measured from the code and the runtime table and tool catalog generated from the registry
+
+- **`Documentation/Standard-Quant-Tools-Briefing.pdf`**, and its dark
+  edition beside it. A cover and contents page; an executive summary;
+  Part I, why the library exists; Part II, the architecture (the five
+  stages of a call, the twelve runtimes, typed references, the MCP server
+  and its context budget); Part III, what each area computes; Part IV, the
+  evidence (the audit trail, the correctness audits, the nine test layers,
+  measured performance, and where an option was measured and did not
+  help); Part V, getting started and the library's limits; and three
+  appendices: every figure with its source, a glossary, and the complete
+  tool catalog. Every figure was measured on 27 October 2026 at `09727c7`.
+- **Generated, not written, where it can rot.** Section 04's runtime table,
+  Figure 1 (tools per runtime) and Appendix C (every tool, with the first
+  sentence of the description the model reads) come from the live
+  registry; Figure 2 draws the measured speedups of `16_performance.md`,
+  ties and the one slowdown included.
+- **Built and checked by one command**, `build_all.py` in
+  `Documentation/design/briefing/`: HTML and CSS printed by headless
+  Chrome, twice, so the contents page carries real page numbers, with a
+  blank page added when
+  the count would be odd. Each edition fails on a code line that would
+  wrap, a font other than IBM Plex, a chart label that overruns its box,
+  an element wider than the column, a clipped cover, text below WCAG
+  contrast or past the margins; the pair fails when any page's header or
+  footer differs between them. Both pass.
+- **Where it is.** The sources are in `Documentation/design/briefing/`,
+  described in `Documentation/design/README.md`; the build intermediates
+  are ignored. The README's Documentation section and the documentation
+  page link both editions. Two more IBM Plex faces (Bold and Italic,
+  unmodified, OFL) join `Documentation/design/fonts/`, and the design
+  requirements name the two PDF libraries the build uses.
+
 ## The README and every guide share one theme in light and dark, a documentation page groups the guides by subject, and each image's words are its alt text, so a figure drawn on one is checked like a figure in the prose
 
 - **The README** opens with a banner, a row of badges (CI, Python, tools,

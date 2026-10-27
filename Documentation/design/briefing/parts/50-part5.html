@@ -1,0 +1,75 @@
+<section class="part" id="part-using" data-toc="Part V · Using it" data-n="V">
+  <div class="bars"><span></span><span></span><span></span><span></span><span></span><span></span></div>
+  <div class="num">PART V</div>
+  <h1>Using it</h1>
+  <p>Install it, call it from Python or serve it over MCP, and know where its edges are before relying on it.</p>
+  <ol><li>18 &nbsp; Getting started</li><li>19 &nbsp; Limits, stated plainly</li></ol>
+</section>
+
+<h2 class="sec" id="s-18-start" data-toc="Getting started" data-n="18"><span class="chip c-green">18</span>Getting started</h2>
+<div class="sec-rule"></div>
+<p class="lede">Python 3.10 or later. <span class="mono">pip install .</span> builds the C++ extension when a toolchain
+is present and installs the pure-Python package when it is not; every tool works either way.</p>
+
+<pre><code>pip install .                              # the library, with the extension where it can build
+pip install "standard_quant_tools[mcp]"    # adds the sqt-mcp server
+pip install "standard_quant_tools[signing]"  # adds Ed25519 checkpoint signing
+pip install "standard_quant_tools[polars]"   # adds optional polars interop</code></pre>
+
+<h4>From Python</h4>
+<pre><code>from standard_quant_tools.agent.tools import dispatch, get_agent_tools
+
+schemas = get_agent_tools()      # the analysis facade's function-calling schemas
+risk = dispatch("analyze_stock_risk", {"symbol": "NVDA", "period": "1y"})</code></pre>
+<p class="small"><span class="mono">dispatch</span> validates the arguments against the tool's input model and
+returns its result as a dictionary. An unknown argument is refused, not ignored.</p>
+
+<h4>Over MCP</h4>
+<pre><code>sqt-mcp --runtime research       # serve one runtime to the client
+sqt-mcp --runtime backtest
+sqt-mcp --print-budget           # what each runtime and category costs a client's context</code></pre>
+<p class="small">Any MCP client launches <span class="mono">sqt-mcp</span> with the runtime it should be served.
+Thinned schemas are the default, and <span class="mono">describe_tool</span> returns any of them in full.</p>
+
+<h3>Configuration and secrets</h3>
+<p>Provider settings live in a <span class="mono">.env</span> file that is never committed, or in a CI system's
+encrypted secrets under the same names; <span class="mono">load_env()</span> is a harmless no-op when there is none.
+The audit trail writes where <span class="mono">SQT_AUDIT_DIR</span> points, and
+<span class="mono">SQT_AUDIT_ENABLED=0</span> turns record writes off.</p>
+
+<h3>Where to read next</h3>
+<table class="tight">
+  <thead><tr><th>Question</th><th>Guide in the repository</th></tr></thead>
+  <tbody>
+    <tr><td>Every module's API in one place</td><td class="k">Documentation/00_module_reference.md</td></tr>
+    <tr><td>Every tool, with the description the model sees</td><td class="k">Documentation/20_tool_index.md</td></tr>
+    <tr><td>Why runtimes, and how references cross them</td><td class="k">Documentation/19_runtimes.md</td></tr>
+    <tr><td>Serving the library over MCP</td><td class="k">Documentation/18_mcp.md</td></tr>
+    <tr><td>What a decision record can certify</td><td class="k">Documentation/10_auditability.md</td></tr>
+    <tr><td>Every measured speedup, and the ports that did not pay</td><td class="k">Documentation/16_performance.md</td></tr>
+    <tr><td>The nine test layers and what each caught</td><td class="k">Documentation/25_testing.md</td></tr>
+  </tbody>
+</table>
+
+<h2 class="sec" id="s-19-limits" data-toc="Limits, stated plainly" data-n="19"><span class="chip c-red">19</span>Limits, stated plainly</h2>
+<div class="sec-rule"></div>
+<p class="lede">What the library does not do, or does only partly. Each limit is also stated where it bites, in the
+tool's own description or refusal.</p>
+
+<table>
+  <thead><tr><th>Limit</th><th>What it means in practice</th></tr></thead>
+  <tbody>
+    <tr><td class="strong">No option-chain data</td><td>The derivatives tools take quotes as arguments. Nothing in the library fetches a chain, and no description implies otherwise.</td></tr>
+    <tr><td class="strong">The whole surface does not fit a session</td><td>727 KB of schema is about 186,000 tokens. A client is served one runtime, by design; serving all twelve is a diagnostic.</td></tr>
+    <tr><td class="strong">An audit trail is not certification</td><td>It detects tampering; it does not prevent it, and it is not a regulatory attestation. <span class="mono">sqt keygen</span> is for local development; a real deployment signs through its own key service.</td></tr>
+    <tr><td class="strong">In-sample is in-sample</td><td>An allocation's reported Sharpe, a factor model's fit and a full-refit model's scores are in-sample, and are labelled so. Out-of-sample figures come from the walk-forward tools.</td></tr>
+    <tr><td class="strong">pandas is required</td><td>Polars interop covers a growing subset of functions; pandas stays the default and required backend.</td></tr>
+    <tr><td class="strong">Live vendor behaviour</td><td>The suite runs on planted and recorded data. What a vendor's live feed does is established only with a live key, in the tests marked as needing one.</td></tr>
+    <tr><td class="strong">Correct is not useful</td><td>The tests show a statistic is computed correctly and reproduces. Whether a strategy built on it makes money is not something any test, or this document, asserts.</td></tr>
+  </tbody>
+</table>
+
+<div class="callout red"><span class="label">Not investment advice</span>
+<p>Standard Quant Tools is a software library. Nothing in it, or in this briefing, is a recommendation to buy or sell
+anything, and the planted-data results in Part IV describe what a method does when the truth is known, not what it
+will earn.</p></div>

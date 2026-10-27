@@ -265,6 +265,8 @@ NaN/Inf data contract is covered separately, in
 
 ## <img src="Documentation/assets/chip-11.svg" height="22" alt=""> Documentation
 
+**The briefing.** A 40-page technical briefing on the whole library: what it is, how it is built, what it computes, and the evidence behind it, with every figure measured from the code. As a PDF, [light](Documentation/Standard-Quant-Tools-Briefing.pdf) or [dark](Documentation/Standard-Quant-Tools-Briefing-Dark.pdf).
+
 The guides are grouped by subject on the [documentation page](Documentation/README.md). Every one, in order:
 
 | Guide | What it covers |

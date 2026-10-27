@@ -1,0 +1,128 @@
+<section class="part" id="part-architecture" data-toc="Part II · Architecture" data-n="II">
+  <div class="bars"><span></span><span></span><span></span><span></span><span></span><span></span></div>
+  <div class="num">PART II</div>
+  <h1>Architecture</h1>
+  <p>Five things happen to every call, in order. Twelve runtimes decide which calls are possible at all, typed
+  references carry results between them, and an MCP server serves one runtime at a time.</p>
+  <ol><li>03 &nbsp; System overview</li><li>04 &nbsp; Twelve runtimes, enforced at dispatch</li><li>05 &nbsp; Typed references between runtimes</li><li>06 &nbsp; The MCP server and the context budget</li></ol>
+</section>
+
+<h2 class="sec" id="s-03-overview" data-toc="System overview" data-n="03"><span class="chip c-green">03</span>System overview</h2>
+<div class="sec-rule"></div>
+<p class="lede">One package, <span class="mono">standard_quant_tools</span>, importable from Python and served over
+MCP. Under its agent surface sit the same indicators, metrics, backtests, optimizers and models a person would
+call directly, and under the CPU-bound ones an optional C++ extension.</p>
+
+<h3>The five stages of a call</h3>
+<table class="stack"><tbody>
+  <tr><td class="lname c-blue">SERVE</td><td class="body">A client is given one runtime as MCP tools or function-calling schemas · under <span class="mono">--tool-detail auto</span> the heaviest schemas are thinned and <span class="mono">describe_tool</span> returns any of them in full</td></tr>
+  <tr><td class="lname c-mint">DISPATCH</td><td class="body">The input is validated against the tool's Pydantic model · unknown arguments are refused · a tool from another runtime is unroutable, and the refusal names its owner</td></tr>
+  <tr><td class="lname c-green">COMPUTE</td><td class="body">C++ kernels when the extension is built, the Python path when not, behind one API · sources declare when their facts became knowable · Sharpe is measured against a stated risk-free rate</td></tr>
+  <tr class="trust"><td class="lname">HAND OFF</td><td class="body">Equity curves, trade logs, return panels and predictions are published as <span class="mono">sqt://</span> references · their kind is checked when another runtime resolves them · nothing large passes through the conversation</td></tr>
+  <tr class="compute"><td class="lname c-amber">RECORD</td><td class="body">A decision record per dispatched call: inputs, the content hashes of the data read, the execution path and a hash of the output, hash-chained across calendar days · <span class="mono">sqt replay</span> and <span class="mono">sqt verify</span></td></tr>
+</tbody></table>
+<p class="small">From Python, a tool is one function call with a Pydantic model in and out. Over MCP,
+<span class="mono">sqt-mcp --runtime research</span> serves one runtime to any client.</p>
+
+<h3>Scale of the build</h3>
+<div class="stats">
+  <div class="stat blue"><div class="n">~198k</div><div class="d">lines of Python in the package, in 379 files</div></div>
+  <div class="stat mint"><div class="n">~14.6k</div><div class="d">lines of C++ in the optional extension, in 40 files</div></div>
+  <div class="stat green"><div class="n">~193k</div><div class="d">lines of tests in 530 Python files, plus 18 C++ test sources</div></div>
+  <div class="stat amber"><div class="n">595</div><div class="d">commits since the first, on 15 February 2026</div></div>
+  <div class="stat red"><div class="n">31</div><div class="d">modeling features, with 27 estimators (8 of them optional) and 18 target kinds</div></div>
+  <div class="stat"><div class="n">15</div><div class="d">tool categories, which narrow within a runtime rather than across them</div></div>
+</div>
+
+<h2 class="sec" id="s-04-runtimes" data-toc="Twelve runtimes, enforced at dispatch" data-n="04"><span class="chip c-amber">04</span>Twelve runtimes, enforced at dispatch</h2>
+<div class="sec-rule"></div>
+<p class="lede">A runtime is an execution boundary, not a label. Each holds its own dispatch table, so a tool from
+another runtime cannot be called through it at all, and the refusal names the runtime that does own it.</p>
+
+<p>That makes a scoping mistake recoverable and a hallucinated tool name obviously different from one. An agent
+serving research questions cannot run a backtest by accident, because the backtest runtime's tools are not in its
+table. A category narrows <em>within</em> a runtime (<span class="mono">--categories microstructure</span> is not the
+same as <span class="mono">--runtime microstructure</span>), and fifteen categories sit across the twelve.</p>
+
+<!--INCLUDE:runtimes-table.html-->
+<p class="small">Schema is the bare bytes of each runtime's tool schemas at full detail, as
+<span class="mono">sqt-mcp --print-budget</span> reports them. 217 of the 266 tools also sit in the analysis facade,
+<span class="mono">get_agent_tools()</span>.</p>
+
+<figure><!--INCLUDE:runtimes.svg--><figcaption>Figure 1. Tools per runtime, read from the live registry on 27 October 2026. Appendix C lists every one.</figcaption></figure>
+
+<h3>Why a boundary and not a filter</h3>
+<p>Narrowing the schemas a model is shown does not, by itself, stop a dispatcher from executing whatever name it
+is handed: a model shown two research tools that names a backtest would still get a backtest. Here the narrowing
+and the execution are the same table: scope is enforced where the call runs, so what an agent was not given it
+cannot do.
+Registering a tool touches six places (the function, its input and result models, the runtime's definitions and
+dispatch, and the facade), and a whole-surface test (section 15) fails when one is missed.</p>
+
+<h2 class="sec" id="s-05-references" data-toc="Typed references between runtimes" data-n="05"><span class="chip c-red">05</span>Typed references between runtimes</h2>
+<div class="sec-rule"></div>
+<p class="lede">Runtimes isolate execution, not data. Every real workflow spans them: screen in research, backtest
+in backtest, size in portfolio, hand a model's predictions to an allocation. Bulk values cross as typed references.</p>
+
+<pre><code>sqt://&lt;kind&gt;/&lt;run_id&gt;/&lt;name&gt;</code></pre>
+
+<p>A producer publishes a bulk value under a <span class="mono">run_id</span> and gets back a string. Any consumer
+in any runtime resolves it. Neither side knows the other exists, so N producers and M consumers need N + M
+integrations instead of N × M bespoke bridges, and nothing is transcribed through a context window on the way.</p>
+
+<pre><code>handoff.resolve(ref, expect="equity_curve")
+# ValidationError: expected an 'equity_curve' reference but
+# 'sqt://trade_log/run1/trades' is a 'trade_log'. ...</code></pre>
+
+<div class="grid2">
+  <div class="card t-red"><span class="label">The kind is checked on resolve</span>
+  <p>A consumer states the kind it expects. Handing a trade log to a tool that wants an equity curve fails with an
+  error naming both kinds, instead of producing a drawdown computed from the wrong series.</p></div>
+  <div class="card t-blue"><span class="label">References are tools too</span>
+  <p><span class="mono">describe_reference</span>, <span class="mono">read_reference</span>,
+  <span class="mono">convert_reference</span> and <span class="mono">list_reference_kinds</span> live in the meta
+  runtime, so any agent can inspect what it was handed.</p></div>
+</div>
+
+<h2 class="sec" id="s-06-mcp" data-toc="The MCP server and the context budget" data-n="06"><span class="chip c-blue">06</span>The MCP server and the context budget</h2>
+<div class="sec-rule"></div>
+<p class="lede">The 266 tools cost about 727 KB of schema, roughly 186,000 tokens, held for a whole session. That is
+the constraint the server is designed around, so what to serve is the first decision rather than a tuning knob.</p>
+
+<p>At full detail a tool averages 3,132 bytes over the wire. A session ceiling of 180,000 bytes, which the server
+once had, buys about 57 tools; taken smallest first, only 127 of the 266 fit. No amount of schema-shrinking brings
+the whole surface back, which is why a client is served one runtime, and why <span class="mono">--runtime all</span>
+is a diagnostic rather than a deployment. There is no fixed ceiling now: what a client can afford is a property of
+the client.</p>
+
+<div class="grid2">
+  <div>
+    <h4>Thinning, with the full schema one call away</h4>
+    <p><span class="mono">--tool-detail auto</span> is the default. It thins the most expensive schemas until a runtime
+    fits, and injects <span class="mono">describe_tool</span>, which returns any thinned schema in full. Served
+    sizes under <span class="mono">auto</span>:</p>
+    <table class="tight"><thead><tr><th>Runtime</th><th class="num">Tools</th><th class="num">Served</th></tr></thead><tbody>
+      <tr><td class="k">modeling</td><td class="num">38</td><td class="num">43 KB</td></tr>
+      <tr><td class="k">research</td><td class="num">46</td><td class="num">46 KB</td></tr>
+      <tr><td class="k">backtest</td><td class="num">35</td><td class="num">43 KB</td></tr>
+      <tr><td class="k">microstructure</td><td class="num">17</td><td class="num">36 KB</td></tr>
+      <tr><td class="k">allocation</td><td class="num">10</td><td class="num">31 KB</td></tr>
+      <tr><td class="k">derivatives</td><td class="num">13</td><td class="num">30 KB</td></tr>
+    </tbody></table>
+  </div>
+  <div>
+    <h4>What a session holds</h4>
+    <ul>
+      <li><strong>The default session</strong> serves four categories (screening, analysis, quantitative research
+      and discovery): 62 tools, about 23,000 tokens of schema.</li>
+      <li><strong>Resources</strong> expose <span class="mono">sqt://</span> references, and <strong>prompts</strong>
+      package common workflows.</li>
+      <li><strong>Long-running tools</strong>, <span class="mono">run_backtest_optimization</span> and
+      <span class="mono">scan_pairs</span>, are served only with <span class="mono">--enable-long-running</span>.</li>
+      <li><strong>The audit trail</strong> covers calls made over the protocol, through the same dispatch as calls
+      made from Python.</li>
+    </ul>
+  </div>
+</div>
+<p class="small">Served bytes are the envelope the server sends; the table in section 04 is bare schema bytes. The two
+are different instruments and are not comparable line for line.</p>

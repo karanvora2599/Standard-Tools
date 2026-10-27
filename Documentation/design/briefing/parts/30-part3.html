@@ -1,0 +1,184 @@
+<section class="part" id="part-compute" data-toc="Part III · What it computes" data-n="III">
+  <div class="bars"><span></span><span></span><span></span><span></span><span></span><span></span></div>
+  <div class="num">PART III</div>
+  <h1>What it computes</h1>
+  <p>From getting the bytes to splitting capital across strategies: each area is a runtime with its own question,
+  and each states what its numbers can and cannot support.</p>
+  <ol><li>07 &nbsp; Data, and when a fact became knowable</li><li>08 &nbsp; Research and statistical inference</li><li>09 &nbsp; Modeling</li><li>10 &nbsp; Backtesting, and how much of it is real</li><li>11 &nbsp; Portfolio, allocation and finance</li><li>12 &nbsp; Derivatives, delta one and microstructure</li></ol>
+</section>
+
+<h2 class="sec" id="s-07-data" data-toc="Data, and when a fact became knowable" data-n="07"><span class="chip c-mint">07</span>Data, and when a fact became knowable</h2>
+<div class="sec-rule"></div>
+<p class="lede">Fetching is a runtime of its own, 21 tools that get the bytes and publish them as references every
+other runtime reads. Before anything is fetched, a source can be asked what it can promise about <em>when</em>
+its facts became knowable.</p>
+
+<div class="grid2">
+  <div>
+    <h4>Providers</h4>
+    <p>A provider-agnostic interface serves OHLCV, fundamentals and metadata, with a free default and adapters for
+    Polygon, Bloomberg and Databento. Databento is the one here that serves L2 depth and order-by-order events, and
+    its key is read from the vendor's own variable, never passed through a spec, so it cannot be persisted into a
+    model's lineage or a decision record. <span class="mono">preflight_vendor_request</span> says what a metered
+    request would cost, and whether the data is there, before it is made.</p>
+    <h4>Infrastructure</h4>
+    <p>Retries with exponential backoff that never retry a caller's own mistake, a TTL and Parquet cache, and
+    quality checks for missing bars, stale prices and price jumps. <span class="mono">get_dataset_metadata</span>
+    reports what the provider guarantees: adjustment, survivorship, point-in-time values and the timezone.</p>
+  </div>
+  <div>
+    <h4>The temporal contract</h4>
+    <p>A quarterly filing describes 30 September and is published on 25 October. Joined on the quarter end it puts
+    three weeks of hindsight into every row. <span class="mono">describe_temporal_contract</span> answers what a
+    source can say about timing before anything is fetched, and a join the contract cannot support is refused
+    rather than degraded silently. <span class="mono">infer_temporal_contract</span> does the same for a frame this
+    library did not fetch.</p>
+    <h4>Bundles and comparisons</h4>
+    <p>A bundle holds several frames and the contract each was fetched under, validated as a unit.
+    <span class="mono">compare_ratio_frames</span> classifies two providers' disagreement: a unit mismatch can be
+    rescaled, a definition difference cannot.</p>
+  </div>
+</div>
+
+<div class="callout"><span class="label">Data too large to fetch</span>
+<p><span class="mono">register_external_dataset</span> makes a Parquet or CSV dataset already on disk resolvable as an
+<span class="mono">sqt://</span> reference without copying it, and <span class="mono">prepare_vendor_extract</span>
+converts a raw vendor extract into the library's contract first. Continuous futures series, tick tapes, quote panels
+and order-book snapshots are published the same way.</p></div>
+
+<h2 class="sec" id="s-08-research" data-toc="Research and statistical inference" data-n="08"><span class="chip c-green">08</span>Research and statistical inference</h2>
+<div class="sec-rule"></div>
+<p class="lede">The research runtime, 46 tools, describes an asset or a universe: its risk and technicals, and its
+statistical structure. It does not run strategies. Around it sits a family of error bars and tests, so a summary
+statistic arrives with how far it can be trusted.</p>
+
+<table class="tight">
+  <thead><tr><th>Area</th><th>Tools</th></tr></thead>
+  <tbody>
+    <tr><td class="strong">Structure</td><td>Factor regressions, cointegration and pair scans, PCA, Hurst, regimes, change points, structural breaks, a Kalman hedge ratio, GARCH volatility forecasts</td></tr>
+    <tr><td class="strong">Error bars</td><td>Block bootstrap intervals, Sharpe stability, drawdown profiles, distribution comparison, normality, tail index and tail dependence</td></tr>
+    <tr><td class="strong">Dependence</td><td>Granger causality, autocorrelation, stationarity, lead-lag matrices, partial correlation, correlation stability, seasonality, entropy</td></tr>
+    <tr><td class="strong">Risk</td><td>Tail and extended risk metrics, volatility estimators beside close-to-close, stock risk against a benchmark, data quality reports</td></tr>
+  </tbody>
+</table>
+
+<h3>A factor model, and which factors belong in it</h3>
+<p><span class="mono">estimate_factor_model</span> fits loadings, a factor covariance and specific variances for many
+assets at once, with standard errors, and can publish B F B' + D as a covariance reference.
+<span class="mono">screen_factor_candidates</span> decides which candidate factors earn a place, judged out of sample:
+incremental R-squared against circularly shifted copies (Benjamini-Hochberg adjusted across candidates), stable
+loadings, a low VIF, and a minimum-variance book that is less volatile with the factor than without.</p>
+<div class="stats">
+  <div class="stat blue"><div class="n">0 of 4,000</div><div class="d">noise candidates selected on planted data</div></div>
+  <div class="stat green"><div class="n">39–62%</div><div class="d">how often a weak real factor was selected</div></div>
+  <div class="stat amber"><div class="n">31–34 bp</div><div class="d">a year less volatile than Ledoit-Wolf, for the selected model's minimum-variance book</div></div>
+</div>
+
+<h3>VaR as a forecast that can be checked</h3>
+<p><span class="mono">forecast_var_series</span> makes a one-step-ahead VaR and expected shortfall for every date
+from the returns before it, by six methods: historical, normal, Cornish-Fisher, EWMA, filtered historical, and EVT on
+GARCH. <span class="mono">backtest_var_forecasts</span> tests the series against what followed: Kupiec, Christoffersen,
+conditional coverage, the Basel traffic light, and Acerbi-Szekely for ES. A model's own quantile column can be tested
+the same way, entity by entity, with overlapping multi-day outcomes thinned.</p>
+
+<h2 class="sec" id="s-09-modeling" data-toc="Modeling" data-n="09"><span class="chip c-amber">09</span>Modeling</h2>
+<div class="sec-rule"></div>
+<p class="lede">A separate 38-tool runtime builds, validates and scores statistical models as one ordered pipeline:
+dataset, leakage checks, walk-forward fitting, the registry, and evaluation of out-of-sample predictions. A feature
+lab of 11 more tools interrogates features before anything is fitted.</p>
+
+<div class="grid2">
+  <div>
+    <h4>What it is built from</h4>
+    <p>31 features, 27 estimators (19 always available and 8 that register only when their library is installed),
+    10 preprocessing steps and 18 target kinds, six of them buildable from prices. A feature matrix computed
+    elsewhere can be registered without copying it.</p>
+    <h4>Leakage, purged by date</h4>
+    <p>Training rows are purged by each row's label end <em>date</em>, not by an integer offset: a horizon counts an
+    entity's own bars, and on a sparse calendar an offset under-purges exactly where it matters. Point-in-time joins,
+    <span class="mono">check_leakage</span> and a gate on each model's training information cutoff close the rest.</p>
+  </div>
+  <div>
+    <h4>A registry with a lifecycle</h4>
+    <p>Models are content-addressed, with signed manifests: <span class="mono">attest_model_package</span> says
+    whether a package is still the one registered and whether a trusted key signed it. Promotion through lifecycle
+    stages, drift monitoring and a bridge from predictions to a tradeable signal complete it.</p>
+    <h4>Predictions into portfolios</h4>
+    <p><span class="mono">evaluate_model_portfolio</span> turns out-of-sample predictions into a simulated book net of
+    costs. The <span class="mono">mean_variance</span> transform sizes it with the optimizer, trading from the book
+    actually held after prices drift.</p>
+  </div>
+</div>
+
+<div class="callout amber"><span class="label">What the optimizer-sized transform was measured to do</span>
+<p>On planted data, net of costs: with a real edge it ties rank weighting damped to half turnover (+0.01 ± 0.05
+Sharpe). Where correlated names score alike it wins (+0.14 ± 0.07). With no edge it loses 0.26% a year, against 2.9%
+for damped rank. Trading from the drifted book added 0.02–0.03 Sharpe and cut no-edge turnover by a third.</p></div>
+
+<h2 class="sec" id="s-10-backtesting" data-toc="Backtesting, and how much of it is real" data-n="10"><span class="chip c-red">10</span>Backtesting, and how much of it is real</h2>
+<div class="sec-rule"></div>
+<p class="lede">The backtest runtime, 35 tools, runs, optimizes and validates strategies, the built-in ones or a
+signal the caller computed. Eleven of them exist to answer a question a backtest cannot answer about itself: how much
+of the result is real.</p>
+
+<div class="grid2 keep">
+  <div>
+    <h4>Running</h4>
+    <p>A vectorized engine with realistic costs, built-in strategies and parameter grids, a signal-panel backtester
+    that accepts the caller's own matrix, pairs and futures backtests, walk-forward runs, Monte Carlo, and a
+    shared-cash portfolio simulator with pluggable cost and constraint models.</p>
+  </div>
+  <div>
+    <h4>Doubting</h4>
+    <p>Deflated Sharpe at the number of trials, the probability of backtest overfitting, purged combinatorial
+    cross-validation splits, the reality check, comparison against random entries, trade clustering, parameter decay,
+    regime-stratified performance and the break-even cost a strategy can bear.</p>
+  </div>
+</div>
+
+<div class="pullquote">A Sharpe ratio is a claim about one path. The trial count, the cost it survives and the
+paths it did not take are what decide whether to believe it.</div>
+
+<h2 class="sec" id="s-11-capital" data-toc="Portfolio, allocation and finance" data-n="11"><span class="chip c-blue">11</span>Portfolio, allocation and finance</h2>
+<div class="sec-rule"></div>
+<p class="lede">Three runtimes turn a view into capital. Portfolio (23 tools) builds and costs positions; allocation
+(10) splits capital across return streams; finance (9) prices what holding a book costs and what a stream of cash is
+worth.</p>
+
+<table class="tight">
+  <thead><tr><th>Runtime</th><th>What it holds</th></tr></thead>
+  <tbody>
+    <tr><td class="k">portfolio</td><td>Covariance with diagnostics; an exact constrained optimizer (minimum variance, maximum utility, maximum Sharpe, tracking error) under bounds, groups, factor-exposure limits and risk caps, with a KKT certificate and shadow prices; the efficient frontier; risk parity, hierarchical risk parity and maximum diversification; factor and tail risk decomposition; stress tests, capacity, trade costs and position sizing</td></tr>
+    <tr><td class="k">allocation</td><td>Streams on one calendar; allocation across sleeves with bootstrap weight bands; a walk-forward test of the rule against equal weight; choosing among rules as you go; registered models as sleeves; Kelly with its uncertainty; volatility-target and CPPI overlays; capacity curves; Brinson attribution; time- and money-weighted book returns</td></tr>
+    <tr><td class="k">finance</td><td>Financing and borrow; Reg T and FINRA margin and the runway a stress path leaves; currency exposure; carry; the FX forward by covered interest parity; NPV, every IRR, duration, cost of capital and DCF</td></tr>
+  </tbody>
+</table>
+
+<h3>The rebalance, net of trading costs</h3>
+<p><span class="mono">optimize_rebalance</span> finds the trade to make from the weights held, with linear and quadratic
+costs in the objective. Names inside their no-trade band keep their weight exactly, and the frictionless target is
+reported beside the trade, so the gap shows what the costs held back. Two hundred assets solve in about 25 ms.</p>
+
+<h3>Choosing among rules as you go</h3>
+<p><span class="mono">select_allocation_rule</span> picks at each rebalance from each rule's own out-of-sample record
+before that date, and reports the hindsight pick beside it. On planted data it kept 0.28 of a 0.37 Sharpe edge, cost
+0.02 against equal weight with no edge, and never claimed one. An optional regime condition added 0.050 Sharpe to a
+volatility-targeted risk parity rule, ahead in 28 of 30 histories.</p>
+
+<h2 class="sec" id="s-12-instruments" data-toc="Derivatives, delta one and microstructure" data-n="12"><span class="chip c-mint">12</span>Derivatives, delta one and microstructure</h2>
+<div class="sec-rule"></div>
+<p class="lede">Three runtimes answer what an instrument is worth, which instrument is the cheapest way to hold an
+exposure, and what the market will charge to trade it.</p>
+
+<div class="grid3">
+  <div class="card t-amber"><span class="label">Derivatives · 13</span><p>Pricing and greeks to second order,
+  implied volatility, multi-leg payoffs, smile and term-structure fits with arbitrage checks, put-call parity, the
+  expected move, delta-hedge simulation, full revaluation grids, and an option book's dollar greeks with the
+  multiplier required. Quotes are arguments: the library fetches no option chains.</p></div>
+  <div class="card t-green"><span class="label">Delta one · 18</span><p>Carry and basis against a quoted future,
+  curves and roll costs, beta translated into contracts and whether the hedge worked, baskets and index rebalances,
+  ETF fair value, total return swaps and futures. The holding horizon can reverse which instrument is cheapest.</p></div>
+  <div class="card t-blue"><span class="label">Microstructure · 17</span><p>Four tools measure spreads and order
+  flow from ticks and refuse without a tick feed; seven estimate the same quantities from OHLCV, each saying what it
+  is a proxy for. <span class="mono">check_spread_proxy</span> turns a proxy's error on one name into a number.</p></div>
+</div>

@@ -1,0 +1,66 @@
+<section class="part" id="part-why" data-toc="Part I · Why it exists" data-n="I">
+  <div class="bars"><span></span><span></span><span></span><span></span><span></span><span></span></div>
+  <div class="num">PART I</div>
+  <h1>Why it exists</h1>
+  <p>An agent can describe a portfolio fluently and still never have computed a single number in it. This library
+  exists so that every number it reports came from a function that can be read, tested and replayed.</p>
+  <ol><li>01 &nbsp; The problem: numbers nobody computed</li><li>02 &nbsp; The approach: the agent chooses, the library computes</li></ol>
+</section>
+
+<h2 class="sec" id="s-01-problem" data-toc="The problem: numbers nobody computed" data-n="01"><span class="chip c-blue">01</span>The problem: numbers nobody computed</h2>
+<div class="sec-rule"></div>
+<p class="lede">A language model produces the most plausible continuation of its context. A volatility, a Sharpe
+ratio or a basis-point spread is just another plausible continuation, and nothing in the text separates a figure
+that was <em>computed</em> from one that was <em>written because it looked right</em>.</p>
+
+<p>Handing the model a quant library does not fix this by itself. Libraries written for people return untyped
+frames, fill gaps with silent defaults and expose every function at once. A model given all of it picks tools it
+should never have seen, passes arguments that are quietly ignored, and joins a quarterly filing on the date it
+describes rather than the date it was published. Each mistake yields a number that looks fine.</p>
+
+<h3>Six ways a computed answer still goes wrong</h3>
+<table>
+  <thead><tr><th>Failure</th><th>What it looks like</th><th>What the library does about it</th></tr></thead>
+  <tbody>
+    <tr><td class="strong">Fabricated figure</td><td>"30-day realized vol is 24.1%", with no tool run behind it.</td><td>Every number is a tool's output, a Pydantic model the agent reads and cites.</td></tr>
+    <tr><td class="strong">Look-ahead by join</td><td>A filing describes 30 September and is published on 25 October. Joined on the quarter end, every row carries three weeks of hindsight.</td><td>Each source declares a temporal contract; a join it cannot support is refused before anything is fetched.</td></tr>
+    <tr><td class="strong">Scope creep</td><td>A research agent runs a backtest, or a sizing tool it was never given.</td><td>Twelve runtimes, each its own dispatch table. A tool outside the runtime is unroutable.</td></tr>
+    <tr><td class="strong">Ignored argument</td><td>A misspelled parameter falls back to a default and the result looks normal.</td><td>Unknown arguments are rejected, and the error names what was wrong and what to change.</td></tr>
+    <tr><td class="strong">Unreplayable work</td><td>Last week's figure cannot be reproduced, because the data or the code moved.</td><td>A decision record keeps the inputs, the data's content hashes and the output hash; <span class="mono">sqt replay</span> says whether it still reproduces.</td></tr>
+    <tr><td class="strong">Overfitted result</td><td>The best of forty backtests is reported as if it were the only one.</td><td>Deflated Sharpe, PBO, purged cross-validation and the reality check, each taking the trial count.</td></tr>
+  </tbody>
+</table>
+
+<p>None of these is exotic. Each is ordinary code or an ordinary request that looks right, and the cost of each is
+a confident number with nothing behind it. The rest of this document is how the library makes each one either
+impossible or visible.</p>
+
+<h2 class="sec" id="s-02-approach" data-toc="The approach: the agent chooses, the library computes" data-n="02"><span class="chip c-mint">02</span>The approach: the agent chooses, the library computes</h2>
+<div class="sec-rule"></div>
+<p class="lede">The split of work is strict. The model decides which question to ask and which tool answers it; the
+library does every piece of arithmetic, with typed inputs, typed outputs, and a record of what it read.</p>
+
+<div class="grid2">
+  <div class="card t-blue"><span class="label">Typed at both ends</span><p>Each tool is one input model and one
+  result model, both JSON-serializable for function calling. An input the model cannot express is an input the
+  agent cannot get wrong.</p></div>
+  <div class="card t-mint"><span class="label">Scoped by runtime</span><p>A client is served one of twelve runtimes,
+  not the whole surface. Scope is enforced at dispatch, so a tool an agent was never given is unroutable rather
+  than merely unlikely.</p></div>
+  <div class="card t-green"><span class="label">Honest by default</span><p>Every Sharpe-reporting tool takes the
+  risk-free rate it is measured against. In-sample figures are labelled in-sample. Options that did not help on an
+  honest test stay opt-in.</p></div>
+  <div class="card t-amber"><span class="label">Recorded and replayable</span><p>A call through
+  <span class="mono">dispatch()</span> can write a decision record, hash-chained across calendar days, that
+  <span class="mono">sqt replay</span> re-runs and <span class="mono">sqt verify</span> checks.</p></div>
+</div>
+
+<h3>Errors are part of the interface</h3>
+<p>A refusal is written for the model that will read it. It says what was wrong, which value would be accepted,
+and, for a tool from another runtime, which runtime owns it. The fuzzing layer of the tests (section 15) holds every
+tool to that contract for <em>any</em> input: a named refusal or a valid result, never a stack trace.</p>
+
+<div class="callout"><span class="label">The same code for people</span>
+<p>Nothing here is agent-only. The same functions are importable from Python: indicators, metrics, backtests,
+optimizers and models, with the same validation. The agent surface is a typed layer over the library, not a
+separate implementation of it.</p></div>

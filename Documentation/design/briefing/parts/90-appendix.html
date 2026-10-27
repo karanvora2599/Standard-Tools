@@ -1,0 +1,67 @@
+<section class="part" id="part-appendix" data-toc="Appendices" data-n="APP.">
+  <div class="bars"><span></span><span></span><span></span><span></span><span></span><span></span></div>
+  <div class="num">APPENDICES</div>
+  <h1>Appendices</h1>
+  <p>Every figure in this document and where it comes from, the terms it uses, and every tool, generated from the
+  registry.</p>
+  <ol><li>A &nbsp; Numbers at a glance</li><li>B &nbsp; Glossary</li><li>C &nbsp; The complete tool catalog</li></ol>
+</section>
+
+<h2 class="sec" id="numbers" data-toc="Appendix A · Numbers at a glance" data-n="A"><span class="chip c-amber">A</span>Appendix A · Numbers at a glance</h2>
+<div class="sec-rule"></div>
+<p class="lede">Every figure here was measured from the code on 27 October 2026, at commit
+<span class="mono">09727c7</span>, unless the row says where else it comes from. Re-measure rather than edit.</p>
+
+<table class="tight">
+  <thead><tr><th>Figure</th><th class="num">Value</th><th>Source or method</th></tr></thead>
+  <tbody>
+    <tr><td>Tools in the registry</td><td class="num">266</td><td class="k">all_runtimes()</td></tr>
+    <tr><td>Runtimes · categories</td><td class="num">12 · 15</td><td class="k">all_runtimes(), TOOL_CATEGORY</td></tr>
+    <tr><td>Tools in the analysis facade</td><td class="num">217</td><td class="k">get_agent_tools()</td></tr>
+    <tr><td>Whole-surface schema, full detail</td><td class="num">744,271 B</td><td class="k">sqt-mcp --print-budget; ~186,067 tokens</td></tr>
+    <tr><td>Most expensive runtime</td><td class="num">218,231 B</td><td>modeling, 29% of the total</td></tr>
+    <tr><td>Average tool schema over the wire</td><td class="num">3,132 B</td><td>Documentation/18_mcp.md</td></tr>
+    <tr><td>Tools fitting 180,000 bytes, smallest first</td><td class="num">127</td><td>Documentation/18_mcp.md</td></tr>
+    <tr><td>Default MCP session</td><td class="num">62 tools</td><td>four categories, ~23,000 tokens</td></tr>
+    <tr><td>Python tests · passing · skipped</td><td class="num">19,256 · 19,084 · 94</td><td>with the extension built; 78 integration tests need network</td></tr>
+    <tr><td>C++ test executables · checks</td><td class="num">16 · 95,816</td><td>ctest; 50,663 of the checks from the fuzz harness</td></tr>
+    <tr><td>Mutations killed</td><td class="num">21 of 21</td><td class="k">scripts/mutation_testing.py</td></tr>
+    <tr><td>Audit findings, core</td><td class="num">41</td><td>31 Python, 10 C++; Documentation/17_correctness.md</td></tr>
+    <tr><td>Modeling review findings</td><td class="num">7 + 20</td><td>Documentation/17_correctness.md</td></tr>
+    <tr><td>Live-data pass findings</td><td class="num">20</td><td>20 September 2026, against a real vendor tape</td></tr>
+    <tr><td>Rolling Hurst speedup</td><td class="num">274×</td><td>n = 2,000, window 200; Documentation/16_performance.md</td></tr>
+    <tr><td>2,000-name pair scan</td><td class="num">1.7 min</td><td>both orders of 1,999,000 pairs at 500 bars</td></tr>
+    <tr><td>Backtest kernel speedup</td><td class="num">~58×</td><td><span class="mono">run_strategy</span>, n = 2,000</td></tr>
+    <tr><td>Rebalance solve, 200 assets</td><td class="num">~25 ms</td><td class="k">optimize_rebalance</td></tr>
+    <tr><td>Modeling features · estimators · targets</td><td class="num">31 · 27 · 18</td><td>the modeling registries; 8 estimators optional</td></tr>
+    <tr><td>Lines of Python · C++ · tests</td><td class="num">~198k · ~14.6k · ~193k</td><td>the package, the extension and the Python tests</td></tr>
+    <tr><td>Commits</td><td class="num">595</td><td>since 15 February 2026</td></tr>
+    <tr><td>Noise factors selected</td><td class="num">0 of 4,000</td><td>planted data, <span class="mono">n_shifts</span> 500</td></tr>
+    <tr><td>Rule selection, with an edge</td><td class="num">0.28 of 0.37</td><td>Sharpe kept, planted data, net of costs</td></tr>
+    <tr><td>Regime option on risk parity</td><td class="num">+0.050</td><td>Sharpe, ahead in 28 of 30 histories</td></tr>
+  </tbody>
+</table>
+
+<h2 class="sec" id="glossary" data-toc="Appendix B · Glossary" data-n="B"><span class="chip c-amber">B</span>Appendix B · Glossary</h2>
+<div class="sec-rule"></div>
+<table class="tight">
+  <thead><tr><th>Term</th><th>Meaning here</th></tr></thead>
+  <tbody>
+    <tr><td class="strong">Runtime</td><td>An execution boundary with its own dispatch table. A tool from another runtime is unroutable through it.</td></tr>
+    <tr><td class="strong">Category</td><td>A narrower grouping within a runtime, used to scope a session further.</td></tr>
+    <tr><td class="strong">Analysis facade</td><td>The 217 tools <span class="mono">get_agent_tools()</span> returns, routed by <span class="mono">dispatch()</span>.</td></tr>
+    <tr><td class="strong">Reference</td><td>An <span class="mono">sqt://kind/run_id/name</span> string standing for a published bulk value, its kind checked on resolve.</td></tr>
+    <tr><td class="strong">Decision record</td><td>One JSONL entry per dispatched call: inputs, data hashes, execution path, output hash, chained to the one before.</td></tr>
+    <tr><td class="strong">Checkpoint</td><td>An Ed25519 signature over a day's chain endpoint, verifiable with the public key alone.</td></tr>
+    <tr><td class="strong">Temporal contract</td><td>What a source can promise about when its facts became knowable, asked before fetching.</td></tr>
+    <tr><td class="strong">Bundle</td><td>Several frames and the contract each was fetched under, validated as one unit.</td></tr>
+    <tr><td class="strong">Purging · embargo</td><td>Dropping training rows whose labels overlap the test period, by label end date, and a gap after it.</td></tr>
+    <tr><td class="strong">Deflated Sharpe</td><td>A Sharpe ratio corrected for the number of strategies tried and for non-normal returns.</td></tr>
+    <tr><td class="strong">PBO</td><td>The probability of backtest overfitting: how often the in-sample winner ranks below the median out of sample.</td></tr>
+    <tr><td class="strong">Thinning</td><td>Serving a shortened schema for an expensive tool, with <span class="mono">describe_tool</span> returning the full one.</td></tr>
+    <tr><td class="strong"><span class="mono">HAS_CPP</span></td><td>Each module's flag for whether its C++ kernel is in use; toggled to time both paths of the same call.</td></tr>
+    <tr><td class="strong">Planted answer</td><td>A test input built so the right output is known by construction, rather than recorded from a past run.</td></tr>
+    <tr><td class="strong">Metamorphic relation</td><td>A rule saying two different inputs must give the same answer, which catches a consistently wrong function.</td></tr>
+    <tr><td class="strong">Mutation testing</td><td>Planting a deliberate defect and requiring the suite to fail, which shows the tests would notice one.</td></tr>
+  </tbody>
+</table>

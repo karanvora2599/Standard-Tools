@@ -1,0 +1,112 @@
+/* Dark edition. Loaded after style.css and overrides colour only, never layout,
+   so both themes paginate alike: paper #0b0b0b / #131313 / #1a1a1a / #232323,
+   ink #efefed / #a4a4a4 / #8c8c8c, gridline #2a2a2a / #444, accent #75fb6d
+   (soft #14301a), critical #f25144, and the spectrum, which is the same in
+   both themes. */
+
+:root {
+  --ink: #efefed;
+  --ink-2: #a4a4a4;
+  --muted: #8c8c8c;
+  --rule: #2a2a2a;
+  --rule-2: #1c1c1c;
+  --paper: #0b0b0b;
+  --paper-1: #131313;
+  --paper-2: #1a1a1a;
+  --paper-3: #232323;
+  --blue: #5ac5fa;
+  --mint: #75fbe1;
+  --green: #75fb6d;
+  --amber: #f5be41;
+  --red: #dc2f21;
+  --red-deep: #a62116;
+  --title-red: #f25144;
+  --green-ink: #75fb6d;
+  --amber-ink: #f5be41;
+  --blue-ink: #5ac5fa;
+  color-scheme: dark;
+}
+
+@page {
+  background: #0b0b0b url(charts/page-hex-dark.svg) no-repeat;
+  background-size: 8.5in 11in;
+  background-position: -0.78in -0.82in;
+  @bottom-left {
+    content: "Standard Quant Tools  ·  Measured, Not Projected  ·  October 2026 briefing";
+    font: 400 7.5pt "PlexMono"; color: #8c8c8c; letter-spacing: 0.04em;
+  }
+  @bottom-right {
+    content: counter(page);
+    font: 500 8pt "PlexMono"; color: #a4a4a4;
+  }
+  @top-right {
+    content: "github.com/karanvora2599/Standard-Tools";
+    font: 400 7.5pt "PlexMono"; color: #737373; letter-spacing: 0.04em;
+  }
+}
+
+/* Chrome resolves @page rules by order, not by named-page specificity, so the
+   recoloured margin boxes above would reappear on the covers and the divider
+   pages. Repeat style.css's exceptions after them. */
+@page cover {
+  background: none;
+  @bottom-left { content: none; } @bottom-right { content: none; } @top-right { content: none; }
+}
+@page divider {
+  @top-right { content: none; }
+}
+
+/* The invisible contents markers take the page colour. */
+.tm { color: #0b0b0b !important; }
+
+/* cover */
+.cover { background-color: #0b0b0b; }
+.cover .meta-top, .cover .promise, .cover .doc-title p, .cover .foot { color: #a4a4a4; }
+.cover .layers { border-color: #444; }
+.cover .layers div { color: #0b0b0b; }
+.cover .meta-top span, .cover .foot span, .cover .plate { background: #0b0b0b; }
+
+/* dividers and headings */
+.part p { color: #a4a4a4; }
+.part ol { color: #8c8c8c; }
+.lede { color: #d4d4d1; }
+h2.sec .chip, h3 .chip { color: #0b0b0b; }
+.c-blue, .c-mint, .c-green, .c-amber { color: #0b0b0b; }
+.c-ink { color: #0b0b0b !important; }
+
+/* blocks */
+.box { border-color: #444; background: #131313; }
+.callout { background: #0c1b24; }
+.callout.amber { background: #1f190b; }
+.callout.red { background: #221010; }
+.callout.mint { border-color: var(--mint); background: #0b1f1b; }
+.callout.red .label { color: var(--title-red); }
+.callout.mint .label { color: var(--mint); }
+.mp { border-color: #2a4f2e; background: #14301a; color: #efefed; }
+.mp code { background: #1f4526; color: #efefed; }
+.card { background: #131313; }
+.stat .d { color: #a4a4a4; }
+
+/* tables */
+th { border-bottom-color: #a4a4a4; }
+.stack td { border-color: #2a2a2a; }
+.stack td.body { background: #131313; }
+.stack tr.trust td { background: #dc2f21; color: #fff; border-color: #a62116; }
+.stack tr.trust td.lname { background: #a62116; }
+.stack tr.compute td.body { background: #232323; color: #efefed; border-color: #232323; }
+
+/* pills: each a dark tint of its signal colour, with the colour as text */
+.pill.live { background: #14301a; color: #9efc4e; border-color: #2a4f2e; }
+.pill.off { background: #2a2108; color: #f5be41; border-color: #4a3a12; }
+.pill.open { background: #2a1210; color: #f25144; border-color: #5a201b; }
+.pill.road { background: #0c2230; color: #5ac5fa; border-color: #1d4560; }
+.pill.oss { background: #232323; color: #c8c8c6; border-color: #3d3d3d; }
+
+/* trace, figures, misc */
+.trace .step { border-color: #444; background: #131313; }
+figure { background: #131313; }
+figure svg text:not([fill]) { fill: var(--ink); }
+.small { color: #a4a4a4; }
+.src { color: #8c8c8c; }
+.pullquote { color: var(--ink); }
+.dark-band { background: #1c1c1c; border: 0.8pt solid #2a2a2a; }

@@ -1,4 +1,7 @@
-# The documentation images (Python 3.10+). Not needed to use the library or
-# to run its tests: the images are committed.
+# The documentation images and the briefing PDFs (Python 3.10+). Not needed to
+# use the library or to run its tests: the images and PDFs are committed. The
+# briefing also needs Chrome, which pip does not install: see briefing/chrome.py.
 fonttools==4.51.0
 brotli==1.1.0  # lets fontTools read and write the .woff2 fonts
+pypdfium2==4.30.0  # finds each section's page for the contents, and runs the checks
+pypdf==5.1.0  # writes the PDF metadata, and lists the embedded fonts for the check

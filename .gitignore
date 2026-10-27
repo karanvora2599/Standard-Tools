@@ -187,3 +187,14 @@ scripts/.mutation_active
 # Plans, findings, surveys and spikes. Working notes, never part of the
 # library; the CHANGELOG is the record of what they led to.
 Development/
+
+# The briefing's build intermediates: build_all.py regenerates every one, and
+# only the two PDFs in Documentation/ are kept.
+Documentation/design/briefing/.chrome-profile/
+Documentation/design/briefing/charts/
+Documentation/design/briefing/parts/92-catalog.html
+Documentation/design/briefing/index.html
+Documentation/design/briefing/_probe.html
+Documentation/design/briefing/_contrast.html
+Documentation/design/briefing/draft.pdf
+Documentation/design/briefing/final.pdf

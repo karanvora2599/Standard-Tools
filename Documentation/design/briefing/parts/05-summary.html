@@ -1,0 +1,72 @@
+<h2 class="sec" id="summary" data-toc="Executive summary" data-n="—"><span class="chip c-ink">—</span>Executive summary</h2>
+<div class="sec-rule"></div>
+<p class="lede"><strong>Standard Quant Tools is a Python library for quantitative finance, built to be called by AI
+agents.</strong> Every tool takes one Pydantic model and returns one, so an agent gets structured data back, and
+errors that say what to fix. The CPU-bound paths run in an optional C++ extension behind the same API, with a
+pure-Python fallback when it is not built.</p>
+
+<div class="grid2">
+  <div>
+    <h4>The problem</h4>
+    <p>A language model produces the most plausible next number, not a computed one. A Sharpe ratio, a hedge ratio
+    or a volatility figure written by a model reads exactly like one that was calculated, and in finance a wrong
+    number is a position. A model that is handed a library meant for people also gets untyped returns, silent
+    defaults and hundreds of functions it was never meant to call.</p>
+    <h4>The approach</h4>
+    <p>The agent chooses; the library computes. <strong>266 tools</strong> sit in <strong>twelve runtimes</strong>,
+    each a separate dispatch table, and a client is served one runtime rather than the whole surface. Inputs are
+    validated, unknown arguments refused, bulk values passed between runtimes as typed <span class="mono">sqt://</span>
+    references, and a call through <span class="mono">dispatch()</span> can leave a hash-chained decision record that
+    replays it.</p>
+  </div>
+  <div>
+    <h4>What makes it different</h4>
+    <ul>
+      <li><strong>Scope is enforced, not suggested.</strong> A tool outside a runtime is unroutable, and the refusal
+      names the runtime that owns it.</li>
+      <li><strong>Point-in-time by declaration.</strong> A source says when its facts became knowable, and a join
+      that would use hindsight is refused rather than quietly allowed.</li>
+      <li><strong>Tested against planted answers.</strong> Nine test layers, from known-answer correctness to
+      mutation testing, each catching a class of defect the others cannot.</li>
+      <li><strong>Negative results are kept.</strong> Ports that did not pay off, and rules that did not help on an
+      honest test, are reported beside the ones that did.</li>
+    </ul>
+  </div>
+</div>
+
+<div class="stats">
+  <div class="stat blue"><div class="n">266</div><div class="d">LLM-callable tools, each Pydantic in and Pydantic out, with function-calling schemas</div></div>
+  <div class="stat green"><div class="n">12</div><div class="d">runtimes, each an execution boundary that refuses the tools it does not own</div></div>
+  <div class="stat red"><div class="n">19,256</div><div class="d">Python tests in nine layers, plus 16 C++ test executables with 95,816 checks</div></div>
+  <div class="stat mint"><div class="n">274×</div><div class="d">rolling Hurst with the C++ extension, against the same module's Python path</div></div>
+  <div class="stat amber"><div class="n">727 KB</div><div class="d">of schema on the whole surface, about 186,000 tokens: the reason a client is served one runtime</div></div>
+  <div class="stat"><div class="n">21 / 21</div><div class="d">planted mutations killed: the suite notices a defect, not only that it runs</div></div>
+</div>
+
+<div class="grid2">
+  <div class="callout mint"><span class="label">Status, stated plainly</span>
+  <p>Version 0.1.0 under Apache 2.0, 595 commits since 15 February 2026, CI green on Python 3.10, 3.11 and 3.12.
+  The C++ extension builds wherever a compiler is present and is optional everywhere: without it every tool runs
+  its Python path and gives the same answer. Live vendor behaviour is established only with a live key, and the
+  suite says which tests need one.</p></div>
+  <div class="callout amber"><span class="label">What this document is not</span>
+  <p>It is not investment advice and not a performance claim. A test can show a statistic is computed correctly;
+  it cannot show that a strategy makes money. Where a figure comes from planted data, it says so.</p></div>
+</div>
+
+<h3>Three things to remember</h3>
+<div class="grid3">
+  <div class="card t-blue"><span class="label">1 · The model is not trusted to compute</span><p>It chooses a tool and
+  reads its result. Every number comes from a typed, deterministic function whose code is open.</p></div>
+  <div class="card t-red"><span class="label">2 · Every call can be reconstructed</span><p>A decision record holds the
+  inputs, the content hashes of the data read and a hash of the output, so a call can be replayed and compared.</p></div>
+  <div class="card t-amber"><span class="label">3 · It says what it cannot do</span><p>A refusal names what was wrong
+  and what to change. An in-sample number is labelled in-sample, and an untested option is opt-in.</p></div>
+</div>
+
+<div class="callout"><span class="label">How to read this briefing</span>
+<p><strong>Part I</strong> is the problem and the approach. <strong>Part II</strong> is the architecture: the five
+stages of a call, the twelve runtimes, the references between them and the MCP server. <strong>Part III</strong>
+is what the library computes, area by area. <strong>Part IV</strong> is the evidence: the audit trail, the audits,
+the tests, the measured speed and where things did not help. <strong>Part V</strong> is how to start and what the
+library does not do. <strong>Appendix C</strong> lists every tool, generated from the registry.</p></div>

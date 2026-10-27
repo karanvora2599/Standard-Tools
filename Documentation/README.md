@@ -5,7 +5,7 @@
 
 **The guides to Standard Quant Tools, one for every part of the library.** Each says what its part does, how it fails, and what it was measured to do, the ports and rules that did not pay off included. Two are generated from the live registries, and the counts in the rest are checked by tests that fail when they go stale.
 
-New here? Start with the [README](../README.md), then the [module reference](00_module_reference.md) for the API and the [tool index](20_tool_index.md) for what an agent sees.
+New here? Start with the [README](../README.md), then the [module reference](00_module_reference.md) for the API and the [tool index](20_tool_index.md) for what an agent sees. For the whole library in one document, read the briefing, a 40-page PDF in [light](Standard-Quant-Tools-Briefing.pdf) or [dark](Standard-Quant-Tools-Briefing-Dark.pdf).
 
 
 ## <img src="assets/chip-01.svg" height="22" alt=""> Start here
